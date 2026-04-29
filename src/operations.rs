@@ -1,0 +1,1284 @@
+//! Contract-first operation definitions
+//! Mirrors gbrain's src/core/operations.ts
+//!
+//! Operations are the single source of truth for the brain API surface.
+//! CLI and MCP server both dispatch through these operations.
+
+use crate::chunker::chunk_text;
+use crate::config::Config;
+use crate::engine::BrainEngine;
+use crate::error::Result;
+use crate::link_extraction::{extract_entity_refs, extract_frontmatter_refs, parse_timeline_entries, refs_to_batch_input, EngineSlugResolver};
+use crate::security::validate_contained;
+use crate::markdown::{infer_type, parse_markdown};
+use crate::search::hybrid::{hybrid_search, HybridOpts};
+use crate::search::intent::{classify_intent, detail_for_intent};
+use crate::security::{validate_filename, validate_page_slug, validate_upload_path};
+use crate::sqlite_engine::SqliteEngine;
+use crate::types::*;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tracing::{debug, info, trace, warn};
+
+/// Extract mode for batch extraction (mirrors TS gbrain extract)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractMode {
+    Links,
+    Timeline,
+    All,
+}
+
+impl ExtractMode {
+    pub fn extract_links(&self) -> bool {
+        matches!(self, Self::Links | Self::All)
+    }
+    pub fn extract_timeline(&self) -> bool {
+        matches!(self, Self::Timeline | Self::All)
+    }
+}
+
+/// Result of batch extraction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractResult {
+    pub links_added: usize,
+    pub timeline_added: usize,
+    pub errors: usize,
+    pub pages_scanned: usize,
+}
+
+/// Parameter type for operation definitions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamType {
+    String,
+    Integer,
+    Boolean,
+    Number,
+    Array,
+    Object,
+}
+
+impl ParamType {
+    pub fn json_type_name(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Number => "number",
+            Self::Array => "array",
+            Self::Object => "object",
+        }
+    }
+}
+
+/// Parameter definition for an operation
+#[derive(Debug, Clone)]
+pub struct ParamDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub required: bool,
+    pub param_type: ParamType,
+    /// Enum values for string parameters (mirrors TS ParamDef.enum)
+    pub enum_values: Option<&'static [&'static str]>,
+    /// Items type for array parameters (mirrors TS ParamDef.items.type)
+    pub items_type: Option<ParamType>,
+}
+
+impl ParamDef {
+    /// Create a parameter definition with defaults for optional fields
+    pub const fn new(name: &'static str, description: &'static str, required: bool, param_type: ParamType) -> Self {
+        Self { name, description, required, param_type, enum_values: None, items_type: None }
+    }
+
+    /// Set enum values (builder pattern)
+    pub const fn with_enum(mut self, values: &'static [&'static str]) -> Self {
+        self.enum_values = Some(values);
+        self
+    }
+
+    /// Set items type for array params (builder pattern)
+    pub const fn with_items(mut self, items_type: ParamType) -> Self {
+        self.items_type = Some(items_type);
+        self
+    }
+}
+
+/// Structured operation definition — mirrors TS Operation type.
+/// Single source of truth for MCP tool schema + param validation + docs.
+#[derive(Debug, Clone)]
+pub struct OperationDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub params: &'static [ParamDef],
+}
+
+impl OperationDef {
+    /// Generate MCP-compatible JSON Schema from the operation definition
+    pub fn to_mcp_schema(&self) -> serde_json::Value {
+        let properties: serde_json::Map<String, serde_json::Value> = self
+            .params
+            .iter()
+            .map(|p| {
+                let mut prop = serde_json::json!({
+                    "type": p.param_type.json_type_name(),
+                    "description": p.description,
+                });
+                if let Some(enums) = p.enum_values {
+                    prop["enum"] = serde_json::json!(enums);
+                }
+                if let Some(items_type) = p.items_type {
+                    prop["items"] = serde_json::json!({
+                        "type": items_type.json_type_name()
+                    });
+                }
+                (p.name.to_string(), prop)
+            })
+            .collect();
+
+        let required: Vec<&str> = self
+            .params
+            .iter()
+            .filter(|p| p.required)
+            .map(|p| p.name)
+            .collect();
+
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": properties,
+        });
+
+        if !required.is_empty() {
+            schema["required"] = serde_json::json!(required);
+        }
+
+        schema
+    }
+}
+
+/// Operation context — trust boundary
+#[derive(Debug, Clone)]
+pub struct OpContext {
+    pub remote: bool,
+    pub working_dir: std::path::PathBuf,
+    /// Dry-run mode: preview without committing (mirrors TS OperationContext.dryRun)
+    pub dry_run: bool,
+    /// P1-7: Sub-agent ID for namespace enforcement (mirrors TS viaSubagent)
+    /// When set, put_page is restricted to wiki/agents/<subagent_id>/... namespace
+    pub subagent_id: Option<String>,
+}
+
+impl Default for OpContext {
+    fn default() -> Self {
+        Self {
+            remote: false,
+            working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            dry_run: false,
+            subagent_id: None,
+        }
+    }
+}
+
+/// Operation definitions — each maps to a brain operation
+pub struct Operations<'a> {
+    pub engine: &'a SqliteEngine,
+    pub ctx: OpContext,
+    config: Config,
+    /// When true, the caller has already opened a transaction; put_page must
+    /// not wrap link reconciliation in `transaction_with_engine` (SQLite does
+    /// not support nested `BEGIN IMMEDIATE`).
+    in_transaction: bool,
+}
+
+impl<'a> Operations<'a> {
+    /// P1-11: Maximum traversal depth (mirrors TS cap of 10)
+    const TRAVERSE_DEPTH_CAP: usize = 10;
+    /// P1-11: Maximum number of files returned by file_list (mirrors TS cap of 100)
+    const FILE_LIST_LIMIT: usize = 100;
+    /// P2-1: Maximum content size in bytes (mirrors TS 5MB limit)
+    const MAX_CONTENT_SIZE: usize = 5_000_000;
+
+    pub fn new(engine: &'a SqliteEngine, ctx: OpContext) -> Self {
+        Self::with_config(engine, ctx, Config::default())
+    }
+
+    pub fn with_config(engine: &'a SqliteEngine, ctx: OpContext, config: Config) -> Self {
+        debug!(remote = ctx.remote, auto_link = config.auto_link, auto_timeline = config.auto_timeline, "Creating Operations instance");
+        Self { engine, ctx, config, in_transaction: false }
+    }
+
+    /// Create Operations instance that knows it's already inside a transaction.
+    /// Used by `put_page_in_transaction` and `batch_put_pages` to avoid nested
+    /// `BEGIN IMMEDIATE` (SQLite does not support nested transactions).
+    fn with_config_in_transaction(engine: &'a SqliteEngine, ctx: OpContext, config: Config) -> Self {
+        debug!(remote = ctx.remote, auto_link = config.auto_link, auto_timeline = config.auto_timeline, "Creating Operations instance (in-transaction)");
+        Self { engine, ctx, config, in_transaction: true }
+    }
+
+    /// Query the brain (high-level search with auto-escalate)
+    pub fn query(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+        info!(query = %query, limit = opts.limit.unwrap_or(20), "Querying brain");
+
+        // Determine detail level from intent if not specified
+        let intent = classify_intent(query);
+        let detail = opts
+            .detail_level
+            .or_else(|| detail_for_intent(&intent.intent))
+            .unwrap_or(DetailLevel::Medium);
+        let mut opts = opts;
+        opts.detail_level = Some(detail);
+
+        let hybrid_opts = HybridOpts::default();
+        let mut results = hybrid_search(self.engine, query, None, opts.clone(), hybrid_opts)?;
+
+        // Auto-escalate: if results are sparse, try with higher detail
+        if results.len() < 3 && detail != DetailLevel::High {
+            info!("Auto-escalating to High detail");
+            opts.detail_level = Some(DetailLevel::High);
+            let escalated = hybrid_search(self.engine, query, None, opts, HybridOpts::default())?;
+            if escalated.len() > results.len() {
+                results = escalated;
+            }
+        }
+
+        info!(result_count = results.len(), "Query complete");
+        Ok(results)
+    }
+
+    /// Search with vector embedding
+    pub fn search(
+        &self,
+        query: &str,
+        embedding: &[f32],
+        opts: SearchOpts,
+    ) -> Result<Vec<SearchResult>> {
+        info!(query = %query, embedding_dims = embedding.len(), "Searching with embedding");
+        let hybrid_opts = HybridOpts::default();
+        let results = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
+        info!(result_count = results.len(), "Search complete");
+        Ok(results)
+    }
+
+    /// Get a page by slug
+    pub fn get_page(&self, slug: &str) -> Result<Option<Page>> {
+        validate_page_slug(slug)?;
+        trace!(slug = %slug, "Getting page");
+        self.engine.get_page(slug)
+    }
+
+    /// Put a page (create or update)
+    ///
+    /// Enhanced flow (P1-1 through P1-5):
+    /// 1. Compute content hash; skip write if unchanged (P1-1)
+    /// 2. Create version snapshot before overwrite (P1-2)
+    /// 3. Write page + chunk + link extraction
+    /// 4. Reconcile tags from frontmatter (P1-3)
+    /// 5. Auto-extract timeline entries (P1-4)
+    /// 6. Remove stale markdown links (P1-5)
+    ///
+    /// P2-2: Put page inside a write transaction (mirrors TS BrainWriter transaction scope).
+    /// Used by BrainWriter to ensure validators and writes share the same transaction.
+    pub fn put_page_in_transaction(
+        &self,
+        slug: &str,
+        title: &str,
+        content: &str,
+        page_type: Option<PageType>,
+        content_hash: Option<&str>,
+    ) -> Result<Page> {
+        let slug = slug.to_string();
+        let title = title.to_string();
+        let content = content.to_string();
+        let content_hash = content_hash.map(String::from);
+        let ctx = self.ctx.clone();
+        let config = self.config.clone();
+
+        self.engine.transaction_with_engine(|engine| {
+            let ops = Operations::with_config_in_transaction(engine, ctx.clone(), config.clone());
+            ops.put_page(&slug, &title, &content, page_type, content_hash.as_deref())
+        })
+    }
+
+    /// P2-4: Batch put multiple pages in a single transaction.
+    /// Mirrors TS batchPut() — each page is written with full auto-processing
+    /// (chunking, link extraction, timeline extraction, etc.).
+    /// Returns results for each page in order, with errors captured per-page
+    /// rather than failing the entire batch.
+    pub fn batch_put_pages(
+        &self,
+        pages: Vec<(String, String, String, Option<PageType>)>,
+    ) -> Result<Vec<(String, Result<Page>)>> {
+        let ctx = self.ctx.clone();
+        let config = self.config.clone();
+
+        self.engine.transaction_with_engine(|engine| {
+            let ops = Operations::with_config_in_transaction(engine, ctx.clone(), config.clone());
+            Ok(pages.iter().map(|(slug, title, content, page_type)| {
+                let result = ops.put_page(slug, title, content, page_type.clone(), None);
+                (slug.clone(), result)
+            }).collect::<Vec<_>>())
+        })
+    }
+
+    /// P2-4: Batch add multiple links in a single transaction.
+    /// Mirrors TS batchAddLinks() — validates slugs exist and deduplicates.
+    pub fn batch_add_links(
+        &self,
+        links: Vec<(String, String, String, String)>, // (from_slug, to_slug, link_type, link_source)
+    ) -> Result<Vec<(String, String, Result<()>)>> {
+        self.engine.transaction_with_engine(|engine| {
+            Ok(links.iter().map(|(from_slug, to_slug, link_type, link_source)| {
+                let result = engine.add_link(
+                    from_slug, to_slug,
+                    None,               // context
+                    Some(link_type),    // link_type
+                    Some(link_source),  // source
+                    None,               // confidence
+                    None,               // metadata
+                );
+                (from_slug.clone(), to_slug.clone(), result)
+            }).collect::<Vec<_>>())
+        })
+    }
+
+    pub fn put_page(
+        &self,
+        slug: &str,
+        title: &str,
+        content: &str,
+        page_type: Option<PageType>,
+        content_hash: Option<&str>,
+    ) -> Result<Page> {
+        validate_page_slug(slug)?;
+
+        // P1-7: Sub-agent namespace enforcement (mirrors TS viaSubagent)
+        // When subagent_id is set, restrict writes to wiki/agents/<subagent_id>/... namespace
+        if let Some(ref subagent_id) = self.ctx.subagent_id {
+            let required_prefix = format!("wiki/agents/{}/", subagent_id);
+            if !slug.starts_with(&required_prefix) {
+                return Err(crate::error::GBrainError::Security(format!(
+                    "Sub-agent '{}' can only write to '{}' namespace, got '{}'",
+                    subagent_id, required_prefix, slug
+                )));
+            }
+        }
+
+        // P2-1: Content size guard (mirrors TS 5MB limit)
+        if content.len() > Self::MAX_CONTENT_SIZE {
+            return Err(crate::error::GBrainError::InvalidInput(format!(
+                "content size {} exceeds maximum {} bytes",
+                content.len(),
+                Self::MAX_CONTENT_SIZE
+            )));
+        }
+
+        if self.ctx.dry_run {
+            info!(slug = %slug, title = %title, "Dry-run: would put page");
+            // Return a stub page for preview
+            return Ok(Page {
+                id: 0,
+                slug: slug.to_string(),
+                page_type: page_type.unwrap_or(PageType::Note),
+                title: title.to_string(),
+                compiled_truth: content.to_string(),
+                timeline: None,
+                frontmatter: None,
+                content_hash: content_hash.map(|s| s.to_string()),
+                created_at: String::new(),
+                updated_at: String::new(),
+            });
+        }
+
+        info!(slug = %slug, title = %title, "Putting page");
+
+        // Parse markdown content
+        let parsed = parse_markdown(content);
+
+        // Infer type from slug if not provided
+        let pt = page_type.unwrap_or_else(|| infer_type(slug));
+
+        // Extract frontmatter tags for hash computation and later reconciliation
+        let fm_tags = extract_frontmatter_tags(&parsed.frontmatter);
+
+        // ── P1-1: Compute content hash ──────────────────────────
+        let computed_hash = compute_content_hash(
+            title,
+            &pt,
+            &parsed.body,
+            &parsed.timeline,
+            &parsed.frontmatter,
+            &fm_tags,
+        );
+
+        // If caller didn't pass a hash, use the computed one
+        let hash_to_use = content_hash
+            .map(|s| s.to_string())
+            .unwrap_or(computed_hash.clone());
+
+        // Check for skip-if-unchanged and capture existing page for version snapshot
+        let existing_page = self.engine.get_page(slug)?;
+
+        // ── P1-1: Skip-if-unchanged ─────────────────────────────
+        if let Some(ref existing) = existing_page {
+            if existing.content_hash.as_deref() == Some(hash_to_use.as_str()) {
+                info!(slug = %slug, "Content unchanged (hash match), skipping re-write");
+                return Ok(existing.clone());
+            }
+        }
+
+        // ── P1-2: Create version snapshot before overwrite ──────
+        if existing_page.is_some() {
+            debug!(slug = %slug, "Creating version snapshot before overwrite");
+            if let Err(e) = self.engine.create_version(slug) {
+                warn!(slug = %slug, error = %e, "Failed to create version snapshot (non-critical)");
+            }
+        }
+
+        // ── P2-8: DB-based auto_link/auto_timeline config with fallback ──
+        // Check the DB for runtime overrides; fall back to struct config if absent.
+        let auto_link = self.engine.get_config("auto_link")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(self.config.auto_link);
+        let auto_timeline = self.engine.get_config("auto_timeline")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(self.config.auto_timeline);
+
+        let input = PageInput {
+            page_type: pt.clone(),
+            title: title.to_string(),
+            compiled_truth: parsed.body.clone(),
+            timeline: if auto_timeline && !parsed.timeline.is_empty() {
+                Some(serde_json::Value::String(parsed.timeline.clone()))
+            } else {
+                None
+            },
+            frontmatter: if parsed.frontmatter.is_null() {
+                None
+            } else {
+                Some(parsed.frontmatter.clone())
+            },
+            content_hash: Some(hash_to_use),
+        };
+
+        let page = self.engine.put_page(slug, input)?;
+
+        // ── Link extraction (existing flow) ─────────────────────
+        // SECURITY: Skip auto-link for remote (MCP) callers. Auto-link's bare-slug regex
+        // matches `people/X` etc. anywhere in page text, including code fences,
+        // quoted strings, and prompt-injected content. An untrusted page can plant
+        // arbitrary outbound links. Combined with the backlink boost in hybridSearch,
+        // attacker-placed targets would surface higher in search. Local CLI users
+        // (ctx.remote=false) opt into this behavior; MCP/remote writes do not.
+        // Mirrors TS operations.ts: "skipped for remote (MCP) callers".
+        //
+        // P0-2: Wrap link reconciliation in a transaction to prevent concurrent
+        // writes from creating duplicate or stale links.
+        // P0-3: Validate link targets exist before adding (FK check via get_all_slugs).
+        let _current_md_refs = if auto_link && !self.ctx.remote {
+            // P0-2: Transaction-protected link reconciliation.
+            // When already inside a transaction (put_page_in_transaction / batch_put_pages),
+            // call reconcile_links_for_page directly to avoid nested BEGIN IMMEDIATE
+            // (SQLite does not support nested transactions).
+            if self.in_transaction {
+                reconcile_links_for_page(self.engine, slug, content, &parsed.frontmatter, &pt, !self.ctx.remote)
+                    .unwrap_or_else(|e| {
+                        warn!(slug = %slug, error = %e, "Link reconciliation failed");
+                        Vec::new()
+                    })
+            } else {
+                self.engine.transaction_with_engine(|engine| {
+                    reconcile_links_for_page(engine, slug, content, &parsed.frontmatter, &pt, !self.ctx.remote)
+                }).unwrap_or_else(|e| {
+                    warn!(slug = %slug, error = %e, "Link reconciliation transaction failed");
+                    Vec::new()
+                })
+            }
+        } else {
+            debug!(slug = %slug, "Auto-link disabled, skipping link extraction");
+            Vec::new()
+        };
+
+        // ── Chunk the content ───────────────────────────────────
+        // P2-2: Log early embedding skip if no API key configured
+        if self.config.openai_api_key.as_ref().is_none_or(|k| k.is_empty()) {
+            debug!("No GBRAIN_OPENAI_API_KEY configured, embedding will be skipped for this page");
+        }
+
+        let chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
+        if !chunks.is_empty() {
+            debug!(slug = %slug, chunk_count = chunks.len(), "Chunking page content");
+            if let Err(e) = self.engine.upsert_chunks(slug, &chunks) {
+                warn!(slug = %slug, error = %e, "Failed to upsert chunks (non-critical)");
+            }
+        }
+
+        // ── P1-3: Tag reconciliation ────────────────────────────
+        if !fm_tags.is_empty() {
+            reconcile_tags(self.engine, slug, &fm_tags)?;
+        }
+
+        // ── P1-4: Auto-timeline extraction ──────────────────────
+        if auto_timeline && !self.ctx.remote {
+            let tl_entries = parse_timeline_entries(content);
+            if !tl_entries.is_empty() {
+                debug!(slug = %slug, timeline_count = tl_entries.len(), "Auto-extracting timeline entries");
+                let inputs: Vec<TimelineInput> = tl_entries
+                    .into_iter()
+                    .map(|(date, summary)| TimelineInput {
+                        date,
+                        source: None,
+                        summary,
+                        detail: None,
+                    })
+                    .collect();
+                if let Err(e) = self.engine.add_timeline_entries_batch(slug, &inputs) {
+                    warn!(slug = %slug, error = %e, "Failed to add auto-timeline entries (non-critical)");
+                }
+            }
+        }
+
+        // ── P2-3: Post-write lint hook ──────────────────────────
+        // Run validators on the freshly-written page, log findings.
+        // Feature-flagged via config.post_write_lint (mirrors TS runPostWriteLint).
+        if self.config.post_write_lint {
+            let lint_result = crate::validators::validate_all(self.engine, slug, content);
+            if !lint_result.issues.is_empty() {
+                for issue in &lint_result.issues {
+                    let level = match issue.severity {
+                        crate::validators::Severity::Error => "ERR",
+                        crate::validators::Severity::Warning => "WRN",
+                        crate::validators::Severity::Info => "INF",
+                    };
+                    debug!(
+                        slug = %slug,
+                        rule = %issue.rule,
+                        severity = level,
+                        message = %issue.message,
+                        "Post-write lint finding"
+                    );
+                }
+                info!(
+                    slug = %slug,
+                    issue_count = lint_result.issues.len(),
+                    error_count = lint_result.errors().len(),
+                    "Post-write lint complete"
+                );
+            }
+        }
+
+        info!(slug = %slug, title = %page.title, "Page saved successfully");
+        Ok(page)
+    }
+
+    /// Delete a page
+    pub fn delete_page(&self, slug: &str) -> Result<()> {
+        validate_page_slug(slug)?;
+        if self.ctx.dry_run {
+            info!(slug = %slug, "Dry-run: would delete page");
+            return Ok(());
+        }
+        info!(slug = %slug, "Deleting page");
+        self.engine.delete_page(slug)
+    }
+
+    /// List pages with filters
+    pub fn list_pages(&self, filters: PageFilters) -> Result<Vec<Page>> {
+        trace!(limit = filters.limit.unwrap_or(50), "Listing pages");
+        self.engine.list_pages(filters)
+    }
+
+    /// Get backlinks for a page
+    pub fn get_backlinks(&self, slug: &str) -> Result<Vec<Link>> {
+        trace!(slug = %slug, "Getting backlinks");
+        self.engine.get_backlinks(slug)
+    }
+
+    /// Traverse the knowledge graph
+    pub fn traverse_graph(&self, slug: &str, depth: usize) -> Result<Vec<GraphNode>> {
+        // P1-11: Cap depth to prevent unbounded traversal (mirrors TS)
+        let capped_depth = depth.min(Self::TRAVERSE_DEPTH_CAP);
+        info!(slug = %slug, depth, capped_depth, "Traversing knowledge graph");
+        self.engine.traverse_graph(slug, capped_depth)
+    }
+
+    /// Resolve partial slugs
+    pub fn resolve_slugs(&self, partial: &str) -> Result<Vec<String>> {
+        debug!(partial = %partial, "Resolving slugs");
+        self.engine.resolve_slugs(partial)
+    }
+
+    /// Fuzzy search by title
+    pub fn find_by_title_fuzzy(
+        &self,
+        query: &str,
+        dir_prefix: Option<&str>,
+        min_similarity: Option<f64>,
+        limit: Option<usize>,
+    ) -> Result<Vec<FuzzyMatch>> {
+        debug!(query = %query, dir_prefix = ?dir_prefix, min_similarity = ?min_similarity, "Fuzzy title search");
+        self.engine
+            .find_by_title_fuzzy(query, dir_prefix, min_similarity, limit)
+    }
+
+    /// Fuzzy search using trigram similarity (pg_trgm equivalent).
+    ///
+    /// Unlike `find_by_title_fuzzy` which only matches against page titles,
+    /// this method matches against both title and compiled_truth content,
+    /// returning full `SearchResult` objects with the max similarity score.
+    ///
+    /// The `min_similarity` threshold (0.0-1.0) filters out low-quality matches.
+    /// A value of 0.3 is a good default for catching near-matches.
+    pub fn fuzzy_search(
+        &self,
+        query: &str,
+        min_similarity: f64,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        info!(query = %query, min_similarity, limit, "Fuzzy search (trigram)");
+        crate::search::fuzzy::fuzzy_search(self.engine, query, min_similarity, limit)
+    }
+
+    /// Get brain statistics
+    pub fn get_stats(&self) -> Result<BrainStats> {
+        trace!("Getting brain stats");
+        self.engine.get_stats()
+    }
+
+    /// Get brain health
+    pub fn get_health(&self) -> Result<BrainHealth> {
+        trace!("Getting brain health");
+        self.engine.get_health()
+    }
+
+    /// Get ingest log
+    pub fn get_ingest_log(&self, limit: Option<usize>) -> Result<Vec<IngestLogEntry>> {
+        trace!(limit = limit.unwrap_or(20), "Getting ingest log");
+        self.engine.get_ingest_log(limit)
+    }
+
+    /// Upload a file
+    pub fn file_upload(
+        &self,
+        source_path: &std::path::Path,
+        slug: &str,
+        opts: FileUploadOptions,
+    ) -> Result<FileRecord> {
+        validate_page_slug(slug)?;
+        validate_upload_path(source_path, self.ctx.remote, &self.ctx.working_dir)?;
+        // For remote callers: canonicalize and verify path is contained within working_dir
+        if self.ctx.remote {
+            validate_contained(source_path, &self.ctx.working_dir, self.ctx.remote)?;
+        }
+        info!(source_path = %source_path.display(), slug = %slug, "Uploading file");
+        self.engine.file_upload(source_path, slug, opts)
+    }
+
+    /// List files
+    pub fn file_list(&self, slug: Option<&str>, limit: Option<usize>) -> Result<Vec<FileRecord>> {
+        // P1-11: Cap result count (mirrors TS)
+        let capped_limit = limit
+            .map(|l| l.min(Self::FILE_LIST_LIMIT))
+            .or(Some(Self::FILE_LIST_LIMIT));
+        trace!(slug = slug.unwrap_or("all"), limit = ?capped_limit, "Listing files");
+        self.engine.file_list(slug, capped_limit)
+    }
+
+    /// Get file URL by storage path
+    pub fn file_url_by_path(&self, storage_path: &str) -> Result<String> {
+        trace!(storage_path = %storage_path, "Getting file URL");
+        self.engine.file_url_by_storage_path(storage_path)
+    }
+
+    /// Verify all file records
+    pub fn file_verify(&self) -> Result<FileVerifyResult> {
+        info!("Verifying all file records");
+        self.engine.file_verify()
+    }
+
+    /// Sync a directory of files to storage
+    ///
+    /// Walks the directory recursively, skipping hidden files and `.md` files.
+    /// For each file: computes SHA256 hash, checks if already exists in DB,
+    /// and if new, uploads via `file_upload`.
+    pub fn file_sync(&self, dir: &std::path::Path) -> Result<FileSyncResult> {
+        info!(dir = %dir.display(), "Starting file sync");
+        let files = collect_files(dir);
+
+        // Fetch existing files once before the loop (avoid N+1)
+        let existing = self.engine.file_list(None, Some(10000))?;
+
+        let mut uploaded = 0;
+        let mut skipped = 0;
+
+        for file_path in &files {
+            let relative = file_path.strip_prefix(dir).unwrap_or(file_path);
+            let relative_str = relative.to_string_lossy().replace('\\', "/");
+            let storage_path = relative_str.clone();
+
+            // Check if already exists by hash
+            let data = std::fs::read(file_path)?;
+            let hash = format!("{:x}", Sha256::digest(&data));
+
+            let already_exists = existing.iter().any(|f| {
+                f.hash.as_deref() == Some(hash.as_str()) && f.storage_path == storage_path
+            });
+
+            if already_exists {
+                debug!(storage_path = %storage_path, "File already exists, skipping");
+                skipped += 1;
+                continue;
+            }
+
+            // Infer page slug from directory structure
+            let filename = file_path
+                .file_name()
+                .ok_or_else(|| crate::error::GBrainError::FileError("No filename".to_string()))?
+                .to_string_lossy()
+                .to_string();
+
+            // Validate filename
+            if validate_filename(&filename).is_err() {
+                warn!(filename = %filename, "Invalid filename, skipping");
+                skipped += 1;
+                continue;
+            }
+
+            // Infer slug from path: e.g., people/alice/photo.jpg -> people/alice
+            let path_parts: Vec<&str> = relative_str.split('/').collect();
+            let page_slug = if path_parts.len() > 1 {
+                path_parts[..path_parts.len() - 1].join("/")
+            } else {
+                "unsorted".to_string()
+            };
+
+            let opts = FileUploadOptions {
+                slug: page_slug.clone(),
+                overwrite: false,
+                max_size_bytes: None,
+            };
+
+            match self.engine.file_upload(file_path, &page_slug, opts) {
+                Ok(_) => {
+                    debug!(storage_path = %storage_path, "File uploaded");
+                    uploaded += 1;
+                }
+                Err(e) => {
+                    warn!(storage_path = %storage_path, error = %e, "File upload failed, skipping");
+                    skipped += 1;
+                }
+            }
+        }
+
+        info!(uploaded, skipped, total = files.len(), "File sync complete");
+        Ok(FileSyncResult { uploaded, skipped })
+    }
+
+    /// Check for missing backlinks: wiki-links in page content that have no
+    /// corresponding entries in the links table. Returns list of (from_slug, to_slug).
+    /// Mirrors TS backlinks.ts check command.
+    pub fn check_backlinks(
+        &self,
+        slug: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let mut missing = Vec::new();
+
+        let filters = PageFilters {
+            limit: None,
+            ..Default::default()
+        };
+        let pages = if let Some(s) = slug {
+            match self.engine.get_page(s)? {
+                Some(p) => vec![p],
+                None => {
+                    return Err(crate::error::GBrainError::PageNotFound(s.to_string()));
+                }
+            }
+        } else {
+            self.engine.list_pages(filters)?
+        };
+
+        for page in pages {
+            let refs = extract_entity_refs(&page.compiled_truth);
+            let existing_links = self.engine.get_links(&page.slug)?;
+            let existing_targets: std::collections::HashSet<String> =
+                existing_links.iter().map(|l| l.to_slug.clone()).collect();
+
+            for entity_ref in &refs {
+                if !existing_targets.contains(&entity_ref.slug) {
+                    missing.push((page.slug.clone(), entity_ref.slug.clone()));
+                }
+            }
+        }
+
+        Ok(missing)
+    }
+
+    /// Fix missing backlinks by adding entries to the links table.
+    /// Returns the number of links added.
+    /// Mirrors TS backlinks.ts fix command.
+    pub fn fix_backlinks(&self, slug: Option<&str>, dry_run: bool) -> Result<usize> {
+        let missing = self.check_backlinks(slug)?;
+
+        if dry_run {
+            info!(
+                missing_count = missing.len(),
+                "Dry run: would add missing backlinks"
+            );
+            for (from, to) in &missing {
+                info!("  {} -> {}", from, to);
+            }
+            return Ok(missing.len());
+        }
+
+        let mut added = 0;
+        for (from, to) in missing {
+            match self.engine.add_link(
+                &from,
+                &to,
+                None,
+                Some("mentions"),
+                Some("markdown"),
+                None,
+                None,
+            ) {
+                Ok(_) => {
+                    debug!(from = %from, to = %to, "Added missing backlink");
+                    added += 1;
+                }
+                Err(e) => {
+                    warn!(from = %from, to = %to, error = %e, "Failed to add backlink");
+                }
+            }
+        }
+
+        info!(added, "Fixed missing backlinks");
+        Ok(added)
+    }
+
+    /// Batch extract links and/or timeline entries from all pages in the database.
+    /// Mirrors TS `gbrain extract links/timeline/all`.
+    ///
+    /// Returns counts of links/timeline entries extracted.
+    pub fn extract(&self, mode: ExtractMode) -> Result<ExtractResult> {
+        let filters = PageFilters {
+            limit: None,
+            offset: None,
+            tag: None,
+            page_type: None,
+            updated_after: None,
+        };
+        let pages = self.engine.list_pages(filters)?;
+        let mut links_added = 0;
+        let mut timeline_added = 0;
+        let mut errors = 0;
+
+        // Pre-fetch all slugs once for FK validation (avoids N+1 query per page)
+        let valid_slugs: std::collections::HashSet<String> = match self.engine.get_all_slugs() {
+            Ok(slugs) => slugs.into_iter().collect(),
+            Err(e) => {
+                warn!(error = %e, "FK validation: failed to fetch slugs");
+                std::collections::HashSet::new()
+            }
+        };
+
+        for page in &pages {
+            if mode.extract_links() {
+                let refs = extract_entity_refs(&page.compiled_truth);
+                if !refs.is_empty() {
+                    let mut links = refs_to_batch_input(&page.slug, &refs);
+                    // FK validation using pre-fetched slugs
+                    links.retain(|l| valid_slugs.contains(&l.to_slug));
+                    if !links.is_empty() {
+                        if let Ok(n) = self.engine.add_links_batch(&links) {
+                            links_added += n;
+                        } else {
+                            errors += 1;
+                        }
+                    }
+                }
+
+                // Frontmatter links
+                if !page.frontmatter.as_deref().unwrap_or("").is_empty() {
+                    let fm: serde_json::Value = serde_json::from_str(
+                        page.frontmatter.as_deref().unwrap_or("{}")
+                    ).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    if !fm.is_null() {
+                        // Remove old frontmatter links first
+                        if let Err(e) = self.engine.remove_links_by_origin(&page.slug, "frontmatter") {
+                            warn!(slug = %page.slug, error = %e, "Failed to remove old frontmatter links");
+                        }
+                        let mut resolver = EngineSlugResolver::new(self.engine, true);
+                        let fm_result = extract_frontmatter_refs(&fm, &page.slug, Some(page.page_type.clone()), Some(&mut resolver));
+                        if !fm_result.candidates.is_empty() {
+                            let mut fm_links = refs_to_batch_input(&page.slug, &fm_result.candidates);
+                            // FK validation using pre-fetched slugs
+                            fm_links.retain(|l| valid_slugs.contains(&l.to_slug));
+                            if !fm_links.is_empty() {
+                                if let Ok(n) = self.engine.add_links_batch(&fm_links) {
+                                    links_added += n;
+                                } else {
+                                    errors += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if mode.extract_timeline() {
+                let tl_entries = parse_timeline_entries(&page.compiled_truth);
+                if !tl_entries.is_empty() {
+                    let inputs: Vec<TimelineInput> = tl_entries
+                        .into_iter()
+                        .map(|(date, summary)| TimelineInput {
+                            date,
+                            source: None,
+                            summary,
+                            detail: None,
+                        })
+                        .collect();
+                    if let Ok(n) = self.engine.add_timeline_entries_batch(&page.slug, &inputs) {
+                        timeline_added += n;
+                    } else {
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        info!(links_added, timeline_added, errors, page_count = pages.len(), "Extract complete");
+        Ok(ExtractResult { links_added, timeline_added, errors, pages_scanned: pages.len() })
+    }
+}
+
+/// Collect non-markdown files from a directory, skipping hidden files and symlinks
+fn collect_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    walk_dir(dir, dir, &mut files);
+    files.sort();
+    files
+}
+
+fn walk_dir(_base: &std::path::Path, dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden files
+        if name_str.starts_with('.') {
+            continue;
+        }
+
+        let path = entry.path();
+
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+
+        // Skip symlinks
+        if metadata.is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            walk_dir(_base, &path, files);
+        } else if !name_str.ends_with(".md") {
+            files.push(path);
+        }
+    }
+}
+
+// ── P1-1: Content hash computation ──────────────────────────────
+
+/// Serialize a serde_json::Value to a canonical JSON string with sorted keys.
+/// Ensures the same logical frontmatter produces the same hash regardless of key order.
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted: Vec<_> = map.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            let pairs: Vec<String> = sorted.iter()
+                .map(|(k, v)| format!("{}:{}", k, canonical_json(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Compute SHA-256 content hash over the key page fields.
+/// Used to detect unchanged pages and skip redundant re-writes.
+fn compute_content_hash(
+    title: &str,
+    page_type: &PageType,
+    compiled_truth: &str,
+    timeline: &str,
+    frontmatter: &serde_json::Value,
+    tags: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(title.as_bytes());
+    hasher.update(page_type.to_string().as_bytes());
+    hasher.update(compiled_truth.as_bytes());
+    hasher.update(timeline.as_bytes());
+    // Serialize frontmatter to a canonical JSON string for stable hashing
+    // Use sorted keys to ensure same logical frontmatter produces same hash
+    let fm_str = canonical_json(frontmatter);
+    hasher.update(fm_str.as_bytes());
+    for tag in tags {
+        hasher.update(tag.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Extract tags from frontmatter's "tags" array field.
+/// Returns an empty vec if frontmatter is missing or has no tags.
+fn extract_frontmatter_tags(frontmatter: &serde_json::Value) -> Vec<String> {
+    let Some(obj) = frontmatter.as_object() else {
+        return Vec::new();
+    };
+    let Some(tags_val) = obj.get("tags") else {
+        return Vec::new();
+    };
+    let Some(arr) = tags_val.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+// ── P1-3: Tag reconciliation ────────────────────────────────────
+
+/// Reconcile frontmatter tags with existing DB tags for a page.
+/// Adds missing tags and removes orphaned tags (present in DB but not in frontmatter).
+fn reconcile_tags(engine: &SqliteEngine, slug: &str, fm_tags: &[String]) -> Result<()> {
+    let existing = engine.get_tags(slug)?;
+    let existing_set: std::collections::HashSet<&str> =
+        existing.iter().map(|s| s.as_str()).collect();
+    let new_set: std::collections::HashSet<&str> =
+        fm_tags.iter().map(|s| s.as_str()).collect();
+
+    // Add tags present in frontmatter but missing from DB
+    for tag in fm_tags {
+        if !existing_set.contains(tag.as_str()) {
+            debug!(slug = %slug, tag = %tag, "Adding missing tag");
+            engine.add_tag(slug, tag)?;
+        }
+    }
+
+    // Remove tags present in DB but no longer in frontmatter
+    for tag in &existing {
+        if !new_set.contains(tag.as_str()) {
+            debug!(slug = %slug, tag = %tag, "Removing orphaned tag");
+            if let Err(e) = engine.remove_tag(slug, tag) {
+                warn!(slug = %slug, tag = %tag, error = %e, "Failed to remove orphaned tag");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── P1-5: Stale link reconciliation ─────────────────────────────
+
+/// Remove stale markdown-sourced links that are no longer present in the page content.
+/// P0-2: Link reconciliation for a page — extracts entity refs and frontmatter refs,
+/// adds new links, removes stale links. This function does NOT wrap in a transaction;
+/// callers must wrap it in `transaction_with_engine` if a transaction is needed.
+/// When called from `put_page_in_transaction` or `batch_put_pages`, the outer transaction
+/// already provides the necessary isolation, so we call this directly to avoid nested
+/// `BEGIN IMMEDIATE` which SQLite does not support.
+fn reconcile_links_for_page(
+    engine: &SqliteEngine,
+    slug: &str,
+    content: &str,
+    frontmatter: &serde_json::Value,
+    page_type: &PageType,
+    allow_fuzzy: bool,
+) -> Result<Vec<crate::link_extraction::EntityRef>> {
+    let refs = extract_entity_refs(content);
+
+    // P0-3: FK validation — get all existing slugs to filter dead links
+    let valid_slugs: std::collections::HashSet<String> = match engine.get_all_slugs() {
+        Ok(slugs) => slugs.into_iter().collect(),
+        Err(e) => {
+            warn!(slug = %slug, error = %e, "FK validation failed: cannot verify link targets, skipping link extraction");
+            return Ok(Vec::new());
+        }
+    };
+
+    if !refs.is_empty() {
+        debug!(slug = %slug, ref_count = refs.len(), "Extracting entity refs and adding links");
+        let mut links = refs_to_batch_input(slug, &refs);
+        // P0-3: Filter out links to non-existent slugs
+        links.retain(|l| valid_slugs.contains(&l.to_slug));
+        if !links.is_empty() {
+            if let Err(e) = engine.add_links_batch(&links) {
+                warn!(slug = %slug, error = %e, "Failed to add entity ref links (non-critical)");
+            }
+        }
+    }
+
+    // Extract frontmatter links (with reconciliation: delete old frontmatter links first)
+    let mut fm_target_slugs: Vec<String> = Vec::new();
+    if !frontmatter.is_null() {
+        // Reconciliation: remove old frontmatter-extracted links for this slug
+        if let Err(e) = engine.remove_links_by_origin(slug, "frontmatter") {
+            warn!(slug = %slug, error = %e, "Failed to remove old frontmatter links (non-critical)");
+        }
+        // Use EngineSlugResolver to check which frontmatter refs actually exist in DB
+        let mut resolver = EngineSlugResolver::new(engine, allow_fuzzy);
+        let fm_result = extract_frontmatter_refs(frontmatter, slug, Some(page_type.clone()), Some(&mut resolver));
+        if !fm_result.candidates.is_empty() {
+            debug!(slug = %slug, fm_ref_count = fm_result.candidates.len(), unresolved_count = fm_result.unresolved.len(), "Extracting frontmatter refs");
+            let mut fm_links = refs_to_batch_input(slug, &fm_result.candidates);
+            // P0-3: Filter out frontmatter links to non-existent slugs
+            fm_links.retain(|l| valid_slugs.contains(&l.to_slug));
+            if !fm_links.is_empty() {
+                if let Err(e) = engine.add_links_batch(&fm_links) {
+                    warn!(slug = %slug, error = %e, "Failed to add frontmatter links (non-critical)");
+                }
+            }
+        }
+        // Collect frontmatter target slugs for inbound reconciliation
+        fm_target_slugs = fm_result.candidates.iter().map(|r| r.slug.clone()).collect();
+        // Log unresolved frontmatter references
+        for (field, name) in &fm_result.unresolved {
+            warn!(slug = %slug, field = %field, name = %name, "Unresolved frontmatter reference");
+        }
+    }
+
+    // P1-5: Link reconciliation — remove stale markdown links
+    reconcile_stale_links(engine, slug, &refs)?;
+
+    // P0-4: Inbound link reconciliation — remove stale frontmatter inbound links
+    reconcile_stale_inbound_links(engine, slug, &fm_target_slugs)?;
+
+    Ok(refs)
+}
+
+/// Compares current entity refs with existing DB links; removes any DB link whose
+/// link_source is Markdown and whose to_slug is not in the current refs.
+fn reconcile_stale_links(
+    engine: &SqliteEngine,
+    slug: &str,
+    current_refs: &[crate::link_extraction::EntityRef],
+) -> Result<()> {
+    let existing_links = engine.get_links(slug)?;
+    let current_targets: std::collections::HashSet<&str> =
+        current_refs.iter().map(|r| r.slug.as_str()).collect();
+
+    for link in &existing_links {
+        // Only reconcile markdown-sourced links; frontmatter/manual links are managed separately
+        if link.link_source.as_ref() == Some(&LinkSource::Markdown)
+            && !current_targets.contains(link.to_slug.as_str()) {
+                debug!(
+                    slug = %slug,
+                    to_slug = %link.to_slug,
+                    link_type = %link.link_type,
+                    "Removing stale markdown link"
+                );
+                if let Err(e) = engine.remove_link(
+                    &link.from_slug,
+                    &link.to_slug,
+                    Some(&link.link_type),
+                    link.context.as_deref(),
+                    Some("markdown"),
+                ) {
+                    warn!(slug = %slug, to_slug = %link.to_slug, error = %e, "Failed to remove stale link");
+                }
+            }
+    }
+
+    Ok(())
+}
+
+// ── P0-4: Inbound link reconciliation ─────────────────────────────
+
+/// Remove stale inbound (frontmatter-sourced) links where the origin page
+/// no longer references this slug in its frontmatter.
+///
+/// In TS, operations.ts:406-410 separates candidates into outbound
+/// (fromSlug === slug) and inbound (fromSlug !== slug), and reconciles
+/// both. The Rust version only reconciled outbound links; this function
+/// adds inbound reconciliation.
+///
+/// When a page's frontmatter changes (e.g., company removes `key_people: [alice]`),
+/// the inbound link `people/alice -> companies/acme` should be removed.
+fn reconcile_stale_inbound_links(
+    engine: &SqliteEngine,
+    slug: &str,
+    _current_fm_targets: &[String],
+) -> Result<()> {
+    // Get all links where this slug is the target (backlinks = inbound links)
+    let backlinks = engine.get_backlinks(slug)?;
+
+    for link in &backlinks {
+        // Only reconcile frontmatter-sourced inbound links
+        // (markdown-sourced inbound links are handled by the origin page's own reconciliation)
+        if link.link_source.as_ref() == Some(&LinkSource::Frontmatter)
+            && link.from_slug != slug  // inbound only (from_slug !== this slug)
+        {
+            // Check whether the origin page (from_slug) still references
+            // this slug in its frontmatter. We need to read the origin
+            // page's frontmatter and extract its link targets.
+            let origin_page = engine.get_page(&link.from_slug)?;
+            let still_referenced = match origin_page {
+                Some(page) => {
+                    // Extract link targets from the origin page's frontmatter
+                    // (not compiled_truth — frontmatter-sourced links must be checked
+                    // against frontmatter to avoid false retention)
+                    let fm: serde_json::Value = page
+                        .frontmatter
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default();
+                    let fm_refs = extract_frontmatter_refs(
+                        &fm, &link.from_slug, Some(page.page_type.clone()), None,
+                    );
+                    fm_refs.candidates.iter().any(|r| r.slug == slug)
+                        // Also check body entity refs for non-frontmatter links
+                        || {
+                            let body_refs = extract_entity_refs(&page.compiled_truth);
+                            body_refs.iter().any(|r| r.slug == slug)
+                        }
+                }
+                None => {
+                    // Origin page was deleted — link is stale
+                    false
+                }
+            };
+
+            if !still_referenced {
+                debug!(
+                    slug = %slug,
+                    from_slug = %link.from_slug,
+                    link_type = %link.link_type,
+                    "Removing stale inbound frontmatter link"
+                );
+                if let Err(e) = engine.remove_link(
+                    &link.from_slug,
+                    &link.to_slug,
+                    Some(&link.link_type),
+                    link.context.as_deref(),
+                    Some("frontmatter"),
+                ) {
+                    warn!(slug = %slug, from_slug = %link.from_slug, error = %e, "Failed to remove stale inbound link");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

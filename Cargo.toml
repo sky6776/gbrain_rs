@@ -1,0 +1,61 @@
+[package]
+name = "gbrain-core"
+version = "0.1.0"
+edition = "2021"
+description = "Personal knowledge brain — Rust core engine with SQLite + sqlite-vec + FTS5"
+license = "MIT"
+
+[[bin]]
+name = "gbrain"
+path = "src/bin/gbrain.rs"
+
+[dependencies]
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Async runtime (for CLI/MCP layer, engine itself is sync)
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (embedding API + query expansion)
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Text processing
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+unicode-normalization = "0.1"
+
+# Hashing + MIME
+sha2 = "0.10"
+infer = "0.16"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Error handling
+thiserror = "2"
+
+# Home directory resolution
+dirs = "6"
+
+# YAML frontmatter parsing
+serde_yaml = "0.9"
+
+# Optional: HTTP file server
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["fs"], optional = true }
+
+[features]
+default = []
+file-server = ["axum", "tower-http"]
+
+[dev-dependencies]
+tempfile = "3"
