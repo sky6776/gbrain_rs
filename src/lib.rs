@@ -7,6 +7,7 @@ pub mod autopilot;
 pub mod backoff;
 pub mod budget;
 pub mod chunker;
+pub mod code_index;
 pub mod completeness;
 pub mod config;
 pub mod embedding;

@@ -9,9 +9,9 @@ src/
 ├── lib.rs              # Library entry, public re-exports
 ├── types.rs            # Core types (Page, Chunk, Link, SearchResult, etc.)
 ├── error.rs            # Error types (GBrainError, OperationError)
-├── engine.rs           # BrainEngine trait (59 methods)
+├── engine.rs           # BrainEngine trait (65 methods)
 ├── sqlite_engine.rs    # SqliteEngine implementation (SQLite + FTS5 + sqlite-vec)
-├── schema.rs           # SQLite DDL (tables, indexes, triggers, migrations V1-V9)
+├── schema.rs           # SQLite DDL (tables, indexes, triggers, migrations V1-V10)
 ├── config.rs           # Config loading (env vars + config.json)
 ├── operations.rs       # Operations business logic layer
 ├── autopilot.rs        # Periodic maintenance orchestrator (embedding stale content, integrity checks)
@@ -87,7 +87,7 @@ Tests use in-memory SQLite (`:memory:`) — no test database setup needed.
 
 Three-layer design:
 
-1. **Engine layer** — `BrainEngine` trait (`engine.rs`, 59 methods) → `SqliteEngine` impl (`sqlite_engine.rs`). Sync, direct SQLite operations. NOT dyn-compatible; use concrete `SqliteEngine`.
+1. **Engine layer** — `BrainEngine` trait (`engine.rs`, 65 methods) → `SqliteEngine` impl (`sqlite_engine.rs`). Sync, direct SQLite operations. NOT dyn-compatible; use concrete `SqliteEngine`.
 2. **Operations layer** — `Operations` struct (`operations.rs`). Business logic: auto-chunking, tag extraction, link inference, security validation, batch operations. Both CLI and MCP dispatch through this. Configurable via `Operations::with_config()` for auto_link/auto_timeline flags.
 3. **Interface layer** — CLI (`bin/gbrain.rs`) + MCP server (`mcp/`). CLI uses `OpContext.remote=false`; MCP sets `remote=true` for untrusted callers.
 
@@ -196,9 +196,9 @@ Audio transcription via Groq Whisper (default, fast) or OpenAI Whisper (fallback
 
 ## Database Tables
 
-pages, chunks, vec_chunks (sqlite-vec virtual), chunk_embeddings (fallback embedding store), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
+pages, chunks, chunks_fts (FTS5 code/chunk search), vec_chunks (sqlite-vec virtual), chunk_embeddings (fallback embedding store), code_edges (symbol call/reference graph), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
 
-Schema version: 9 (migrations V1-V9; V9 adds soft-delete support, chunk code metadata, and chunk_embeddings; V8 adds title + page_type columns to page_versions; V7 adds FTS5 rebuild + timeline UNIQUE constraint)
+Schema version: 10 (migrations V1-V10; V10 adds chunks_fts and code_edges; V9 adds soft-delete support, chunk code metadata, and chunk_embeddings)
 
 ## Dependencies
 
@@ -226,6 +226,7 @@ Schema version: 9 (migrations V1-V9; V9 adds soft-delete support, chunk code met
 - `gbrain list` — List pages with filters
 - `gbrain search` — Hybrid search
 - `gbrain embed` — Generate and persist embeddings for stale chunks
+- `gbrain code reindex/search/callers/callees/edges` — Code chunk indexing and symbol graph queries
 - `gbrain lint` — Zero-LLM quality check (6 rules)
 - `gbrain extract` — Extract links/timeline/all from pages
 - `gbrain install` — Install shell completions

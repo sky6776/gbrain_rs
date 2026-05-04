@@ -252,6 +252,64 @@ pub struct SearchResult {
     pub updated_at: Option<String>,
 }
 
+/// Code symbol extracted from a code page or fenced code block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeSymbol {
+    pub name: String,
+    pub qualified_name: String,
+    pub symbol_type: String,
+    pub language: String,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub parent_symbol: Option<String>,
+}
+
+/// Input for a code edge between symbols.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeEdgeInput {
+    pub from_slug: String,
+    pub from_symbol: String,
+    pub to_slug: String,
+    pub to_symbol: String,
+    pub edge_type: String,
+    pub confidence: f64,
+    pub context: Option<String>,
+    pub from_chunk_id: Option<i64>,
+    pub to_chunk_id: Option<i64>,
+}
+
+/// A stored code edge between symbols/chunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeEdge {
+    pub id: i64,
+    pub from_slug: String,
+    pub from_symbol: String,
+    pub to_slug: String,
+    pub to_symbol: String,
+    pub edge_type: String,
+    pub confidence: f64,
+    pub context: Option<String>,
+    pub from_chunk_id: Option<i64>,
+    pub to_chunk_id: Option<i64>,
+    pub created_at: String,
+}
+
+/// Code-specific keyword search result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeChunkResult {
+    pub slug: String,
+    pub title: String,
+    pub chunk_id: i64,
+    pub chunk_index: i32,
+    pub chunk_text: String,
+    pub score: f64,
+    pub language: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_type: Option<String>,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
+}
+
 /// A link between pages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Link {

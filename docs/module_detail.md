@@ -4,11 +4,11 @@
 
 本模块级对比的原始内容基于 2026-04-29。当前 Rust 版本已有以下变化：
 
-- `BrainEngine` trait 为 59 个方法，新增 soft-delete restore/purge 与 stale chunk 查询接口。
+- `BrainEngine` trait 为 65 个方法，新增 soft-delete restore/purge、stale chunk、代码 chunk 搜索与 code edge 查询接口。
 - Engine 层已实现 `count_stale_chunks`、`list_stale_chunks`；CLI embed 与 Autopilot 会复用 stale chunk 路径。
-- Operations 查询路径会生成 query embedding；`put_page` 会抽取 Markdown fenced code block 为 `fenced_code` chunk。
+- Operations 查询路径会生成 query embedding；`put_page` 会对代码页和 Markdown fenced code block 生成符号级 `fenced_code` chunk。
 - Search 层已实现 source boost、hard exclude、include/exclude slug prefix，并提供 `chunk_embeddings` fallback vector scoring。
-- Chunker 层仍没有完整 tree-sitter code chunker 和 code edge extractor，但已有轻量 fenced-code chunk 支持。
+- 代码索引层已有确定性 Rust/TS/JS/Python/Go/Java/C 风格声明解析、qualified names、`code_edges` 和 callers/callees 查询；仍没有 tree-sitter 级 AST 精度与 Cathedral II two-pass retrieval。
 - Config 中仍没有完全等价的 TS `searchBoosts` 配置对象；Rust 当前使用内置 slug-prefix boost 规则。
 
 [English version](./module_detail_en.md) | 中文
@@ -38,7 +38,7 @@ getEdgesByChunk(chunkId): Promise<CodeEdgeResult[]>
 withReservedConnection<T>(fn): Promise<T>  // advisory lock
 ```
 
-### Rust: BrainEngine trait (engine.rs, 59方法)
+### Rust: BrainEngine trait (engine.rs, 65方法)
 
 ```rust
 // 单引擎实现: SqliteEngine (SQLite + FTS5 + sqlite-vec)
@@ -53,6 +53,12 @@ restore_page(slug): Result<bool>
 purge_deleted_pages(older_than_hours): Result<Vec<String>>
 count_stale_chunks(): Result<usize>
 list_stale_chunks(limit): Result<Vec<StaleChunk>>
+search_keyword_chunks(query, opts): Result<Vec<CodeChunkResult>>
+add_code_edges(edges): Result<usize>
+delete_code_edges_for_chunks(chunk_ids): Result<usize>
+get_callers_of(slug, symbol): Result<Vec<CodeEdge>>
+get_callees_of(slug, symbol): Result<Vec<CodeEdge>>
+get_edges_by_chunk(chunk_id): Result<Vec<CodeEdge>>
 ```
 
 ### 差异分析
@@ -62,7 +68,7 @@ list_stale_chunks(limit): Result<Vec<StaleChunk>>
 | 引擎数量 | 2 (PGLite + Postgres) | 1 (SQLite) |
 | dyn兼容 | ✓ (interface) | ✗ (trait) |
 | 连接管理 | 连接池 + advisory lock | 单连接 |
-| 代码边 | ✓ | ✗ |
+| 代码边 | ✓ | ✓（页内 calls/references） |
 | Stale chunks | ✓ | ✓ |
 | 多源 | ✓ (source_id) | ✗ |
 
@@ -84,8 +90,8 @@ publishPage(slug, opts): Promise<PublishResult>  // HTML导出+加密
 ### Rust: Operations (operations.rs, ~1,200行)
 
 ```rust
-// 核心方法完整: put_page, get_page, delete_page, search, file_upload等
-// 缺少: extractAndEnrich, reindexCodePage, reconcileLinks, checkBacklinks, publishPage
+// 核心方法完整: put_page, get_page, delete_page, search, query embedding, code search/call graph, file_upload等
+// 缺少: extractAndEnrich, reconcileLinks, checkBacklinks, publishPage
 ```
 
 ---
@@ -147,7 +153,7 @@ chunkers/
 └── edge-extractor.ts  (178行) 代码边提取
 ```
 
-### Rust: chunker/ (3文件, ~1,361行 + operations.rs 轻量 fenced-code 抽取)
+### Rust: chunker/ + code_index.rs (4文件, ~1,600行 + operations.rs 索引编排)
 
 ```
 chunker/
@@ -161,9 +167,9 @@ chunker/
 
 | 方面 | TS | Rust |
 |------|----|------|
-| 代码分块 | ✓ (tree-sitter, 1,050行) | 部分：Markdown fenced-code chunks |
-| 边提取 | ✓ (178行) | ✗ |
-| 限定名 | ✓ (109行) | ✗ |
+| 代码分块 | ✓ (tree-sitter, 1,050行) | ✓（确定性解析代码页与 fenced code；Rust/TS/JS/Python/Go/Java/C） |
+| 边提取 | ✓ (178行) | ✓（确定性页内 calls/references） |
+| 限定名 | ✓ (109行) | ✓（容器/方法 qualified names） |
 | 语义分块 | 340行 | 719行 (更详细) |
 | 递归分块 | 211行 | 366行 (更详细) |
 
@@ -529,10 +535,10 @@ enum GBrainError {
 
 - 222个lib单元测试 (#[cfg(test)] mod tests)
 - 4个dedup集成测试
-- 17个engine集成测试
+- 18个engine集成测试
 - 16个fuzzy集成测试
 - 3个search集成测试
-- 共262个测试，全部通过
+- 共266个测试，全部通过
 - 使用:memory: SQLite，零配置
 
 ### 差异
@@ -540,7 +546,7 @@ enum GBrainError {
 | 方面 | TS | Rust |
 |------|----|------|
 | 测试框架 | Bun test | cargo test |
-| 测试数量 | 未知 (内联) | 262 |
+| 测试数量 | 未知 (内联) | 266 |
 | 集成测试 | PGLite实例 | :memory: SQLite |
 | 评估框架 | ✓ (eval命令) | ✓ (eval.rs) |
 | 覆盖率 | 未知 | 未测量 |

@@ -4,9 +4,9 @@
 
 - `gbrain embed`、查询流程和 Autopilot 已接入真实 embedding 生成与持久化；当 sqlite-vec 不可用时，会使用 `chunk_embeddings` fallback 表做 cosine 检索。
 - `delete` 现在是软删除，新增 `restore` 和 `purge-deleted` 命令；默认读取、列表、搜索、统计和健康检查都会排除软删除页面。
-- schema version 已更新到 9，新增 `deleted_at`、chunk 代码元数据字段，以及 `chunk_embeddings`。
+- schema version 已更新到 10，新增 `deleted_at`、chunk 代码元数据字段、`chunk_embeddings`、`chunks_fts` 和 `code_edges`。
 - `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
-- `put_page` 会从 Markdown fenced code block 生成额外的代码 chunk；搜索支持 include/exclude slug prefix、默认 hard-exclude 和 source boost。
+- `put_page` 会从代码页或 Markdown fenced code block 生成符号级代码 chunk；支持 Rust/TS/JS/Python/Go/Java/C 风格声明识别、代码 chunk 搜索和 callers/callees 调用图。
 - Markdown import 会校验 frontmatter `slug` 与路径推导 slug 是否一致，不一致时跳过。
 
 [English](./README_EN.md) | 中文

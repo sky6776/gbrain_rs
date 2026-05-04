@@ -272,6 +272,12 @@ enum Commands {
         link_type: Option<String>,
     },
 
+    /// Code index and symbol graph operations
+    Code {
+        #[command(subcommand)]
+        command: CodeCommands,
+    },
+
     /// File storage operations
     File {
         #[command(subcommand)]
@@ -318,6 +324,28 @@ enum FileCommands {
         /// Storage path of the file
         storage_path: String,
     },
+}
+
+#[derive(Subcommand)]
+enum CodeCommands {
+    /// Rebuild code chunks and code edges for a page
+    Reindex { slug: String },
+
+    /// Search indexed code chunks
+    Search {
+        query: String,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Show callers of a symbol
+    Callers { slug: String, symbol: String },
+
+    /// Show callees of a symbol
+    Callees { slug: String, symbol: String },
+
+    /// Show code edges attached to a chunk id
+    Edges { chunk_id: i64 },
 }
 
 /// Config subcommands
@@ -1090,6 +1118,81 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 }
             }
         }
+
+        Commands::Code { command } => match command {
+            CodeCommands::Reindex { slug } => {
+                let count = ops.reindex_code_page(&slug)?;
+                info!(slug = %slug, chunk_count = count, "Code page reindexed");
+            }
+            CodeCommands::Search { query, limit } => {
+                let results = ops.search_keyword_chunks(
+                    &query,
+                    SearchOpts {
+                        limit: Some(limit),
+                        page_type: Some(PageType::Code),
+                        ..Default::default()
+                    },
+                )?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&results)?);
+                } else {
+                    for r in &results {
+                        info!(
+                            "{}#{} [{}:{}-{}] score={:.3}",
+                            r.slug,
+                            r.symbol_name.as_deref().unwrap_or("<file>"),
+                            r.language.as_deref().unwrap_or(""),
+                            r.start_line.unwrap_or_default(),
+                            r.end_line.unwrap_or_default(),
+                            r.score
+                        );
+                    }
+                    info!("{} code chunk(s) found", results.len());
+                }
+            }
+            CodeCommands::Callers { slug, symbol } => {
+                let edges = ops.get_callers_of(&slug, &symbol)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&edges)?);
+                } else {
+                    for e in &edges {
+                        info!(
+                            "{}#{} -> {}#{}",
+                            e.from_slug, e.from_symbol, e.to_slug, e.to_symbol
+                        );
+                    }
+                    info!("{} caller edge(s)", edges.len());
+                }
+            }
+            CodeCommands::Callees { slug, symbol } => {
+                let edges = ops.get_callees_of(&slug, &symbol)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&edges)?);
+                } else {
+                    for e in &edges {
+                        info!(
+                            "{}#{} -> {}#{}",
+                            e.from_slug, e.from_symbol, e.to_slug, e.to_symbol
+                        );
+                    }
+                    info!("{} callee edge(s)", edges.len());
+                }
+            }
+            CodeCommands::Edges { chunk_id } => {
+                let edges = ops.get_edges_by_chunk(chunk_id)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&edges)?);
+                } else {
+                    for e in &edges {
+                        info!(
+                            "{}#{} -> {}#{}",
+                            e.from_slug, e.from_symbol, e.to_slug, e.to_symbol
+                        );
+                    }
+                    info!("{} edge(s)", edges.len());
+                }
+            }
+        },
 
         Commands::File { command } => match command {
             FileCommands::List { slug } => {

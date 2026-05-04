@@ -30,6 +30,7 @@ const ALLOWED_SLUG_PREFIXES: &[&str] = &[
     "area",
     "event",
     "industry",
+    "code",
 ];
 
 /// Allowed file extensions for uploads

@@ -847,6 +847,46 @@ impl McpServer {
                 Ok(serde_json::json!({"url": url, "storage_path": storage_path}))
             }
 
+            "search_code_chunks" => {
+                let query = arguments["query"].as_str().unwrap_or("");
+                let limit = arguments["limit"].as_u64().map(|l| l as usize);
+                let results = ops.search_keyword_chunks(
+                    query,
+                    SearchOpts {
+                        limit,
+                        page_type: Some(PageType::Code),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(serde_json::to_value(results)?)
+            }
+
+            "get_callers" => {
+                let slug = arguments["slug"].as_str().unwrap_or("");
+                let symbol = arguments["symbol"].as_str().unwrap_or("");
+                crate::security::validate_page_slug(slug)?;
+                Ok(serde_json::to_value(ops.get_callers_of(slug, symbol)?)?)
+            }
+
+            "get_callees" => {
+                let slug = arguments["slug"].as_str().unwrap_or("");
+                let symbol = arguments["symbol"].as_str().unwrap_or("");
+                crate::security::validate_page_slug(slug)?;
+                Ok(serde_json::to_value(ops.get_callees_of(slug, symbol)?)?)
+            }
+
+            "get_code_edges_by_chunk" => {
+                let chunk_id = arguments["chunk_id"].as_i64().unwrap_or(0);
+                Ok(serde_json::to_value(ops.get_edges_by_chunk(chunk_id)?)?)
+            }
+
+            "reindex_code_page" => {
+                let slug = arguments["slug"].as_str().unwrap_or("");
+                crate::security::validate_page_slug(slug)?;
+                let chunks = ops.reindex_code_page(slug)?;
+                Ok(serde_json::json!({"ok": true, "chunks": chunks}))
+            }
+
             // P1-9: sync_brain MCP tool (mirrors TS sync_brain operation)
             "sync_brain" => {
                 let repo_path = arguments["repo_path"].as_str().unwrap_or("");

@@ -5,6 +5,7 @@
 //! CLI and MCP server both dispatch through these operations.
 
 use crate::chunker::chunk_text;
+use crate::code_index::{index_code, CodeIndex};
 use crate::config::Config;
 use crate::embedding::Embedder;
 use crate::engine::BrainEngine;
@@ -294,6 +295,39 @@ impl<'a> Operations<'a> {
 
         info!(result_count = results.len(), "Query complete");
         Ok(results)
+    }
+
+    pub fn search_keyword_chunks(
+        &self,
+        query: &str,
+        opts: SearchOpts,
+    ) -> Result<Vec<CodeChunkResult>> {
+        self.engine.search_keyword_chunks(query, opts)
+    }
+
+    pub fn get_callers_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
+        self.engine.get_callers_of(slug, symbol)
+    }
+
+    pub fn get_callees_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
+        self.engine.get_callees_of(slug, symbol)
+    }
+
+    pub fn get_edges_by_chunk(&self, chunk_id: i64) -> Result<Vec<CodeEdge>> {
+        self.engine.get_edges_by_chunk(chunk_id)
+    }
+
+    pub fn reindex_code_page(&self, slug: &str) -> Result<usize> {
+        let page = self
+            .engine
+            .get_page(slug)?
+            .ok_or_else(|| crate::error::GBrainError::PageNotFound(slug.to_string()))?;
+        let content = page.compiled_truth.clone();
+        let code_index = index_code(slug, &content, None, 0);
+        self.engine.delete_chunks(slug)?;
+        let count = self.engine.upsert_chunks(slug, &code_index.chunks)?;
+        reconcile_code_edges(self.engine, slug, &code_index)?;
+        Ok(count)
     }
 
     fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
@@ -620,11 +654,28 @@ impl<'a> Operations<'a> {
 
         let mut chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
         let next_index = chunks.len() as i32;
-        chunks.extend(extract_fenced_code_chunks(content, next_index));
+        let code_index = if pt == PageType::Code {
+            Some(index_code(slug, &parsed.body, None, next_index))
+        } else {
+            Some(extract_fenced_code_index(slug, content, next_index))
+        };
+        if let Some(index) = &code_index {
+            chunks.extend(index.chunks.clone());
+        }
         if !chunks.is_empty() {
             debug!(slug = %slug, chunk_count = chunks.len(), "Chunking page content");
+            if let Err(e) = self.engine.delete_chunks(slug) {
+                warn!(slug = %slug, error = %e, "Failed to clear stale chunks before reindex (non-critical)");
+            }
             if let Err(e) = self.engine.upsert_chunks(slug, &chunks) {
                 warn!(slug = %slug, error = %e, "Failed to upsert chunks (non-critical)");
+            }
+            if let Some(index) = &code_index {
+                if !index.edges.is_empty() {
+                    if let Err(e) = reconcile_code_edges(self.engine, slug, index) {
+                        warn!(slug = %slug, error = %e, "Failed to reconcile code edges (non-critical)");
+                    }
+                }
             }
         }
 
@@ -1196,8 +1247,10 @@ fn extract_frontmatter_tags(frontmatter: &serde_json::Value) -> Vec<String> {
 
 /// Reconcile frontmatter tags with existing DB tags for a page.
 /// Adds missing tags and removes orphaned tags (present in DB but not in frontmatter).
-fn extract_fenced_code_chunks(content: &str, start_index: i32) -> Vec<ChunkInput> {
+fn extract_fenced_code_index(slug: &str, content: &str, start_index: i32) -> CodeIndex {
     let mut chunks = Vec::new();
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
     let mut in_fence = false;
     let mut lang: Option<String> = None;
     let mut buf = String::new();
@@ -1208,19 +1261,40 @@ fn extract_fenced_code_chunks(content: &str, start_index: i32) -> Vec<ChunkInput
         if trimmed.starts_with("```") {
             if in_fence {
                 if !buf.trim().is_empty() {
-                    chunks.push(ChunkInput {
-                        chunk_index: start_index + chunks.len() as i32,
-                        chunk_text: buf.trim().to_string(),
-                        source: ChunkSource::FencedCode,
-                        token_count: crate::chunker::estimate_tokens(&buf) as i32,
-                        embedding: None,
-                        model: None,
-                        language: lang.clone(),
-                        symbol_name: None,
-                        symbol_type: Some("fenced_code".to_string()),
-                        start_line: Some(start_line),
-                        end_line: Some(line_idx as i32 + 1),
-                    });
+                    let local_start = start_index + chunks.len() as i32;
+                    let indexed = index_code(slug, buf.trim(), lang.as_deref(), local_start);
+                    if indexed.symbols.is_empty() {
+                        chunks.push(ChunkInput {
+                            chunk_index: local_start,
+                            chunk_text: buf.trim().to_string(),
+                            source: ChunkSource::FencedCode,
+                            token_count: crate::chunker::estimate_tokens(&buf) as i32,
+                            embedding: None,
+                            model: None,
+                            language: lang.clone(),
+                            symbol_name: None,
+                            symbol_type: Some("fenced_code".to_string()),
+                            start_line: Some(start_line),
+                            end_line: Some(line_idx as i32 + 1),
+                        });
+                    } else {
+                        let line_offset = start_line - 1;
+                        for mut chunk in indexed.chunks {
+                            if let Some(line) = chunk.start_line {
+                                chunk.start_line = Some(line + line_offset);
+                            }
+                            if let Some(line) = chunk.end_line {
+                                chunk.end_line = Some(line + line_offset);
+                            }
+                            chunks.push(chunk);
+                        }
+                        symbols.extend(indexed.symbols.into_iter().map(|mut sym| {
+                            sym.start_line += line_offset;
+                            sym.end_line += line_offset;
+                            sym
+                        }));
+                        edges.extend(indexed.edges);
+                    }
                 }
                 in_fence = false;
                 lang = None;
@@ -1243,7 +1317,45 @@ fn extract_fenced_code_chunks(content: &str, start_index: i32) -> Vec<ChunkInput
         }
     }
 
-    chunks
+    CodeIndex {
+        chunks,
+        symbols,
+        edges,
+    }
+}
+
+fn reconcile_code_edges(engine: &SqliteEngine, slug: &str, index: &CodeIndex) -> Result<()> {
+    let chunks = engine.get_chunks(slug)?;
+    let code_chunk_ids: Vec<i64> = chunks
+        .iter()
+        .filter(|c| c.source == ChunkSource::FencedCode)
+        .map(|c| c.id)
+        .collect();
+    let _ = engine.delete_code_edges_for_chunks(&code_chunk_ids)?;
+
+    let mut symbol_to_chunk: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    for chunk in chunks
+        .iter()
+        .filter(|c| c.source == ChunkSource::FencedCode)
+    {
+        if let Some(symbol) = &chunk.symbol_name {
+            symbol_to_chunk.insert(symbol.clone(), chunk.id);
+            if let Some(name) = symbol.rsplit('.').next() {
+                symbol_to_chunk.entry(name.to_string()).or_insert(chunk.id);
+            }
+        }
+    }
+
+    let mut edges = index.edges.clone();
+    for edge in &mut edges {
+        edge.from_chunk_id = symbol_to_chunk.get(&edge.from_symbol).copied();
+        edge.to_chunk_id = symbol_to_chunk.get(&edge.to_symbol).copied();
+    }
+    if !edges.is_empty() {
+        engine.add_code_edges(&edges)?;
+    }
+    Ok(())
 }
 
 fn reconcile_tags(engine: &SqliteEngine, slug: &str, fm_tags: &[String]) -> Result<()> {

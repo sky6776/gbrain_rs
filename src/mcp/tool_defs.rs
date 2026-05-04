@@ -230,6 +230,44 @@ static OPERATION_DEFS: &[OperationDef] = &[
         ],
     },
     OperationDef {
+        name: "search_code_chunks",
+        description: "Search indexed code chunks by keyword/symbol text",
+        params: &[
+            ParamDef { name: "query", description: "Code search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "get_callers",
+        description: "Get code graph callers of a symbol",
+        params: &[
+            ParamDef { name: "slug", description: "Code page slug", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "symbol", description: "Qualified or local symbol name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "get_callees",
+        description: "Get code graph callees of a symbol",
+        params: &[
+            ParamDef { name: "slug", description: "Code page slug", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "symbol", description: "Qualified or local symbol name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "get_code_edges_by_chunk",
+        description: "Get code graph edges attached to a chunk id",
+        params: &[
+            ParamDef { name: "chunk_id", description: "Chunk id", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "reindex_code_page",
+        description: "Rebuild code chunks and code edges for a code page",
+        params: &[
+            ParamDef { name: "slug", description: "Code page slug", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
         name: "log_ingest",
         description: "Log an ingestion event",
         params: &[

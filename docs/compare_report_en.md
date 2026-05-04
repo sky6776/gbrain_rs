@@ -24,7 +24,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 - Rust lacks the Minions subsystem (4,478 lines)
 - Rust lacks the Resolver subsystem (1,095 lines)
 - Rust lacks the Skillify/Skillpack system (1,013 lines)
-- Rust now has lightweight fenced-code chunk indexing, but still lacks the full tree-sitter code indexing/code edge system (~1,500 lines in TS)
+- Rust now has deterministic multi-language code chunk indexing and code_edges call graph support; it still does not use tree-sitter.
 
 ---
 
@@ -38,7 +38,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | **Fuzzy search** | pg_trgm (trigram) | Custom character trigram Jaccard |
 | **Connection pooling** | postgres.js built-in | Single connection (SQLite doesn't need pooling) |
 | **Transaction support** | Postgres transactions + advisory lock | BEGIN IMMEDIATE + COMMIT/ROLLBACK |
-| **Schema version** | V1-V29 | V1-V9 |
+| **Schema version** | V1-V29 | V1-V10 |
 | **Multi-source support** | source_id composite key (v0.18+) | No |
 | **PGLite** | Embedded WASM Postgres | No (uses SQLite directly) |
 | **PgBouncer** | Auto-detect compatibility | Not applicable |
@@ -46,7 +46,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 **Key differences**:
 - TS uses the Postgres ecosystem (pgvector, pg_trgm, tsvector), Rust uses the SQLite ecosystem (sqlite-vec, FTS5)
 - TS supports multi-source brains (source_id composite key), Rust does not
-- TS schema migrations reach V29, Rust is currently V9
+- TS schema migrations reach V29, Rust is currently V10
 - TS has dual engines (PGLite for embedded, remote Postgres for production), Rust only has SQLite
 
 ---
@@ -59,7 +59,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 |----------|-----------|-------------|------------|
 | Lifecycle | 4 | 4 | Same |
 | Page CRUD | 6 | 8 | Rust adds soft-delete restore/purge |
-| Search | 4 | 3 | TS has searchKeywordChunks |
+| Search | 4 | 4 | Same at interface level; Rust uses deterministic code chunk search |
 | Chunking | 6 | 7 | Rust now has countStaleChunks/listStaleChunks equivalents |
 | Links | 9 | 9 | Same |
 | Tags | 3 | 3 | Same |
@@ -70,15 +70,14 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | Orphans/Dead links | 1 | 2 | Rust has detect_dead_links |
 | Config | 2 | 2 | Same |
 | Files | 4 | 5 | Rust has file_url_by_storage_path, file_verify |
-| Code edges | 5 | 0 | **TS only** |
+| Code edges | 5 | 4 | Rust has add/delete/query edge APIs; TS still has broader code graph workflows |
 | Other | 5 | 5 | Roughly same |
-| **Total** | **~59** | **~59** | Rust still lacks code-edge APIs but added soft-delete/stale chunk APIs |
+| **Total** | **~59** | **~65** | Rust added soft-delete, stale chunk, code chunk search, and code edge APIs |
 
 ### TS-Only Methods
 
 | Method | Description |
 |--------|-------------|
-| `searchKeywordChunks()` | Search code chunks (v0.19+) |
 | `findOrphanPages()` | Find orphan pages (Rust has detect_orphans) |
 | `addCodeEdges()` | Add code call edges (v0.20 Cathedral II) |
 | `deleteCodeEdgesForChunks()` | Delete code edges |
@@ -149,8 +148,8 @@ Rust now includes the workflow PageType variants added in TS v0.18+: email, slac
 | Type | TS | Rust | Difference |
 |------|----|----|------------|
 | PageKind | Yes (markdown/code) | No | Rust has no PageKind |
-| CodeEdgeInput | Yes | No | Cathedral II code edges |
-| CodeEdgeResult | Yes | No | Cathedral II code edges |
+| CodeEdgeInput | Yes | Yes | Rust has basic intra-page calls/references |
+| CodeEdgeResult | Yes | Yes (`CodeEdge`) | Rust has basic callers/callees |
 | Link.direction | No | Yes | Rust has LinkDirection |
 | LinkBatchInput.direction | No | Yes | Rust has direction field |
 | PutPageResult | Yes | Yes | Same |
@@ -184,7 +183,7 @@ Rust now includes the workflow PageType variants added in TS v0.18+: email, slac
 |---------|------|-------------|
 | source-boost | search/source-boost.ts | Implemented in Rust as slug-prefix result weighting |
 | hard-exclude | search/sql-ranking.ts | Implemented in Rust via include/exclude slug-prefix filters |
-| two-pass retrieval | search/two-pass.ts | Cathedral II code structure retrieval (BFS traversal of code_edges) |
+| two-pass retrieval | search/two-pass.ts | Not yet implemented in Rust; code_edges are available for callers/callees |
 | searchKeywordChunks | engine.ts | Code chunk search |
 
 ### Rust-Only Search Features
@@ -267,11 +266,11 @@ Rust MCP only supports stdio transport, with no HTTP transport, no rate limiting
 | Recursive | Yes (211 lines) | Yes (366 lines) | Rust implementation more detailed |
 | Semantic | Yes (340 lines) | Yes (719 lines) | Rust implementation more detailed |
 | LLM-guided | Yes (163 lines) | Yes (276 lines) | Same |
-| **Code (tree-sitter)** | Yes (1,050 lines) | No | **Missing in Rust** |
-| **Edge extractor** | Yes (178 lines) | No | **Missing in Rust** |
-| **Qualified names** | Yes (109 lines) | No | **Missing in Rust** |
+| **Code parser** | Yes (tree-sitter, 1,050 lines) | Yes (deterministic parser for Rust/TS/JS/Python/Go/Java/C-style declarations) | Different implementation |
+| **Edge extractor** | Yes (178 lines) | Yes (intra-page calls/references) | Rust is simpler |
+| **Qualified names** | Yes (109 lines) | Yes (container.method style) | Rust is simpler |
 
-Rust now has lightweight fenced-code chunk extraction, but still lacks the full tree-sitter AST parsing, code edge extraction, and qualified-name subsystem.
+Rust now has deterministic symbol chunk extraction, qualified names, `chunks_fts`, and `code_edges`; it still lacks tree-sitter-grade AST precision and Cathedral II two-pass retrieval.
 
 ---
 
@@ -518,7 +517,7 @@ Interface Layer (CLI + MCP)
 | Core engine | 88% | Missing code edges and multi-source; stale chunk APIs now implemented |
 | Search pipeline | 80% | Missing source-boost, hard-exclude, two-pass |
 | MCP tools | 90% | Missing pause/resume/replay/send_message |
-| Chunkers | 65% | Has fenced-code chunks; still missing tree-sitter chunker, edge extractor, qualified names |
+| Chunkers/code index | 78% | Deterministic code chunks and code_edges implemented; tree-sitter precision and two-pass retrieval still missing |
 | Enrichment pipeline | 90% | Missing batch extractAndEnrich |
 | Validators | 70% | Missing citation, triple-hr validators |
 | Storage backends | 40% | Missing S3, Supabase; has unique axum file server |
@@ -578,7 +577,7 @@ Sorted by impact:
 | P2 | Multi-source brain (source_id) | 2 days | Multi-repo scenarios |
 | P2 | S3 storage backend | 1-2 days | Cloud deployment needs |
 | P2 | Subagent runtime | 3-5 days | Automated workflows |
-| P3 | Code chunker (tree-sitter) | 5-7 days | Code indexing needs |
+| P3 | Deterministic code chunker + code_edges | Done | Code indexing needs |
 | P3 | Resolver system | 2-3 days | Dead link detection, external APIs |
 | P3 | Skill system | 3-5 days | Skill ecosystem |
 | P4 | Supervisor process management | 2 days | Production stability |

@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -120,6 +120,33 @@ CREATE INDEX IF NOT EXISTS idx_chunks_page_id ON chunks(page_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON chunks(symbol_name);
 
+-- FTS5 virtual table for chunk/code-chunk search.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    chunk_text,
+    language,
+    symbol_name,
+    symbol_type,
+    content='chunks',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+END;
+
 -- Portable fallback embedding store. sqlite-vec is used when available; this
 -- table keeps vector search functional in zero-config builds where vec0 is not
 -- loadable.
@@ -145,6 +172,27 @@ CREATE TABLE IF NOT EXISTS links (
 
 CREATE INDEX IF NOT EXISTS idx_links_from_slug ON links(from_slug);
 CREATE INDEX IF NOT EXISTS idx_links_to_slug ON links(to_slug);
+
+-- Code edges: symbol call/reference graph extracted from code chunks.
+CREATE TABLE IF NOT EXISTS code_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_slug TEXT NOT NULL,
+    from_symbol TEXT NOT NULL,
+    to_slug TEXT NOT NULL,
+    to_symbol TEXT NOT NULL,
+    edge_type TEXT NOT NULL DEFAULT 'calls',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    context TEXT,
+    from_chunk_id INTEGER REFERENCES chunks(id) ON DELETE CASCADE,
+    to_chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(from_slug, from_symbol, to_slug, to_symbol, edge_type, from_chunk_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_edges_from ON code_edges(from_slug, from_symbol);
+CREATE INDEX IF NOT EXISTS idx_code_edges_to ON code_edges(to_slug, to_symbol);
+CREATE INDEX IF NOT EXISTS idx_code_edges_from_chunk ON code_edges(from_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_to_chunk ON code_edges(to_chunk_id);
 
 -- Tags
 CREATE TABLE IF NOT EXISTS tags (
@@ -455,6 +503,65 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
 );
 "#;
 
+/// Migration DDL for schema version 10: code chunk FTS and code symbol graph.
+pub const MIGRATION_V10_DDL: &str = r#"
+DROP TRIGGER IF EXISTS chunks_fts_insert;
+DROP TRIGGER IF EXISTS chunks_fts_update;
+DROP TRIGGER IF EXISTS chunks_fts_delete;
+DROP TABLE IF EXISTS chunks_fts;
+
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    chunk_text,
+    language,
+    symbol_name,
+    symbol_type,
+    content='chunks',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+END;
+
+INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
+SELECT id, chunk_text, coalesce(language, ''), coalesce(symbol_name, ''), coalesce(symbol_type, '')
+FROM chunks
+WHERE NOT EXISTS (SELECT 1 FROM chunks_fts WHERE rowid = chunks.id);
+
+CREATE TABLE IF NOT EXISTS code_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_slug TEXT NOT NULL,
+    from_symbol TEXT NOT NULL,
+    to_slug TEXT NOT NULL,
+    to_symbol TEXT NOT NULL,
+    edge_type TEXT NOT NULL DEFAULT 'calls',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    context TEXT,
+    from_chunk_id INTEGER REFERENCES chunks(id) ON DELETE CASCADE,
+    to_chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(from_slug, from_symbol, to_slug, to_symbol, edge_type, from_chunk_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_edges_from ON code_edges(from_slug, from_symbol);
+CREATE INDEX IF NOT EXISTS idx_code_edges_to ON code_edges(to_slug, to_symbol);
+CREATE INDEX IF NOT EXISTS idx_code_edges_from_chunk ON code_edges(from_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_to_chunk ON code_edges(to_chunk_id);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -466,5 +573,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (7, MIGRATION_V7_DDL),
         (8, MIGRATION_V8_DDL),
         (9, MIGRATION_V9_DDL),
+        (10, MIGRATION_V10_DDL),
     ]
 }

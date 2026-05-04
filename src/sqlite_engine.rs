@@ -124,6 +124,37 @@ fn apply_source_boosts(results: &mut [SearchResult], detail: Option<DetailLevel>
     });
 }
 
+fn query_code_edges<P>(conn: &Connection, sql: &str, params: P) -> Result<Vec<CodeEdge>>
+where
+    P: rusqlite::Params,
+{
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok(CodeEdge {
+                id: row.get(0)?,
+                from_slug: row.get(1)?,
+                from_symbol: row.get(2)?,
+                to_slug: row.get(3)?,
+                to_symbol: row.get(4)?,
+                edge_type: row.get(5)?,
+                confidence: row.get(6)?,
+                context: row.get(7)?,
+                from_chunk_id: row.get(8)?,
+                to_chunk_id: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?
+        .filter_map(|r| {
+            if let Err(e) = &r {
+                warn!(error = %e, "Code edge row decode error");
+            }
+            r.ok()
+        })
+        .collect();
+    Ok(rows)
+}
+
 /// SQLite-based brain engine
 pub struct SqliteEngine {
     conn: Option<Connection>,
@@ -1040,10 +1071,10 @@ impl BrainEngine for SqliteEngine {
                 .query_map(param_refs.as_slice(), |row| {
                     let score: f64 = row.get(3)?;
                     let source_str: String = row.get::<_, String>(6).unwrap_or_default();
-                    let source = if source_str == "timeline" {
-                        ChunkSource::Timeline
-                    } else {
-                        ChunkSource::CompiledTruth
+                    let source = match source_str.as_str() {
+                        "timeline" => ChunkSource::Timeline,
+                        "fenced_code" => ChunkSource::FencedCode,
+                        _ => ChunkSource::CompiledTruth,
                     };
                     let page_type_str: String = row.get::<_, String>(8).unwrap_or_default();
                     let page_type = if page_type_str.is_empty() {
@@ -1180,6 +1211,108 @@ impl BrainEngine for SqliteEngine {
             apply_source_boosts(&mut results, opts.detail_level);
             Ok(results)
         }
+    }
+
+    fn search_keyword_chunks(&self, query: &str, opts: SearchOpts) -> Result<Vec<CodeChunkResult>> {
+        trace!(query = %query, limit = opts.limit.unwrap_or(20), "FTS5 code chunk keyword search");
+        let conn = self.conn()?;
+        let limit = opts.limit.unwrap_or(20);
+        let match_query = crate::search::keyword::build_fts_query(query);
+        if match_query.trim().is_empty() || !has_table(conn, "chunks_fts") {
+            return Ok(Vec::new());
+        }
+
+        let exclude_prefixes = effective_exclude_prefixes(&opts);
+        let mut sql = String::from(
+            "SELECT p.slug, p.title, c.id, c.chunk_index,
+                    snippet(chunks_fts, 0, '<<', '>>', '...', 80) as snippet,
+                    bm25(chunks_fts, 1.0, 0.5, 3.0, 2.0) as score,
+                    c.language, c.symbol_name, c.symbol_type, c.start_line, c.end_line
+             FROM chunks_fts
+             JOIN chunks c ON c.id = chunks_fts.rowid
+             JOIN pages p ON p.id = c.page_id
+             WHERE chunks_fts MATCH ?1
+               AND p.deleted_at IS NULL
+               AND (p.page_type = 'code' OR c.chunk_source = 'fenced_code')",
+        );
+        if opts.page_type.is_some() {
+            sql.push_str(" AND p.page_type = ?3");
+        }
+        if let Some(include) = &opts.include_slug_prefixes {
+            if !include.is_empty() {
+                let start_idx = if opts.page_type.is_some() { 4 } else { 3 };
+                let clauses: Vec<String> = (0..include.len())
+                    .map(|i| format!("p.slug LIKE ?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
+            }
+        }
+        if !exclude_prefixes.is_empty() {
+            let include_count = opts
+                .include_slug_prefixes
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0);
+            let start_idx = if opts.page_type.is_some() {
+                4 + include_count
+            } else {
+                3 + include_count
+            };
+            let clauses: Vec<String> = (0..exclude_prefixes.len())
+                .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
+                .collect();
+            sql.push_str(&format!(" AND {}", clauses.join(" AND ")));
+        }
+        sql.push_str(" ORDER BY score LIMIT ?2");
+
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params_vec.push(Box::new(match_query));
+        params_vec.push(Box::new(limit));
+        if let Some(ref pt) = opts.page_type {
+            params_vec.push(Box::new(pt.to_string()));
+        }
+        if let Some(include) = &opts.include_slug_prefixes {
+            for prefix in include {
+                params_vec.push(Box::new(format!("{}%", prefix)));
+            }
+        }
+        for prefix in &exclude_prefixes {
+            params_vec.push(Box::new(format!("{}%", prefix)));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut results: Vec<CodeChunkResult> = stmt
+            .query_map(refs.as_slice(), |row| {
+                let score: f64 = row.get(5)?;
+                Ok(CodeChunkResult {
+                    slug: row.get(0)?,
+                    title: row.get(1)?,
+                    chunk_id: row.get(2)?,
+                    chunk_index: row.get(3)?,
+                    chunk_text: row.get(4)?,
+                    score: -score,
+                    language: row.get(6)?,
+                    symbol_name: row.get(7)?,
+                    symbol_type: row.get(8)?,
+                    start_line: row.get(9)?,
+                    end_line: row.get(10)?,
+                })
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Code chunk row decode error");
+                }
+                r.ok()
+            })
+            .collect();
+        results.sort_by(|a, b| {
+            (b.score * source_boost_factor(&b.slug))
+                .partial_cmp(&(a.score * source_boost_factor(&a.slug)))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(results)
     }
 
     fn search_vector(&self, embedding: &[f32], opts: SearchOpts) -> Result<Vec<SearchResult>> {
@@ -1607,6 +1740,98 @@ impl BrainEngine for SqliteEngine {
     }
 
     // ── Links ──────────────────────────────────────────────────
+
+    fn add_code_edges(&self, edges: &[CodeEdgeInput]) -> Result<usize> {
+        self.transaction(|tx| {
+            let mut count = 0;
+            for edge in edges {
+                tx.execute(
+                    "INSERT INTO code_edges (
+                        from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+                        context, from_chunk_id, to_chunk_id
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(from_slug, from_symbol, to_slug, to_symbol, edge_type, from_chunk_id)
+                     DO UPDATE SET
+                        confidence = excluded.confidence,
+                        context = excluded.context,
+                        to_chunk_id = excluded.to_chunk_id",
+                    params![
+                        edge.from_slug,
+                        edge.from_symbol,
+                        edge.to_slug,
+                        edge.to_symbol,
+                        edge.edge_type,
+                        edge.confidence,
+                        edge.context,
+                        edge.from_chunk_id,
+                        edge.to_chunk_id,
+                    ],
+                )?;
+                count += 1;
+            }
+            Ok(count)
+        })
+    }
+
+    fn delete_code_edges_for_chunks(&self, chunk_ids: &[i64]) -> Result<usize> {
+        if chunk_ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn()?;
+        let placeholders = (0..chunk_ids.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "DELETE FROM code_edges WHERE from_chunk_id IN ({}) OR to_chunk_id IN ({})",
+            placeholders, placeholders
+        );
+        let mut values: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+        for id in chunk_ids {
+            values.push(id);
+        }
+        for id in chunk_ids {
+            values.push(id);
+        }
+        Ok(conn.execute(&sql, values.as_slice())?)
+    }
+
+    fn get_callers_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
+        query_code_edges(
+            self.conn()?,
+            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+                    context, from_chunk_id, to_chunk_id, created_at
+             FROM code_edges
+             WHERE to_slug = ?1 AND to_symbol = ?2
+             ORDER BY confidence DESC, created_at DESC",
+            params![slug, symbol],
+        )
+    }
+
+    fn get_callees_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
+        query_code_edges(
+            self.conn()?,
+            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+                    context, from_chunk_id, to_chunk_id, created_at
+             FROM code_edges
+             WHERE from_slug = ?1 AND from_symbol = ?2
+             ORDER BY confidence DESC, created_at DESC",
+            params![slug, symbol],
+        )
+    }
+
+    fn get_edges_by_chunk(&self, chunk_id: i64) -> Result<Vec<CodeEdge>> {
+        query_code_edges(
+            self.conn()?,
+            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+                    context, from_chunk_id, to_chunk_id, created_at
+             FROM code_edges
+             WHERE from_chunk_id = ?1 OR to_chunk_id = ?1
+             ORDER BY confidence DESC, created_at DESC",
+            params![chunk_id],
+        )
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn add_link(

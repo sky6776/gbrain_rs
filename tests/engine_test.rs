@@ -1,6 +1,7 @@
 //! Engine CRUD integration tests against in-memory SQLite
 
 use gbrain_core::engine::BrainEngine;
+use gbrain_core::operations::{OpContext, Operations};
 use gbrain_core::sqlite_engine::SqliteEngine;
 use gbrain_core::types::*;
 use std::path::PathBuf;
@@ -304,6 +305,48 @@ fn test_stale_chunks_track_embedding_status() {
         )
         .expect("embedded chunks");
     assert_eq!(engine.count_stale_chunks().expect("stale count"), 0);
+}
+
+#[test]
+fn test_code_page_indexes_symbols_and_edges() {
+    let engine = make_engine();
+    let ops = Operations::new(&engine, OpContext::default());
+    let content = r#"
+pub fn alpha() {
+    beta();
+}
+
+fn beta() {
+}
+"#;
+
+    ops.put_page("code/lib", "Lib", content, Some(PageType::Code), None)
+        .expect("put code page");
+
+    let chunks = engine.get_chunks("code/lib").expect("chunks");
+    assert!(chunks.iter().any(|c| {
+        c.source == ChunkSource::FencedCode && c.symbol_name.as_deref() == Some("alpha")
+    }));
+    assert!(chunks.iter().any(|c| {
+        c.source == ChunkSource::FencedCode && c.symbol_name.as_deref() == Some("beta")
+    }));
+
+    let callees = engine.get_callees_of("code/lib", "alpha").expect("callees");
+    assert!(callees.iter().any(|e| e.to_symbol == "beta"));
+
+    let results = engine
+        .search_keyword_chunks(
+            "alpha",
+            SearchOpts {
+                limit: Some(10),
+                page_type: Some(PageType::Code),
+                ..Default::default()
+            },
+        )
+        .expect("search code chunks");
+    assert!(results
+        .iter()
+        .any(|r| r.symbol_name.as_deref() == Some("alpha")));
 }
 
 #[test]

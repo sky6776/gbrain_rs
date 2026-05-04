@@ -176,6 +176,8 @@ pub fn infer_type(slug: &str) -> PageType {
         PageType::Media
     } else if slug_lower.starts_with("source/") || slug_lower.starts_with("sources/") {
         PageType::Source
+    } else if slug_lower.starts_with("code/") {
+        PageType::Code
     } else if slug_lower.starts_with("civic/") {
         PageType::Civic
     } else {

@@ -50,6 +50,7 @@ pub trait BrainEngine {
     fn search_keyword(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>>;
     fn search_vector(&self, embedding: &[f32], opts: SearchOpts) -> Result<Vec<SearchResult>>;
     fn get_embeddings_by_chunk_ids(&self, chunk_ids: &[i64]) -> Result<Vec<(i64, Vec<f32>)>>;
+    fn search_keyword_chunks(&self, query: &str, opts: SearchOpts) -> Result<Vec<CodeChunkResult>>;
 
     // ── Chunks ─────────────────────────────────────────────────
 
@@ -58,6 +59,13 @@ pub trait BrainEngine {
     fn count_stale_chunks(&self) -> Result<usize>;
     fn list_stale_chunks(&self, limit: Option<usize>) -> Result<Vec<StaleChunk>>;
     fn delete_chunks(&self, slug: &str) -> Result<()>;
+
+    // Code graph
+    fn add_code_edges(&self, edges: &[CodeEdgeInput]) -> Result<usize>;
+    fn delete_code_edges_for_chunks(&self, chunk_ids: &[i64]) -> Result<usize>;
+    fn get_callers_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>>;
+    fn get_callees_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>>;
+    fn get_edges_by_chunk(&self, chunk_id: i64) -> Result<Vec<CodeEdge>>;
 
     // ── Links ──────────────────────────────────────────────────
 

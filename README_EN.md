@@ -12,7 +12,7 @@ English | [中文](./README.md)
 
 - **Real Embeddings** - CLI, query, and Autopilot paths generate and persist embeddings, with a SQLite fallback table when sqlite-vec is unavailable.
 - **Soft Delete Lifecycle** - `delete` hides pages by default, while `restore` and `purge-deleted` cover recovery and permanent cleanup.
-- **Code-Aware Chunks** - Markdown fenced code blocks are indexed as `fenced_code` chunks with language and line metadata.
+- **Code Knowledge Graph** - Code pages and Markdown fenced code blocks are indexed into symbol-level `fenced_code` chunks with deterministic Rust/TS/JS/Python/Go/Java/C-style parsing, code chunk search, and callers/callees edges.
 
 - **Hybrid Search** — BM25 keyword + vector cosine similarity + fuzzy trigram, fused via Reciprocal Rank Fusion with multi-query expansion
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry validation
@@ -364,7 +364,7 @@ Three-layer design:
 
 ## Documentation
 
-Current implementation notes (2026-05-04): schema version 9; soft-delete lifecycle; real embedding write/query/Autopilot flow; `chunk_embeddings` fallback; include/exclude slug-prefix search controls; `email`, `slack`, `calendar-event`, and `code` page types; `fenced_code` chunks for Markdown code blocks.
+Current implementation notes (2026-05-04): schema version 10; soft-delete lifecycle; real embedding write/query/Autopilot flow; `chunk_embeddings` fallback; include/exclude slug-prefix search controls; `email`, `slack`, `calendar-event`, and `code` page types; `fenced_code` chunks, `chunks_fts`, and `code_edges` for code search/call graph.
 
 - [TS vs Rust Comparison Report](./docs/compare_report_en.md) / [中文](./docs/compare_report.md) — Comprehensive comparison of TypeScript and Rust versions (code size, database, search, MCP, security, etc.)
 - [TS vs Rust Module-Level Comparison](./docs/module_detail_en.md) / [中文](./docs/module_detail.md) — Per-module comparison (engine layer, operations, search, chunker, enrichment, validators, etc.)

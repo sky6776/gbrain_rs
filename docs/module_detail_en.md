@@ -27,7 +27,7 @@ getEdgesByChunk(chunkId): Promise<CodeEdgeResult[]>
 withReservedConnection<T>(fn): Promise<T>  // advisory lock
 ```
 
-### Rust: BrainEngine trait (engine.rs, 59 methods)
+### Rust: BrainEngine trait (engine.rs, 65 methods)
 
 ```rust
 // Single-engine implementation: SqliteEngine (SQLite + FTS5 + sqlite-vec)
@@ -42,6 +42,12 @@ restore_page(slug): Result<bool>
 purge_deleted_pages(older_than_hours): Result<Vec<String>>
 count_stale_chunks(): Result<usize>
 list_stale_chunks(limit): Result<Vec<StaleChunk>>
+search_keyword_chunks(query, opts): Result<Vec<CodeChunkResult>>
+add_code_edges(edges): Result<usize>
+delete_code_edges_for_chunks(chunk_ids): Result<usize>
+get_callers_of(slug, symbol): Result<Vec<CodeEdge>>
+get_callees_of(slug, symbol): Result<Vec<CodeEdge>>
+get_edges_by_chunk(chunk_id): Result<Vec<CodeEdge>>
 ```
 
 ### Difference Analysis
@@ -51,7 +57,7 @@ list_stale_chunks(limit): Result<Vec<StaleChunk>>
 | Engine count | 2 (PGLite + Postgres) | 1 (SQLite) |
 | dyn-compatible | Yes (interface) | No (trait) |
 | Connection management | Connection pool + advisory lock | Single connection |
-| Code edges | Yes | No |
+| Code edges | Yes | Yes (intra-page calls/references) |
 | Stale chunks | Yes | Yes |
 | Multi-source | Yes (source_id) | No |
 
@@ -73,8 +79,8 @@ publishPage(slug, opts): Promise<PublishResult>  // HTML export + encryption
 ### Rust: Operations (operations.rs, ~1,200 lines)
 
 ```rust
-// Core methods complete: put_page, get_page, delete_page, search, query embedding, file_upload, etc.
-// Missing: extractAndEnrich, reindexCodePage, reconcileLinks, checkBacklinks, publishPage
+// Core methods complete: put_page, get_page, delete_page, search, query embedding, code search/call graph, file_upload, etc.
+// Missing: extractAndEnrich, reconcileLinks, checkBacklinks, publishPage
 ```
 
 ---
@@ -136,7 +142,7 @@ chunkers/
 └── edge-extractor.ts  (178 lines) Code edge extraction
 ```
 
-### Rust: chunker/ (3 files, ~1,361 lines + lightweight fenced-code extraction in operations.rs)
+### Rust: chunker/ + code_index.rs (4 files, ~1,600 lines + indexing orchestration in operations.rs)
 
 ```
 chunker/
@@ -150,9 +156,9 @@ chunker/
 
 | Aspect | TS | Rust |
 |--------|----|----|
-| Code chunking | Yes (tree-sitter, 1,050 lines) | Partial: Markdown fenced-code chunks |
-| Edge extraction | Yes (178 lines) | No |
-| Qualified names | Yes (109 lines) | No |
+| Code chunking | Yes (tree-sitter, 1,050 lines) | Yes (deterministic code pages and fenced code; Rust/TS/JS/Python/Go/Java/C) |
+| Edge extraction | Yes (178 lines) | Yes (deterministic intra-page calls/references) |
+| Qualified names | Yes (109 lines) | Yes (container/method qualified names) |
 | Semantic chunking | 340 lines | 719 lines (more detailed) |
 | Recursive chunking | 211 lines | 366 lines (more detailed) |
 
@@ -518,10 +524,10 @@ enum GBrainError {
 
 - 222 lib unit tests (#[cfg(test)] mod tests)
 - 4 dedup integration tests
-- 17 engine integration tests
+- 18 engine integration tests
 - 16 fuzzy integration tests
 - 3 search integration tests
-- 262 total tests, all passing
+- 266 total tests, all passing
 - Uses :memory: SQLite, zero configuration
 
 ### Differences
@@ -529,7 +535,7 @@ enum GBrainError {
 | Aspect | TS | Rust |
 |--------|----|----|
 | Test framework | Bun test | cargo test |
-| Test count | Unknown (inline) | 262 |
+| Test count | Unknown (inline) | 266 |
 | Integration tests | PGLite instance | :memory: SQLite |
 | Evaluation framework | Yes (eval command) | Yes (eval.rs) |
 | Coverage | Unknown | Not measured |
