@@ -172,7 +172,10 @@ impl<'a> JobQueue<'a> {
         )?;
 
         if rows == 0 {
-            warn!(job_id, "Job fail: no running job found (may have been claimed by another worker)");
+            warn!(
+                job_id,
+                "Job fail: no running job found (may have been claimed by another worker)"
+            );
         } else {
             // Read back the actual state for logging
             let (status, attempts, max_attempts): (String, i32, i32) = self

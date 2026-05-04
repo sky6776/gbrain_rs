@@ -57,8 +57,7 @@ impl<'a> Autopilot<'a> {
                 if orphans > 0 || dead_links > 0 {
                     info!(
                         orphans,
-                        dead_links,
-                        "Autopilot: integrity check found issues"
+                        dead_links, "Autopilot: integrity check found issues"
                     );
                 } else {
                     info!("Autopilot: integrity check passed");
@@ -98,22 +97,57 @@ impl<'a> Autopilot<'a> {
     }
 
     /// Embed chunks that don't yet have embeddings
-    fn embed_unembedded_chunks(&self, _embedder: &Embedder) -> Result<usize, crate::error::GBrainError> {
-        // Check how many chunks exist in total
-        let stats = self.engine.get_stats()?;
-        if stats.chunk_count == 0 {
-            debug!("Autopilot: no chunks found, nothing to embed");
+    fn embed_unembedded_chunks(
+        &self,
+        embedder: &Embedder,
+    ) -> Result<usize, crate::error::GBrainError> {
+        let stale = self.engine.list_stale_chunks(Some(1000))?;
+        if stale.is_empty() {
+            debug!("Autopilot: no stale chunks found, nothing to embed");
             return Ok(0);
         }
-
-        // This is a stub path — the actual embedding logic requires
-        // sqlite-vec integration which is not yet fully implemented.
-        // For now, we report the count of chunks that would need embedding.
-        debug!(
-            chunk_count = stats.chunk_count,
-            "Autopilot: embedding stub — sqlite-vec integration pending"
-        );
-        Ok(0)
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                crate::error::GBrainError::InvalidInput(format!(
+                    "failed to start async runtime: {}",
+                    e
+                ))
+            })?;
+        let mut embedded = 0;
+        for batch in stale.chunks(50) {
+            let texts: Vec<&str> = batch.iter().map(|c| c.chunk_text.as_str()).collect();
+            let embeddings = rt.block_on(embedder.embed_batch(&texts))?;
+            let mut by_slug: std::collections::HashMap<String, Vec<crate::types::ChunkInput>> =
+                std::collections::HashMap::new();
+            for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
+                by_slug
+                    .entry(row.slug.clone())
+                    .or_default()
+                    .push(crate::types::ChunkInput {
+                        chunk_index: row.chunk_index,
+                        chunk_text: row.chunk_text.clone(),
+                        source: row.source.clone(),
+                        token_count: row.token_count,
+                        embedding: Some(embedding),
+                        model: Some(
+                            row.model
+                                .clone()
+                                .unwrap_or_else(|| "text-embedding-3-large".to_string()),
+                        ),
+                        language: None,
+                        symbol_name: None,
+                        symbol_type: None,
+                        start_line: None,
+                        end_line: None,
+                    });
+            }
+            for (slug, chunks) in by_slug {
+                embedded += self.engine.upsert_chunks(&slug, &chunks)?;
+            }
+        }
+        Ok(embedded)
     }
 
     /// Run integrity checks: detect orphans and dead links

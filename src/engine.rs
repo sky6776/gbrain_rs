@@ -39,6 +39,8 @@ pub trait BrainEngine {
     fn get_page(&self, slug: &str) -> Result<Option<Page>>;
     fn put_page(&self, slug: &str, input: PageInput) -> Result<Page>;
     fn delete_page(&self, slug: &str) -> Result<()>;
+    fn restore_page(&self, slug: &str) -> Result<bool>;
+    fn purge_deleted_pages(&self, older_than_hours: i64) -> Result<Vec<String>>;
     fn list_pages(&self, filters: PageFilters) -> Result<Vec<Page>>;
     fn resolve_slugs(&self, partial: &str) -> Result<Vec<String>>;
     fn get_all_slugs(&self) -> Result<Vec<String>>;
@@ -53,6 +55,8 @@ pub trait BrainEngine {
 
     fn upsert_chunks(&self, slug: &str, chunks: &[ChunkInput]) -> Result<usize>;
     fn get_chunks(&self, slug: &str) -> Result<Vec<Chunk>>;
+    fn count_stale_chunks(&self) -> Result<usize>;
+    fn list_stale_chunks(&self, limit: Option<usize>) -> Result<Vec<StaleChunk>>;
     fn delete_chunks(&self, slug: &str) -> Result<()>;
 
     // ── Links ──────────────────────────────────────────────────

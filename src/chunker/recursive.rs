@@ -57,12 +57,7 @@ pub fn chunk_text(
         .enumerate()
         .map(|(i, chunk_text)| {
             let token_count = estimate_tokens(&chunk_text);
-            ChunkInput {
-                chunk_index: i as i32,
-                chunk_text,
-                source: source.clone(),
-                token_count: token_count as i32,
-            }
+            ChunkInput::text(i as i32, chunk_text, source.clone(), token_count as i32)
         })
         .collect()
 }

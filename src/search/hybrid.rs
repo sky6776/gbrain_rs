@@ -93,7 +93,9 @@ pub fn hybrid_search(
     // P1-3: Auto-detail detection — when detail_level not specified,
     // classify query intent and derive detail level (mirrors TS)
     let intent = classify_intent(query);
-    let detail = opts.detail_level.or_else(|| detail_for_intent(&intent.intent));
+    let detail = opts
+        .detail_level
+        .or_else(|| detail_for_intent(&intent.intent));
 
     debug!(query = %query, has_embedding = embedding.is_some(), limit, offset, detail = ?detail, "Starting hybrid search");
 
@@ -181,10 +183,7 @@ pub fn hybrid_search(
                     continue; // Skip original query (already searched)
                 }
                 // Use per-query embedding when available, fall back to original
-                let exp_emb = expanded_embs
-                    .get(i)
-                    .and_then(|e| *e)
-                    .unwrap_or(query_emb);
+                let exp_emb = expanded_embs.get(i).and_then(|e| *e).unwrap_or(query_emb);
                 let exp_vector = engine.search_vector(
                     exp_emb,
                     SearchOpts {
@@ -235,11 +234,7 @@ pub fn hybrid_search(
                     hybrid_opts.compiled_truth_boost,
                 )
             } else {
-                rrf_fuse(
-                    &keyword_results,
-                    &vector_results,
-                    hybrid_opts.rrf_k,
-                )
+                rrf_fuse(&keyword_results, &vector_results, hybrid_opts.rrf_k)
             }
         }
     };
@@ -534,7 +529,10 @@ fn normalize_scores(results: &mut [SearchResult]) {
     if results.is_empty() {
         return;
     }
-    let max_score = results.iter().map(|r| r.score).fold(f64::NEG_INFINITY, f64::max);
+    let max_score = results
+        .iter()
+        .map(|r| r.score)
+        .fold(f64::NEG_INFINITY, f64::max);
     if max_score > 0.0 {
         for r in results.iter_mut() {
             r.score /= max_score;
@@ -549,7 +547,10 @@ fn normalize_scores(results: &mut [SearchResult]) {
     } else {
         // All scores are negative — shift to [0, 1] preserving order
         // (less negative = better, so min_score maps to 0, max_score maps to 1)
-        let min_score = results.iter().map(|r| r.score).fold(f64::INFINITY, f64::min);
+        let min_score = results
+            .iter()
+            .map(|r| r.score)
+            .fold(f64::INFINITY, f64::min);
         let range = max_score - min_score; // both negative, max > min, so range > 0
         if range > 0.0 {
             for r in results.iter_mut() {
@@ -600,11 +601,7 @@ fn cosine_rescore(
 /// Boost results based on backlink count (multiplicative)
 /// Mirrors TS: score *= (1 + coef * ln(1 + count))
 /// Multiplicative boost preserves relative ordering better than additive.
-fn apply_backlink_boost(
-    results: &mut [SearchResult],
-    counts: &HashMap<String, i64>,
-    coef: f64,
-) {
+fn apply_backlink_boost(results: &mut [SearchResult], counts: &HashMap<String, i64>, coef: f64) {
     for result in results.iter_mut() {
         if let Some(&count) = counts.get(&result.slug) {
             let factor = 1.0 + coef * (1.0 + count as f64).ln();

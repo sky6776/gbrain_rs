@@ -61,8 +61,8 @@ pub struct Config {
     pub log_to_console: bool,          // default true
 
     // --- P2-6: Auto-link / Auto-timeline (mirrors TS) ---
-    pub auto_link: bool,      // default true, GBRAIN_AUTO_LINK
-    pub auto_timeline: bool,  // default true, GBRAIN_AUTO_TIMELINE
+    pub auto_link: bool,     // default true, GBRAIN_AUTO_LINK
+    pub auto_timeline: bool, // default true, GBRAIN_AUTO_TIMELINE
 
     // --- P2-3: Post-write lint (mirrors TS runPostWriteLint) ---
     pub post_write_lint: bool, // default false, GBRAIN_POST_WRITE_LINT

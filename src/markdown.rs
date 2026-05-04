@@ -48,7 +48,9 @@ pub fn split_frontmatter(content: &str) -> (serde_json::Value, String) {
     // Find closing ---
     // Handle both LF (\n---) and CRLF (\r\n---) line endings
     let after_first = &trimmed[3..];
-    let end_idx = after_first.find("\n---").or_else(|| after_first.find("\r\n---"));
+    let end_idx = after_first
+        .find("\n---")
+        .or_else(|| after_first.find("\r\n---"));
     if let Some(end_idx) = end_idx {
         let yaml_str = after_first[..end_idx].trim();
         // Skip past the closing --- delimiter (handle both \n--- and \r\n---)

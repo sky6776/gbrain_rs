@@ -63,27 +63,123 @@ pub struct FrontmatterLinkRule {
 /// Full frontmatter link map with direction semantics (mirrors TS)
 const FRONTMATTER_LINK_MAP: &[FrontmatterLinkRule] = &[
     // Person → Company (outgoing: person works_at/founded company)
-    FrontmatterLinkRule { field: "company", link_type: "works_at", direction: LinkDirection::Outgoing, page_type_constraint: Some(PageType::Person), dir_hint: &["companies"] },
-    FrontmatterLinkRule { field: "companies", link_type: "works_at", direction: LinkDirection::Outgoing, page_type_constraint: Some(PageType::Person), dir_hint: &["companies"] },
-    FrontmatterLinkRule { field: "founded", link_type: "founded", direction: LinkDirection::Outgoing, page_type_constraint: Some(PageType::Person), dir_hint: &["companies"] },
+    FrontmatterLinkRule {
+        field: "company",
+        link_type: "works_at",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: Some(PageType::Person),
+        dir_hint: &["companies"],
+    },
+    FrontmatterLinkRule {
+        field: "companies",
+        link_type: "works_at",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: Some(PageType::Person),
+        dir_hint: &["companies"],
+    },
+    FrontmatterLinkRule {
+        field: "founded",
+        link_type: "founded",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: Some(PageType::Person),
+        dir_hint: &["companies"],
+    },
     // Company → Person (incoming: person works_at company, from company's perspective)
-    FrontmatterLinkRule { field: "key_people", link_type: "works_at", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Company), dir_hint: &["people"] },
-    FrontmatterLinkRule { field: "partner", link_type: "yc_partner", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Company), dir_hint: &["people"] },
-    FrontmatterLinkRule { field: "investors", link_type: "invested_in", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Company), dir_hint: &["companies", "people", "funds"] },
+    FrontmatterLinkRule {
+        field: "key_people",
+        link_type: "works_at",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Company),
+        dir_hint: &["people"],
+    },
+    FrontmatterLinkRule {
+        field: "partner",
+        link_type: "yc_partner",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Company),
+        dir_hint: &["people"],
+    },
+    FrontmatterLinkRule {
+        field: "investors",
+        link_type: "invested_in",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Company),
+        dir_hint: &["companies", "people", "funds"],
+    },
     // Deal
-    FrontmatterLinkRule { field: "investors", link_type: "invested_in", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Deal), dir_hint: &["companies", "people", "funds"] },
-    FrontmatterLinkRule { field: "lead", link_type: "led_round", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Deal), dir_hint: &["companies", "people", "funds"] },
+    FrontmatterLinkRule {
+        field: "investors",
+        link_type: "invested_in",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Deal),
+        dir_hint: &["companies", "people", "funds"],
+    },
+    FrontmatterLinkRule {
+        field: "lead",
+        link_type: "led_round",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Deal),
+        dir_hint: &["companies", "people", "funds"],
+    },
     // Meeting
-    FrontmatterLinkRule { field: "attendees", link_type: "attended", direction: LinkDirection::Incoming, page_type_constraint: Some(PageType::Meeting), dir_hint: &["people"] },
+    FrontmatterLinkRule {
+        field: "attendees",
+        link_type: "attended",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: Some(PageType::Meeting),
+        dir_hint: &["people"],
+    },
     // Any type
-    FrontmatterLinkRule { field: "sources", link_type: "discussed_in", direction: LinkDirection::Incoming, page_type_constraint: None, dir_hint: &["source", "media"] },
-    FrontmatterLinkRule { field: "source", link_type: "source", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &[] },
-    FrontmatterLinkRule { field: "related", link_type: "related_to", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &[] },
-    FrontmatterLinkRule { field: "see_also", link_type: "related_to", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &[] },
+    FrontmatterLinkRule {
+        field: "sources",
+        link_type: "discussed_in",
+        direction: LinkDirection::Incoming,
+        page_type_constraint: None,
+        dir_hint: &["source", "media"],
+    },
+    FrontmatterLinkRule {
+        field: "source",
+        link_type: "source",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &[],
+    },
+    FrontmatterLinkRule {
+        field: "related",
+        link_type: "related_to",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &[],
+    },
+    FrontmatterLinkRule {
+        field: "see_also",
+        link_type: "related_to",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &[],
+    },
     // Legacy compatibility (no direction constraint)
-    FrontmatterLinkRule { field: "competitors", link_type: "competes_with", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &["companies"] },
-    FrontmatterLinkRule { field: "partners", link_type: "partnered_with", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &["companies"] },
-    FrontmatterLinkRule { field: "acquired_by", link_type: "acquired_by", direction: LinkDirection::Outgoing, page_type_constraint: None, dir_hint: &["companies"] },
+    FrontmatterLinkRule {
+        field: "competitors",
+        link_type: "competes_with",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &["companies"],
+    },
+    FrontmatterLinkRule {
+        field: "partners",
+        link_type: "partnered_with",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &["companies"],
+    },
+    FrontmatterLinkRule {
+        field: "acquired_by",
+        link_type: "acquired_by",
+        direction: LinkDirection::Outgoing,
+        page_type_constraint: None,
+        dir_hint: &["companies"],
+    },
 ];
 
 /// Strip code blocks from content to avoid false link matches
@@ -103,13 +199,17 @@ fn strip_code_blocks(content: &str) -> String {
         if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
             if !in_code {
                 // Start of fenced block — blank out the opening ```
-                result[i] = ' '; result[i + 1] = ' '; result[i + 2] = ' ';
+                result[i] = ' ';
+                result[i + 1] = ' ';
+                result[i + 2] = ' ';
                 in_code = true;
                 i += 3;
                 continue;
             } else {
                 // End of fenced block — blank out the closing ```
-                result[i] = ' '; result[i + 1] = ' '; result[i + 2] = ' ';
+                result[i] = ' ';
+                result[i + 1] = ' ';
+                result[i + 2] = ' ';
                 in_code = false;
                 i += 3;
                 continue;
@@ -165,7 +265,8 @@ pub fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
     let mut refs = Vec::new();
 
     // Pattern 0: Explicit relation labels [type:Name](dir/slug) (P2-11: lazy regex)
-    let explicit_re = RE_EXPLICIT_SLUG.get_or_init(|| Regex::new(r"\[([a-z_]+):([^\]]+)\]\(([^)]+)\)").unwrap());
+    let explicit_re =
+        RE_EXPLICIT_SLUG.get_or_init(|| Regex::new(r"\[([a-z_]+):([^\]]+)\]\(([^)]+)\)").unwrap());
     for caps in explicit_re.captures_iter(&cleaned) {
         let link_type = caps.get(1).unwrap().as_str().to_string();
         let name = caps.get(2).unwrap().as_str().to_string();
@@ -222,7 +323,8 @@ pub fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
 
     // Pattern 2: Wikilinks [[dir/slug|Name]] or [[dir/slug]]
     // Pattern 2: Wikilinks [[dir/slug|Name]] or [[dir/slug]] (P2-11: lazy regex)
-    let wikilink_re = RE_WIKILINK.get_or_init(|| Regex::new(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]").unwrap());
+    let wikilink_re =
+        RE_WIKILINK.get_or_init(|| Regex::new(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]").unwrap());
     for caps in wikilink_re.captures_iter(&cleaned) {
         let raw_slug = caps.get(1).unwrap().as_str().to_string();
         let name = caps
@@ -232,7 +334,10 @@ pub fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
 
         // P2-5: Strip section anchors (#heading) and .md suffix (mirrors TS)
         let without_anchor = raw_slug.split('#').next().unwrap_or(&raw_slug);
-        let slug = without_anchor.strip_suffix(".md").unwrap_or(without_anchor).to_string();
+        let slug = without_anchor
+            .strip_suffix(".md")
+            .unwrap_or(without_anchor)
+            .to_string();
 
         if is_slug_reference(&slug) {
             // P0-4: capture context first, then pass it to infer_link_type
@@ -306,7 +411,12 @@ pub fn extract_frontmatter_refs(
     let mut unresolved = Vec::new();
     let obj = match frontmatter.as_object() {
         Some(o) => o,
-        None => return FrontmatterExtractResult { candidates: refs, unresolved },
+        None => {
+            return FrontmatterExtractResult {
+                candidates: refs,
+                unresolved,
+            }
+        }
     };
 
     for rule in FRONTMATTER_LINK_MAP {
@@ -379,7 +489,10 @@ pub fn extract_frontmatter_refs(
     }
 
     let _ = from_slug; // used for reconciliation in operations layer
-    FrontmatterExtractResult { candidates: refs, unresolved }
+    FrontmatterExtractResult {
+        candidates: refs,
+        unresolved,
+    }
 }
 
 /// Extract raw string values from a frontmatter value (before slugification).
@@ -389,10 +502,7 @@ pub fn extract_frontmatter_refs(
 fn extract_raw_values(value: &serde_json::Value) -> Vec<String> {
     match value {
         serde_json::Value::String(s) => vec![s.clone()],
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .flat_map(extract_raw_values)
-            .collect(),
+        serde_json::Value::Array(arr) => arr.iter().flat_map(extract_raw_values).collect(),
         serde_json::Value::Object(obj) => {
             // P1-6: Try name, slug, then title field — mirrors TS obj.name ?? obj.slug ?? obj.title
             if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
@@ -413,7 +523,11 @@ fn extract_raw_values(value: &serde_json::Value) -> Vec<String> {
 /// Extract slugs from a frontmatter value (string or array)
 /// Uses dir_hint for slug resolution when the value doesn't contain a slash.
 #[allow(dead_code)]
-fn extract_slugs_from_value(value: &serde_json::Value, field: &str, dir_hint: &[&str]) -> Vec<String> {
+fn extract_slugs_from_value(
+    value: &serde_json::Value,
+    field: &str,
+    dir_hint: &[&str],
+) -> Vec<String> {
     match value {
         serde_json::Value::String(s) => {
             if s.contains('/') {
@@ -527,9 +641,12 @@ pub fn infer_link_type(
     let partner_role_re = PARTNER_ROLE_RE.get_or_init(|| Regex::new(
         r"\b(?:partner at|partner of|venture partner|VC partner|invested early|investor at|investor in|portfolio|venture capital|early-stage investor|seed investor|fund [A-Z]|invests across|backs companies)\b"
     ).unwrap());
-    let advisor_role_re = ADVISOR_ROLE_RE.get_or_init(|| Regex::new(
-        r"\b(?:full-time advisor|professional advisor|advises (?:multiple|several|various))\b"
-    ).unwrap());
+    let advisor_role_re = ADVISOR_ROLE_RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:full-time advisor|professional advisor|advises (?:multiple|several|various))\b",
+        )
+        .unwrap()
+    });
 
     if target_lower.starts_with("people/") {
         if founded_re.is_match(&regex_input) {
@@ -639,7 +756,11 @@ pub fn is_valid_date(s: &str) -> bool {
 
 /// SlugResolver trait — multi-step name-to-slug resolution chain (mirrors TS makeResolver)
 pub trait SlugResolver {
-    fn resolve(&mut self, name: &str, dir_hint: Option<&[&str]>) -> crate::error::Result<Option<String>>;
+    fn resolve(
+        &mut self,
+        name: &str,
+        dir_hint: Option<&[&str]>,
+    ) -> crate::error::Result<Option<String>>;
 }
 
 /// Engine-backed slug resolver with caching and 4-step resolve chain
@@ -651,12 +772,20 @@ pub struct EngineSlugResolver<'a> {
 
 impl<'a> EngineSlugResolver<'a> {
     pub fn new(engine: &'a crate::sqlite_engine::SqliteEngine, live_mode: bool) -> Self {
-        Self { engine, cache: std::collections::HashMap::new(), live_mode }
+        Self {
+            engine,
+            cache: std::collections::HashMap::new(),
+            live_mode,
+        }
     }
 }
 
 impl<'a> SlugResolver for EngineSlugResolver<'a> {
-    fn resolve(&mut self, name: &str, dir_hint: Option<&[&str]>) -> crate::error::Result<Option<String>> {
+    fn resolve(
+        &mut self,
+        name: &str,
+        dir_hint: Option<&[&str]>,
+    ) -> crate::error::Result<Option<String>> {
         let key = format!("{}:{:?}", name, dir_hint);
         if let Some(cached) = self.cache.get(&key) {
             return Ok(cached.clone());
@@ -671,13 +800,15 @@ impl<'a> SlugResolver for EngineSlugResolver<'a> {
 impl<'a> EngineSlugResolver<'a> {
     fn resolve_impl(&self, name: &str, dir_hint: Option<&[&str]>) -> Option<String> {
         // Step 1: Already a slug? (contains /)
-        if name.contains('/')
-            && self.engine.get_page(name).ok().flatten().is_some() {
-                return Some(name.to_string());
-            }
+        if name.contains('/') && self.engine.get_page(name).ok().flatten().is_some() {
+            return Some(name.to_string());
+        }
 
         // Step 2: dir_hint + slugify → try exact getPage
-        let slugified = name.to_lowercase().replace(' ', "-").chars()
+        let slugified = name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
             .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '/')
             .collect::<String>();
         if let Some(hints) = dir_hint {
@@ -691,7 +822,10 @@ impl<'a> EngineSlugResolver<'a> {
 
         // Step 3: Fuzzy title match — P0-5: pass dir_hint as dir_prefix
         let hint_prefix = dir_hint.and_then(|h| h.first()).copied();
-        if let Ok(matches) = self.engine.find_by_title_fuzzy(name, hint_prefix, Some(0.55), None) {
+        if let Ok(matches) = self
+            .engine
+            .find_by_title_fuzzy(name, hint_prefix, Some(0.55), None)
+        {
             if let Some(m) = matches.first() {
                 return Some(m.slug.clone());
             }
@@ -710,9 +844,9 @@ impl<'a> EngineSlugResolver<'a> {
                         // P0-5: if dir_hint is present, only accept results whose slug
                         // starts with a prefix matching one of the hints
                         if let Some(hints) = dir_hint {
-                            let matches_hint = hints.iter().any(|hint| {
-                                r.slug.starts_with(&format!("{}/", hint))
-                            });
+                            let matches_hint = hints
+                                .iter()
+                                .any(|hint| r.slug.starts_with(&format!("{}/", hint)));
                             if !matches_hint {
                                 continue;
                             }
@@ -740,11 +874,14 @@ impl<'a> EngineSlugResolver<'a> {
 /// Continuation lines (indented with spaces/tabs after an entry) are appended as detail.
 pub fn parse_timeline_entries(content: &str) -> Vec<(String, String)> {
     // P2-4: Support |, -, en-dash, and em-dash as separators (P2-11: lazy regex)
-    let date_re = RE_DATE.get_or_init(|| Regex::new(r"-\s*(\d{4}-\d{2}-\d{2})\s*[|\-–—]+\s*(.+)").unwrap());
+    let date_re =
+        RE_DATE.get_or_init(|| Regex::new(r"-\s*(\d{4}-\d{2}-\d{2})\s*[|\-–—]+\s*(.+)").unwrap());
     // Colon separator format remains separate (P2-11: lazy regex)
-    let colon_re = RE_COLON.get_or_init(|| Regex::new(r"-\s*(\d{4}-\d{2}-\d{2})\s*:\s*(.+)").unwrap());
+    let colon_re =
+        RE_COLON.get_or_init(|| Regex::new(r"-\s*(\d{4}-\d{2}-\d{2})\s*:\s*(.+)").unwrap());
     // Bold date format (P2-11: lazy regex)
-    let bold_date_re = RE_BOLD_DATE.get_or_init(|| Regex::new(r"-\s*\*\*(\d{4}-\d{2}-\d{2})\*\*\s*[|\-–—]*\s*(.+)").unwrap());
+    let bold_date_re = RE_BOLD_DATE
+        .get_or_init(|| Regex::new(r"-\s*\*\*(\d{4}-\d{2}-\d{2})\*\*\s*[|\-–—]*\s*(.+)").unwrap());
 
     /// Internal entry with optional detail for multi-line support (P2-4)
     struct Entry {
@@ -761,7 +898,11 @@ pub fn parse_timeline_entries(content: &str) -> Vec<(String, String)> {
             let date = caps.get(1).unwrap().as_str().to_string();
             let summary = caps.get(2).unwrap().as_str().trim().to_string();
             if !summary.is_empty() && is_valid_date(&date) {
-                entries.push(Entry { date, summary, detail: None });
+                entries.push(Entry {
+                    date,
+                    summary,
+                    detail: None,
+                });
                 continue;
             }
         }
@@ -770,7 +911,11 @@ pub fn parse_timeline_entries(content: &str) -> Vec<(String, String)> {
             let date = caps.get(1).unwrap().as_str().to_string();
             let summary = caps.get(2).unwrap().as_str().trim().to_string();
             if !summary.is_empty() && is_valid_date(&date) {
-                entries.push(Entry { date, summary, detail: None });
+                entries.push(Entry {
+                    date,
+                    summary,
+                    detail: None,
+                });
                 continue;
             }
         }
@@ -779,7 +924,11 @@ pub fn parse_timeline_entries(content: &str) -> Vec<(String, String)> {
             let date = caps.get(1).unwrap().as_str().to_string();
             let summary = caps.get(2).unwrap().as_str().trim().to_string();
             if !summary.is_empty() && is_valid_date(&date) {
-                entries.push(Entry { date, summary, detail: None });
+                entries.push(Entry {
+                    date,
+                    summary,
+                    detail: None,
+                });
                 continue;
             }
         }
@@ -894,7 +1043,8 @@ mod tests {
         });
         let result = extract_frontmatter_refs(&frontmatter, "test/page", None, None);
         assert!(!result.candidates.is_empty());
-        assert!(result.candidates
+        assert!(result
+            .candidates
             .iter()
             .any(|r| r.slug == "companies/acme" && r.link_type == "works_at"));
     }
@@ -906,10 +1056,12 @@ mod tests {
             "key_people": ["people/alice", "people/bob"],
         });
         let result = extract_frontmatter_refs(&frontmatter, "test/page", None, None);
-        assert!(result.candidates
+        assert!(result
+            .candidates
             .iter()
             .any(|r| r.slug == "companies/sequoia" && r.link_type == "invested_in"));
-        assert!(result.candidates
+        assert!(result
+            .candidates
             .iter()
             .any(|r| r.slug == "people/alice" && r.link_type == "works_at"));
     }
@@ -920,7 +1072,8 @@ mod tests {
             "company": "Acme Corp",
         });
         let result = extract_frontmatter_refs(&frontmatter, "test/page", None, None);
-        assert!(result.candidates
+        assert!(result
+            .candidates
             .iter()
             .any(|r| r.slug == "companies/acme-corp" || r.slug.starts_with("company")));
     }
@@ -940,7 +1093,13 @@ mod tests {
     fn test_infer_link_type_founded() {
         // P0-4: "founder" in context window should match FOUNDED_RE
         assert_eq!(
-            infer_link_type("Alice", "people/alice", None, Some("Alice is the founder of the company"), None),
+            infer_link_type(
+                "Alice",
+                "people/alice",
+                None,
+                Some("Alice is the founder of the company"),
+                None
+            ),
             "founded"
         );
     }
@@ -973,7 +1132,13 @@ mod tests {
     fn test_infer_link_type_context_over_display() {
         // P0-4: Context with verb phrase should override display name
         assert_eq!(
-            infer_link_type("Acme Corp", "companies/acme", None, Some("She invested in Acme Corp last year"), None),
+            infer_link_type(
+                "Acme Corp",
+                "companies/acme",
+                None,
+                Some("She invested in Acme Corp last year"),
+                None
+            ),
             "invested_in"
         );
     }
@@ -983,7 +1148,13 @@ mod tests {
         // P0-4: When no regex match and no target-path match, page role priors apply.
         // Project is in PAGE_ROLE_PRIORS with "mentions"
         assert_eq!(
-            infer_link_type("Something", "topics/random", Some(PageType::Project), None, None),
+            infer_link_type(
+                "Something",
+                "topics/random",
+                Some(PageType::Project),
+                None,
+                None
+            ),
             "mentions"
         );
     }
@@ -1060,8 +1231,12 @@ mod tests {
         // but the raw value extraction should still work.
         // The investors field has page_type_constraint Some(Company) and Some(Deal),
         // so with page_type=None, the rules won't fire. Test with Deal type instead:
-        let result = extract_frontmatter_refs(&frontmatter, "deals/series-a", Some(PageType::Deal), None);
-        assert!(result.candidates.iter().any(|r| r.display_name == "sequoia"));
+        let result =
+            extract_frontmatter_refs(&frontmatter, "deals/series-a", Some(PageType::Deal), None);
+        assert!(result
+            .candidates
+            .iter()
+            .any(|r| r.display_name == "sequoia"));
         assert!(result.candidates.iter().any(|r| r.display_name == "a16z"));
     }
 
@@ -1070,25 +1245,28 @@ mod tests {
     #[test]
     fn test_funds_dir_hint_investors_company() {
         // Verify that the investors rule for Company page type includes "funds" in dir_hint
-        let rule = FRONTMATTER_LINK_MAP.iter().find(|r| {
-            r.field == "investors" && r.page_type_constraint == Some(PageType::Company)
-        }).expect("investors/Company rule should exist");
+        let rule = FRONTMATTER_LINK_MAP
+            .iter()
+            .find(|r| r.field == "investors" && r.page_type_constraint == Some(PageType::Company))
+            .expect("investors/Company rule should exist");
         assert!(rule.dir_hint.contains(&"funds"));
     }
 
     #[test]
     fn test_funds_dir_hint_investors_deal() {
-        let rule = FRONTMATTER_LINK_MAP.iter().find(|r| {
-            r.field == "investors" && r.page_type_constraint == Some(PageType::Deal)
-        }).expect("investors/Deal rule should exist");
+        let rule = FRONTMATTER_LINK_MAP
+            .iter()
+            .find(|r| r.field == "investors" && r.page_type_constraint == Some(PageType::Deal))
+            .expect("investors/Deal rule should exist");
         assert!(rule.dir_hint.contains(&"funds"));
     }
 
     #[test]
     fn test_funds_dir_hint_lead_deal() {
-        let rule = FRONTMATTER_LINK_MAP.iter().find(|r| {
-            r.field == "lead" && r.page_type_constraint == Some(PageType::Deal)
-        }).expect("lead/Deal rule should exist");
+        let rule = FRONTMATTER_LINK_MAP
+            .iter()
+            .find(|r| r.field == "lead" && r.page_type_constraint == Some(PageType::Deal))
+            .expect("lead/Deal rule should exist");
         assert!(rule.dir_hint.contains(&"funds"));
     }
 
@@ -1240,7 +1418,8 @@ mod tests {
     #[test]
     fn test_parse_timeline_multiline_detail() {
         // P2-4: Continuation lines appended as detail
-        let content = "- 2024-01-15: Series A announced\n  Raised $10M from Sequoia\n  Valuation $50M";
+        let content =
+            "- 2024-01-15: Series A announced\n  Raised $10M from Sequoia\n  Valuation $50M";
         let entries = parse_timeline_entries(content);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "2024-01-15");
@@ -1252,7 +1431,8 @@ mod tests {
     #[test]
     fn test_parse_timeline_multiline_multiple_entries() {
         // P2-4: Each entry gets its own detail
-        let content = "- 2024-01-15: Series A\n  Detail for A\n- 2024-02-20: Product launch\n  Detail for B";
+        let content =
+            "- 2024-01-15: Series A\n  Detail for A\n- 2024-02-20: Product launch\n  Detail for B";
         let entries = parse_timeline_entries(content);
         assert_eq!(entries.len(), 2);
         assert!(entries[0].1.contains("Detail for A"));

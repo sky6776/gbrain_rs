@@ -21,9 +21,18 @@ pub enum ScaffoldError {
 }
 
 /// Build a tweet citation: `[Source: [X/handle, YYYY-MM-DD](https://x.com/handle/status/id)]`
-pub fn tweet_citation(handle: &str, tweet_id: &str, date_iso: Option<&str>) -> Result<String, ScaffoldError> {
+pub fn tweet_citation(
+    handle: &str,
+    tweet_id: &str,
+    date_iso: Option<&str>,
+) -> Result<String, ScaffoldError> {
     let clean_handle = handle.trim_start_matches('@');
-    if clean_handle.is_empty() || clean_handle.len() > 15 || !clean_handle.chars().all(|c| c.is_alphanumeric() || c == '_') {
+    if clean_handle.is_empty()
+        || clean_handle.len() > 15
+        || !clean_handle
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_')
+    {
         return Err(ScaffoldError::InvalidHandle(handle.to_string()));
     }
     if tweet_id.is_empty() || tweet_id.len() > 20 || !tweet_id.chars().all(|c| c.is_ascii_digit()) {
@@ -34,7 +43,11 @@ pub fn tweet_citation(handle: &str, tweet_id: &str, date_iso: Option<&str>) -> R
         return Err(ScaffoldError::InvalidDate(date.to_string()));
     }
     // Conditionally include date to avoid malformed ", " when date is empty
-    let date_part = if date.is_empty() { String::new() } else { format!(", {}", date) };
+    let date_part = if date.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", date)
+    };
     Ok(format!(
         "[Source: [X/{}{}](https://x.com/{}/status/{})]",
         clean_handle, date_part, clean_handle, tweet_id
@@ -42,7 +55,12 @@ pub fn tweet_citation(handle: &str, tweet_id: &str, date_iso: Option<&str>) -> R
 }
 
 /// Build an email citation: `[Source: email "subject", YYYY-MM-DD](https://mail.google.com/mail/u/0/#inbox/messageId)`
-pub fn email_citation(_account: &str, message_id: &str, subject: &str, date_iso: Option<&str>) -> Result<String, ScaffoldError> {
+pub fn email_citation(
+    _account: &str,
+    message_id: &str,
+    subject: &str,
+    date_iso: Option<&str>,
+) -> Result<String, ScaffoldError> {
     if message_id.is_empty() || message_id.len() > 60 {
         return Err(ScaffoldError::InvalidMessageId(message_id.to_string()));
     }
@@ -54,12 +72,18 @@ pub fn email_citation(_account: &str, message_id: &str, subject: &str, date_iso:
     let safe_message_id = sanitize_label(message_id);
     Ok(format!(
         "[Source: email \"{}\", {}](https://mail.google.com/mail/u/0/#inbox/{})",
-        sanitize_label(subject), date, safe_message_id
+        sanitize_label(subject),
+        date,
+        safe_message_id
     ))
 }
 
 /// Build an entity link: `[Display Name](../../dir/slug.md)`
-pub fn entity_link(slug: &str, display_text: &str, relative_prefix: Option<&str>) -> Result<String, ScaffoldError> {
+pub fn entity_link(
+    slug: &str,
+    display_text: &str,
+    relative_prefix: Option<&str>,
+) -> Result<String, ScaffoldError> {
     if slug.is_empty() || !is_valid_slug(slug) {
         return Err(ScaffoldError::InvalidSlug(slug.to_string()));
     }
@@ -69,12 +93,20 @@ pub fn entity_link(slug: &str, display_text: &str, relative_prefix: Option<&str>
     let prefix = relative_prefix.unwrap_or("../..");
     let safe_display = sanitize_label(display_text);
     // Slugs always end with .md in wikilinks for portability
-    let md_slug = if slug.ends_with(".md") { slug.to_string() } else { format!("{}.md", slug) };
+    let md_slug = if slug.ends_with(".md") {
+        slug.to_string()
+    } else {
+        format!("{}.md", slug)
+    };
     Ok(format!("[{}]({}/{})", safe_display, prefix, md_slug))
 }
 
 /// Build a timeline line: `- **YYYY-MM-DD** | Summary [Source: ...]`
-pub fn timeline_line(date_iso: &str, summary: &str, source_citation: Option<&str>) -> Result<String, ScaffoldError> {
+pub fn timeline_line(
+    date_iso: &str,
+    summary: &str,
+    source_citation: Option<&str>,
+) -> Result<String, ScaffoldError> {
     if !is_iso_date(date_iso) {
         return Err(ScaffoldError::InvalidDate(date_iso.to_string()));
     }
@@ -86,7 +118,12 @@ pub fn timeline_line(date_iso: &str, summary: &str, source_citation: Option<&str
         if src.is_empty() {
             Ok(format!("- **{}** | {}", date_iso, safe_summary))
         } else {
-            Ok(format!("- **{}** | {} {}", date_iso, safe_summary, sanitize_label(src)))
+            Ok(format!(
+                "- **{}** | {} {}",
+                date_iso,
+                safe_summary,
+                sanitize_label(src)
+            ))
         }
     } else {
         Ok(format!("- **{}** | {}", date_iso, safe_summary))
@@ -113,7 +150,9 @@ use std::sync::OnceLock;
 static SLUG_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn is_valid_slug(s: &str) -> bool {
-    let re = SLUG_RE.get_or_init(|| regex::Regex::new(r"^[a-z0-9][a-z0-9\-]*(/[a-z0-9][a-z0-9\-]*)*$").unwrap());
+    let re = SLUG_RE.get_or_init(|| {
+        regex::Regex::new(r"^[a-z0-9][a-z0-9\-]*(/[a-z0-9][a-z0-9\-]*)*$").unwrap()
+    });
     re.is_match(s)
 }
 

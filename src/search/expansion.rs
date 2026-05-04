@@ -79,7 +79,10 @@ pub fn sanitize_query_for_prompt(query: &str) -> String {
 
     // Remove leading injection keywords (P2-11: lazy regex)
     let re_inject = RE_INJECT.get_or_init(|| {
-        regex::Regex::new(r"(?i)^(\s*(ignore|forget|disregard|override|system|assistant|human)[\s:]+)+").unwrap()
+        regex::Regex::new(
+            r"(?i)^(\s*(ignore|forget|disregard|override|system|assistant|human)[\s:]+)+",
+        )
+        .unwrap()
     });
     q = re_inject.replace(&q, "").to_string();
 

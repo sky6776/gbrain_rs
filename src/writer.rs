@@ -61,7 +61,9 @@ pub enum IssueSeverity {
 /// Trait for custom write validators
 pub trait WriteValidator: Send + Sync {
     /// Unique identifier for this validator
-    fn id(&self) -> &'static str { std::any::type_name::<Self>() }
+    fn id(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
     /// Validate a page before writing. Return issues found.
     fn validate(
         &self,
@@ -91,12 +93,24 @@ impl Default for LinkValidator {
     }
 }
 
-impl LinkValidator { pub fn new() -> Self { Self } }
+impl LinkValidator {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 impl WriteValidator for LinkValidator {
-    fn id(&self) -> &'static str { "link" }
+    fn id(&self) -> &'static str {
+        "link"
+    }
 
-    fn validate(&self, slug: &str, _title: &str, content: &str, _page_type: Option<&PageType>) -> Vec<ValidationIssue> {
+    fn validate(
+        &self,
+        slug: &str,
+        _title: &str,
+        content: &str,
+        _page_type: Option<&PageType>,
+    ) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         // P2-11: Regex patterns use OnceLock for lazy one-time compilation.
         static LINK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -105,20 +119,38 @@ impl WriteValidator for LinkValidator {
 
         for (line_num, line) in content.lines().enumerate() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") { in_fence = !in_fence; continue; }
-            if in_fence || trimmed.starts_with('`') { continue; }
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence || trimmed.starts_with('`') {
+                continue;
+            }
 
             for cap in re.captures_iter(line) {
                 let target = &cap[2];
-                if target.starts_with("http") || target.starts_with("mailto:") || target.starts_with('#') {
+                if target.starts_with("http")
+                    || target.starts_with("mailto:")
+                    || target.starts_with('#')
+                {
                     continue;
                 }
-                let target_slug = target.trim_start_matches("../").trim_start_matches('/').trim_end_matches(".md");
-                if target_slug.is_empty() { continue; }
+                let target_slug = target
+                    .trim_start_matches("../")
+                    .trim_start_matches('/')
+                    .trim_end_matches(".md");
+                if target_slug.is_empty() {
+                    continue;
+                }
                 if !target_slug.contains('/') || target_slug.contains(' ') {
                     issues.push(ValidationIssue {
                         field: slug.to_string(),
-                        message: format!("Suspicious link target on line {}: [{}]({}) — not a valid slug", line_num + 1, &cap[1], target),
+                        message: format!(
+                            "Suspicious link target on line {}: [{}]({}) — not a valid slug",
+                            line_num + 1,
+                            &cap[1],
+                            target
+                        ),
                         severity: IssueSeverity::Warning,
                     });
                 }
@@ -138,27 +170,51 @@ impl Default for CitationValidator {
     }
 }
 
-impl CitationValidator { pub fn new() -> Self { Self } }
+impl CitationValidator {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 impl WriteValidator for CitationValidator {
-    fn id(&self) -> &'static str { "citation" }
+    fn id(&self) -> &'static str {
+        "citation"
+    }
 
-    fn validate(&self, slug: &str, _title: &str, content: &str, _page_type: Option<&PageType>) -> Vec<ValidationIssue> {
+    fn validate(
+        &self,
+        slug: &str,
+        _title: &str,
+        content: &str,
+        _page_type: Option<&PageType>,
+    ) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         // P2-11: Regex patterns use OnceLock for lazy one-time compilation.
         static CITATION_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let citation_re = CITATION_RE.get_or_init(|| regex::Regex::new(r"\[Source:\s*\S[^\]]*\]|\]\(\s*https?://[^)]+\)").unwrap());
+        let citation_re = CITATION_RE.get_or_init(|| {
+            regex::Regex::new(r"\[Source:\s*\S[^\]]*\]|\]\(\s*https?://[^)]+\)").unwrap()
+        });
         let mut in_fence = false;
 
         for para in content.split("\n\n") {
             let trimmed = para.trim();
-            if trimmed.is_empty() { continue; }
-            if trimmed.starts_with("```") { in_fence = !in_fence; continue; }
-            if in_fence { continue; }
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
 
             // Skip non-factual content
-            if trimmed.starts_with('#') || trimmed.starts_with('>') || trimmed.starts_with('|')
-                || trimmed == "---" {
+            if trimmed.starts_with('#')
+                || trimmed.starts_with('>')
+                || trimmed.starts_with('|')
+                || trimmed == "---"
+            {
                 continue;
             }
 
@@ -266,7 +322,8 @@ impl WriteValidator for DefaultWriteValidator {
         // Check for orphan wikilinks (links to non-existent pages)
         // P2-11: Regex patterns use OnceLock for lazy one-time compilation.
         static WIKILINK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let wikilink_pattern = WIKILINK_RE.get_or_init(|| regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+        let wikilink_pattern =
+            WIKILINK_RE.get_or_init(|| regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
         for cap in wikilink_pattern.captures_iter(content) {
             let target = cap.get(1).unwrap().as_str();
             // Just flag as warning — we can't check existence without a validator
@@ -350,13 +407,8 @@ impl<'a> BrainWriter<'a> {
 
         // Perform the write inside a transaction so validators and the write
         // are in the same transaction scope (mirrors TS BrainWriter behavior).
-        self.ops.put_page_in_transaction(
-            slug,
-            title,
-            content,
-            page_type,
-            content_hash,
-        )
+        self.ops
+            .put_page_in_transaction(slug, title, content, page_type, content_hash)
     }
 
     /// Delete a page

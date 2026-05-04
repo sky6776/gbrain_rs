@@ -181,9 +181,7 @@ impl SlugResolver {
 
         // Step 1: Exact match — input is already a valid slug
         let trimmed = name.trim();
-        if is_valid_slug(trimmed)
-            && self.engine.get_page(trimmed).ok().flatten().is_some()
-        {
+        if is_valid_slug(trimmed) && self.engine.get_page(trimmed).ok().flatten().is_some() {
             debug!(name = %name, step = "exact", "Slug resolved");
             self.cache.insert(cache_key, Some(trimmed.to_string()));
             return Some(trimmed.to_string());
@@ -216,7 +214,10 @@ impl SlugResolver {
             dir_hint.iter().map(|h| Some(*h)).collect()
         };
         for hint in search_hints {
-            if let Ok(matches) = self.engine.find_by_title_fuzzy(name, hint, Some(0.55), Some(1)) {
+            if let Ok(matches) = self
+                .engine
+                .find_by_title_fuzzy(name, hint, Some(0.55), Some(1))
+            {
                 if let Some(match_result) = matches.first() {
                     debug!(
                         name = %name,
@@ -256,8 +257,7 @@ impl SlugResolver {
                                 step = "keyword",
                                 "Slug resolved"
                             );
-                            self.cache
-                                .insert(cache_key, Some(matched.slug.clone()));
+                            self.cache.insert(cache_key, Some(matched.slug.clone()));
                             return Some(matched.slug.clone());
                         }
                     } else {
@@ -267,8 +267,7 @@ impl SlugResolver {
                             step = "keyword",
                             "Slug resolved"
                         );
-                        self.cache
-                            .insert(cache_key, Some(top.slug.clone()));
+                        self.cache.insert(cache_key, Some(top.slug.clone()));
                         return Some(top.slug.clone());
                     }
                 }

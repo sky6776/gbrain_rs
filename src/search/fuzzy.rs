@@ -104,10 +104,7 @@ pub fn fuzzy_search(
     }
 
     // Sort by score descending
-    results.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit);
 
     debug!(result_count = results.len(), "Fuzzy search complete");
@@ -178,7 +175,10 @@ mod tests {
     #[test]
     fn test_trigram_similarity_identical() {
         let score = trigram_similarity("hello", "hello");
-        assert!((score - 1.0).abs() < 1e-6, "identical strings should have similarity 1.0");
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "identical strings should have similarity 1.0"
+        );
     }
 
     #[test]
@@ -247,8 +247,14 @@ mod tests {
     fn test_trigram_similarity_padding_effect() {
         // Short strings with padding should still produce meaningful similarity
         let score = trigram_similarity("ab", "a");
-        assert!(score > 0.0, "padded short strings should have non-zero similarity");
-        assert!(score < 1.0, "different short strings should not be identical");
+        assert!(
+            score > 0.0,
+            "padded short strings should have non-zero similarity"
+        );
+        assert!(
+            score < 1.0,
+            "different short strings should not be identical"
+        );
     }
 
     #[test]

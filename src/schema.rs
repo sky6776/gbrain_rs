@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -33,12 +33,14 @@ CREATE TABLE IF NOT EXISTS pages (
     frontmatter TEXT NOT NULL DEFAULT '',
     content_hash TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(slug);
 CREATE INDEX IF NOT EXISTS idx_pages_page_type ON pages(page_type);
 CREATE INDEX IF NOT EXISTS idx_pages_updated_at ON pages(updated_at);
+CREATE INDEX IF NOT EXISTS idx_pages_deleted_at ON pages(deleted_at);
 
 -- FTS5 virtual table for full-text search (weighted: title > compiled_truth > timeline)
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
@@ -103,12 +105,31 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_text TEXT NOT NULL DEFAULT '',
     chunk_source TEXT NOT NULL DEFAULT 'compiled_truth',
     token_count INTEGER NOT NULL DEFAULT 0,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
     embedded_at TEXT,
+    language TEXT,
+    symbol_name TEXT,
+    symbol_type TEXT,
+    start_line INTEGER,
+    end_line INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(page_id, chunk_index, chunk_source)
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_page_id ON chunks(page_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
+CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON chunks(symbol_name);
+
+-- Portable fallback embedding store. sqlite-vec is used when available; this
+-- table keeps vector search functional in zero-config builds where vec0 is not
+-- loadable.
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- Links
 CREATE TABLE IF NOT EXISTS links (
@@ -411,6 +432,29 @@ ALTER TABLE page_versions ADD COLUMN title TEXT NOT NULL DEFAULT '';
 ALTER TABLE page_versions ADD COLUMN page_type TEXT NOT NULL DEFAULT 'note';
 "#;
 
+/// Migration DDL for schema version 9: soft delete, portable embeddings,
+/// and code/fenced-code chunk metadata.
+pub const MIGRATION_V9_DDL: &str = r#"
+ALTER TABLE pages ADD COLUMN deleted_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_pages_deleted_at ON pages(deleted_at);
+
+ALTER TABLE chunks ADD COLUMN language TEXT;
+ALTER TABLE chunks ADD COLUMN symbol_name TEXT;
+ALTER TABLE chunks ADD COLUMN symbol_type TEXT;
+ALTER TABLE chunks ADD COLUMN start_line INTEGER;
+ALTER TABLE chunks ADD COLUMN end_line INTEGER;
+CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
+CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON chunks(symbol_name);
+
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -421,5 +465,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (6, MIGRATION_V6_DDL),
         (7, MIGRATION_V7_DDL),
         (8, MIGRATION_V8_DDL),
+        (9, MIGRATION_V9_DDL),
     ]
 }

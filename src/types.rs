@@ -22,6 +22,10 @@ pub enum PageType {
     Hardware,
     Architecture,
     Meeting,
+    Email,
+    Slack,
+    CalendarEvent,
+    Code,
     Note,
 }
 
@@ -43,6 +47,10 @@ impl PageType {
             "hardware" => Self::Hardware,
             "architecture" => Self::Architecture,
             "meeting" | "meetings" => Self::Meeting,
+            "email" | "emails" => Self::Email,
+            "slack" => Self::Slack,
+            "calendar-event" | "calendar_event" | "calendar" => Self::CalendarEvent,
+            "code" => Self::Code,
             _ => Self::Note,
         }
     }
@@ -66,6 +74,10 @@ impl std::fmt::Display for PageType {
             Self::Hardware => write!(f, "hardware"),
             Self::Architecture => write!(f, "architecture"),
             Self::Meeting => write!(f, "meeting"),
+            Self::Email => write!(f, "email"),
+            Self::Slack => write!(f, "slack"),
+            Self::CalendarEvent => write!(f, "calendar-event"),
+            Self::Code => write!(f, "code"),
             Self::Note => write!(f, "note"),
         }
     }
@@ -84,6 +96,7 @@ pub struct Page {
     pub content_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub deleted_at: Option<String>,
 }
 
 /// Input for creating/updating a page
@@ -106,6 +119,8 @@ pub struct PageFilters {
     pub offset: Option<usize>,
     /// Filter to pages updated after this ISO date string (mirrors TS updated_after)
     pub updated_after: Option<String>,
+    pub include_deleted: bool,
+    pub slug_prefix: Option<String>,
 }
 
 /// Chunk source type
@@ -114,6 +129,7 @@ pub struct PageFilters {
 pub enum ChunkSource {
     CompiledTruth,
     Timeline,
+    FencedCode,
 }
 
 impl std::fmt::Display for ChunkSource {
@@ -121,6 +137,7 @@ impl std::fmt::Display for ChunkSource {
         match self {
             Self::CompiledTruth => write!(f, "compiled_truth"),
             Self::Timeline => write!(f, "timeline"),
+            Self::FencedCode => write!(f, "fenced_code"),
         }
     }
 }
@@ -135,6 +152,13 @@ pub struct Chunk {
     pub chunk_text: String,
     pub source: ChunkSource,
     pub token_count: i32,
+    pub model: Option<String>,
+    pub embedded_at: Option<String>,
+    pub language: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_type: Option<String>,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
     pub created_at: String,
 }
 
@@ -145,6 +169,36 @@ pub struct ChunkInput {
     pub chunk_text: String,
     pub source: ChunkSource,
     pub token_count: i32,
+    pub embedding: Option<Vec<f32>>,
+    pub model: Option<String>,
+    pub language: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_type: Option<String>,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
+}
+
+impl ChunkInput {
+    pub fn text(
+        chunk_index: i32,
+        chunk_text: String,
+        source: ChunkSource,
+        token_count: i32,
+    ) -> Self {
+        Self {
+            chunk_index,
+            chunk_text,
+            source,
+            token_count,
+            embedding: None,
+            model: None,
+            language: None,
+            symbol_name: None,
+            symbol_type: None,
+            start_line: None,
+            end_line: None,
+        }
+    }
 }
 
 /// Detail level for search results
@@ -166,6 +220,8 @@ pub struct SearchOpts {
     pub detail_level: Option<DetailLevel>,
     /// Slugs to exclude from search results (mirrors TS exclude_slugs)
     pub exclude_slugs: Option<Vec<String>>,
+    pub exclude_slug_prefixes: Option<Vec<String>>,
+    pub include_slug_prefixes: Option<Vec<String>>,
     /// Pre-computed expanded queries for multi-list RRF fusion.
     /// Caller should run expand_query() asynchronously and pass results here.
     pub expanded_queries: Option<Vec<String>>,
@@ -405,6 +461,17 @@ pub struct BrainHealth {
 pub struct MostConnectedPage {
     pub slug: String,
     pub link_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleChunk {
+    pub slug: String,
+    pub chunk_id: i64,
+    pub chunk_index: i32,
+    pub chunk_text: String,
+    pub source: ChunkSource,
+    pub token_count: i32,
+    pub model: Option<String>,
 }
 
 /// Ingest log entry

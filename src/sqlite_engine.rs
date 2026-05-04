@@ -22,6 +22,108 @@ fn empty_to_none(s: Option<String>) -> Option<String> {
     }
 }
 
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+fn blob_to_embedding(blob: Vec<u8>) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .filter_map(|chunk| {
+            let bytes: [u8; 4] = chunk.try_into().ok()?;
+            Some(f32::from_le_bytes(bytes))
+        })
+        .collect()
+}
+
+fn has_table(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1",
+        params![name],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
+}
+
+fn default_hard_excludes() -> Vec<String> {
+    let mut prefixes = vec![
+        "test/".to_string(),
+        "archive/".to_string(),
+        "attachments/".to_string(),
+        ".raw/".to_string(),
+    ];
+    if let Ok(extra) = std::env::var("GBRAIN_SEARCH_EXCLUDE") {
+        prefixes.extend(
+            extra
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+    }
+    prefixes
+}
+
+fn effective_exclude_prefixes(opts: &SearchOpts) -> Vec<String> {
+    let mut prefixes = default_hard_excludes();
+    if let Some(extra) = &opts.exclude_slug_prefixes {
+        prefixes.extend(extra.iter().filter(|s| !s.is_empty()).cloned());
+    }
+    if let Some(include) = &opts.include_slug_prefixes {
+        prefixes.retain(|p| !include.iter().any(|inc| inc == p));
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn source_boost_factor(slug: &str) -> f64 {
+    let mut boosts: Vec<(String, f64)> = vec![
+        ("originals/".to_string(), 1.5),
+        ("writing/".to_string(), 1.4),
+        ("concepts/".to_string(), 1.3),
+        ("people/".to_string(), 1.2),
+        ("companies/".to_string(), 1.2),
+        ("deals/".to_string(), 1.2),
+        ("meetings/".to_string(), 1.1),
+        ("media/articles/".to_string(), 1.1),
+        ("media/repos/".to_string(), 1.1),
+        ("daily/".to_string(), 0.8),
+        ("media/x/".to_string(), 0.7),
+        ("openclaw/chat/".to_string(), 0.5),
+    ];
+    if let Ok(env) = std::env::var("GBRAIN_SOURCE_BOOST") {
+        for pair in env.split(',') {
+            if let Some((prefix, factor)) = pair.rsplit_once(':') {
+                if let Ok(factor) = factor.trim().parse::<f64>() {
+                    if factor.is_finite() && factor >= 0.0 && !prefix.trim().is_empty() {
+                        boosts.push((prefix.trim().to_string(), factor));
+                    }
+                }
+            }
+        }
+    }
+    boosts.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    boosts
+        .into_iter()
+        .find(|(prefix, _)| slug.starts_with(prefix))
+        .map(|(_, factor)| factor)
+        .unwrap_or(1.0)
+}
+
+fn apply_source_boosts(results: &mut [SearchResult], detail: Option<DetailLevel>) {
+    if detail == Some(DetailLevel::High) {
+        return;
+    }
+    for r in &mut *results {
+        r.score *= source_boost_factor(&r.slug);
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// SQLite-based brain engine
 pub struct SqliteEngine {
     conn: Option<Connection>,
@@ -157,20 +259,49 @@ impl SqliteEngine {
         } else {
             // Use up to 16 trigrams for the MATCH expression
             // Strip FTS5-special characters from each trigram to prevent injection
-            let parts: Vec<String> = trigrams.iter().take(16).map(|t| {
-                let safe_t: String = t.chars()
-                    .filter(|c| !matches!(c, '"' | '\'' | '(' | ')' | '{' | '}' | ':' | '^' | '*' | '.' | '[' | ']' | '+' | '-'))
-                    .collect();
-                if safe_t.is_empty() { String::new() } else { format!("title:\"{}\"", safe_t) }
-            }).filter(|s| !s.is_empty()).collect();
-            if parts.is_empty() { return Ok(Vec::new()); }
+            let parts: Vec<String> = trigrams
+                .iter()
+                .take(16)
+                .map(|t| {
+                    let safe_t: String = t
+                        .chars()
+                        .filter(|c| {
+                            !matches!(
+                                c,
+                                '"' | '\''
+                                    | '('
+                                    | ')'
+                                    | '{'
+                                    | '}'
+                                    | ':'
+                                    | '^'
+                                    | '*'
+                                    | '.'
+                                    | '['
+                                    | ']'
+                                    | '+'
+                                    | '-'
+                            )
+                        })
+                        .collect();
+                    if safe_t.is_empty() {
+                        String::new()
+                    } else {
+                        format!("title:\"{}\"", safe_t)
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return Ok(Vec::new());
+            }
             parts.join(" OR ")
         };
 
         let sql = if dir_prefix.is_some() {
-            "SELECT p.slug, p.title FROM pages_trgm pt JOIN pages p ON p.id = pt.rowid WHERE pages_trgm MATCH ?1 AND p.slug LIKE ?2 LIMIT 100"
+            "SELECT p.slug, p.title FROM pages_trgm pt JOIN pages p ON p.id = pt.rowid WHERE pages_trgm MATCH ?1 AND p.deleted_at IS NULL AND p.slug LIKE ?2 LIMIT 100"
         } else {
-            "SELECT p.slug, p.title FROM pages_trgm pt JOIN pages p ON p.id = pt.rowid WHERE pages_trgm MATCH ?1 LIMIT 100"
+            "SELECT p.slug, p.title FROM pages_trgm pt JOIN pages p ON p.id = pt.rowid WHERE pages_trgm MATCH ?1 AND p.deleted_at IS NULL LIMIT 100"
         };
 
         let mut stmt = conn.prepare(sql)?;
@@ -179,13 +310,23 @@ impl SqliteEngine {
             stmt.query_map(params![match_expr, prefix_pattern], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         } else {
             stmt.query_map(params![match_expr], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         };
 
@@ -200,9 +341,9 @@ impl SqliteEngine {
         dir_prefix: Option<&str>,
     ) -> Result<Vec<(String, String)>> {
         let sql = if dir_prefix.is_some() {
-            "SELECT slug, title FROM pages WHERE slug LIKE ?1"
+            "SELECT slug, title FROM pages WHERE deleted_at IS NULL AND slug LIKE ?1"
         } else {
-            "SELECT slug, title FROM pages LIMIT 5000"
+            "SELECT slug, title FROM pages WHERE deleted_at IS NULL LIMIT 5000"
         };
 
         let mut stmt = conn.prepare(sql)?;
@@ -211,13 +352,23 @@ impl SqliteEngine {
             stmt.query_map(params![prefix_pattern], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         } else {
             stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         };
 
@@ -340,6 +491,107 @@ impl SqliteEngine {
         let trimmed = result.trim_matches('-');
         trimmed.to_string()
     }
+
+    fn search_vector_fallback(
+        &self,
+        embedding: &[f32],
+        opts: SearchOpts,
+    ) -> Result<Vec<SearchResult>> {
+        let conn = self.conn()?;
+        if !has_table(conn, "chunk_embeddings") {
+            return Ok(Vec::new());
+        }
+        let limit = opts.limit.unwrap_or(20);
+        let exclude_exact: std::collections::HashSet<String> = opts
+            .exclude_slugs
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let exclude_prefixes = effective_exclude_prefixes(&opts);
+
+        let mut stmt = conn.prepare(
+            "SELECT ce.chunk_id, ce.embedding, c.chunk_text, c.chunk_index, c.chunk_source, c.page_id,
+                    p.slug, p.title, p.page_type, p.updated_at,
+                    (c.embedded_at IS NULL OR c.embedded_at < p.updated_at) as stale
+             FROM chunk_embeddings ce
+             JOIN chunks c ON c.id = ce.chunk_id
+             JOIN pages p ON p.id = c.page_id
+             WHERE p.deleted_at IS NULL"
+        )?;
+
+        let detail = opts.detail_level.unwrap_or(DetailLevel::Medium);
+        let mut results = Vec::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, bool>(10).unwrap_or(false),
+            ))
+        })?;
+
+        for row in rows {
+            let (
+                chunk_id,
+                blob,
+                chunk_text,
+                chunk_index,
+                chunk_source_str,
+                page_id,
+                slug,
+                title,
+                page_type_str,
+                updated_at,
+                stale,
+            ) = row?;
+            if exclude_exact.contains(&slug) || exclude_prefixes.iter().any(|p| slug.starts_with(p))
+            {
+                continue;
+            }
+            let page_type = PageType::from_str_lossy(&page_type_str);
+            if let Some(ref wanted) = opts.page_type {
+                if &page_type != wanted {
+                    continue;
+                }
+            }
+            let source = match chunk_source_str.as_str() {
+                "timeline" => ChunkSource::Timeline,
+                "fenced_code" => ChunkSource::FencedCode,
+                _ => ChunkSource::CompiledTruth,
+            };
+            if opts.detail_level == Some(DetailLevel::Low) && source != ChunkSource::CompiledTruth {
+                continue;
+            }
+            let chunk_embedding = blob_to_embedding(blob);
+            let score =
+                crate::search::vector::cosine_similarity(embedding, &chunk_embedding) as f64;
+            results.push(SearchResult {
+                slug,
+                title,
+                chunk_text,
+                score,
+                page_id: Some(page_id),
+                chunk_id: Some(chunk_id),
+                chunk_index: Some(chunk_index),
+                source: Some(source),
+                detail_level: detail,
+                page_type: Some(page_type),
+                stale,
+                updated_at,
+            });
+        }
+        apply_source_boosts(&mut results, opts.detail_level);
+        results.truncate(limit);
+        Ok(results)
+    }
 }
 
 impl BrainEngine for SqliteEngine {
@@ -369,7 +621,7 @@ impl BrainEngine for SqliteEngine {
              PRAGMA busy_timeout = 5000;
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -64000;
-             PRAGMA temp_store = MEMORY;"
+             PRAGMA temp_store = MEMORY;",
         )?;
         self.conn = Some(conn);
         info!(db_path = %self.db_path, "SQLite connection established");
@@ -408,8 +660,8 @@ impl BrainEngine for SqliteEngine {
         trace!(slug = %slug, "Querying page");
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, slug, page_type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at
-             FROM pages WHERE slug = ?1"
+            "SELECT id, slug, page_type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at
+             FROM pages WHERE slug = ?1 AND deleted_at IS NULL"
         )?;
 
         let result = stmt.query_row(params![slug], |row| {
@@ -424,6 +676,7 @@ impl BrainEngine for SqliteEngine {
                 content_hash: row.get(7)?,
                 created_at: row.get(8)?,
                 updated_at: row.get(9)?,
+                deleted_at: row.get(10)?,
             })
         });
 
@@ -459,6 +712,7 @@ impl BrainEngine for SqliteEngine {
                 timeline = excluded.timeline,
                 frontmatter = excluded.frontmatter,
                 content_hash = excluded.content_hash,
+                deleted_at = NULL,
                 updated_at = datetime('now')",
             params![
                 slug,
@@ -471,13 +725,49 @@ impl BrainEngine for SqliteEngine {
             ],
         )?;
 
-        self.get_page(slug)?.ok_or_else(|| GBrainError::PageNotFound(slug.to_string()))
+        self.get_page(slug)?
+            .ok_or_else(|| GBrainError::PageNotFound(slug.to_string()))
     }
 
     fn delete_page(&self, slug: &str) -> Result<()> {
-        debug!(slug = %slug, "Deleting page");
+        debug!(slug = %slug, "Soft deleting page");
+        let conn = self.conn()?;
+        let rows = conn.execute(
+            "UPDATE pages SET deleted_at = datetime('now'), updated_at = datetime('now')
+             WHERE slug = ?1 AND deleted_at IS NULL",
+            params![slug],
+        )?;
+        if rows == 0 {
+            warn!(slug = %slug, "Page not found for soft deletion");
+            return Err(GBrainError::PageNotFound(slug.to_string()));
+        }
+        Ok(())
+    }
+
+    fn restore_page(&self, slug: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let rows = conn.execute(
+            "UPDATE pages SET deleted_at = NULL, updated_at = datetime('now')
+             WHERE slug = ?1 AND deleted_at IS NOT NULL",
+            params![slug],
+        )?;
+        Ok(rows > 0)
+    }
+
+    fn purge_deleted_pages(&self, older_than_hours: i64) -> Result<Vec<String>> {
+        debug!(older_than_hours, "Purging soft-deleted pages");
         self.transaction(|tx| {
-            let rows = tx.execute("DELETE FROM pages WHERE slug = ?1", params![slug])?;
+            let cutoff = format!("-{} hours", older_than_hours.max(0));
+            let mut stmt = tx.prepare(
+                "SELECT slug FROM pages WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', ?1)"
+            )?;
+            let slugs: Vec<String> = stmt
+                .query_map(params![cutoff], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+            for slug in &slugs {
+                let rows = tx.execute("DELETE FROM pages WHERE slug = ?1", params![slug])?;
             if rows == 0 {
                 warn!(slug = %slug, "Page not found for deletion");
                 return Err(GBrainError::PageNotFound(slug.to_string()));
@@ -485,7 +775,8 @@ impl BrainEngine for SqliteEngine {
             // Clean up slug-based references not covered by CASCADE
             tx.execute("DELETE FROM links WHERE from_slug = ?1 OR to_slug = ?1", params![slug])?;
             tx.execute("DELETE FROM files WHERE page_slug = ?1", params![slug])?;
-            Ok(())
+            }
+            Ok(slugs)
         })
     }
 
@@ -493,7 +784,7 @@ impl BrainEngine for SqliteEngine {
         let conn = self.conn()?;
 
         let mut sql = String::from(
-            "SELECT id, slug, page_type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at FROM pages WHERE 1=1"
+            "SELECT id, slug, page_type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, deleted_at FROM pages WHERE 1=1"
         );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -508,6 +799,13 @@ impl BrainEngine for SqliteEngine {
         if let Some(ref updated_after) = filters.updated_after {
             sql.push_str(" AND updated_at > ?");
             param_values.push(Box::new(updated_after.clone()));
+        }
+        if !filters.include_deleted {
+            sql.push_str(" AND deleted_at IS NULL");
+        }
+        if let Some(ref prefix) = filters.slug_prefix {
+            sql.push_str(" AND slug LIKE ?");
+            param_values.push(Box::new(format!("{}%", prefix)));
         }
 
         sql.push_str(" ORDER BY updated_at DESC");
@@ -538,6 +836,7 @@ impl BrainEngine for SqliteEngine {
                     content_hash: row.get(7)?,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
+                    deleted_at: row.get(10)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -551,7 +850,7 @@ impl BrainEngine for SqliteEngine {
         // Step 1: Exact match
         let exact: Option<String> = conn
             .query_row(
-                "SELECT slug FROM pages WHERE slug = ?1",
+                "SELECT slug FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
                 params![partial],
                 |row| row.get(0),
             )
@@ -565,7 +864,7 @@ impl BrainEngine for SqliteEngine {
         if slugified != partial {
             let slugified_match: Option<String> = conn
                 .query_row(
-                    "SELECT slug FROM pages WHERE slug = ?1",
+                    "SELECT slug FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
                     params![slugified],
                     |row| row.get(0),
                 )
@@ -584,7 +883,12 @@ impl BrainEngine for SqliteEngine {
                 conn.prepare("SELECT slug FROM pages_fts WHERE slug MATCH ?1 LIMIT 20")?;
             let fts_results: Vec<String> = stmt
                 .query_map(params![match_expr], |row| row.get(0))?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect();
 
             if !fts_results.is_empty() {
@@ -601,11 +905,18 @@ impl BrainEngine for SqliteEngine {
         // Step 4: LIKE fallback (last resort, unranked)
         // Escape LIKE wildcards % and _ to prevent injection
         let escaped = partial.replace('%', "\\%").replace('_', "\\_");
-        let mut stmt = conn.prepare("SELECT slug FROM pages WHERE slug LIKE ?1 ESCAPE '\\' LIMIT 20")?;
+        let mut stmt = conn.prepare(
+            "SELECT slug FROM pages WHERE deleted_at IS NULL AND slug LIKE ?1 ESCAPE '\\' LIMIT 20",
+        )?;
         let like_pattern = format!("%{}%", escaped);
         let results: Vec<String> = stmt
             .query_map(params![like_pattern], |row| row.get(0))?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
 
         Ok(results)
@@ -616,7 +927,12 @@ impl BrainEngine for SqliteEngine {
         let mut stmt = conn.prepare("SELECT slug FROM pages ORDER BY slug")?;
         let slugs: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(slugs)
     }
@@ -627,6 +943,7 @@ impl BrainEngine for SqliteEngine {
         trace!(query = %query, limit = opts.limit.unwrap_or(20), "FTS5 chunk-level keyword search");
         let conn = self.conn()?;
         let limit = opts.limit.unwrap_or(20);
+        let exclude_prefixes = effective_exclude_prefixes(&opts);
 
         // Use chunk-level FTS5 (chunks_fts) for chunk-aware results
         // Fall back to page-level FTS5 (pages_fts) if chunks_fts doesn't exist
@@ -640,11 +957,9 @@ impl BrainEngine for SqliteEngine {
             .unwrap_or(false);
         // Check if chunks_fts actually has data
         let chunks_has_data: bool = if has_chunks_fts {
-            conn.query_row(
-                "SELECT COUNT(*) FROM chunks_fts",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
+            conn.query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .map(|c| c > 0)
             .unwrap_or(false)
         } else {
@@ -666,7 +981,7 @@ impl BrainEngine for SqliteEngine {
                  FROM chunks_fts
                  JOIN chunks c ON c.id = chunks_fts.rowid
                  JOIN pages p ON p.id = c.page_id
-                 WHERE chunks_fts MATCH ?1",
+                 WHERE chunks_fts MATCH ?1 AND p.deleted_at IS NULL",
             );
             if opts.page_type.is_some() {
                 sql.push_str(" AND p.page_type = ?3");
@@ -680,6 +995,18 @@ impl BrainEngine for SqliteEngine {
                         .collect();
                     sql.push_str(&format!(" AND p.slug NOT IN ({})", placeholders.join(", ")));
                 }
+            }
+            if !exclude_prefixes.is_empty() {
+                let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
+                let start_idx = if opts.page_type.is_some() {
+                    4 + exact_count
+                } else {
+                    3 + exact_count
+                };
+                let clauses: Vec<String> = (0..exclude_prefixes.len())
+                    .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND {}", clauses.join(" AND ")));
             }
             if opts.detail_level == Some(DetailLevel::Low) {
                 sql.push_str(" AND c.chunk_source = 'compiled_truth'");
@@ -702,10 +1029,14 @@ impl BrainEngine for SqliteEngine {
                     param_values.push(Box::new(s.clone()));
                 }
             }
+            for prefix in &exclude_prefixes {
+                param_values.push(Box::new(format!("{}%", prefix)));
+            }
 
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
 
-            let results: Vec<SearchResult> = stmt
+            let mut results: Vec<SearchResult> = stmt
                 .query_map(param_refs.as_slice(), |row| {
                     let score: f64 = row.get(3)?;
                     let source_str: String = row.get::<_, String>(6).unwrap_or_default();
@@ -737,8 +1068,14 @@ impl BrainEngine for SqliteEngine {
                         updated_at,
                     })
                 })?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect();
+            apply_source_boosts(&mut results, opts.detail_level);
             Ok(results)
         } else {
             // Fallback: page-level FTS5 (backward compat)
@@ -754,7 +1091,7 @@ impl BrainEngine for SqliteEngine {
                         p.updated_at
                  FROM pages_fts
                  JOIN pages p ON p.id = pages_fts.rowid
-                 WHERE pages_fts MATCH ?1",
+                 WHERE pages_fts MATCH ?1 AND p.deleted_at IS NULL",
             );
             if opts.page_type.is_some() {
                 sql.push_str(" AND p.page_type = ?3");
@@ -773,6 +1110,18 @@ impl BrainEngine for SqliteEngine {
                     sql.push_str(&format!(" AND p.slug NOT IN ({})", placeholders.join(", ")));
                 }
             }
+            if !exclude_prefixes.is_empty() {
+                let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
+                let start_idx = if opts.page_type.is_some() {
+                    4 + exact_count
+                } else {
+                    3 + exact_count
+                };
+                let clauses: Vec<String> = (0..exclude_prefixes.len())
+                    .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND {}", clauses.join(" AND ")));
+            }
             sql.push_str(" ORDER BY score LIMIT ?2");
 
             let mut stmt = conn.prepare(&sql)?;
@@ -788,10 +1137,14 @@ impl BrainEngine for SqliteEngine {
                     param_values.push(Box::new(s.clone()));
                 }
             }
+            for prefix in &exclude_prefixes {
+                param_values.push(Box::new(format!("{}%", prefix)));
+            }
 
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
 
-            let results: Vec<SearchResult> = stmt
+            let mut results: Vec<SearchResult> = stmt
                 .query_map(param_refs.as_slice(), |row| {
                     let score: f64 = row.get(3)?;
                     let page_type_str: String = row.get::<_, String>(4).unwrap_or_default();
@@ -817,8 +1170,14 @@ impl BrainEngine for SqliteEngine {
                         updated_at,
                     })
                 })?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect();
+            apply_source_boosts(&mut results, opts.detail_level);
             Ok(results)
         }
     }
@@ -826,22 +1185,26 @@ impl BrainEngine for SqliteEngine {
     fn search_vector(&self, embedding: &[f32], opts: SearchOpts) -> Result<Vec<SearchResult>> {
         // P1-3: sqlite-vec vector search implementation
         // Mirrors TS: searchVector() via pgvector cosine distance
-        trace!(limit = opts.limit.unwrap_or(20), emb_dims = embedding.len(), "Vector search (sqlite-vec)");
+        trace!(
+            limit = opts.limit.unwrap_or(20),
+            emb_dims = embedding.len(),
+            "Vector search (sqlite-vec)"
+        );
         let conn = self.conn()?;
 
         // Check if vec_chunks table exists
         let has_vec: bool = conn.prepare("SELECT 1 FROM vec_chunks LIMIT 0").is_ok();
-        if !has_vec || embedding.is_empty() {
+        if embedding.is_empty() {
             return Ok(Vec::new());
+        }
+        if !has_vec {
+            return self.search_vector_fallback(embedding, opts);
         }
 
         let limit = opts.limit.unwrap_or(20);
 
         // Serialize query embedding as f32 LE blob for sqlite-vec
-        let query_blob: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let query_blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
 
         // Query vec_chunks for nearest neighbors by cosine distance
         // sqlite-vec vec0 virtual table supports: SELECT ... WHERE embedding MATCH ? ORDER BY distance
@@ -853,7 +1216,7 @@ impl BrainEngine for SqliteEngine {
              FROM vec_chunks v
              JOIN chunks c ON c.id = v.chunk_id
              JOIN pages p ON p.id = c.page_id
-             WHERE v.embedding MATCH ?1"
+             WHERE v.embedding MATCH ?1 AND p.deleted_at IS NULL",
         );
         if opts.page_type.is_some() {
             sql.push_str(" AND p.page_type = ?3");
@@ -871,6 +1234,19 @@ impl BrainEngine for SqliteEngine {
                 sql.push_str(&format!(" AND p.slug NOT IN ({})", placeholders.join(", ")));
             }
         }
+        let exclude_prefixes = effective_exclude_prefixes(&opts);
+        if !exclude_prefixes.is_empty() {
+            let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
+            let start_idx = if opts.page_type.is_some() {
+                4 + exact_count
+            } else {
+                3 + exact_count
+            };
+            let clauses: Vec<String> = (0..exclude_prefixes.len())
+                .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
+                .collect();
+            sql.push_str(&format!(" AND {}", clauses.join(" AND ")));
+        }
         sql.push_str(" ORDER BY v.distance LIMIT ?2");
 
         let mut stmt = conn.prepare(&sql)?;
@@ -887,8 +1263,12 @@ impl BrainEngine for SqliteEngine {
                 param_values.push(Box::new(s.clone()));
             }
         }
+        for prefix in &exclude_prefixes {
+            param_values.push(Box::new(format!("{}%", prefix)));
+        }
 
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let chunk_id: i64 = row.get(0)?;
@@ -902,17 +1282,42 @@ impl BrainEngine for SqliteEngine {
             let page_type_str: String = row.get::<_, String>(8).unwrap_or_default();
             let updated_at: Option<String> = row.get(9).ok();
             let stale: bool = row.get::<_, bool>(10).unwrap_or(false);
-            Ok((chunk_id, distance, chunk_text, chunk_index, chunk_source_str, page_id, slug, title, page_type_str, updated_at, stale))
+            Ok((
+                chunk_id,
+                distance,
+                chunk_text,
+                chunk_index,
+                chunk_source_str,
+                page_id,
+                slug,
+                title,
+                page_type_str,
+                updated_at,
+                stale,
+            ))
         })?;
 
         let detail = opts.detail_level.unwrap_or(DetailLevel::Medium);
         let mut results = Vec::new();
         for row_result in rows {
-            let (chunk_id, distance, chunk_text, chunk_index, chunk_source_str, page_id, slug, title, page_type_str, updated_at, stale) = row_result?;
+            let (
+                chunk_id,
+                distance,
+                chunk_text,
+                chunk_index,
+                chunk_source_str,
+                page_id,
+                slug,
+                title,
+                page_type_str,
+                updated_at,
+                stale,
+            ) = row_result?;
 
             let source = match chunk_source_str.as_str() {
                 "compiled_truth" => ChunkSource::CompiledTruth,
                 "timeline" => ChunkSource::Timeline,
+                "fenced_code" => ChunkSource::FencedCode,
                 _ => ChunkSource::CompiledTruth,
             };
 
@@ -942,30 +1347,44 @@ impl BrainEngine for SqliteEngine {
             });
         }
 
-        debug!(result_count = results.len(), "Vector search complete (sqlite-vec)");
+        debug!(
+            result_count = results.len(),
+            "Vector search complete (sqlite-vec)"
+        );
+        apply_source_boosts(&mut results, opts.detail_level);
         Ok(results)
     }
 
     fn get_embeddings_by_chunk_ids(&self, chunk_ids: &[i64]) -> Result<Vec<(i64, Vec<f32>)>> {
         let conn = self.conn()?;
 
-        // Check if vec_chunks table exists
-        if conn.prepare("SELECT 1 FROM vec_chunks LIMIT 0").is_err() {
-            return Ok(Vec::new());
-        }
-
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
 
         // Batch query: single IN clause instead of per-id loop (fixes N+1)
-        let placeholders: Vec<String> = chunk_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let placeholders: Vec<String> = chunk_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let table = if conn.prepare("SELECT 1 FROM vec_chunks LIMIT 0").is_ok() {
+            "vec_chunks"
+        } else if has_table(conn, "chunk_embeddings") {
+            "chunk_embeddings"
+        } else {
+            return Ok(Vec::new());
+        };
         let sql = format!(
-            "SELECT chunk_id, embedding FROM vec_chunks WHERE chunk_id IN ({})",
+            "SELECT chunk_id, embedding FROM {} WHERE chunk_id IN ({})",
+            table,
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = chunk_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = chunk_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::types::ToSql)
+            .collect();
         let rows: Vec<(i64, Vec<u8>)> = stmt
             .query_map(params.as_slice(), |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -975,14 +1394,7 @@ impl BrainEngine for SqliteEngine {
 
         let mut results = Vec::with_capacity(rows.len());
         for (id, blob) in rows {
-            let embedding: Vec<f32> = blob
-                .chunks_exact(4)
-                .filter_map(|chunk| {
-                    let bytes: [u8; 4] = chunk.try_into().ok()?;
-                    Some(f32::from_le_bytes(bytes))
-                })
-                .collect();
-            results.push((id, embedding));
+            results.push((id, blob_to_embedding(blob)));
         }
 
         Ok(results)
@@ -1004,22 +1416,65 @@ impl BrainEngine for SqliteEngine {
             let mut count = 0;
             for chunk in chunks {
                 let source_str = chunk.source.to_string();
+                let model = chunk.model.as_deref().unwrap_or("text-embedding-3-large");
                 let result = tx.execute(
-                    "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_source, token_count)
-                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    "INSERT INTO chunks (
+                        page_id, chunk_index, chunk_text, chunk_source, token_count, model,
+                        language, symbol_name, symbol_type, start_line, end_line, embedded_at
+                     )
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                             CASE WHEN ?12 IS NOT NULL THEN datetime('now') ELSE NULL END)
                      ON CONFLICT(page_id, chunk_index, chunk_source) DO UPDATE SET
                         chunk_text = excluded.chunk_text,
                         token_count = excluded.token_count,
-                        embedded_at = NULL",
+                        model = excluded.model,
+                        language = excluded.language,
+                        symbol_name = excluded.symbol_name,
+                        symbol_type = excluded.symbol_type,
+                        start_line = excluded.start_line,
+                        end_line = excluded.end_line,
+                        embedded_at = CASE WHEN ?12 IS NOT NULL THEN datetime('now') ELSE NULL END",
                     params![
                         page_id,
                         chunk.chunk_index,
                         chunk.chunk_text,
-                        source_str,
-                        chunk.token_count
+                        source_str.as_str(),
+                        chunk.token_count,
+                        model,
+                        chunk.language.clone(),
+                        chunk.symbol_name.clone(),
+                        chunk.symbol_type.clone(),
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.embedding.as_ref().map(|_| 1_i64),
                     ],
                 );
                 if result.is_ok() {
+                    let chunk_id: i64 = tx.query_row(
+                        "SELECT id FROM chunks WHERE page_id = ?1 AND chunk_index = ?2 AND chunk_source = ?3",
+                        params![page_id, chunk.chunk_index, source_str],
+                        |row| row.get(0),
+                    )?;
+                    if let Some(ref embedding) = chunk.embedding {
+                        let blob = embedding_to_blob(embedding);
+                        tx.execute(
+                            "INSERT INTO chunk_embeddings (chunk_id, embedding, dimensions, model, embedded_at)
+                             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                             ON CONFLICT(chunk_id) DO UPDATE SET
+                                embedding = excluded.embedding,
+                                dimensions = excluded.dimensions,
+                                model = excluded.model,
+                                embedded_at = datetime('now')",
+                            params![chunk_id, blob, embedding.len() as i64, model],
+                        )?;
+                        let _ = tx.execute(
+                            "INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
+                            params![chunk_id, embedding_to_blob(embedding)],
+                        );
+                    } else {
+                        tx.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?1", params![chunk_id])?;
+                        let _ = tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![chunk_id]);
+                    }
                     count += 1;
                 }
             }
@@ -1031,10 +1486,12 @@ impl BrainEngine for SqliteEngine {
     fn get_chunks(&self, slug: &str) -> Result<Vec<Chunk>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT c.id, c.page_id, p.slug, c.chunk_index, c.chunk_text, c.chunk_source, c.token_count, c.created_at
+            "SELECT c.id, c.page_id, p.slug, c.chunk_index, c.chunk_text, c.chunk_source,
+                    c.token_count, c.model, c.embedded_at, c.language, c.symbol_name,
+                    c.symbol_type, c.start_line, c.end_line, c.created_at
              FROM chunks c JOIN pages p ON p.id = c.page_id
              WHERE p.slug = ?1
-             ORDER BY c.chunk_index"
+             ORDER BY c.chunk_index",
         )?;
 
         let chunks: Vec<Chunk> = stmt
@@ -1047,20 +1504,101 @@ impl BrainEngine for SqliteEngine {
                     chunk_text: row.get(4)?,
                     source: match row.get::<_, String>(5)?.as_str() {
                         "timeline" => ChunkSource::Timeline,
+                        "fenced_code" => ChunkSource::FencedCode,
                         _ => ChunkSource::CompiledTruth,
                     },
                     token_count: row.get::<_, Option<i32>>(6)?.unwrap_or(0),
-                    created_at: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+                    model: row.get(7)?,
+                    embedded_at: row.get(8)?,
+                    language: row.get(9)?,
+                    symbol_name: row.get(10)?,
+                    symbol_type: row.get(11)?,
+                    start_line: row.get(12)?,
+                    end_line: row.get(13)?,
+                    created_at: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
 
         Ok(chunks)
     }
 
+    fn count_stale_chunks(&self) -> Result<usize> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM chunks c
+             JOIN pages p ON p.id = c.page_id
+             LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+             WHERE p.deleted_at IS NULL
+               AND (ce.chunk_id IS NULL OR c.embedded_at IS NULL OR c.embedded_at < p.updated_at)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    fn list_stale_chunks(&self, limit: Option<usize>) -> Result<Vec<StaleChunk>> {
+        let conn = self.conn()?;
+        let limit = limit.unwrap_or(1000).min(100_000);
+        let mut stmt = conn.prepare(
+            "SELECT p.slug, c.id, c.chunk_index, c.chunk_text, c.chunk_source, c.token_count, c.model
+             FROM chunks c
+             JOIN pages p ON p.id = c.page_id
+             LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+             WHERE p.deleted_at IS NULL
+               AND (ce.chunk_id IS NULL OR c.embedded_at IS NULL OR c.embedded_at < p.updated_at)
+             ORDER BY p.updated_at DESC, c.chunk_index ASC
+             LIMIT ?1",
+        )?;
+        let chunks = stmt
+            .query_map(params![limit], |row| {
+                let source_str: String = row.get(4)?;
+                Ok(StaleChunk {
+                    slug: row.get(0)?,
+                    chunk_id: row.get(1)?,
+                    chunk_index: row.get(2)?,
+                    chunk_text: row.get(3)?,
+                    source: match source_str.as_str() {
+                        "timeline" => ChunkSource::Timeline,
+                        "fenced_code" => ChunkSource::FencedCode,
+                        _ => ChunkSource::CompiledTruth,
+                    },
+                    token_count: row.get::<_, Option<i32>>(5)?.unwrap_or(0),
+                    model: row.get(6)?,
+                })
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
+            .collect();
+        Ok(chunks)
+    }
+
     fn delete_chunks(&self, slug: &str) -> Result<()> {
         let conn = self.conn()?;
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT c.id FROM chunks c JOIN pages p ON p.id = c.page_id WHERE p.slug = ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![slug], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<i64>>();
+            rows
+        };
+        for id in ids {
+            let _ = conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id]);
+        }
         conn.execute(
             "DELETE FROM chunks WHERE page_id = (SELECT id FROM pages WHERE slug = ?1)",
             params![slug],
@@ -1196,7 +1734,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(9)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(links)
     }
@@ -1224,7 +1767,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(9)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(links)
     }
@@ -1296,7 +1844,8 @@ impl BrainEngine for SqliteEngine {
 
         // Prepare statements once outside the loop (fixes N+1 prepare overhead)
         let mut page_stmt = conn.prepare("SELECT page_type, title FROM pages WHERE slug = ?1")?;
-        let mut links_stmt = conn.prepare("SELECT to_slug, link_type FROM links WHERE from_slug = ?1")?;
+        let mut links_stmt =
+            conn.prepare("SELECT to_slug, link_type FROM links WHERE from_slug = ?1")?;
 
         while let Some((current_slug, current_depth)) = queue.pop() {
             if current_depth > depth || visited.contains(&current_slug) {
@@ -1320,7 +1869,12 @@ impl BrainEngine for SqliteEngine {
                         link_type: row.get(1)?,
                     })
                 })?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect();
 
             // Add unvisited targets to queue
@@ -1396,7 +1950,12 @@ impl BrainEngine for SqliteEngine {
                         row.get::<_, String>(3).unwrap_or_default(),
                     ))
                 })?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect()
             } else {
                 stmt.query_map(params![current], |row| {
@@ -1407,7 +1966,12 @@ impl BrainEngine for SqliteEngine {
                         row.get::<_, String>(3).unwrap_or_default(),
                     ))
                 })?
-                .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+                .filter_map(|r| {
+                    if let Err(e) = &r {
+                        warn!(error = %e, "Row decode error");
+                    }
+                    r.ok()
+                })
                 .collect()
             };
 
@@ -1459,7 +2023,9 @@ impl BrainEngine for SqliteEngine {
                 .filter(|e| e.to_slug == to)
                 .flat_map(|e| vec![e.from_slug.clone(), e.to_slug.clone()])
                 .collect();
-            edges.retain(|e| target_reachable.contains(&e.from_slug) || target_reachable.contains(&e.to_slug));
+            edges.retain(|e| {
+                target_reachable.contains(&e.from_slug) || target_reachable.contains(&e.to_slug)
+            });
         }
 
         Ok(edges)
@@ -1471,18 +2037,30 @@ impl BrainEngine for SqliteEngine {
             return Ok(HashMap::new());
         }
         let conn = self.conn()?;
-        let placeholders: Vec<String> = slugs.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let placeholders: Vec<String> = slugs
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let sql = format!(
             "SELECT to_slug, COUNT(*) as cnt FROM links WHERE to_slug IN ({}) GROUP BY to_slug",
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = slugs.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = slugs
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
         let counts: HashMap<String, i64> = stmt
             .query_map(params.as_slice(), |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(counts)
     }
@@ -1492,11 +2070,13 @@ impl BrainEngine for SqliteEngine {
     fn add_tag(&self, slug: &str, tag: &str) -> Result<()> {
         let conn = self.conn()?;
         // Check page exists first to give a clear error message
-        let page_id: Option<i64> = conn.query_row(
-            "SELECT id FROM pages WHERE slug = ?1",
-            params![slug],
-            |row| row.get(0),
-        ).ok();
+        let page_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM pages WHERE slug = ?1",
+                params![slug],
+                |row| row.get(0),
+            )
+            .ok();
         let page_id = match page_id {
             Some(id) => id,
             None => return Err(GBrainError::PageNotFound(slug.to_string())),
@@ -1525,7 +2105,12 @@ impl BrainEngine for SqliteEngine {
         )?;
         let tags: Vec<String> = stmt
             .query_map(params![slug], |row| row.get(0))?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(tags)
     }
@@ -1588,7 +2173,13 @@ impl BrainEngine for SqliteEngine {
                     let result = tx.execute(
                         "INSERT OR IGNORE INTO timeline (page_id, date, source, summary, detail)
                          VALUES ((SELECT id FROM pages WHERE slug = ?1), ?2, ?3, ?4, ?5)",
-                        params![batch.slug, entry.date, entry.source, entry.summary, entry.detail],
+                        params![
+                            batch.slug,
+                            entry.date,
+                            entry.source,
+                            entry.summary,
+                            entry.detail
+                        ],
                     );
                     if let Ok(n) = result {
                         count += n;
@@ -1607,7 +2198,10 @@ impl BrainEngine for SqliteEngine {
         let conn = self.conn()?;
         let limit = opts.as_ref().and_then(|o| o.limit).unwrap_or(50);
         let after = opts.as_ref().and_then(|o| o.after.as_deref()).unwrap_or("");
-        let before = opts.as_ref().and_then(|o| o.before.as_deref()).unwrap_or("");
+        let before = opts
+            .as_ref()
+            .and_then(|o| o.before.as_deref())
+            .unwrap_or("");
 
         // Build query with optional date range filters
         let query = if !after.is_empty() && !before.is_empty() {
@@ -1625,25 +2219,61 @@ impl BrainEngine for SqliteEngine {
         let entries: Vec<TimelineEntry> = if !after.is_empty() && !before.is_empty() {
             stmt.query_map(params![slug, limit, after, before], |row| {
                 Ok(TimelineEntry {
-                    id: row.get(0)?, slug: row.get(1)?, date: row.get(2)?,
-                    source: row.get(3)?, summary: row.get(4)?, detail: row.get(5)?, created_at: row.get(6)?,
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    date: row.get(2)?,
+                    source: row.get(3)?,
+                    summary: row.get(4)?,
+                    detail: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
-            })?.filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() }).collect()
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
+            .collect()
         } else if !after.is_empty() || !before.is_empty() {
             let filter_date = if !after.is_empty() { after } else { before };
             stmt.query_map(params![slug, limit, filter_date], |row| {
                 Ok(TimelineEntry {
-                    id: row.get(0)?, slug: row.get(1)?, date: row.get(2)?,
-                    source: row.get(3)?, summary: row.get(4)?, detail: row.get(5)?, created_at: row.get(6)?,
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    date: row.get(2)?,
+                    source: row.get(3)?,
+                    summary: row.get(4)?,
+                    detail: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
-            })?.filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() }).collect()
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
+            .collect()
         } else {
             stmt.query_map(params![slug, limit], |row| {
                 Ok(TimelineEntry {
-                    id: row.get(0)?, slug: row.get(1)?, date: row.get(2)?,
-                    source: row.get(3)?, summary: row.get(4)?, detail: row.get(5)?, created_at: row.get(6)?,
+                    id: row.get(0)?,
+                    slug: row.get(1)?,
+                    date: row.get(2)?,
+                    source: row.get(3)?,
+                    summary: row.get(4)?,
+                    detail: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
-            })?.filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() }).collect()
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
+            .collect()
         };
 
         Ok(entries)
@@ -1718,7 +2348,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(6)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
 
         Ok(versions)
@@ -1728,18 +2363,21 @@ impl BrainEngine for SqliteEngine {
         self.transaction_with_engine(|_engine| {
             let conn = self.conn()?;
             // Fetch the compiled_truth from the version, verifying it belongs to this page
-            let compiled_truth: String = conn.query_row(
-                "SELECT pv.compiled_truth FROM page_versions pv
+            let compiled_truth: String = conn
+                .query_row(
+                    "SELECT pv.compiled_truth FROM page_versions pv
                  JOIN pages p ON p.id = pv.page_id
                  WHERE pv.id = ?1 AND p.slug = ?2",
-                params![version_id, slug],
-                |row| row.get(0),
-            ).map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => GBrainError::PageNotFound(
-                    format!("Version {} does not exist or does not belong to page '{}'", version_id, slug)
-                ),
-                e => GBrainError::Database(e.to_string()),
-            })?;
+                    params![version_id, slug],
+                    |row| row.get(0),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => GBrainError::PageNotFound(format!(
+                        "Version {} does not exist or does not belong to page '{}'",
+                        version_id, slug
+                    )),
+                    e => GBrainError::Database(e.to_string()),
+                })?;
             // Also restore title and page_type from the version snapshot (V8 columns)
             // Clear content_hash so skip-if-unchanged won't incorrectly skip subsequent writes
             conn.execute(
@@ -1762,12 +2400,16 @@ impl BrainEngine for SqliteEngine {
     fn get_stats(&self) -> Result<BrainStats> {
         let conn = self.conn()?;
 
-        let page_count: i64 = conn.query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))?;
+        let page_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
         let chunk_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM chunks c JOIN pages p ON p.id = c.page_id WHERE p.deleted_at IS NULL", [], |row| row.get(0))?;
         let embedded_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NOT NULL",
+                "SELECT COUNT(*) FROM chunk_embeddings ce JOIN chunks c ON c.id = ce.chunk_id JOIN pages p ON p.id = c.page_id WHERE p.deleted_at IS NULL",
                 [],
                 |row| row.get(0),
             )
@@ -1779,12 +2421,17 @@ impl BrainEngine for SqliteEngine {
 
         // pages_by_type: mirrors TS BrainStats.pages_by_type
         let mut stmt = conn
-            .prepare("SELECT page_type, COUNT(*) FROM pages GROUP BY page_type ORDER BY page_type")?;
+            .prepare("SELECT page_type, COUNT(*) FROM pages WHERE deleted_at IS NULL GROUP BY page_type ORDER BY page_type")?;
         let pages_by_type: std::collections::HashMap<String, i64> = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
 
         Ok(BrainStats {
@@ -1829,20 +2476,20 @@ impl BrainEngine for SqliteEngine {
 
         // Orphan pages — zero inbound AND zero outbound links (mirrors TS: "islanded pages")
         let orphan_pages: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pages p WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)",
+            "SELECT COUNT(*) FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)",
             [], |row| row.get(0)
         ).unwrap_or(0);
 
         // Dead links (links to non-existent pages)
         let dead_links: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM links l WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.slug = l.to_slug)",
+            "SELECT COUNT(*) FROM links l WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.slug = l.to_slug AND p.deleted_at IS NULL)",
             [], |row| row.get(0)
         ).unwrap_or(0);
 
         // Stale pages (not updated in 30 days)
         let stale_pages: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pages WHERE updated_at < datetime('now', '-30 days')",
+                "SELECT COUNT(*) FROM pages WHERE deleted_at IS NULL AND updated_at < datetime('now', '-30 days')",
                 [],
                 |row| row.get(0),
             )
@@ -1866,7 +2513,7 @@ impl BrainEngine for SqliteEngine {
         // Missing embeddings (chunks without vec_chunks entries)
         let missing_embeddings: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM chunks c WHERE NOT EXISTS (SELECT 1 FROM vec_chunks v WHERE v.chunk_id = c.id)",
+                "SELECT COUNT(*) FROM chunks c JOIN pages p ON p.id = c.page_id WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM chunk_embeddings v WHERE v.chunk_id = c.id)",
                 [],
                 |row| row.get(0),
             )
@@ -1881,20 +2528,28 @@ impl BrainEngine for SqliteEngine {
                     SELECT COUNT(*) FROM links WHERE to_slug = p.slug
                 ) as total_links
                 FROM pages p
+                WHERE p.deleted_at IS NULL
                 ORDER BY total_links DESC
                 LIMIT 5",
             ) {
-                Ok(mut stmt) => {
-                stmt.query_map([], |row| {
-                    Ok(MostConnectedPage {
-                        slug: row.get(0)?,
-                        link_count: row.get(1)?,
+                Ok(mut stmt) => stmt
+                    .query_map([], |row| {
+                        Ok(MostConnectedPage {
+                            slug: row.get(0)?,
+                            link_count: row.get(1)?,
+                        })
                     })
-                })
-                .ok()
-                .map(|rows| rows.filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() }).collect())
-                .unwrap_or_default()
-                }
+                    .ok()
+                    .map(|rows| {
+                        rows.filter_map(|r| {
+                            if let Err(e) = &r {
+                                warn!(error = %e, "Row decode error");
+                            }
+                            r.ok()
+                        })
+                        .collect()
+                    })
+                    .unwrap_or_default(),
                 Err(_) => Vec::new(),
             }
         };
@@ -1929,11 +2584,16 @@ impl BrainEngine for SqliteEngine {
     fn detect_orphans(&self) -> Result<Vec<String>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT p.slug FROM pages p WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)"
+            "SELECT p.slug FROM pages p WHERE p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM links l WHERE l.to_slug = p.slug) AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_slug = p.slug)"
         )?;
         let orphans: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(orphans)
     }
@@ -1941,11 +2601,18 @@ impl BrainEngine for SqliteEngine {
     fn detect_dead_links(&self) -> Result<Vec<(String, String)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT l.from_slug, l.to_slug FROM links l WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.slug = l.to_slug)"
+            "SELECT l.from_slug, l.to_slug FROM links l WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.slug = l.to_slug AND p.deleted_at IS NULL)"
         )?;
         let dead: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
         Ok(dead)
     }
@@ -2001,7 +2668,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(8)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect();
 
         Ok(entries)
@@ -2094,8 +2766,29 @@ impl BrainEngine for SqliteEngine {
     }
 
     fn get_chunks_with_embeddings(&self) -> Result<Vec<(i64, String, Vec<f32>)>> {
-        // This requires sqlite-vec; gracefully degrade
-        Ok(Vec::new())
+        let conn = self.conn()?;
+        if !has_table(conn, "chunk_embeddings") {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.chunk_text, ce.embedding
+             FROM chunks c
+             JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+             JOIN pages p ON p.id = c.page_id
+             WHERE p.deleted_at IS NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(id, text, blob)| (id, text, blob_to_embedding(blob)))
+            .collect();
+        Ok(rows)
     }
 
     // ── File Storage ────────────────────────────────────────────
@@ -2116,14 +2809,17 @@ impl BrainEngine for SqliteEngine {
                 .ok_or_else(|| GBrainError::FileError("No filename".to_string()))?
                 .to_string_lossy()
                 .to_string();
-            let existing: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM files WHERE page_slug = ?1 AND filename = ?2",
-                params![slug, filename],
-                |row| row.get(0),
-            ).unwrap_or(0);
+            let existing: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM files WHERE page_slug = ?1 AND filename = ?2",
+                    params![slug, filename],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
             if existing > 0 {
                 return Err(GBrainError::InvalidInput(format!(
-                    "file already exists for slug '{}' (set overwrite=true to replace)", slug
+                    "file already exists for slug '{}' (set overwrite=true to replace)",
+                    slug
                 )));
             }
         }
@@ -2135,7 +2831,9 @@ impl BrainEngine for SqliteEngine {
         if let Some(max_size) = opts.max_size_bytes {
             if data.len() > max_size {
                 return Err(GBrainError::InvalidInput(format!(
-                    "file size {} exceeds maximum {} bytes", data.len(), max_size
+                    "file size {} exceeds maximum {} bytes",
+                    data.len(),
+                    max_size
                 )));
             }
         }
@@ -2177,7 +2875,10 @@ impl BrainEngine for SqliteEngine {
                 "DELETE FROM files WHERE page_slug = ?1 AND filename = ?2",
                 params![slug, filename],
             );
-            return Err(GBrainError::FileError(format!("Failed to write file: {}", e)));
+            return Err(GBrainError::FileError(format!(
+                "Failed to write file: {}",
+                e
+            )));
         }
 
         let id = conn.last_insert_rowid();
@@ -2226,7 +2927,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(7)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         } else {
             stmt.query_map(params![limit], |row| {
@@ -2241,7 +2947,12 @@ impl BrainEngine for SqliteEngine {
                     created_at: row.get(7)?,
                 })
             })?
-            .filter_map(|r| { if let Err(e) = &r { warn!(error = %e, "Row decode error"); } r.ok() })
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Row decode error");
+                }
+                r.ok()
+            })
             .collect()
         };
 

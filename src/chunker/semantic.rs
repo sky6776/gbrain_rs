@@ -4,7 +4,12 @@
 //! Uses sentence embedding similarity to detect topic boundaries.
 //! Applies Savitzky-Golay smoothing to reduce noise in similarity scores.
 
-#![allow(clippy::needless_range_loop, clippy::manual_is_multiple_of, clippy::collapsible_if, clippy::len_zero)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_is_multiple_of,
+    clippy::collapsible_if,
+    clippy::len_zero
+)]
 //! Boundaries are detected where smoothed similarity drops below a threshold.
 
 use crate::types::{ChunkInput, ChunkSource};
@@ -108,11 +113,13 @@ pub fn chunk_semantic(
     chunks
         .into_iter()
         .enumerate()
-        .map(|(i, chunk_text)| ChunkInput {
-            chunk_index: i as i32,
-            chunk_text: chunk_text.clone(),
-            source: source.clone(),
-            token_count: crate::chunker::estimate_tokens(&chunk_text) as i32,
+        .map(|(i, chunk_text)| {
+            ChunkInput::text(
+                i as i32,
+                chunk_text.clone(),
+                source.clone(),
+                crate::chunker::estimate_tokens(&chunk_text) as i32,
+            )
         })
         .collect()
 }
@@ -452,12 +459,7 @@ pub fn chunk_semantic_with_embeddings(
     if sentences.len() <= 1 || sentence_embeddings.len() != sentences.len() {
         // Fall back to single chunk if not enough sentences or embeddings mismatch
         let token_count = (text.len() / 3).max(1) as i32;
-        return vec![ChunkInput {
-            chunk_index: 0,
-            chunk_text: text.to_string(),
-            source,
-            token_count,
-        }];
+        return vec![ChunkInput::text(0, text.to_string(), source, token_count)];
     }
 
     // Compute cosine similarity between adjacent sentences
@@ -504,12 +506,7 @@ pub fn chunk_semantic_with_embeddings(
         .enumerate()
         .map(|(i, chunk_text)| {
             let token_count = (chunk_text.len() / 3).max(1) as i32;
-            ChunkInput {
-                chunk_index: i as i32,
-                chunk_text,
-                source: source.clone(),
-                token_count,
-            }
+            ChunkInput::text(i as i32, chunk_text, source.clone(), token_count)
         })
         .collect()
 }
@@ -526,14 +523,16 @@ fn split_sentences(text: &str) -> Vec<String> {
 
         // Sentence boundary: punctuation followed by space/newline
         if (chars[i] == '.' || chars[i] == '!' || chars[i] == '?')
-            && i + 1 < chars.len() && (chars[i + 1] == ' ' || chars[i + 1] == '\n') {
-                if !current.trim().is_empty() {
-                    sentences.push(current.trim().to_string());
-                }
-                current = String::new();
-                i += 2; // skip the punctuation and the space/newline
-                continue;
+            && i + 1 < chars.len()
+            && (chars[i + 1] == ' ' || chars[i + 1] == '\n')
+        {
+            if !current.trim().is_empty() {
+                sentences.push(current.trim().to_string());
             }
+            current = String::new();
+            i += 2; // skip the punctuation and the space/newline
+            continue;
+        }
 
         // Newline boundary
         if chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
@@ -625,7 +624,11 @@ fn savitzky_golay_smooth(signal: &[f64], window: usize, _poly_order: usize) -> V
                 sum += signal[idx] * weights[j];
                 weight_sum += weights[j];
             }
-            smoothed[i] = if weight_sum > 0.0 { sum / weight_sum } else { signal[i] };
+            smoothed[i] = if weight_sum > 0.0 {
+                sum / weight_sum
+            } else {
+                signal[i]
+            };
         }
     }
 

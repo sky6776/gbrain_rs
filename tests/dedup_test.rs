@@ -7,7 +7,12 @@ fn make_result(slug: &str, score: f64, source: Option<ChunkSource>) -> SearchRes
     make_result_with_text(slug, &format!("content for {}", slug), score, source)
 }
 
-fn make_result_with_text(slug: &str, chunk_text: &str, score: f64, source: Option<ChunkSource>) -> SearchResult {
+fn make_result_with_text(
+    slug: &str,
+    chunk_text: &str,
+    score: f64,
+    source: Option<ChunkSource>,
+) -> SearchResult {
     SearchResult {
         slug: slug.to_string(),
         title: slug.to_string(),
@@ -28,8 +33,18 @@ fn make_result_with_text(slug: &str, chunk_text: &str, score: f64, source: Optio
 fn test_dedup_slug() {
     // Two different chunks from same page with different text (to avoid Jaccard dedup)
     let hits = vec![
-        make_result_with_text("people/alice", "Alice's background and early career in technology", 0.9, None),
-        make_result_with_text("people/alice", "Alice's recent projects and portfolio companies", 0.5, None),
+        make_result_with_text(
+            "people/alice",
+            "Alice's background and early career in technology",
+            0.9,
+            None,
+        ),
+        make_result_with_text(
+            "people/alice",
+            "Alice's recent projects and portfolio companies",
+            0.5,
+            None,
+        ),
     ];
     let results = dedup_results(hits, 10, None);
     // With cap=2 per page, both chunks from same page can survive
@@ -40,8 +55,18 @@ fn test_dedup_slug() {
 #[test]
 fn test_dedup_compiled_truth_preferred() {
     let hits = vec![
-        make_result_with_text("people/alice", "Alice timeline of events through the years", 0.5, Some(ChunkSource::Timeline)),
-        make_result_with_text("people/alice", "Alice core facts and compiled knowledge base", 0.5, Some(ChunkSource::CompiledTruth)),
+        make_result_with_text(
+            "people/alice",
+            "Alice timeline of events through the years",
+            0.5,
+            Some(ChunkSource::Timeline),
+        ),
+        make_result_with_text(
+            "people/alice",
+            "Alice core facts and compiled knowledge base",
+            0.5,
+            Some(ChunkSource::CompiledTruth),
+        ),
     ];
     let results = dedup_results(hits, 10, None);
     // With cap=2 per page, both chunks survive (CT + Timeline)

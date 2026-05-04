@@ -24,8 +24,15 @@ pub struct BudgetState {
 /// Reservation result — either held or exhausted
 #[derive(Debug, Clone)]
 pub enum Reservation {
-    Held { reservation_id: String },
-    Exhausted { reason: String, spent: f64, pending: f64, cap: f64 },
+    Held {
+        reservation_id: String,
+    },
+    Exhausted {
+        reason: String,
+        spent: f64,
+        pending: f64,
+        cap: f64,
+    },
 }
 
 /// S-10: Display implementation for user-friendly logging
@@ -33,8 +40,16 @@ impl std::fmt::Display for Reservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Reservation::Held { reservation_id } => write!(f, "Held: {}", reservation_id),
-            Reservation::Exhausted { reason, spent, pending, cap } =>
-                write!(f, "Exhausted: {} (spent=${:.2}, pending=${:.2}, cap=${:.2})", reason, spent, pending, cap),
+            Reservation::Exhausted {
+                reason,
+                spent,
+                pending,
+                cap,
+            } => write!(
+                f,
+                "Exhausted: {} (spent=${:.2}, pending=${:.2}, cap=${:.2})",
+                reason, spent, pending, cap
+            ),
         }
     }
 }
@@ -102,7 +117,7 @@ impl<'a> BudgetLedger<'a> {
                 status TEXT NOT NULL DEFAULT 'held',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL
-            );"
+            );",
         )?;
         Ok(())
     }
@@ -124,7 +139,8 @@ impl<'a> BudgetLedger<'a> {
 
         let tx = TxGuard::begin(self.conn)?;
 
-        let result = self.reserve_inner(scope, resolver_id, estimate_usd, cap_usd, today, expires_at);
+        let result =
+            self.reserve_inner(scope, resolver_id, estimate_usd, cap_usd, today, expires_at);
         match result {
             Ok(r) => {
                 tx.commit()?;
@@ -160,17 +176,27 @@ impl<'a> BudgetLedger<'a> {
             "SELECT scope, resolver_id, local_date, reserved_usd, committed_usd, cap_usd
              FROM budget_ledger WHERE scope = ?1 AND resolver_id = ?2 AND local_date = ?3",
             params![scope, resolver_id, today],
-            |row| Ok(BudgetState {
-                scope: row.get(0)?, resolver_id: row.get(1)?, date: row.get(2)?,
-                reserved_usd: row.get(3)?, committed_usd: row.get(4)?, cap_usd: row.get(5)?,
-            }),
+            |row| {
+                Ok(BudgetState {
+                    scope: row.get(0)?,
+                    resolver_id: row.get(1)?,
+                    date: row.get(2)?,
+                    reserved_usd: row.get(3)?,
+                    committed_usd: row.get(4)?,
+                    cap_usd: row.get(5)?,
+                })
+            },
         )?;
 
         // I-11 fix: Error when no cap configured instead of silently defaulting to $1.0
         let effective_cap = match cap_usd.or(state.cap_usd) {
             Some(cap) => cap,
             None => {
-                tracing::warn!("No daily budget cap configured for {}/{}, defaulting to $1.0", scope, resolver_id);
+                tracing::warn!(
+                    "No daily budget cap configured for {}/{}, defaulting to $1.0",
+                    scope,
+                    resolver_id
+                );
                 1.0 // safe default: block spending beyond $1 until cap is configured
             }
         };
@@ -225,7 +251,8 @@ impl<'a> BudgetLedger<'a> {
 
     fn commit_inner(&self, reservation_id: &str, actual_spend: f64) -> Result<()> {
         // Read reservation WITHIN the transaction to prevent TOCTOU race
-        let (scope, resolver_id, estimate, date) = self.get_reservation_with_date(reservation_id)?;
+        let (scope, resolver_id, estimate, date) =
+            self.get_reservation_with_date(reservation_id)?;
 
         // Reverse the reserved estimate, add actual to committed -- only if reservation is still held
         // This makes commit idempotent: a second call won't double-decrement reserved_usd
@@ -236,7 +263,14 @@ impl<'a> BudgetLedger<'a> {
                  updated_at = datetime('now')
              WHERE scope = ?3 AND resolver_id = ?4 AND local_date = ?5
                AND EXISTS (SELECT 1 FROM budget_reservations WHERE id = ?6 AND status = 'held')",
-            params![estimate, actual_spend, scope, resolver_id, date, reservation_id],
+            params![
+                estimate,
+                actual_spend,
+                scope,
+                resolver_id,
+                date,
+                reservation_id
+            ],
         )?;
 
         if rows == 0 {
@@ -274,10 +308,11 @@ impl<'a> BudgetLedger<'a> {
 
     fn rollback_inner(&self, reservation_id: &str) -> Result<()> {
         // Read reservation WITHIN the transaction to prevent TOCTOU race
-        let (scope, resolver_id, estimate, date) = match self.get_reservation_with_date(reservation_id) {
-            Ok(r) => r,
-            Err(_) => return Ok(()), // already cleaned up
-        };
+        let (scope, resolver_id, estimate, date) =
+            match self.get_reservation_with_date(reservation_id) {
+                Ok(r) => r,
+                Err(_) => return Ok(()), // already cleaned up
+            };
 
         // Only rollback if still 'held' (not already committed/rolled_back)
         // Use the reservation's original date to handle cross-day rollbacks
@@ -303,13 +338,17 @@ impl<'a> BudgetLedger<'a> {
     pub fn cleanup_expired(&self) -> Result<usize> {
         let mut count = 0;
         let mut stmt = self.conn.prepare(
-            "SELECT id FROM budget_reservations WHERE status = 'held' AND expires_at < ?1"
+            "SELECT id FROM budget_reservations WHERE status = 'held' AND expires_at < ?1",
         )?;
-        let expired: Vec<String> = stmt.query_map(params![iso_now()], |row| row.get(0))?
-            .filter_map(|r| r.ok()).collect();
+        let expired: Vec<String> = stmt
+            .query_map(params![iso_now()], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
 
         for id in expired {
-            if self.rollback(&id).is_ok() { count += 1; }
+            if self.rollback(&id).is_ok() {
+                count += 1;
+            }
         }
         Ok(count)
     }
@@ -333,10 +372,15 @@ fn iso_now() -> String {
 
 fn iso_from_now(d: Duration) -> String {
     match chrono::Duration::from_std(d) {
-        Ok(cd) => (chrono::Utc::now() + cd).format("%Y-%m-%dT%H:%M:%S").to_string(),
+        Ok(cd) => (chrono::Utc::now() + cd)
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string(),
         Err(_) => {
             // Duration too large for chrono; use far-future sentinel
-            tracing::warn!(duration_secs = d.as_secs(), "Duration exceeds chrono range, clamping to 9999-12-31");
+            tracing::warn!(
+                duration_secs = d.as_secs(),
+                "Duration exceeds chrono range, clamping to 9999-12-31"
+            );
             "9999-12-31T23:59:59".to_string()
         }
     }
@@ -348,12 +392,16 @@ static UUID_COUNTER: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
 
 fn uuid_simple() -> String {
     use std::sync::atomic::Ordering;
-    let counter = UUID_COUNTER.get_or_init(|| std::sync::atomic::AtomicU64::new(
-        // Seed with process ID to avoid collisions across processes
-        std::process::id() as u64
-    ));
+    let counter = UUID_COUNTER.get_or_init(|| {
+        std::sync::atomic::AtomicU64::new(
+            // Seed with process ID to avoid collisions across processes
+            std::process::id() as u64,
+        )
+    });
     let seq = counter.fetch_add(1, Ordering::Relaxed);
-    let t = std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let t = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     format!("{:x}-{:x}-{:x}", t.as_nanos(), seq, std::process::id())
 }
 
@@ -372,69 +420,89 @@ mod tests {
     #[test]
     fn test_reserve_within_cap() {
         with_ledger(|ledger| {
-        let result = ledger.reserve("test", "resolver1", 0.5, Some(1.0), Some(60)).unwrap();
-        assert!(matches!(result, Reservation::Held { .. }));
+            let result = ledger
+                .reserve("test", "resolver1", 0.5, Some(1.0), Some(60))
+                .unwrap();
+            assert!(matches!(result, Reservation::Held { .. }));
         });
     }
 
     #[test]
     fn test_reserve_exceeds_cap() {
         with_ledger(|ledger| {
-        let result = ledger.reserve("test", "resolver1", 2.0, Some(1.0), Some(60)).unwrap();
-        assert!(matches!(result, Reservation::Exhausted { .. }));
+            let result = ledger
+                .reserve("test", "resolver1", 2.0, Some(1.0), Some(60))
+                .unwrap();
+            assert!(matches!(result, Reservation::Exhausted { .. }));
         });
     }
 
     #[test]
     fn test_commit_and_exhaust() {
         with_ledger(|ledger| {
-        let r = ledger.reserve("test", "r2", 0.7, Some(1.0), Some(60)).unwrap();
-        if let Reservation::Held { reservation_id } = r {
-            ledger.commit(&reservation_id, 0.7).unwrap();
-        }
-        let r2 = ledger.reserve("test", "r2", 0.5, Some(1.0), Some(60)).unwrap();
-        assert!(matches!(r2, Reservation::Exhausted { .. }));
+            let r = ledger
+                .reserve("test", "r2", 0.7, Some(1.0), Some(60))
+                .unwrap();
+            if let Reservation::Held { reservation_id } = r {
+                ledger.commit(&reservation_id, 0.7).unwrap();
+            }
+            let r2 = ledger
+                .reserve("test", "r2", 0.5, Some(1.0), Some(60))
+                .unwrap();
+            assert!(matches!(r2, Reservation::Exhausted { .. }));
         });
     }
 
     #[test]
     fn test_rollback_frees_budget() {
         with_ledger(|ledger| {
-        let r = ledger.reserve("test", "r3", 0.9, Some(1.0), Some(60)).unwrap();
-        if let Reservation::Held { reservation_id } = r {
-            ledger.rollback(&reservation_id).unwrap();
-        }
-        let r2 = ledger.reserve("test", "r3", 0.9, Some(1.0), Some(60)).unwrap();
-        assert!(matches!(r2, Reservation::Held { .. }));
+            let r = ledger
+                .reserve("test", "r3", 0.9, Some(1.0), Some(60))
+                .unwrap();
+            if let Reservation::Held { reservation_id } = r {
+                ledger.rollback(&reservation_id).unwrap();
+            }
+            let r2 = ledger
+                .reserve("test", "r3", 0.9, Some(1.0), Some(60))
+                .unwrap();
+            assert!(matches!(r2, Reservation::Held { .. }));
         });
     }
 
     #[test]
     fn test_cleanup_expired() {
         with_ledger(|ledger| {
-        // Create reservation and manually expire it via direct SQL
-        let _r = ledger.reserve("test", "r4", 0.1, Some(1.0), Some(60)).unwrap();
-        ledger.conn.execute(
+            // Create reservation and manually expire it via direct SQL
+            let _r = ledger
+                .reserve("test", "r4", 0.1, Some(1.0), Some(60))
+                .unwrap();
+            ledger.conn.execute(
             "UPDATE budget_reservations SET expires_at = datetime('now', '-1 seconds') WHERE status = 'held'", []
         ).unwrap();
-        let count = ledger.cleanup_expired().unwrap();
-        assert!(count >= 1, "Should have cleaned up at least 1 expired reservation, got {}", count);
+            let count = ledger.cleanup_expired().unwrap();
+            assert!(
+                count >= 1,
+                "Should have cleaned up at least 1 expired reservation, got {}",
+                count
+            );
         });
     }
 
     #[test]
     fn test_commit_uses_reservation_date() {
         with_ledger(|ledger| {
-        // Reserve on today's date
-        let r = ledger.reserve("test", "r5", 0.5, Some(1.0), Some(60)).unwrap();
-        if let Reservation::Held { reservation_id } = r {
-            // Manually change the ledger date to simulate cross-day commit
-            ledger.conn.execute(
+            // Reserve on today's date
+            let r = ledger
+                .reserve("test", "r5", 0.5, Some(1.0), Some(60))
+                .unwrap();
+            if let Reservation::Held { reservation_id } = r {
+                // Manually change the ledger date to simulate cross-day commit
+                ledger.conn.execute(
                 "UPDATE budget_ledger SET local_date = '2020-01-01' WHERE resolver_id = 'r5'", []
             ).unwrap();
-            // Commit should still work because it uses the reservation's stored date
-            ledger.commit(&reservation_id, 0.5).unwrap();
-        }
+                // Commit should still work because it uses the reservation's stored date
+                ledger.commit(&reservation_id, 0.5).unwrap();
+            }
         });
     }
 }

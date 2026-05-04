@@ -33,12 +33,7 @@ pub struct QueryIntent {
 
 /// Helper: compile a batch of pattern strings into Regex objects, stored in OnceLock.
 fn get_or_init_patterns<'a>(lock: &'a OnceLock<Vec<Regex>>, patterns: &[&str]) -> &'a Vec<Regex> {
-    lock.get_or_init(|| {
-        patterns
-            .iter()
-            .filter_map(|p| Regex::new(p).ok())
-            .collect()
-    })
+    lock.get_or_init(|| patterns.iter().filter_map(|p| Regex::new(p).ok()).collect())
 }
 
 // Full-context patterns (checked FIRST — mirrors TS)
@@ -113,7 +108,9 @@ const ENTITY_PATTERNS_STR: &[&str] = &[
 
 /// Check if any pattern in a lazily-compiled set matches the query.
 fn any_match(lock: &OnceLock<Vec<Regex>>, patterns: &[&str], query: &str) -> bool {
-    get_or_init_patterns(lock, patterns).iter().any(|re| re.is_match(query))
+    get_or_init_patterns(lock, patterns)
+        .iter()
+        .any(|re| re.is_match(query))
 }
 
 /// Classify a query's intent
@@ -207,7 +204,10 @@ mod tests {
     #[test]
     fn test_detail_for_intent() {
         assert_eq!(detail_for_intent(&Intent::Entity), Some(DetailLevel::Low));
-        assert_eq!(detail_for_intent(&Intent::Temporal), Some(DetailLevel::High));
+        assert_eq!(
+            detail_for_intent(&Intent::Temporal),
+            Some(DetailLevel::High)
+        );
         assert_eq!(detail_for_intent(&Intent::Event), Some(DetailLevel::High));
         assert_eq!(detail_for_intent(&Intent::General), None);
     }

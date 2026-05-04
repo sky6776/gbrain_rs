@@ -18,9 +18,16 @@ pub fn build_fts_query(query: &str) -> String {
         // Phrase search: strip internal quotes and sanitize FTS5-special characters
         // to prevent column filter injection (e.g., "title:secret" being interpreted
         // as a column-scoped search by FTS5).
-        let clean_query: String = query.chars()
+        let clean_query: String = query
+            .chars()
             .filter(|c| *c != '"')
-            .map(|c| if c.is_alphanumeric() || c == '_' || c == '\'' || c.is_whitespace() { c } else { ' ' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' || c == '\'' || c.is_whitespace() {
+                    c
+                } else {
+                    ' '
+                }
+            })
             .collect();
         let phrase = format!("\"{}\"", clean_query);
         // Individual token search: escape each term, filter empty, add prefix wildcard.
@@ -30,7 +37,11 @@ pub fn build_fts_query(query: &str) -> String {
             .iter()
             .filter_map(|t| {
                 let escaped = escape_fts_term(t);
-                if escaped.is_empty() { None } else { Some(format!("\"{}\"*", escaped)) }
+                if escaped.is_empty() {
+                    None
+                } else {
+                    Some(format!("\"{}\"*", escaped))
+                }
             })
             .collect();
         if individual.is_empty() {

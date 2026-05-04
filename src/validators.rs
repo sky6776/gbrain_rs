@@ -68,25 +68,31 @@ impl ValidationResult {
     }
 
     pub fn errors(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == Severity::Error).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect()
     }
 
     pub fn warnings(&self) -> Vec<&ValidationIssue> {
-        self.issues.iter().filter(|i| i.severity == Severity::Warning).collect()
+        self.issues
+            .iter()
+            .filter(|i| i.severity == Severity::Warning)
+            .collect()
     }
 }
 
 /// Validate that wiki-link targets exist in the brain
-pub fn validate_back_links(
-    engine: &SqliteEngine,
-    slug: &str,
-    content: &str,
-) -> ValidationResult {
+pub fn validate_back_links(engine: &SqliteEngine, slug: &str, content: &str) -> ValidationResult {
     let mut result = ValidationResult::new(slug);
 
     // Extract all [[wiki-links]]
     let re = WIKILINK_RE.get_or_init(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-    let all_slugs: HashSet<String> = engine.get_all_slugs().unwrap_or_default().into_iter().collect();
+    let all_slugs: HashSet<String> = engine
+        .get_all_slugs()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     for cap in re.captures_iter(content) {
         let target = cap.get(1).unwrap().as_str().to_string();
@@ -112,7 +118,12 @@ pub fn validate_citations(slug: &str, content: &str) -> ValidationResult {
     // Check for malformed citations: [number] without corresponding reference
     // P2-11: Regex patterns use OnceLock for lazy one-time compilation.
     let cite_re = CITE_RE.get_or_init(|| Regex::new(r"\[(\d+)\]").unwrap());
-    let ref_re = REF_RE.get_or_init(|| regex::RegexBuilder::new(r"^\[(\d+)\]:\s+.+").multi_line(true).build().unwrap());
+    let ref_re = REF_RE.get_or_init(|| {
+        regex::RegexBuilder::new(r"^\[(\d+)\]:\s+.+")
+            .multi_line(true)
+            .build()
+            .unwrap()
+    });
 
     let cited_numbers: HashSet<String> = cite_re
         .captures_iter(content)
@@ -129,7 +140,10 @@ pub fn validate_citations(slug: &str, content: &str) -> ValidationResult {
             result.add_issue(ValidationIssue {
                 rule: "citation".to_string(),
                 severity: Severity::Warning,
-                message: format!("Citation [{}] has no corresponding reference definition", num),
+                message: format!(
+                    "Citation [{}] has no corresponding reference definition",
+                    num
+                ),
                 location: Some(format!("[{}]", num)),
                 fix_hint: Some(format!("Add reference definition: [{}]: <url>", num)),
             });
@@ -232,21 +246,24 @@ pub fn validate_triple_hr(slug: &str, content: &str) -> ValidationResult {
 
 /// Validate that markdown [text](slug) link targets exist in the brain
 /// Mirrors TS output/validators/link.ts — checks dangling markdown links
-pub fn validate_links(
-    engine: &SqliteEngine,
-    slug: &str,
-    content: &str,
-) -> ValidationResult {
+pub fn validate_links(engine: &SqliteEngine, slug: &str, content: &str) -> ValidationResult {
     let mut result = ValidationResult::new(slug);
 
     // Extract all markdown links [text](target)
     let md_link_re = MD_LINK_RE.get_or_init(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
-    let all_slugs: HashSet<String> = engine.get_all_slugs().unwrap_or_default().into_iter().collect();
+    let all_slugs: HashSet<String> = engine
+        .get_all_slugs()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     for cap in md_link_re.captures_iter(content) {
         let target = cap.get(2).unwrap().as_str().to_string();
         // Skip external URLs (http/https) and anchors (#)
-        if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("#") {
+        if target.starts_with("http://")
+            || target.starts_with("https://")
+            || target.starts_with("#")
+        {
             continue;
         }
         // Strip anchor suffix if present (e.g., "people/alice#section")
@@ -281,7 +298,11 @@ pub fn validate_source_citations(
     let mut result = ValidationResult::new(slug);
 
     let re = SOURCE_CITE_RE.get_or_init(|| Regex::new(r"\[Source:([^\]]+)\]").unwrap());
-    let all_slugs: HashSet<String> = engine.get_all_slugs().unwrap_or_default().into_iter().collect();
+    let all_slugs: HashSet<String> = engine
+        .get_all_slugs()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     for cap in re.captures_iter(content) {
         let target = cap.get(1).unwrap().as_str().trim().to_string();
@@ -304,10 +325,7 @@ pub fn validate_source_citations(
 /// have corresponding inbound links. Mirrors TS backLinkValidator.
 /// For each outbound link from this slug, verifies that the target page
 /// has a link record pointing back (either from_slug or to_slug direction).
-pub fn validate_back_link_symmetry(
-    engine: &SqliteEngine,
-    slug: &str,
-) -> ValidationResult {
+pub fn validate_back_link_symmetry(engine: &SqliteEngine, slug: &str) -> ValidationResult {
     let mut result = ValidationResult::new(slug);
 
     let outbound_links = engine.get_links(slug).unwrap_or_default();
@@ -315,9 +333,9 @@ pub fn validate_back_link_symmetry(
     for link in &outbound_links {
         // Check if the target page has any link record involving this slug
         let target_links = engine.get_links(&link.to_slug).unwrap_or_default();
-        let has_symmetry = target_links.iter().any(|tl| {
-            tl.from_slug == slug || tl.to_slug == slug
-        });
+        let has_symmetry = target_links
+            .iter()
+            .any(|tl| tl.from_slug == slug || tl.to_slug == slug);
 
         if !has_symmetry {
             result.add_issue(ValidationIssue {
@@ -341,11 +359,7 @@ pub fn validate_back_link_symmetry(
 }
 
 /// Run all validators on content
-pub fn validate_all(
-    engine: &SqliteEngine,
-    slug: &str,
-    content: &str,
-) -> ValidationResult {
+pub fn validate_all(engine: &SqliteEngine, slug: &str, content: &str) -> ValidationResult {
     let mut result = validate_slug(slug);
 
     let back_link_result = validate_back_links(engine, slug, content);
@@ -398,7 +412,10 @@ mod tests {
     #[test]
     fn test_validate_slug_uppercase() {
         let result = validate_slug("People/Alice");
-        assert!(result.issues.iter().any(|i| i.message.contains("lowercase")));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.message.contains("lowercase")));
     }
 
     #[test]
@@ -463,11 +480,7 @@ mod tests {
     #[test]
     fn test_validate_source_citations_missing() {
         let content = "According to [Source:people/bob], the project started in 2020.";
-        let result = validate_source_citations(
-            &SqliteEngine::in_memory(),
-            "test/page",
-            content,
-        );
+        let result = validate_source_citations(&SqliteEngine::in_memory(), "test/page", content);
         assert!(result.issues.iter().any(|i| i.rule == "source-citation"));
     }
 
@@ -477,23 +490,43 @@ mod tests {
         let mut engine = SqliteEngine::in_memory();
         engine.connect().unwrap();
         engine.init_schema().unwrap();
-        engine.put_page("people/alice", PageInput {
-            page_type: PageType::Person,
-            title: "Alice".to_string(),
-            compiled_truth: "Knows Bob".to_string(),
-            timeline: None,
-            frontmatter: None,
-            content_hash: None,
-        }).unwrap();
-        engine.put_page("people/bob", PageInput {
-            page_type: PageType::Person,
-            title: "Bob".to_string(),
-            compiled_truth: "Known by Alice".to_string(),
-            timeline: None,
-            frontmatter: None,
-            content_hash: None,
-        }).unwrap();
-        engine.add_link("people/alice", "people/bob", None, Some("knows"), Some("markdown"), None, None).unwrap();
+        engine
+            .put_page(
+                "people/alice",
+                PageInput {
+                    page_type: PageType::Person,
+                    title: "Alice".to_string(),
+                    compiled_truth: "Knows Bob".to_string(),
+                    timeline: None,
+                    frontmatter: None,
+                    content_hash: None,
+                },
+            )
+            .unwrap();
+        engine
+            .put_page(
+                "people/bob",
+                PageInput {
+                    page_type: PageType::Person,
+                    title: "Bob".to_string(),
+                    compiled_truth: "Known by Alice".to_string(),
+                    timeline: None,
+                    frontmatter: None,
+                    content_hash: None,
+                },
+            )
+            .unwrap();
+        engine
+            .add_link(
+                "people/alice",
+                "people/bob",
+                None,
+                Some("knows"),
+                Some("markdown"),
+                None,
+                None,
+            )
+            .unwrap();
 
         let result = validate_back_link_symmetry(&engine, "people/alice");
         // Alice -> Bob exists, but Bob -> Alice does not

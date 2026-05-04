@@ -3,7 +3,9 @@
 
 use crate::engine::BrainEngine;
 use crate::error::{GBrainError, Result};
-use crate::security::{validate_contained, validate_filename, validate_page_slug, validate_upload_path};
+use crate::security::{
+    validate_contained, validate_filename, validate_page_slug, validate_upload_path,
+};
 use crate::types::*;
 use std::path::Path;
 

@@ -134,10 +134,22 @@ impl OperationError {
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         let s = Some(suggestion.into());
         match &mut self {
-            Self::Failed { suggestion: ref mut sug, .. }
-            | Self::Forbidden { suggestion: ref mut sug, .. }
-            | Self::Validation { suggestion: ref mut sug, .. }
-            | Self::NotFound { suggestion: ref mut sug, .. } => *sug = s,
+            Self::Failed {
+                suggestion: ref mut sug,
+                ..
+            }
+            | Self::Forbidden {
+                suggestion: ref mut sug,
+                ..
+            }
+            | Self::Validation {
+                suggestion: ref mut sug,
+                ..
+            }
+            | Self::NotFound {
+                suggestion: ref mut sug,
+                ..
+            } => *sug = s,
         }
         self
     }
@@ -145,10 +157,22 @@ impl OperationError {
     pub fn with_docs(mut self, docs_url: impl Into<String>) -> Self {
         let d = Some(docs_url.into());
         match &mut self {
-            Self::Failed { docs_url: ref mut docs, .. }
-            | Self::Forbidden { docs_url: ref mut docs, .. }
-            | Self::Validation { docs_url: ref mut docs, .. }
-            | Self::NotFound { docs_url: ref mut docs, .. } => *docs = d,
+            Self::Failed {
+                docs_url: ref mut docs,
+                ..
+            }
+            | Self::Forbidden {
+                docs_url: ref mut docs,
+                ..
+            }
+            | Self::Validation {
+                docs_url: ref mut docs,
+                ..
+            }
+            | Self::NotFound {
+                docs_url: ref mut docs,
+                ..
+            } => *docs = d,
         }
         self
     }

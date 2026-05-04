@@ -21,7 +21,12 @@ pub struct BackoffOpts {
 
 impl Default for BackoffOpts {
     fn default() -> Self {
-        Self { max_retries: 5, base_ms: 500, max_ms: 120000, jitter: true }
+        Self {
+            max_retries: 5,
+            base_ms: 500,
+            max_ms: 120000,
+            jitter: true,
+        }
     }
 }
 
@@ -29,10 +34,7 @@ impl Default for BackoffOpts {
 ///
 /// The function `f` is called at most `opts.max_retries + 1` times (initial + retries).
 /// Between retries, sleeps for `base_ms * 2^(attempt-1)` ms, capped at `max_ms`.
-pub async fn with_backoff<F, Fut, T, E>(
-    mut f: F,
-    opts: BackoffOpts,
-) -> Result<T, E>
+pub async fn with_backoff<F, Fut, T, E>(mut f: F, opts: BackoffOpts) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -48,8 +50,8 @@ where
                 if attempt > opts.max_retries {
                     return Err(e);
                 }
-                let delay_ms = (opts.base_ms * 2u64.pow(attempt.saturating_sub(1)))
-                    .min(opts.max_ms);
+                let delay_ms =
+                    (opts.base_ms * 2u64.pow(attempt.saturating_sub(1))).min(opts.max_ms);
                 let delay_ms = if opts.jitter {
                     // Add up to 25% random jitter
                     let jitter = (delay_ms as f64 * 0.25 * rand_factor()) as u64;
@@ -71,10 +73,7 @@ where
 }
 
 /// Blocking version for sync contexts
-pub fn with_backoff_sync<F, T, E>(
-    mut f: F,
-    opts: BackoffOpts,
-) -> Result<T, E>
+pub fn with_backoff_sync<F, T, E>(mut f: F, opts: BackoffOpts) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
     E: std::fmt::Display,
@@ -89,8 +88,8 @@ where
                 if attempt > opts.max_retries {
                     return Err(e);
                 }
-                let delay_ms = (opts.base_ms * 2u64.pow(attempt.saturating_sub(1)))
-                    .min(opts.max_ms);
+                let delay_ms =
+                    (opts.base_ms * 2u64.pow(attempt.saturating_sub(1))).min(opts.max_ms);
                 let delay_ms = if opts.jitter {
                     let jitter = (delay_ms as f64 * 0.25 * rand_factor()) as u64;
                     (delay_ms + jitter).min(opts.max_ms)
@@ -118,8 +117,7 @@ fn rand_factor() -> f64 {
 /// Useful for HTTP-level retry logic that needs to combine this delay with
 /// server-provided Retry-After headers.
 pub fn backoff_delay_ms(attempt: u32, opts: &BackoffOpts) -> u64 {
-    let delay_ms = (opts.base_ms * 2u64.pow(attempt.saturating_sub(1)))
-        .min(opts.max_ms);
+    let delay_ms = (opts.base_ms * 2u64.pow(attempt.saturating_sub(1))).min(opts.max_ms);
     if opts.jitter {
         let jitter = (delay_ms as f64 * 0.25 * rand_factor()) as u64;
         (delay_ms + jitter).min(opts.max_ms)

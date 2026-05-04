@@ -432,7 +432,9 @@ impl McpServer {
                 let content = arguments["content"].as_str().unwrap_or("");
                 // Content size limit for remote callers (DoS prevention)
                 if content.len() > 1_000_000 {
-                    return Err(GBrainError::InvalidInput("content exceeds 1MB limit for remote callers".into()));
+                    return Err(GBrainError::InvalidInput(
+                        "content exceeds 1MB limit for remote callers".into(),
+                    ));
                 }
                 // Parse frontmatter from content to extract title and page_type
                 let parsed = crate::markdown::parse_markdown(content);
@@ -474,7 +476,8 @@ impl McpServer {
                 let confirm = arguments["confirm"].as_bool().unwrap_or(false);
                 if !confirm {
                     return Err(crate::error::GBrainError::InvalidInput(
-                        "delete_page requires confirm=true to prevent accidental deletion".to_string()
+                        "delete_page requires confirm=true to prevent accidental deletion"
+                            .to_string(),
                     ));
                 }
                 let slug = arguments["slug"].as_str().unwrap_or("");
@@ -504,10 +507,14 @@ impl McpServer {
                 let tag = arguments["tag"].as_str().unwrap_or("");
                 crate::security::validate_page_slug(slug)?;
                 if tag.is_empty() || tag.len() > 200 {
-                    return Err(GBrainError::InvalidInput("tag must be 1-200 characters".into()));
+                    return Err(GBrainError::InvalidInput(
+                        "tag must be 1-200 characters".into(),
+                    ));
                 }
                 if tag.contains('\0') || tag.contains('\n') || tag.contains('\r') {
-                    return Err(GBrainError::InvalidInput("tag contains invalid characters".into()));
+                    return Err(GBrainError::InvalidInput(
+                        "tag contains invalid characters".into(),
+                    ));
                 }
                 ops.engine.add_tag(slug, tag)?;
                 Ok(serde_json::json!({"ok": true}))
@@ -518,10 +525,14 @@ impl McpServer {
                 let tag = arguments["tag"].as_str().unwrap_or("");
                 crate::security::validate_page_slug(slug)?;
                 if tag.is_empty() || tag.len() > 200 {
-                    return Err(GBrainError::InvalidInput("tag must be 1-200 characters".into()));
+                    return Err(GBrainError::InvalidInput(
+                        "tag must be 1-200 characters".into(),
+                    ));
                 }
                 if tag.contains('\0') || tag.contains('\n') || tag.contains('\r') {
-                    return Err(GBrainError::InvalidInput("tag contains invalid characters".into()));
+                    return Err(GBrainError::InvalidInput(
+                        "tag contains invalid characters".into(),
+                    ));
                 }
                 ops.engine.remove_tag(slug, tag)?;
                 Ok(serde_json::json!({"ok": true}))
@@ -543,22 +554,33 @@ impl McpServer {
                 crate::security::validate_page_slug(to)?;
                 // Verify both slugs exist to prevent dead links
                 if ops.engine.get_page(from)?.is_none() {
-                    return Err(GBrainError::PageNotFound(format!("Source slug not found: {}", from)));
+                    return Err(GBrainError::PageNotFound(format!(
+                        "Source slug not found: {}",
+                        from
+                    )));
                 }
                 if ops.engine.get_page(to)?.is_none() {
-                    return Err(GBrainError::PageNotFound(format!("Target slug not found: {}", to)));
+                    return Err(GBrainError::PageNotFound(format!(
+                        "Target slug not found: {}",
+                        to
+                    )));
                 }
                 let link_type = arguments["link_type"].as_str();
                 let context = arguments["context"].as_str();
                 // Validate link_type and context length for remote callers
                 if let Some(lt) = link_type {
-                    if lt.len() > 200 || lt.contains('\0') || lt.contains('\n') || lt.contains('\r') {
-                        return Err(GBrainError::InvalidInput("link_type must be ≤200 chars with no control characters".into()));
+                    if lt.len() > 200 || lt.contains('\0') || lt.contains('\n') || lt.contains('\r')
+                    {
+                        return Err(GBrainError::InvalidInput(
+                            "link_type must be ≤200 chars with no control characters".into(),
+                        ));
                     }
                 }
                 if let Some(ctx) = context {
                     if ctx.len() > 2000 || ctx.contains('\0') {
-                        return Err(GBrainError::InvalidInput("context must be ≤2000 chars with no null bytes".into()));
+                        return Err(GBrainError::InvalidInput(
+                            "context must be ≤2000 chars with no null bytes".into(),
+                        ));
                     }
                 }
                 ops.engine
@@ -611,7 +633,9 @@ impl McpServer {
                 let summary = arguments["summary"].as_str().unwrap_or("");
                 // Validate date format (YYYY-MM-DD) for LLM callers using proper date parsing
                 if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
-                    return Err(GBrainError::InvalidInput("date must be valid YYYY-MM-DD format".to_string()));
+                    return Err(GBrainError::InvalidInput(
+                        "date must be valid YYYY-MM-DD format".to_string(),
+                    ));
                 }
                 // Cap summary length to prevent abuse from LLM callers
                 let summary_capped = if summary.len() > 500 {
@@ -634,9 +658,14 @@ impl McpServer {
                 // Validate slug for remote callers
                 crate::security::validate_page_slug(slug)?;
                 let limit = arguments["limit"].as_u64().map(|l| l as usize);
-                let entries = ops
-                    .engine
-                    .get_timeline(slug, Some(TimelineQueryOpts { limit, after: None, before: None }))?;
+                let entries = ops.engine.get_timeline(
+                    slug,
+                    Some(TimelineQueryOpts {
+                        limit,
+                        after: None,
+                        before: None,
+                    }),
+                )?;
                 Ok(serde_json::to_value(entries)?)
             }
 
@@ -674,7 +703,9 @@ impl McpServer {
                 let path = arguments["path"].as_str().unwrap_or("");
                 // R3-05: Reject empty path — prevents silent default to empty path
                 if path.is_empty() {
-                    return Err(crate::error::GBrainError::InvalidInput("path is required for file_upload".to_string()));
+                    return Err(crate::error::GBrainError::InvalidInput(
+                        "path is required for file_upload".to_string(),
+                    ));
                 }
                 let slug = arguments["page_slug"].as_str().unwrap_or("unsorted");
                 crate::security::validate_page_slug(slug)?;
@@ -714,8 +745,9 @@ impl McpServer {
                 let slug = arguments["slug"].as_str().unwrap_or("");
                 // Validate slug for remote callers (write operation)
                 crate::security::validate_page_slug(slug)?;
-                let version_id = arguments["version_id"].as_i64()
-                    .ok_or_else(|| GBrainError::InvalidInput("version_id must be a valid integer".into()))?;
+                let version_id = arguments["version_id"].as_i64().ok_or_else(|| {
+                    GBrainError::InvalidInput("version_id must be a valid integer".into())
+                })?;
                 ops.engine.revert_to_version(slug, version_id)?;
                 Ok(serde_json::json!({"ok": true}))
             }
@@ -733,7 +765,8 @@ impl McpServer {
                 let json_size = data.to_string().len();
                 if json_size > 1_000_000 {
                     return Err(GBrainError::InvalidInput(format!(
-                        "Raw data payload too large: {} bytes (max 1MB)", json_size
+                        "Raw data payload too large: {} bytes (max 1MB)",
+                        json_size
                     )));
                 }
                 ops.engine.put_raw_data(slug, source, data)?;
@@ -797,8 +830,13 @@ impl McpServer {
             "file_url" => {
                 let storage_path = arguments["storage_path"].as_str().unwrap_or("");
                 // Validate storage_path for remote callers: reject traversal patterns
-                if storage_path.contains("..") || storage_path.contains('\0') || storage_path.contains('\\') {
-                    return Err(crate::error::GBrainError::Security("invalid storage path".into()));
+                if storage_path.contains("..")
+                    || storage_path.contains('\0')
+                    || storage_path.contains('\\')
+                {
+                    return Err(crate::error::GBrainError::Security(
+                        "invalid storage path".into(),
+                    ));
                 }
                 // Path containment: verify resolved path stays within file storage directory
                 let base_dir = Config::base_dir();
@@ -815,7 +853,8 @@ impl McpServer {
                 let force_full = arguments["force_full"].as_bool().unwrap_or(false);
                 let path = std::path::Path::new(repo_path);
                 // Use canonical security validation instead of inline checks
-                let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let working_dir =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                 crate::security::validate_upload_path(path, true, &working_dir)?;
                 crate::security::validate_contained(path, &working_dir, true)?;
                 let result = crate::sync::sync_brain(&self.engine, path, force_full, true)?;

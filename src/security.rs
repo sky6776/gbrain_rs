@@ -110,7 +110,9 @@ pub fn validate_page_slug(slug: &str) -> Result<()> {
 
     // 6. No consecutive slashes
     if slug.contains("//") {
-        return Err(GBrainError::Security("consecutive slashes in slug".to_string()));
+        return Err(GBrainError::Security(
+            "consecutive slashes in slug".to_string(),
+        ));
     }
 
     // 7. Format: prefix/name[/sub...] or just name
@@ -126,9 +128,10 @@ pub fn validate_page_slug(slug: &str) -> Result<()> {
     // 8. Each segment: lowercase, alphanumeric, hyphens only; must not be empty
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
-            return Err(GBrainError::Security(
-                format!("empty segment at position {} in slug", i),
-            ));
+            return Err(GBrainError::Security(format!(
+                "empty segment at position {} in slug",
+                i
+            )));
         }
         if !part
             .chars()
@@ -194,13 +197,21 @@ pub fn validate_filename(name: &str) -> Result<()> {
 /// Mirrors TS LocalStorage.contained() — prevents path traversal attacks.
 /// Canonicalizes both the path and base_dir, then verifies the path starts with base_dir.
 /// P1-10: Also rejects paths containing symlinks for remote callers (TOCTOU defense).
-pub fn validate_contained(path: &std::path::Path, base_dir: &std::path::Path, remote: bool) -> Result<std::path::PathBuf> {
+pub fn validate_contained(
+    path: &std::path::Path,
+    base_dir: &std::path::Path,
+    remote: bool,
+) -> Result<std::path::PathBuf> {
     // P1-10: Reject symlinks BEFORE canonicalize for remote callers (TOCTOU defense)
     if remote {
         reject_symlinks(path)?;
     }
     let canonical_base = base_dir.canonicalize().map_err(|e| {
-        GBrainError::Security(format!("Cannot resolve base directory {}: {}", base_dir.display(), e))
+        GBrainError::Security(format!(
+            "Cannot resolve base directory {}: {}",
+            base_dir.display(),
+            e
+        ))
     })?;
     let resolved = path.canonicalize().map_err(|e| {
         GBrainError::Security(format!("Cannot resolve path {}: {}", path.display(), e))
@@ -208,7 +219,8 @@ pub fn validate_contained(path: &std::path::Path, base_dir: &std::path::Path, re
     if !resolved.starts_with(&canonical_base) {
         return Err(GBrainError::Security(format!(
             "Path traversal detected: {} is outside {}",
-            resolved.display(), canonical_base.display()
+            resolved.display(),
+            canonical_base.display()
         )));
     }
     Ok(resolved)

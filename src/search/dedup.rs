@@ -206,7 +206,11 @@ impl Default for DedupOpts {
 /// Layer 4: Cap N chunks per page (from opts.max_per_page)
 /// Layer 5: Compiled truth guarantee — swap in best CT chunk if page has none
 /// Final: Flatten, sort by score, truncate to limit
-pub fn dedup_results(hits: Vec<SearchResult>, limit: usize, opts: Option<DedupOpts>) -> Vec<SearchResult> {
+pub fn dedup_results(
+    hits: Vec<SearchResult>,
+    limit: usize,
+    opts: Option<DedupOpts>,
+) -> Vec<SearchResult> {
     let opts = opts.unwrap_or_default();
 
     // Pre-build best CT per slug from ALL hits before Layer 1 consumes them.
@@ -246,7 +250,8 @@ pub fn dedup_results(hits: Vec<SearchResult>, limit: usize, opts: Option<DedupOp
             match (a_ct, b_ct) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => b.score
+                _ => b
+                    .score
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal),
             }
@@ -293,13 +298,19 @@ pub fn dedup_results(hits: Vec<SearchResult>, limit: usize, opts: Option<DedupOp
     let mut slugs_needing_ct: HashMap<String, usize> = HashMap::new(); // slug -> index of lowest-score non-CT chunk
     for r in capped.iter() {
         if r.source.as_ref() == Some(&ChunkSource::CompiledTruth) {
-            slugs_with_ct.entry(r.slug.clone()).and_modify(|s| *s = s.max(r.score)).or_insert(r.score);
+            slugs_with_ct
+                .entry(r.slug.clone())
+                .and_modify(|s| *s = s.max(r.score))
+                .or_insert(r.score);
         }
     }
     for (i, r) in capped.iter().enumerate() {
-        if r.source.as_ref() != Some(&ChunkSource::CompiledTruth) && !slugs_with_ct.contains_key(&r.slug) {
+        if r.source.as_ref() != Some(&ChunkSource::CompiledTruth)
+            && !slugs_with_ct.contains_key(&r.slug)
+        {
             // Track the lowest-scoring non-CT chunk for this slug
-            slugs_needing_ct.entry(r.slug.clone())
+            slugs_needing_ct
+                .entry(r.slug.clone())
                 .and_modify(|best_idx| {
                     if capped[*best_idx].score > r.score {
                         *best_idx = i;
@@ -406,8 +417,7 @@ mod tests {
                 r
             })
             .chain((0..4).map(|i| {
-                let mut r =
-                    make_result(&format!("company-{i}"), "content", 0.7 - i as f64 * 0.05);
+                let mut r = make_result(&format!("company-{i}"), "content", 0.7 - i as f64 * 0.05);
                 r.page_type = Some(PageType::Company);
                 r
             }))
@@ -431,9 +441,17 @@ mod tests {
             .filter(|r| r.page_type == Some(PageType::Company))
             .count();
         // Person should be capped at max_per_type = 7
-        assert!(person_count <= 7, "Person count {} should be <= 7", person_count);
+        assert!(
+            person_count <= 7,
+            "Person count {} should be <= 7",
+            person_count
+        );
         // Company should not be capped (4 <= 7)
-        assert!(company_count <= 4, "Company count {} should be <= 4", company_count);
+        assert!(
+            company_count <= 4,
+            "Company count {} should be <= 4",
+            company_count
+        );
         // At least some results should remain
         assert!(!deduped.is_empty());
     }
@@ -458,8 +476,16 @@ mod tests {
         // Two different chunks from the same page should both survive
         // if they're semantically different enough
         let results = vec![
-            make_result("a", "machine learning algorithms for classification tasks", 0.9),
-            make_result("a", "database schema design and SQL optimization patterns", 0.8),
+            make_result(
+                "a",
+                "machine learning algorithms for classification tasks",
+                0.9,
+            ),
+            make_result(
+                "a",
+                "database schema design and SQL optimization patterns",
+                0.8,
+            ),
             make_result("b", "different page content here", 0.7),
         ];
         let deduped = dedup_results(results, 10, None);
@@ -503,19 +529,32 @@ mod tests {
     fn test_cross_source_dedup_prefers_ct() {
         // Same page, very similar text, different sources → keep CT, drop Timeline
         let results = vec![
-            make_ct_result("a", "Alice is a software engineer at Google working on AI and machine learning systems", 0.7),
-            make_tl_result("a", "Alice is a software engineer at Google working on AI and machine learning systems", 0.9),
+            make_ct_result(
+                "a",
+                "Alice is a software engineer at Google working on AI and machine learning systems",
+                0.7,
+            ),
+            make_tl_result(
+                "a",
+                "Alice is a software engineer at Google working on AI and machine learning systems",
+                0.9,
+            ),
         ];
         let deduped = dedup_results(results, 10, None);
         // Should keep CT chunk and drop Timeline chunk (similar text, same page)
-        let ct_count = deduped.iter()
+        let ct_count = deduped
+            .iter()
             .filter(|r| r.source.as_ref() == Some(&ChunkSource::CompiledTruth))
             .count();
-        let tl_count = deduped.iter()
+        let tl_count = deduped
+            .iter()
             .filter(|r| r.source.as_ref() == Some(&ChunkSource::Timeline))
             .count();
         assert!(ct_count >= 1, "Should keep at least one CT chunk");
-        assert_eq!(tl_count, 0, "Should drop Timeline chunk when CT covers same content");
+        assert_eq!(
+            tl_count, 0,
+            "Should drop Timeline chunk when CT covers same content"
+        );
     }
 
     #[test]
@@ -527,7 +566,10 @@ mod tests {
         ];
         let deduped = dedup_results(results, 10, None);
         // Text is dissimilar, so both should survive
-        assert!(deduped.len() >= 2, "Dissimilar chunks from different sources should both survive");
+        assert!(
+            deduped.len() >= 2,
+            "Dissimilar chunks from different sources should both survive"
+        );
     }
 
     #[test]
@@ -535,28 +577,50 @@ mod tests {
         // Different pages, similar text, different sources → both kept
         // (cross-source dedup only applies within same page)
         let results = vec![
-            make_ct_result("a", "Alice is a software engineer at Google working on AI", 0.7),
-            make_tl_result("b", "Alice is a software engineer at Google working on ML", 0.9),
+            make_ct_result(
+                "a",
+                "Alice is a software engineer at Google working on AI",
+                0.7,
+            ),
+            make_tl_result(
+                "b",
+                "Alice is a software engineer at Google working on ML",
+                0.9,
+            ),
         ];
         let deduped = dedup_results(results, 10, None);
         // Different slugs → cross-source dedup doesn't apply
         // But Layer 2 (text similarity) may still dedup them
         // The key point: both slugs should be represented
         let slugs: std::collections::HashSet<_> = deduped.iter().map(|r| r.slug.clone()).collect();
-        assert!(slugs.contains("a") || slugs.contains("b"), "At least one page should survive");
+        assert!(
+            slugs.contains("a") || slugs.contains("b"),
+            "At least one page should survive"
+        );
     }
 
     #[test]
     fn test_cross_source_dedup_same_source_keeps_higher_score() {
         // Same page, very similar text, same source → keep higher score
         let results = vec![
-            make_tl_result("a", "The quick brown fox jumps over the lazy dog in the park today", 0.9),
-            make_tl_result("a", "The quick brown fox jumps over the lazy dog in the park today", 0.7),
+            make_tl_result(
+                "a",
+                "The quick brown fox jumps over the lazy dog in the park today",
+                0.9,
+            ),
+            make_tl_result(
+                "a",
+                "The quick brown fox jumps over the lazy dog in the park today",
+                0.7,
+            ),
         ];
         let deduped = dedup_results(results, 10, None);
         // Should keep the higher-scored one
         let a_count = deduped.iter().filter(|r| r.slug == "a").count();
-        assert_eq!(a_count, 1, "Similar same-source chunks should be deduped to 1");
+        assert_eq!(
+            a_count, 1,
+            "Similar same-source chunks should be deduped to 1"
+        );
         assert_eq!(deduped[0].score, 0.9, "Should keep the higher-scored chunk");
     }
 }

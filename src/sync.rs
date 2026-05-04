@@ -41,22 +41,29 @@ pub struct SyncFailure {
 
 /// Record sync failures to JSONL log, deduplicating by (path, commit, error-hash)
 /// P2-1: Use SHA-256 hash of error message instead of error.len() (mirrors TS _hashError)
-pub fn record_sync_failures(
-    failures: &[SyncFailure],
-    failure_log_path: &Path,
-) -> Result<()> {
+pub fn record_sync_failures(failures: &[SyncFailure], failure_log_path: &Path) -> Result<()> {
     // Load existing failures for dedup
     let existing = load_sync_failures(failure_log_path);
     let mut existing_keys = std::collections::HashSet::new();
     for f in &existing {
-        let key = format!("{}:{}:{}", f.path, f.commit.as_deref().unwrap_or(""), hash_error(&f.error));
+        let key = format!(
+            "{}:{}:{}",
+            f.path,
+            f.commit.as_deref().unwrap_or(""),
+            hash_error(&f.error)
+        );
         existing_keys.insert(key);
     }
 
     let new_failures: Vec<SyncFailure> = failures
         .iter()
         .filter(|f| {
-            let key = format!("{}:{}:{}", f.path, f.commit.as_deref().unwrap_or(""), hash_error(&f.error));
+            let key = format!(
+                "{}:{}:{}",
+                f.path,
+                f.commit.as_deref().unwrap_or(""),
+                hash_error(&f.error)
+            );
             !existing_keys.contains(&key)
         })
         .cloned()
@@ -102,20 +109,25 @@ pub fn acknowledge_sync_failures(failure_log_path: &Path) -> Result<usize> {
     if !failures.is_empty() {
         let temp_path = failure_log_path.with_extension("jsonl.tmp");
         {
-            let mut file = std::fs::File::create(&temp_path)
-                .map_err(|e| GBrainError::FileError(format!("Failed to create temp failure log: {}", e)))?;
+            let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+                GBrainError::FileError(format!("Failed to create temp failure log: {}", e))
+            })?;
             for failure in &failures {
-                let line = serde_json::to_string(failure)
-                    .map_err(|e| GBrainError::FileError(format!("Failed to serialize failure: {}", e)))?;
+                let line = serde_json::to_string(failure).map_err(|e| {
+                    GBrainError::FileError(format!("Failed to serialize failure: {}", e))
+                })?;
                 use std::io::Write;
-                file.write_all(line.as_bytes())
-                    .map_err(|e| GBrainError::FileError(format!("Failed to write failure log: {}", e)))?;
-                file.write_all(b"\n")
-                    .map_err(|e| GBrainError::FileError(format!("Failed to write newline: {}", e)))?;
+                file.write_all(line.as_bytes()).map_err(|e| {
+                    GBrainError::FileError(format!("Failed to write failure log: {}", e))
+                })?;
+                file.write_all(b"\n").map_err(|e| {
+                    GBrainError::FileError(format!("Failed to write newline: {}", e))
+                })?;
             }
         }
-        std::fs::rename(&temp_path, failure_log_path)
-            .map_err(|e| GBrainError::FileError(format!("Failed to rename temp failure log: {}", e)))?;
+        std::fs::rename(&temp_path, failure_log_path).map_err(|e| {
+            GBrainError::FileError(format!("Failed to rename temp failure log: {}", e))
+        })?;
     }
 
     Ok(count)
@@ -641,7 +653,10 @@ fn git_pull(path: &Path) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(GBrainError::FileError(format!("git pull failed: {}", stderr)));
+        return Err(GBrainError::FileError(format!(
+            "git pull failed: {}",
+            stderr
+        )));
     }
     Ok(())
 }

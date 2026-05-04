@@ -86,7 +86,8 @@ impl FailImproveLoop {
 
     /// P2-2: Get the improvements file path for an operation
     fn improvements_path(&self, operation: &str) -> PathBuf {
-        self.log_dir.join(format!("{}_improvements.json", operation))
+        self.log_dir
+            .join(format!("{}_improvements.json", operation))
     }
 
     /// P2-2: Increment call count (mirrors TS incrementCallCount)
@@ -330,7 +331,7 @@ impl FailImproveLoop {
                 .iter()
                 .rev()
                 .take(MAX_ENTRIES)
-                .rev()  // restore chronological order (oldest first)
+                .rev() // restore chronological order (oldest first)
                 .map(|l| l.to_string())
                 .collect::<Vec<String>>();
             let rotated_content = format!("{}\n", kept.join("\n"));
@@ -464,7 +465,10 @@ mod tests {
 
         let improvements = loop_.load_improvements("imp_op");
         assert_eq!(improvements.len(), 2);
-        assert_eq!(improvements[0].description, "Added better heuristic for names");
+        assert_eq!(
+            improvements[0].description,
+            "Added better heuristic for names"
+        );
 
         // Clean up
         let _ = std::fs::remove_dir_all(&dir);

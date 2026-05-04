@@ -217,7 +217,9 @@ async fn transcribe_large_file(
     // Create unique temp directory for segments (avoids race conditions between concurrent transcriptions)
     let unique_id = {
         use std::time::SystemTime;
-        let t = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let t = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         format!("{:x}", t.as_nanos())
     };
     let temp_dir = std::env::temp_dir().join(format!("gbrain_segments_{}", unique_id));

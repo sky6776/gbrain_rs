@@ -5,7 +5,7 @@
 //! retry with exponential backoff, Retry-After header parsing,
 //! input truncation, and batch completion callbacks.
 
-use crate::backoff::{BackoffOpts, backoff_delay_ms};
+use crate::backoff::{backoff_delay_ms, BackoffOpts};
 use crate::error::{GBrainError, Result};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
@@ -188,7 +188,9 @@ impl Embedder {
                                 );
                                 return Err(GBrainError::Embedding(format!(
                                     "Embedding dimension mismatch: expected {}, got {} at index {}",
-                                    self.dimensions, d.embedding.len(), d.index
+                                    self.dimensions,
+                                    d.embedding.len(),
+                                    d.index
                                 )));
                             }
                             // Validate all values are finite (no NaN or Infinity)
@@ -213,7 +215,8 @@ impl Embedder {
                             );
                             return Err(GBrainError::Embedding(format!(
                                 "Response count mismatch: expected {} embeddings, got {}",
-                                texts.len(), embedding_resp.data.len()
+                                texts.len(),
+                                embedding_resp.data.len()
                             )));
                         }
 
@@ -236,7 +239,8 @@ impl Embedder {
                     let error_text = resp.text().await.unwrap_or_default();
 
                     // Retry on rate limit (429) or server error (5xx)
-                    if (status.as_u16() == 429 || status.as_u16() >= 500) && attempt <= backoff_opts.max_retries
+                    if (status.as_u16() == 429 || status.as_u16() >= 500)
+                        && attempt <= backoff_opts.max_retries
                     {
                         // Parse Retry-After header
                         let retry_after_ms = headers
@@ -275,7 +279,8 @@ impl Embedder {
                     }
                     return Err(GBrainError::Embedding(format!(
                         "Request failed after {} attempts: {}",
-                        backoff_opts.max_retries + 1, e
+                        backoff_opts.max_retries + 1,
+                        e
                     )));
                 }
             }
@@ -330,7 +335,7 @@ mod tests {
         // Should break at the last space before the limit, not mid-word
         let word = "abcdefghij";
         let text = format!("{} {} {}", word, word, word); // "abcdefghij abcdefghij abcdefghij"
-        // Limit in the middle of the third word — should truncate after the second word
+                                                          // Limit in the middle of the third word — should truncate after the second word
         let truncated = truncate_at_word_boundary(&text, word.len() * 2 + 2 + 5);
         // The truncation should end at a space boundary (may include trailing space)
         // The key invariant: no partial word at the end

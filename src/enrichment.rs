@@ -100,8 +100,11 @@ pub struct SuggestedLink {
 pub fn extract_entity_candidates(text: &str) -> Vec<EntityCandidate> {
     static CAPS_RE: OnceLock<Regex> = OnceLock::new();
     static COMPANY_SUFFIXES_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CAPS_RE.get_or_init(|| Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b").unwrap());
-    let company_suffixes = COMPANY_SUFFIXES_RE.get_or_init(|| Regex::new(r"(?i)\b(Inc|Corp|Ltd|LLC|Labs?|Tech|AI|Capital|Ventures?|Fund)\b").unwrap());
+    let re =
+        CAPS_RE.get_or_init(|| Regex::new(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b").unwrap());
+    let company_suffixes = COMPANY_SUFFIXES_RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(Inc|Corp|Ltd|LLC|Labs?|Tech|AI|Capital|Ventures?|Fund)\b").unwrap()
+    });
 
     let mut candidates = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -132,7 +135,12 @@ pub fn extract_entity_candidates(text: &str) -> Vec<EntityCandidate> {
         while !text.is_char_boundary(ctx_start) && ctx_start < caps.get(0).unwrap().end() {
             ctx_start += 1;
         }
-        let mut ctx_end = caps.get(0).unwrap().end().saturating_add(80).min(text.len());
+        let mut ctx_end = caps
+            .get(0)
+            .unwrap()
+            .end()
+            .saturating_add(80)
+            .min(text.len());
         // Walk backward to nearest char boundary to avoid panic on multi-byte UTF-8
         while !text.is_char_boundary(ctx_end) && ctx_end > ctx_start {
             ctx_end -= 1;
@@ -155,7 +163,11 @@ pub fn extract_entity_candidates(text: &str) -> Vec<EntityCandidate> {
 /// - Meeting or voice-note → Tier1
 /// - 3-7 mentions + 2+ sources → Tier2
 /// - Default → Tier3
-pub fn compute_tier(mention_count: usize, source_count: usize, page_type: Option<PageType>) -> Tier {
+pub fn compute_tier(
+    mention_count: usize,
+    source_count: usize,
+    page_type: Option<PageType>,
+) -> Tier {
     // Meeting or voice-note → Tier1
     if matches!(page_type, Some(PageType::Meeting) | Some(PageType::Note)) {
         return Tier::Tier1;
@@ -233,10 +245,16 @@ impl<'a> EnrichmentService<'a> {
         let page = self.engine.get_page(slug)?;
         // Use compute_tier with source_count and page_type instead of legacy suggest_tier
         // which hardcodes source_count=0 and page_type=None, making Tier2 unreachable
-        let source_count = page.as_ref().map(|p| {
-            // Count backlinks as a proxy for source count
-            self.engine.get_backlinks(&p.slug).map(|l| l.len()).unwrap_or(0)
-        }).unwrap_or(0);
+        let source_count = page
+            .as_ref()
+            .map(|p| {
+                // Count backlinks as a proxy for source count
+                self.engine
+                    .get_backlinks(&p.slug)
+                    .map(|l| l.len())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
         let page_type = page.as_ref().map(|p| p.page_type.clone());
         let tier = compute_tier(mention_count, source_count, page_type);
         let suggested_tags = page
@@ -288,10 +306,19 @@ impl<'a> EnrichmentService<'a> {
                 );
                 let ops = crate::operations::Operations::with_config(
                     self.engine,
-                    crate::operations::OpContext { remote: true, ..Default::default() },
+                    crate::operations::OpContext {
+                        remote: true,
+                        ..Default::default()
+                    },
                     config.clone(),
                 );
-                match ops.put_page(&entity_ref.slug, &entity_ref.display_name, &stub_content, None, None) {
+                match ops.put_page(
+                    &entity_ref.slug,
+                    &entity_ref.display_name,
+                    &stub_content,
+                    None,
+                    None,
+                ) {
                     Ok(_) => {
                         result.stubs_created += 1;
                         info!(stub_slug = %entity_ref.slug, source = %slug, "Created stub page");
@@ -304,9 +331,9 @@ impl<'a> EnrichmentService<'a> {
 
             // Add backlink (skip if already exists to prevent duplicates on re-enrichment)
             let existing_links = self.engine.get_links(&entity_ref.slug)?;
-            let already_linked = existing_links.iter().any(|l| {
-                l.to_slug == slug && l.link_type == "mentioned_in"
-            });
+            let already_linked = existing_links
+                .iter()
+                .any(|l| l.to_slug == slug && l.link_type == "mentioned_in");
             if !already_linked {
                 let backlink = LinkBatchInput {
                     from_slug: entity_ref.slug.clone(),
@@ -454,8 +481,12 @@ mod tests {
         let text = "Alice Smith met with Sequoia Capital yesterday.";
         let candidates = extract_entity_candidates(text);
         assert!(!candidates.is_empty());
-        assert!(candidates.iter().any(|c| c.name == "Alice Smith" && c.entity_type == EntityType::Person));
-        assert!(candidates.iter().any(|c| c.name.contains("Sequoia") && c.entity_type == EntityType::Company));
+        assert!(candidates
+            .iter()
+            .any(|c| c.name == "Alice Smith" && c.entity_type == EntityType::Person));
+        assert!(candidates
+            .iter()
+            .any(|c| c.name.contains("Sequoia") && c.entity_type == EntityType::Company));
     }
 
     #[test]

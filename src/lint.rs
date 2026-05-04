@@ -58,11 +58,15 @@ pub struct LintResult {
 
 impl LintResult {
     pub fn has_errors(&self) -> bool {
-        self.issues.iter().any(|i| i.severity == LintSeverity::Error)
+        self.issues
+            .iter()
+            .any(|i| i.severity == LintSeverity::Error)
     }
 
     pub fn has_warnings(&self) -> bool {
-        self.issues.iter().any(|i| i.severity >= LintSeverity::Warning)
+        self.issues
+            .iter()
+            .any(|i| i.severity >= LintSeverity::Warning)
     }
 }
 
@@ -132,16 +136,27 @@ pub fn lint_pages(engine: &SqliteEngine, slug: Option<&str>, opts: LintOpts) -> 
         // If fixes were applied and not a dry run, write the fixed content back
         if let Some(ref fixed) = result.fixed_content {
             if opts.fix && !opts.dry_run {
-                match engine.put_page(&page.slug, PageInput {
-                    page_type: page.page_type.clone(),
-                    title: page.title.clone(),
-                    compiled_truth: fixed.clone(),
-                    timeline: page.timeline.as_ref().and_then(|s| serde_json::from_str(s).ok()),
-                    frontmatter: page.frontmatter.as_ref().and_then(|s| serde_json::from_str(s).ok()),
-                    content_hash: None,
-                }) {
+                match engine.put_page(
+                    &page.slug,
+                    PageInput {
+                        page_type: page.page_type.clone(),
+                        title: page.title.clone(),
+                        compiled_truth: fixed.clone(),
+                        timeline: page
+                            .timeline
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str(s).ok()),
+                        frontmatter: page
+                            .frontmatter
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str(s).ok()),
+                        content_hash: None,
+                    },
+                ) {
                     Ok(_) => info!(slug = %page.slug, "Lint: applied auto-fixes"),
-                    Err(e) => warn!(slug = %page.slug, error = %e, "Lint: failed to write fixed content"),
+                    Err(e) => {
+                        warn!(slug = %page.slug, error = %e, "Lint: failed to write fixed content")
+                    }
                 }
             }
         }
@@ -285,9 +300,9 @@ fn check_broken_citations(page: &Page, all_slugs: &HashSet<String>, issues: &mut
         if let Some(slug_ref) = cap.get(1) {
             let slug = slug_ref.as_str().trim();
             if !slug.is_empty() && !all_slugs.contains(slug) {
-                let line = cap.get(0).map(|m| {
-                    content[..m.start()].matches('\n').count() + 1
-                });
+                let line = cap
+                    .get(0)
+                    .map(|m| content[..m.start()].matches('\n').count() + 1);
                 issues.push(LintIssue {
                     slug: page.slug.clone(),
                     severity: LintSeverity::Warning,
@@ -425,6 +440,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let mut issues = Vec::new();
         check_llm_preamble(&page, &mut issues);
@@ -445,6 +461,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let mut issues = Vec::new();
         check_placeholder_dates(&page, &mut issues);
@@ -465,6 +482,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let mut issues = Vec::new();
         check_code_fence_residue(&page, &mut issues);
@@ -485,6 +503,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let mut issues = Vec::new();
         check_empty_sections(&page, &mut issues);
@@ -508,6 +527,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let mut issues = Vec::new();
         check_broken_citations(&page, &all_slugs, &mut issues);
@@ -556,7 +576,10 @@ mod tests {
         // Should have a closing fence at the end
         assert!(fixed.ends_with("```\n"));
         // Count fences -- should be even now
-        let count = fixed.lines().filter(|l| l.trim().starts_with("```")).count();
+        let count = fixed
+            .lines()
+            .filter(|l| l.trim().starts_with("```"))
+            .count();
         assert_eq!(count % 2, 0);
     }
 
@@ -589,10 +612,17 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let all_slugs = HashSet::new();
-        let opts_with_fix = LintOpts { fix: true, dry_run: false };
-        let opts_no_fix = LintOpts { fix: false, dry_run: false };
+        let opts_with_fix = LintOpts {
+            fix: true,
+            dry_run: false,
+        };
+        let opts_no_fix = LintOpts {
+            fix: false,
+            dry_run: false,
+        };
 
         // With fix enabled, should return fixed content
         let result = lint_page(
@@ -603,15 +633,14 @@ mod tests {
         );
         assert!(result.fixed_content.is_some());
         assert!(!result.fixed_content.as_ref().unwrap().contains("Of course"));
-        assert!(result.fixed_content.as_ref().unwrap().contains("Real content"));
+        assert!(result
+            .fixed_content
+            .as_ref()
+            .unwrap()
+            .contains("Real content"));
 
         // Without fix, should not return fixed content
-        let result = lint_page(
-            &SqliteEngine::in_memory(),
-            &page,
-            &all_slugs,
-            &opts_no_fix,
-        );
+        let result = lint_page(&SqliteEngine::in_memory(), &page, &all_slugs, &opts_no_fix);
         assert!(result.fixed_content.is_none());
     }
 
@@ -628,16 +657,15 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             content_hash: None,
+            deleted_at: None,
         };
         let all_slugs = HashSet::new();
-        let opts = LintOpts { fix: true, dry_run: false };
+        let opts = LintOpts {
+            fix: true,
+            dry_run: false,
+        };
 
-        let result = lint_page(
-            &SqliteEngine::in_memory(),
-            &page,
-            &all_slugs,
-            &opts,
-        );
+        let result = lint_page(&SqliteEngine::in_memory(), &page, &all_slugs, &opts);
         // placeholder-date is not auto-fixable, so no fixed content
         assert!(result.fixed_content.is_none());
         // But the issue should still be reported

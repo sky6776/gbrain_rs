@@ -77,6 +77,38 @@ fn test_delete_page() {
 }
 
 #[test]
+fn test_restore_soft_deleted_page() {
+    let engine = make_engine();
+    engine
+        .put_page(
+            "people/alice",
+            page_input("Alice", "Content", PageType::Person),
+        )
+        .expect("put");
+
+    engine.delete_page("people/alice").expect("delete");
+    assert!(engine.get_page("people/alice").expect("get").is_none());
+
+    let deleted = engine
+        .list_pages(PageFilters {
+            include_deleted: true,
+            slug_prefix: Some("people/".to_string()),
+            ..Default::default()
+        })
+        .expect("list deleted");
+    assert_eq!(deleted.len(), 1);
+    assert!(deleted[0].deleted_at.is_some());
+
+    assert!(engine.restore_page("people/alice").expect("restore"));
+    let restored = engine
+        .get_page("people/alice")
+        .expect("get restored")
+        .expect("restored page");
+    assert_eq!(restored.title, "Alice");
+    assert!(restored.deleted_at.is_none());
+}
+
+#[test]
 fn test_list_pages() {
     let engine = make_engine();
     engine
@@ -92,6 +124,8 @@ fn test_list_pages() {
         limit: Some(50),
         offset: None,
         updated_after: None,
+        include_deleted: false,
+        slug_prefix: None,
     };
     let pages = engine.list_pages(filters).expect("list");
     assert_eq!(pages.len(), 2);
@@ -113,6 +147,8 @@ fn test_list_pages_by_type() {
         limit: Some(50),
         offset: None,
         updated_after: None,
+        include_deleted: false,
+        slug_prefix: None,
     };
     let pages = engine.list_pages(filters).expect("list");
     assert_eq!(pages.len(), 1);
@@ -190,12 +226,26 @@ fn test_chunks() {
             chunk_text: "First chunk".to_string(),
             source: ChunkSource::CompiledTruth,
             token_count: 10,
+            embedding: None,
+            model: None,
+            language: None,
+            symbol_name: None,
+            symbol_type: None,
+            start_line: None,
+            end_line: None,
         },
         ChunkInput {
             chunk_index: 1,
             chunk_text: "Second chunk".to_string(),
             source: ChunkSource::Timeline,
             token_count: 10,
+            embedding: None,
+            model: None,
+            language: None,
+            symbol_name: None,
+            symbol_type: None,
+            start_line: None,
+            end_line: None,
         },
     ];
     engine
@@ -206,6 +256,54 @@ fn test_chunks() {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].chunk_text, "First chunk");
     assert_eq!(got[1].chunk_text, "Second chunk");
+}
+
+#[test]
+fn test_stale_chunks_track_embedding_status() {
+    let engine = make_engine();
+    engine
+        .put_page("people/alice", page_input("Alice", "A", PageType::Person))
+        .expect("put");
+
+    engine
+        .upsert_chunks(
+            "people/alice",
+            &[ChunkInput {
+                chunk_index: 0,
+                chunk_text: "Alice writes Rust".to_string(),
+                source: ChunkSource::CompiledTruth,
+                token_count: 3,
+                embedding: None,
+                model: None,
+                language: None,
+                symbol_name: None,
+                symbol_type: None,
+                start_line: None,
+                end_line: None,
+            }],
+        )
+        .expect("chunks");
+    assert_eq!(engine.count_stale_chunks().expect("stale count"), 1);
+
+    engine
+        .upsert_chunks(
+            "people/alice",
+            &[ChunkInput {
+                chunk_index: 0,
+                chunk_text: "Alice writes Rust".to_string(),
+                source: ChunkSource::CompiledTruth,
+                token_count: 3,
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                model: Some("test-embedding".to_string()),
+                language: None,
+                symbol_name: None,
+                symbol_type: None,
+                start_line: None,
+                end_line: None,
+            }],
+        )
+        .expect("embedded chunks");
+    assert_eq!(engine.count_stale_chunks().expect("stale count"), 0);
 }
 
 #[test]

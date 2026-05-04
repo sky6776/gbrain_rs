@@ -70,7 +70,8 @@ pub async fn llm_chunk(
     if text.len() > MAX_LLM_CHUNK_INPUT_CHARS {
         tracing::warn!(
             "Document too large for LLM chunking ({} chars, max {}), falling back to single chunk",
-            text.len(), MAX_LLM_CHUNK_INPUT_CHARS
+            text.len(),
+            MAX_LLM_CHUNK_INPUT_CHARS
         );
         return single_chunk(text, line_count);
     }
@@ -228,7 +229,8 @@ struct LLMChunkRaw {
 fn extract_json_array(text: &str) -> Option<&str> {
     // Try to find JSON within markdown code fences first (```json ... ```)
     static RE_FENCE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE_FENCE.get_or_init(|| regex::Regex::new(r"```(?:json)?\s*\n([\s\S]*?)\n```").unwrap());
+    let re =
+        RE_FENCE.get_or_init(|| regex::Regex::new(r"```(?:json)?\s*\n([\s\S]*?)\n```").unwrap());
     if let Some(m) = re.captures(text) {
         if let Some(group) = m.get(1) {
             let inner = group.as_str();

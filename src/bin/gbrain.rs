@@ -4,6 +4,7 @@
 use clap::{Parser, Subcommand};
 use gbrain_core::autopilot::Autopilot;
 use gbrain_core::config::Config;
+use gbrain_core::embedding::Embedder;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::error::{GBrainError, Result};
 use gbrain_core::lint::{lint_pages, LintOpts};
@@ -75,6 +76,19 @@ enum Commands {
         /// Skip confirmation
         #[arg(long)]
         force: bool,
+    },
+
+    /// Restore a soft-deleted page
+    Restore {
+        /// Page slug
+        slug: String,
+    },
+
+    /// Permanently purge soft-deleted pages older than the cutoff
+    PurgeDeleted {
+        /// Age cutoff in hours
+        #[arg(long, default_value = "72")]
+        older_than_hours: i64,
     },
 
     /// List pages
@@ -417,11 +431,31 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
 
         Commands::Delete { slug, force } => {
             if !force {
-                warn!(slug = %slug, "Are you sure you want to delete this page? Use --force to confirm.");
+                warn!(slug = %slug, "Are you sure you want to soft-delete this page? Use --force to confirm.");
                 return Ok(());
             }
             ops.delete_page(&slug)?;
-            info!(slug = %slug, "Page deleted");
+            info!(slug = %slug, "Page soft-deleted");
+        }
+
+        Commands::Restore { slug } => {
+            if ops.engine.restore_page(&slug)? {
+                info!(slug = %slug, "Page restored");
+            } else {
+                warn!(slug = %slug, "Page was not soft-deleted or does not exist");
+            }
+        }
+
+        Commands::PurgeDeleted { older_than_hours } => {
+            let slugs = ops.engine.purge_deleted_pages(older_than_hours)?;
+            if cli.json {
+                info!("{}", serde_json::to_string_pretty(&slugs)?);
+            } else {
+                info!(
+                    count = slugs.len(),
+                    older_than_hours, "Purged soft-deleted pages"
+                );
+            }
         }
 
         Commands::List { page_type, limit } => {
@@ -431,6 +465,8 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 limit: Some(limit),
                 offset: None,
                 updated_after: None,
+                include_deleted: false,
+                slug_prefix: None,
             };
 
             let pages = ops.list_pages(filters)?;
@@ -594,7 +630,10 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             if !fast {
                 // Full diagnostics
                 let stats = ops.engine.get_stats()?;
-                info!("Pages: {}, Chunks: {}, Links: {}", stats.page_count, stats.chunk_count, stats.link_count);
+                info!(
+                    "Pages: {}, Chunks: {}, Links: {}",
+                    stats.page_count, stats.chunk_count, stats.link_count
+                );
                 // Orphan detection
                 let orphans = engine.detect_orphans()?;
                 if orphans.is_empty() {
@@ -692,7 +731,11 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             for result in &results {
                 total_issues += result.issues.len();
                 if result.has_errors() {
-                    total_errors += result.issues.iter().filter(|i| i.severity == gbrain_core::lint::LintSeverity::Error).count();
+                    total_errors += result
+                        .issues
+                        .iter()
+                        .filter(|i| i.severity == gbrain_core::lint::LintSeverity::Error)
+                        .count();
                 }
                 if result.fixed_content.is_some() {
                     total_fixed += 1;
@@ -700,13 +743,22 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 for issue in &result.issues {
                     match issue.severity {
                         gbrain_core::lint::LintSeverity::Error => {
-                            error!("[{}] {} ({}): {}", issue.severity, result.slug, issue.rule, issue.message);
+                            error!(
+                                "[{}] {} ({}): {}",
+                                issue.severity, result.slug, issue.rule, issue.message
+                            );
                         }
                         gbrain_core::lint::LintSeverity::Warning => {
-                            warn!("[{}] {} ({}): {}", issue.severity, result.slug, issue.rule, issue.message);
+                            warn!(
+                                "[{}] {} ({}): {}",
+                                issue.severity, result.slug, issue.rule, issue.message
+                            );
                         }
                         gbrain_core::lint::LintSeverity::Info => {
-                            info!("[{}] {} ({}): {}", issue.severity, result.slug, issue.rule, issue.message);
+                            info!(
+                                "[{}] {} ({}): {}",
+                                issue.severity, result.slug, issue.rule, issue.message
+                            );
                         }
                     }
                 }
@@ -720,7 +772,14 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     String::new()
                 };
                 let dry_msg = if dry_run { " (dry run)" } else { "" };
-                info!("{} pages linted, {} issues ({} errors){}{}", results.len(), total_issues, total_errors, fix_msg, dry_msg);
+                info!(
+                    "{} pages linted, {} issues ({} errors){}{}",
+                    results.len(),
+                    total_issues,
+                    total_errors,
+                    fix_msg,
+                    dry_msg
+                );
             }
         }
 
@@ -764,19 +823,21 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     }
                 }
             }
-            ConfigCommand::Get { key } => {
-                match ops.engine.get_config(&key)? {
-                    Some(val) => info!("{}", val),
-                    None => info!("(not set)"),
-                }
-            }
+            ConfigCommand::Get { key } => match ops.engine.get_config(&key)? {
+                Some(val) => info!("{}", val),
+                None => info!("(not set)"),
+            },
             ConfigCommand::Set { key, value } => {
                 ops.engine.set_config(&key, &value)?;
                 info!("{} = {}", key, value);
             }
         },
 
-        Commands::Report { report_type, title, content } => {
+        Commands::Report {
+            report_type,
+            title,
+            content,
+        } => {
             let now = chrono::Utc::now();
             let dir = Config::base_dir().join("reports").join(&report_type);
             std::fs::create_dir_all(&dir)?;
@@ -784,27 +845,49 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             let path = dir.join(&filename);
             let title = title.unwrap_or_else(|| report_type.clone());
             let body = content.unwrap_or_default();
-            let report_content = format!("---\ntitle: {}\ntype: report\nreport_type: {}\ndate: {}\ntime: {}\n---\n\n{}",
-                title, report_type, now.format("%Y-%m-%d"), now.format("%H:%M"), body);
+            let report_content = format!(
+                "---\ntitle: {}\ntype: report\nreport_type: {}\ndate: {}\ntime: {}\n---\n\n{}",
+                title,
+                report_type,
+                now.format("%Y-%m-%d"),
+                now.format("%H:%M"),
+                body
+            );
             std::fs::write(&path, report_content)?;
             info!("Report saved: {}", path.display());
         }
 
-        Commands::Export { dir, page_type, slugs } => {
+        Commands::Export {
+            dir,
+            page_type,
+            slugs,
+        } => {
             let pages = if slugs.is_empty() {
                 let filters = PageFilters {
                     page_type: page_type.as_deref().map(PageType::from_str_lossy),
-                    limit: None, offset: None, tag: None, updated_after: None,
+                    limit: None,
+                    offset: None,
+                    tag: None,
+                    updated_after: None,
+                    include_deleted: false,
+                    slug_prefix: None,
                 };
                 ops.engine.list_pages(filters)?
             } else {
-                slugs.iter().filter_map(|s| ops.get_page(s).ok().flatten()).collect()
+                slugs
+                    .iter()
+                    .filter_map(|s| ops.get_page(s).ok().flatten())
+                    .collect()
             };
             if let Some(out_dir) = dir {
                 std::fs::create_dir_all(&out_dir)?;
                 for page in &pages {
-                    let path = std::path::PathBuf::from(&out_dir).join(format!("{}.md", page.slug.replace('/', "_")));
-                    let content = format!("---\ntype: {}\ntitle: {}\n---\n\n{}", page.page_type, page.title, page.compiled_truth);
+                    let path = std::path::PathBuf::from(&out_dir)
+                        .join(format!("{}.md", page.slug.replace('/', "_")));
+                    let content = format!(
+                        "---\ntype: {}\ntitle: {}\n---\n\n{}",
+                        page.page_type, page.title, page.compiled_truth
+                    );
                     std::fs::write(&path, content)?;
                     info!("Exported: {}", path.display());
                 }
@@ -813,15 +896,25 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 info!("{}", serde_json::to_string_pretty(&pages)?);
             } else {
                 for page in &pages {
-                    info!("---\ntype: {}\ntitle: {}\nslug: {}\n---\n{}", page.page_type, page.title, page.slug, page.compiled_truth);
+                    info!(
+                        "---\ntype: {}\ntitle: {}\nslug: {}\n---\n{}",
+                        page.page_type, page.title, page.slug, page.compiled_truth
+                    );
                 }
             }
         }
 
-        Commands::Import { dir, embed: do_embed, auto_link } => {
+        Commands::Import {
+            dir,
+            embed: do_embed,
+            auto_link,
+        } => {
             let import_dir = std::path::Path::new(&dir);
             if !import_dir.is_dir() {
-                return Err(GBrainError::InvalidInput(format!("Not a directory: {}", dir)));
+                return Err(GBrainError::InvalidInput(format!(
+                    "Not a directory: {}",
+                    dir
+                )));
             }
             let mut count = 0;
             let mut dirs = vec![import_dir.to_path_buf()];
@@ -837,7 +930,8 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                         // structured slugs (e.g. "people/alice"), and validate it
                         // to prevent path traversal from malicious filenames.
                         let relative = path.strip_prefix(import_dir).unwrap_or(&path);
-                        let slug = relative.with_extension("")
+                        let slug = relative
+                            .with_extension("")
                             .to_string_lossy()
                             .replace('\\', "/");
                         // Validate slug — skip files with invalid/traversal slugs
@@ -845,51 +939,136 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             tracing::warn!(slug = %slug, "Skipping file with invalid slug");
                             continue;
                         }
-                        ops.put_page(&slug, &slug, &content, None, None)?;
+                        let parsed = gbrain_core::markdown::parse_markdown(&content);
+                        if let Some(fm_slug) =
+                            parsed.frontmatter.get("slug").and_then(|v| v.as_str())
+                        {
+                            if fm_slug != slug {
+                                tracing::warn!(path = %path.display(), frontmatter_slug = %fm_slug, path_slug = %slug, "Skipping file with mismatched frontmatter slug");
+                                continue;
+                            }
+                        }
+                        let title = parsed
+                            .frontmatter
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&slug)
+                            .to_string();
+                        ops.put_page(&slug, &title, &content, None, None)?;
                         count += 1;
                     }
                 }
             }
             info!("Imported {} pages from {}", count, dir);
-            if do_embed { info!("Embed flag set — use 'gbrain embed' separately"); }
-            if auto_link { info!("Auto-link enabled — links extracted during put_page"); }
+            if do_embed {
+                info!("Embed flag set — use 'gbrain embed' separately");
+            }
+            if auto_link {
+                info!("Auto-link enabled — links extracted during put_page");
+            }
         }
 
         Commands::Embed { batch_size, slugs } => {
-            let filters = PageFilters {
-                limit: None, offset: None, tag: None, page_type: None, updated_after: None,
-            };
-            let target_pages = if slugs.is_empty() {
-                ops.engine.list_pages(filters)?
+            let api_key = config.openai_api_key.as_deref().ok_or_else(|| {
+                GBrainError::InvalidInput(
+                    "GBRAIN_OPENAI_API_KEY is required for embedding".to_string(),
+                )
+            })?;
+            let embedder = Embedder::new(
+                api_key,
+                config.openai_base_url.as_deref(),
+                Some(&config.embedding_model),
+                Some(config.embedding_dimensions),
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    GBrainError::InvalidInput(format!("failed to start async runtime: {}", e))
+                })?;
+            let stale_chunks: Vec<StaleChunk> = if slugs.is_empty() {
+                ops.engine.list_stale_chunks(None)?
             } else {
-                slugs.iter().filter_map(|s| ops.get_page(s).ok().flatten()).collect()
-            };
-            info!(page_count = target_pages.len(), batch_size, "Starting embed");
-            let mut embedded = 0;
-            for page in &target_pages {
-                let chunks = ops.engine.get_chunks(&page.slug)?;
-                for chunk in &chunks {
-                    if chunk.chunk_text.len() > 20 {
-                        embedded += 1;
-                        // Actual embedding requires async embedder — here we count
-                        // what would be embedded (the real embedding is done via API call)
-                        tracing::debug!(slug = %page.slug, chunk_idx = chunk.chunk_index, "Would embed chunk");
+                let mut rows = Vec::new();
+                for slug in &slugs {
+                    for c in ops.engine.get_chunks(slug)? {
+                        rows.push(StaleChunk {
+                            slug: slug.clone(),
+                            chunk_id: c.id,
+                            chunk_index: c.chunk_index,
+                            chunk_text: c.chunk_text,
+                            source: c.source,
+                            token_count: c.token_count,
+                            model: c.model,
+                        });
                     }
                 }
+                rows
+            };
+            info!(
+                chunk_count = stale_chunks.len(),
+                batch_size, "Starting embed"
+            );
+            let target_chunk_count = stale_chunks.len();
+            let mut embedded = 0;
+            for batch in stale_chunks.chunks(batch_size.max(1)) {
+                let texts: Vec<&str> = batch.iter().map(|c| c.chunk_text.as_str()).collect();
+                let embeddings = rt
+                    .block_on(embedder.embed_batch(&texts))
+                    .map_err(|e| GBrainError::Embedding(e.to_string()))?;
+                let mut by_slug: std::collections::HashMap<String, Vec<ChunkInput>> =
+                    std::collections::HashMap::new();
+                for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
+                    by_slug
+                        .entry(row.slug.clone())
+                        .or_default()
+                        .push(ChunkInput {
+                            chunk_index: row.chunk_index,
+                            chunk_text: row.chunk_text.clone(),
+                            source: row.source.clone(),
+                            token_count: row.token_count,
+                            embedding: Some(embedding),
+                            model: Some(config.embedding_model.clone()),
+                            language: None,
+                            symbol_name: None,
+                            symbol_type: None,
+                            start_line: None,
+                            end_line: None,
+                        });
+                }
+                for (slug, chunks) in by_slug {
+                    embedded += ops.engine.upsert_chunks(&slug, &chunks)?;
+                }
             }
-            info!(embedded, page_count = target_pages.len(), "Embed complete");
+            info!(embedded, target_chunk_count, "Embed complete");
         }
 
-        Commands::GraphQuery { from, to, depth, link_type } => {
-            let direction = if link_type.is_some() { Direction::Out } else { Direction::Both };
+        Commands::GraphQuery {
+            from,
+            to,
+            depth,
+            link_type,
+        } => {
+            let direction = if link_type.is_some() {
+                Direction::Out
+            } else {
+                Direction::Both
+            };
             if let Some(target) = to {
-                let opts = TraverseOpts { depth, direction, link_type };
+                let opts = TraverseOpts {
+                    depth,
+                    direction,
+                    link_type,
+                };
                 let paths = ops.engine.traverse_paths(&from, &target, opts)?;
                 if cli.json {
                     info!("{}", serde_json::to_string_pretty(&paths)?);
                 } else {
                     for p in &paths {
-                        info!("{} -> {} [{}] depth={}", p.from_slug, p.to_slug, p.link_type, p.depth);
+                        info!(
+                            "{} -> {} [{}] depth={}",
+                            p.from_slug, p.to_slug, p.link_type, p.depth
+                        );
                     }
                     info!("{} paths found", paths.len());
                 }
@@ -899,7 +1078,13 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     info!("{}", serde_json::to_string_pretty(&nodes)?);
                 } else {
                     for node in &nodes {
-                        info!("  {:indent$}{} [{}]", "", node.slug, node.page_type, indent = node.depth * 2);
+                        info!(
+                            "  {:indent$}{} [{}]",
+                            "",
+                            node.slug,
+                            node.page_type,
+                            indent = node.depth * 2
+                        );
                     }
                     info!("{} nodes reachable", nodes.len());
                 }
@@ -1042,7 +1227,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     "Extract complete"
                 );
             }
-        },
+        }
     }
 
     engine.disconnect()?;

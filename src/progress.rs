@@ -31,7 +31,10 @@ impl ProgressMode {
                 _ => {}
             }
         }
-        if std::env::var("GBRAIN_PROGRESS_JSON").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("GBRAIN_PROGRESS_JSON")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             return Self::Json;
         }
         Self::Auto
@@ -133,12 +136,22 @@ impl ProgressReporter {
                 if let Some(e) = eta_ms {
                     obj["eta_ms"] = serde_json::json!(e);
                 }
-                let _ = writeln!(self.writer, "{}", serde_json::to_string(&obj).unwrap_or_default());
+                let _ = writeln!(
+                    self.writer,
+                    "{}",
+                    serde_json::to_string(&obj).unwrap_or_default()
+                );
             }
             ProgressMode::Human => {
                 let total_str = self.total.map_or("?".to_string(), |t| t.to_string());
                 let line = if is_finish {
-                    format!("\r[{}] {}/{} done ({:.1}s)", self.phase, self.done, total_str, elapsed_ms as f64 / 1000.0)
+                    format!(
+                        "\r[{}] {}/{} done ({:.1}s)",
+                        self.phase,
+                        self.done,
+                        total_str,
+                        elapsed_ms as f64 / 1000.0
+                    )
                 } else {
                     format!("\r[{}] {}/{}", self.phase, self.done, total_str)
                 };
