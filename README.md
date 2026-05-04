@@ -1,5 +1,14 @@
 # gbrain-rs
 
+## 2026-05-04 当前实现状态
+
+- `gbrain embed`、查询流程和 Autopilot 已接入真实 embedding 生成与持久化；当 sqlite-vec 不可用时，会使用 `chunk_embeddings` fallback 表做 cosine 检索。
+- `delete` 现在是软删除，新增 `restore` 和 `purge-deleted` 命令；默认读取、列表、搜索、统计和健康检查都会排除软删除页面。
+- schema version 已更新到 9，新增 `deleted_at`、chunk 代码元数据字段，以及 `chunk_embeddings`。
+- `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
+- `put_page` 会从 Markdown fenced code block 生成额外的代码 chunk；搜索支持 include/exclude slug prefix、默认 hard-exclude 和 source boost。
+- Markdown import 会校验 frontmatter `slug` 与路径推导 slug 是否一致，不一致时跳过。
+
 [English](./README_EN.md) | 中文
 
 **个人知识大脑引擎** — [gbrain](https://github.com/garrytan/gbrain) 的 Rust 实现。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式知识库，支持混合搜索、知识图谱和 MCP 智能体集成。
@@ -54,7 +63,9 @@ cargo build --features file-server   # 包含 axum 文件服务器
 | `gbrain init` | 初始化新的知识库 |
 | `gbrain get <slug>` | 按 slug 读取页面 |
 | `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>]` | 创建或更新页面 |
-| `gbrain delete <slug> [--force]` | 删除页面 |
+| `gbrain delete <slug> [--force]` | 软删除页面 |
+| `gbrain restore <slug>` | 恢复软删除页面 |
+| `gbrain purge-deleted [--older-than-hours <N>]` | 永久清理旧的软删除页面 |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | 列出页面（可筛选） |
 | `gbrain query <query> [--limit <N>]` | 混合搜索（别名: `ask`） |
 
@@ -78,8 +89,8 @@ cargo build --features file-server   # 包含 axum 文件服务器
 
 | 命令 | 说明 |
 |------|------|
-| `gbrain embed [slugs...] [--batch-size <N>]` | 为内容块生成嵌入向量 |
-| `gbrain import <dir> [--embed] [--auto-link]` | 导入 Markdown 文件 |
+| `gbrain embed [slugs...] [--batch-size <N>]` | 为 stale chunks 生成并持久化嵌入向量 |
+| `gbrain import <dir> [--embed] [--auto-link]` | 导入 Markdown 文件；frontmatter slug 与路径不一致时跳过 |
 | `gbrain export [slugs...] [--dir <DIR>] [--page-type <TYPE>]` | 导出页面为 Markdown |
 | `gbrain extract [--mode links\|timeline\|all]` | 批量提取链接/时间线 |
 | `gbrain lint [slug] [--fix] [--dry-run]` | 零 LLM 质量检查（6 条规则） |
@@ -138,7 +149,7 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 |------|------|
 | `get_page` | 读取页面（支持模糊匹配） |
 | `put_page` | 写入/更新页面（Markdown + frontmatter） |
-| `delete_page` | 删除页面 |
+| `delete_page` | 软删除页面 |
 | `list_pages` | 列出页面（支持类型/标签/数量筛选） |
 | `get_chunks` | 获取页面的内容块 |
 

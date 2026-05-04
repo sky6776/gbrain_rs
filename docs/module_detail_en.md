@@ -2,7 +2,7 @@
 
 English | [中文版](./module_detail.md)
 
-**Date**: 2026-04-29
+**Date**: 2026-05-04
 
 ---
 
@@ -27,7 +27,7 @@ getEdgesByChunk(chunkId): Promise<CodeEdgeResult[]>
 withReservedConnection<T>(fn): Promise<T>  // advisory lock
 ```
 
-### Rust: BrainEngine trait (engine.rs, 55 methods)
+### Rust: BrainEngine trait (engine.rs, 59 methods)
 
 ```rust
 // Single-engine implementation: SqliteEngine (SQLite + FTS5 + sqlite-vec)
@@ -38,6 +38,10 @@ detect_dead_links(slug): Result<Vec<String>>
 file_url_by_storage_path(storage_path): Result<Option<String>>
 file_verify(file_id): Result<bool>
 add_timeline_multi_batch(entries): Result<usize>
+restore_page(slug): Result<bool>
+purge_deleted_pages(older_than_hours): Result<Vec<String>>
+count_stale_chunks(): Result<usize>
+list_stale_chunks(limit): Result<Vec<StaleChunk>>
 ```
 
 ### Difference Analysis
@@ -48,7 +52,7 @@ add_timeline_multi_batch(entries): Result<usize>
 | dyn-compatible | Yes (interface) | No (trait) |
 | Connection management | Connection pool + advisory lock | Single connection |
 | Code edges | Yes | No |
-| Stale chunks | Yes | No |
+| Stale chunks | Yes | Yes |
 | Multi-source | Yes (source_id) | No |
 
 ---
@@ -69,7 +73,7 @@ publishPage(slug, opts): Promise<PublishResult>  // HTML export + encryption
 ### Rust: Operations (operations.rs, ~1,200 lines)
 
 ```rust
-// Core methods complete: put_page, get_page, delete_page, search, file_upload, etc.
+// Core methods complete: put_page, get_page, delete_page, search, query embedding, file_upload, etc.
 // Missing: extractAndEnrich, reindexCodePage, reconcileLinks, checkBacklinks, publishPage
 ```
 
@@ -109,8 +113,8 @@ search/
 | Aspect | TS | Rust |
 |--------|----|----|
 | SQL ranking | sql-ranking.ts (415 lines, Postgres-specific) | keyword.rs (68 lines, FTS5-specific) |
-| Source boost | Yes (349 lines) | No |
-| Hard exclude | Yes (SQL NOT LIKE) | No |
+| Source boost | Yes (349 lines) | Yes (slug-prefix weighting) |
+| Hard exclude | Yes (SQL NOT LIKE) | Yes (include/exclude slug-prefix filters) |
 | Two-pass retrieval | Yes (325 lines) | No |
 | Fuzzy search | pg_trgm (Postgres extension) | Custom implementation (317 lines) |
 | Evaluation framework | No | Yes (313 lines, P@k/R@k/MRR/nDCG@k) |
@@ -132,7 +136,7 @@ chunkers/
 └── edge-extractor.ts  (178 lines) Code edge extraction
 ```
 
-### Rust: chunker/ (3 files, ~1,361 lines)
+### Rust: chunker/ (3 files, ~1,361 lines + lightweight fenced-code extraction in operations.rs)
 
 ```
 chunker/
@@ -146,7 +150,7 @@ chunker/
 
 | Aspect | TS | Rust |
 |--------|----|----|
-| Code chunking | Yes (tree-sitter, 1,050 lines) | No |
+| Code chunking | Yes (tree-sitter, 1,050 lines) | Partial: Markdown fenced-code chunks |
 | Edge extraction | Yes (178 lines) | No |
 | Qualified names | Yes (109 lines) | No |
 | Semantic chunking | 340 lines | 719 lines (more detailed) |
@@ -450,7 +454,7 @@ pub struct Config {
 |-------------|----|----|
 | databaseUrl | Yes | No (uses db_path) |
 | storageBackend | Yes (local/s3/supabase) | No (local only) |
-| searchBoosts | Yes | No |
+| searchBoosts | Yes | Partial: built-in slug-prefix boosts |
 | hardExclude | Yes | No |
 | mcpPort | Yes | No |
 | mcpAuthToken | Yes | No |
@@ -514,10 +518,10 @@ enum GBrainError {
 
 - 222 lib unit tests (#[cfg(test)] mod tests)
 - 4 dedup integration tests
-- 15 engine integration tests
+- 17 engine integration tests
 - 16 fuzzy integration tests
 - 3 search integration tests
-- 260 total tests, all passing
+- 262 total tests, all passing
 - Uses :memory: SQLite, zero configuration
 
 ### Differences
@@ -525,7 +529,7 @@ enum GBrainError {
 | Aspect | TS | Rust |
 |--------|----|----|
 | Test framework | Bun test | cargo test |
-| Test count | Unknown (inline) | 260 |
+| Test count | Unknown (inline) | 262 |
 | Integration tests | PGLite instance | :memory: SQLite |
 | Evaluation framework | Yes (eval command) | Yes (eval.rs) |
 | Coverage | Unknown | Not measured |

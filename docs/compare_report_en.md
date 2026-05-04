@@ -2,7 +2,7 @@
 
 English | [中文版](./compare_report.md)
 
-**Date**: 2026-04-29
+**Date**: 2026-05-04
 **TS Version**: gbrain v0.22.8 (Bun runtime)
 **Rust Version**: gbrain-rs (native, SQLite + sqlite-vec + FTS5)
 
@@ -24,7 +24,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 - Rust lacks the Minions subsystem (4,478 lines)
 - Rust lacks the Resolver subsystem (1,095 lines)
 - Rust lacks the Skillify/Skillpack system (1,013 lines)
-- Rust lacks the code indexing/code chunking system (tree-sitter related, ~1,500 lines)
+- Rust now has lightweight fenced-code chunk indexing, but still lacks the full tree-sitter code indexing/code edge system (~1,500 lines in TS)
 
 ---
 
@@ -38,7 +38,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | **Fuzzy search** | pg_trgm (trigram) | Custom character trigram Jaccard |
 | **Connection pooling** | postgres.js built-in | Single connection (SQLite doesn't need pooling) |
 | **Transaction support** | Postgres transactions + advisory lock | BEGIN IMMEDIATE + COMMIT/ROLLBACK |
-| **Schema version** | V1-V29 | V1-V8 |
+| **Schema version** | V1-V29 | V1-V9 |
 | **Multi-source support** | source_id composite key (v0.18+) | No |
 | **PGLite** | Embedded WASM Postgres | No (uses SQLite directly) |
 | **PgBouncer** | Auto-detect compatibility | Not applicable |
@@ -46,7 +46,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 **Key differences**:
 - TS uses the Postgres ecosystem (pgvector, pg_trgm, tsvector), Rust uses the SQLite ecosystem (sqlite-vec, FTS5)
 - TS supports multi-source brains (source_id composite key), Rust does not
-- TS schema migrations reach V29, Rust only V8
+- TS schema migrations reach V29, Rust is currently V9
 - TS has dual engines (PGLite for embedded, remote Postgres for production), Rust only has SQLite
 
 ---
@@ -58,9 +58,9 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | Category | TS Methods | Rust Methods | Difference |
 |----------|-----------|-------------|------------|
 | Lifecycle | 4 | 4 | Same |
-| Page CRUD | 6 | 6 | Same |
+| Page CRUD | 6 | 8 | Rust adds soft-delete restore/purge |
 | Search | 4 | 3 | TS has searchKeywordChunks |
-| Chunking | 6 | 5 | TS has countStaleChunks, listStaleChunks |
+| Chunking | 6 | 7 | Rust now has countStaleChunks/listStaleChunks equivalents |
 | Links | 9 | 9 | Same |
 | Tags | 3 | 3 | Same |
 | Timeline | 3 | 4 | Rust has add_timeline_multi_batch |
@@ -72,15 +72,13 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | Files | 4 | 5 | Rust has file_url_by_storage_path, file_verify |
 | Code edges | 5 | 0 | **TS only** |
 | Other | 5 | 5 | Roughly same |
-| **Total** | **~59** | **~55** | |
+| **Total** | **~59** | **~59** | Rust still lacks code-edge APIs but added soft-delete/stale chunk APIs |
 
 ### TS-Only Methods
 
 | Method | Description |
 |--------|-------------|
 | `searchKeywordChunks()` | Search code chunks (v0.19+) |
-| `countStaleChunks()` | Count stale chunks |
-| `listStaleChunks()` | List stale chunks |
 | `findOrphanPages()` | Find orphan pages (Rust has detect_orphans) |
 | `addCodeEdges()` | Add code call edges (v0.20 Cathedral II) |
 | `deleteCodeEdgesForChunks()` | Delete code edges |
@@ -113,30 +111,30 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | architecture | Yes | Yes | Same |
 | meeting | Yes | Yes | Same |
 | note | Yes | Yes | Same |
-| **email** | Yes | No | **Missing in Rust** |
-| **slack** | Yes | No | **Missing in Rust** |
-| **calendar-event** | Yes | No | **Missing in Rust** |
-| **code** | Yes | No | **Missing in Rust** |
+| **email** | Yes | Yes | Same |
+| **slack** | Yes | Yes | Same |
+| **calendar-event** | Yes | Yes | Same |
+| **code** | Yes | Yes | Same |
 
-Rust is missing 4 PageType variants: email, slack, calendar-event, code. These are workflow types added in v0.18+.
+Rust now includes the workflow PageType variants added in TS v0.18+: email, slack, calendar-event, and code.
 
 ### Chunk Differences
 
 | Feature | TS | Rust |
 |---------|----|----|
-| chunk_source | compiled_truth / timeline / **fenced_code** | compiled_truth / timeline |
-| Code metadata | Yes (language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified) | No |
-| embedding field | Yes (Float32Array) | No (not stored in Chunk struct) |
-| model field | Yes | No |
-| embedded_at | Yes | No |
-| StaleChunkRow | Yes | No |
+| chunk_source | compiled_truth / timeline / **fenced_code** | compiled_truth / timeline / **fenced_code** |
+| Code metadata | Yes (language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified) | Partial: language, symbol_name, symbol_type, start_line, end_line |
+| embedding field | Yes (Float32Array) | Yes on `ChunkInput`; stored in `chunk_embeddings` fallback table |
+| model field | Yes | Yes |
+| embedded_at | Yes | Yes |
+| StaleChunkRow | Yes | Yes (`StaleChunk`) |
 
 ### SearchOpts Differences
 
 | Feature | TS | Rust |
 |---------|----|----|
-| exclude_slug_prefixes | Yes | No |
-| include_slug_prefixes | Yes | No |
+| exclude_slug_prefixes | Yes | Yes |
+| include_slug_prefixes | Yes | Yes |
 | language | Yes (v0.20) | No |
 | symbolKind | Yes (v0.20) | No |
 | nearSymbol | Yes (v0.20) | No |
@@ -166,8 +164,8 @@ Rust is missing 4 PageType variants: email, slack, calendar-event, code. These a
 
 | Step | TS | Rust | Difference |
 |------|----|----|------------|
-| 1. Keyword search | tsvector + ts_rank + **source-boost** + **hard-exclude** | FTS5 BM25 weighted | TS has source-boost and hard-exclude |
-| 2. Vector search | pgvector cosine distance | sqlite-vec cosine similarity | Different engines, same algorithm |
+| 1. Keyword search | tsvector + ts_rank + **source-boost** + **hard-exclude** | FTS5 BM25 weighted + source boost + hard exclude | Different SQL engine, similar controls |
+| 2. Vector search | pgvector cosine distance | sqlite-vec cosine similarity + `chunk_embeddings` fallback | Different engines, same algorithm |
 | 3. Fallback broadening | Yes | Yes | Same |
 | 4. RRF fusion | Yes (k=60) | Yes (k=60) | Same |
 | 5. compiled_truth boost | Yes (2.0x) | Yes | Weights may differ |
@@ -184,8 +182,8 @@ Rust is missing 4 PageType variants: email, slack, calendar-event, code. These a
 
 | Feature | File | Description |
 |---------|------|-------------|
-| source-boost | search/source-boost.ts | Search result weighting by slug prefix (e.g. originals/:1.5) |
-| hard-exclude | search/sql-ranking.ts | SQL-injected hard-exclude NOT(LIKE) clauses |
+| source-boost | search/source-boost.ts | Implemented in Rust as slug-prefix result weighting |
+| hard-exclude | search/sql-ranking.ts | Implemented in Rust via include/exclude slug-prefix filters |
 | two-pass retrieval | search/two-pass.ts | Cathedral II code structure retrieval (BFS traversal of code_edges) |
 | searchKeywordChunks | engine.ts | Code chunk search |
 
@@ -207,7 +205,7 @@ Rust is missing 4 PageType variants: email, slack, calendar-event, code. These a
 |------|----|----|------------|
 | get_page | Yes | Yes | Same |
 | put_page | Yes | Yes | Same |
-| delete_page | Yes | Yes | Same |
+| delete_page | Yes | Yes | Rust is soft-delete by default |
 | list_pages | Yes | Yes | Same |
 | search | Yes | Yes | Same |
 | query | Yes | Yes | Same |
@@ -230,6 +228,8 @@ Rust is missing 4 PageType variants: email, slack, calendar-event, code. These a
 | get_raw_data | Yes | Yes | Same |
 | resolve_slugs | Yes | Yes | Same |
 | get_chunks | Yes | Yes | Same |
+| count_stale_chunks | Yes | Yes | Same |
+| list_stale_chunks | Yes | Yes | Same |
 | log_ingest | Yes | Yes | Same |
 | get_ingest_log | Yes | Yes | Same |
 | file_list | Yes | Yes | Same |
@@ -271,7 +271,7 @@ Rust MCP only supports stdio transport, with no HTTP transport, no rate limiting
 | **Edge extractor** | Yes (178 lines) | No | **Missing in Rust** |
 | **Qualified names** | Yes (109 lines) | No | **Missing in Rust** |
 
-Rust is missing the entire code chunking subsystem (tree-sitter AST parsing, code edge extraction, qualified name construction).
+Rust now has lightweight fenced-code chunk extraction, but still lacks the full tree-sitter AST parsing, code edge extraction, and qualified-name subsystem.
 
 ---
 
@@ -356,6 +356,8 @@ The entire Resolver subsystem is missing in Rust. This includes dead link detect
 | get | Yes | Yes |
 | put | Yes | Yes |
 | delete | Yes | Yes |
+| restore | Partial/varies | Yes |
+| purge-deleted | Partial/varies | Yes |
 | list | Yes | Yes |
 | search | Yes | Yes |
 | query/ask | Yes | Yes |
@@ -513,10 +515,10 @@ Interface Layer (CLI + MCP)
 
 | Module | Completeness | Notes |
 |--------|-------------|--------|
-| Core engine | 85% | Missing code edges, multi-source, stale chunks |
+| Core engine | 88% | Missing code edges and multi-source; stale chunk APIs now implemented |
 | Search pipeline | 80% | Missing source-boost, hard-exclude, two-pass |
 | MCP tools | 90% | Missing pause/resume/replay/send_message |
-| Chunkers | 60% | Missing code chunker, edge extractor, qualified names |
+| Chunkers | 65% | Has fenced-code chunks; still missing tree-sitter chunker, edge extractor, qualified names |
 | Enrichment pipeline | 90% | Missing batch extractAndEnrich |
 | Validators | 70% | Missing citation, triple-hr validators |
 | Storage backends | 40% | Missing S3, Supabase; has unique axum file server |
@@ -571,8 +573,8 @@ Sorted by impact:
 | P0 | HTTP MCP transport + Bearer auth | 2-3 days | Security-critical, required for remote access |
 | P0 | Rate limiting | 1 day | DoS/abuse prevention |
 | P1 | Citation validator | 0.5 day | Data quality assurance |
-| P1 | PageType extension (email/slack/calendar-event/code) | 0.5 day | Type completeness |
-| P1 | source-boost + hard-exclude search | 1 day | Search quality improvement |
+| P1 | PageType extension (email/slack/calendar-event/code) | Done | Type completeness |
+| P1 | source-boost + hard-exclude search | Done | Search quality improvement |
 | P2 | Multi-source brain (source_id) | 2 days | Multi-repo scenarios |
 | P2 | S3 storage backend | 1-2 days | Cloud deployment needs |
 | P2 | Subagent runtime | 3-5 days | Automated workflows |

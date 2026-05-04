@@ -9,9 +9,9 @@ src/
 ├── lib.rs              # Library entry, public re-exports
 ├── types.rs            # Core types (Page, Chunk, Link, SearchResult, etc.)
 ├── error.rs            # Error types (GBrainError, OperationError)
-├── engine.rs           # BrainEngine trait (55 methods)
+├── engine.rs           # BrainEngine trait (59 methods)
 ├── sqlite_engine.rs    # SqliteEngine implementation (SQLite + FTS5 + sqlite-vec)
-├── schema.rs           # SQLite DDL (tables, indexes, triggers, migrations V1-V7)
+├── schema.rs           # SQLite DDL (tables, indexes, triggers, migrations V1-V9)
 ├── config.rs           # Config loading (env vars + config.json)
 ├── operations.rs       # Operations business logic layer
 ├── autopilot.rs        # Periodic maintenance orchestrator (embedding stale content, integrity checks)
@@ -87,7 +87,7 @@ Tests use in-memory SQLite (`:memory:`) — no test database setup needed.
 
 Three-layer design:
 
-1. **Engine layer** — `BrainEngine` trait (`engine.rs`, 55 methods) → `SqliteEngine` impl (`sqlite_engine.rs`). Sync, direct SQLite operations. NOT dyn-compatible; use concrete `SqliteEngine`.
+1. **Engine layer** — `BrainEngine` trait (`engine.rs`, 59 methods) → `SqliteEngine` impl (`sqlite_engine.rs`). Sync, direct SQLite operations. NOT dyn-compatible; use concrete `SqliteEngine`.
 2. **Operations layer** — `Operations` struct (`operations.rs`). Business logic: auto-chunking, tag extraction, link inference, security validation, batch operations. Both CLI and MCP dispatch through this. Configurable via `Operations::with_config()` for auto_link/auto_timeline flags.
 3. **Interface layer** — CLI (`bin/gbrain.rs`) + MCP server (`mcp/`). CLI uses `OpContext.remote=false`; MCP sets `remote=true` for untrusted callers.
 
@@ -96,7 +96,7 @@ Three-layer design:
 9-step pipeline:
 
 1. FTS5 BM25 keyword search (weighted: title 10x, compiled_truth 5x, timeline 2x)
-2. sqlite-vec cosine similarity (requires embedding)
+2. sqlite-vec cosine similarity (requires embedding; falls back to `chunk_embeddings` cosine scoring when sqlite-vec is unavailable)
 3. Fallback broadened OR query when vector returns <3 results
 4. RRF fusion (k=60) with multi-list support for query expansion
 5. Compiled truth boost (conditional on detail level)
@@ -116,7 +116,7 @@ Tiered entity detection and auto-promotion:
 
 ### Autopilot
 
-Periodic maintenance orchestrator (`autopilot.rs`): embeds stale content, runs integrity checks, reports health. Designed for scheduled/cron execution.
+Periodic maintenance orchestrator (`autopilot.rs`): embeds stale content via real embedding API calls, runs integrity checks, reports health. Designed for scheduled/cron execution.
 
 ### Writer & Validation
 
@@ -196,9 +196,9 @@ Audio transcription via Groq Whisper (default, fast) or OpenAI Whisper (fallback
 
 ## Database Tables
 
-pages, chunks, vec_chunks (sqlite-vec virtual), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
+pages, chunks, vec_chunks (sqlite-vec virtual), chunk_embeddings (fallback embedding store), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
 
-Schema version: 8 (migrations V1-V8; V8 adds title + page_type columns to page_versions; V7 adds FTS5 rebuild + timeline UNIQUE constraint)
+Schema version: 9 (migrations V1-V9; V9 adds soft-delete support, chunk code metadata, and chunk_embeddings; V8 adds title + page_type columns to page_versions; V7 adds FTS5 rebuild + timeline UNIQUE constraint)
 
 ## Dependencies
 
@@ -220,9 +220,12 @@ Schema version: 8 (migrations V1-V8; V8 adds title + page_type columns to page_v
 
 - `gbrain put` — Create/update a page
 - `gbrain get` — Retrieve a page
-- `gbrain delete` — Delete a page
+- `gbrain delete` — Soft-delete a page
+- `gbrain restore` — Restore a soft-deleted page
+- `gbrain purge-deleted` — Permanently purge old soft-deleted pages
 - `gbrain list` — List pages with filters
 - `gbrain search` — Hybrid search
+- `gbrain embed` — Generate and persist embeddings for stale chunks
 - `gbrain lint` — Zero-LLM quality check (6 rules)
 - `gbrain extract` — Extract links/timeline/all from pages
 - `gbrain install` — Install shell completions

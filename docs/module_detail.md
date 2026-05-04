@@ -1,8 +1,19 @@
 # gbrain TS vs Rust — 模块级详细对比
 
+## 2026-05-04 更新摘要
+
+本模块级对比的原始内容基于 2026-04-29。当前 Rust 版本已有以下变化：
+
+- `BrainEngine` trait 为 59 个方法，新增 soft-delete restore/purge 与 stale chunk 查询接口。
+- Engine 层已实现 `count_stale_chunks`、`list_stale_chunks`；CLI embed 与 Autopilot 会复用 stale chunk 路径。
+- Operations 查询路径会生成 query embedding；`put_page` 会抽取 Markdown fenced code block 为 `fenced_code` chunk。
+- Search 层已实现 source boost、hard exclude、include/exclude slug prefix，并提供 `chunk_embeddings` fallback vector scoring。
+- Chunker 层仍没有完整 tree-sitter code chunker 和 code edge extractor，但已有轻量 fenced-code chunk 支持。
+- Config 中仍没有完全等价的 TS `searchBoosts` 配置对象；Rust 当前使用内置 slug-prefix boost 规则。
+
 [English version](./module_detail_en.md) | 中文
 
-**日期**: 2026-04-29
+**日期**: 2026-05-04
 
 ---
 
@@ -27,7 +38,7 @@ getEdgesByChunk(chunkId): Promise<CodeEdgeResult[]>
 withReservedConnection<T>(fn): Promise<T>  // advisory lock
 ```
 
-### Rust: BrainEngine trait (engine.rs, 55方法)
+### Rust: BrainEngine trait (engine.rs, 59方法)
 
 ```rust
 // 单引擎实现: SqliteEngine (SQLite + FTS5 + sqlite-vec)
@@ -38,6 +49,10 @@ detect_dead_links(slug): Result<Vec<String>>
 file_url_by_storage_path(storage_path): Result<Option<String>>
 file_verify(file_id): Result<bool>
 add_timeline_multi_batch(entries): Result<usize>
+restore_page(slug): Result<bool>
+purge_deleted_pages(older_than_hours): Result<Vec<String>>
+count_stale_chunks(): Result<usize>
+list_stale_chunks(limit): Result<Vec<StaleChunk>>
 ```
 
 ### 差异分析
@@ -48,7 +63,7 @@ add_timeline_multi_batch(entries): Result<usize>
 | dyn兼容 | ✓ (interface) | ✗ (trait) |
 | 连接管理 | 连接池 + advisory lock | 单连接 |
 | 代码边 | ✓ | ✗ |
-| Stale chunks | ✓ | ✗ |
+| Stale chunks | ✓ | ✓ |
 | 多源 | ✓ (source_id) | ✗ |
 
 ---
@@ -109,8 +124,8 @@ search/
 | 方面 | TS | Rust |
 |------|----|------|
 | SQL排名 | sql-ranking.ts (415行, Postgres特定) | keyword.rs (68行, FTS5特定) |
-| Source boost | ✓ (349行) | ✗ |
-| Hard exclude | ✓ (SQL NOT LIKE) | ✗ |
+| Source boost | ✓ (349行) | ✓（slug-prefix 加权） |
+| Hard exclude | ✓ (SQL NOT LIKE) | ✓（include/exclude slug-prefix 过滤） |
 | Two-pass retrieval | ✓ (325行) | ✗ |
 | 模糊搜索 | pg_trgm (Postgres扩展) | 自实现 (317行) |
 | 评估框架 | ✗ | ✓ (313行, P@k/R@k/MRR/nDCG@k) |
@@ -132,7 +147,7 @@ chunkers/
 └── edge-extractor.ts  (178行) 代码边提取
 ```
 
-### Rust: chunker/ (3文件, ~1,361行)
+### Rust: chunker/ (3文件, ~1,361行 + operations.rs 轻量 fenced-code 抽取)
 
 ```
 chunker/
@@ -146,7 +161,7 @@ chunker/
 
 | 方面 | TS | Rust |
 |------|----|------|
-| 代码分块 | ✓ (tree-sitter, 1,050行) | ✗ |
+| 代码分块 | ✓ (tree-sitter, 1,050行) | 部分：Markdown fenced-code chunks |
 | 边提取 | ✓ (178行) | ✗ |
 | 限定名 | ✓ (109行) | ✗ |
 | 语义分块 | 340行 | 719行 (更详细) |
@@ -450,7 +465,7 @@ pub struct Config {
 |--------|----|----|
 | databaseUrl | ✓ | ✗ (用db_path) |
 | storageBackend | ✓ (local/s3/supabase) | ✗ (仅local) |
-| searchBoosts | ✓ | ✗ |
+| searchBoosts | ✓ | 部分：内置 slug-prefix boost |
 | hardExclude | ✓ | ✗ |
 | mcpPort | ✓ | ✗ |
 | mcpAuthToken | ✓ | ✗ |
@@ -514,10 +529,10 @@ enum GBrainError {
 
 - 222个lib单元测试 (#[cfg(test)] mod tests)
 - 4个dedup集成测试
-- 15个engine集成测试
+- 17个engine集成测试
 - 16个fuzzy集成测试
 - 3个search集成测试
-- 共260个测试，全部通过
+- 共262个测试，全部通过
 - 使用:memory: SQLite，零配置
 
 ### 差异
@@ -525,7 +540,7 @@ enum GBrainError {
 | 方面 | TS | Rust |
 |------|----|------|
 | 测试框架 | Bun test | cargo test |
-| 测试数量 | 未知 (内联) | 260 |
+| 测试数量 | 未知 (内联) | 262 |
 | 集成测试 | PGLite实例 | :memory: SQLite |
 | 评估框架 | ✓ (eval命令) | ✓ (eval.rs) |
 | 覆盖率 | 未知 | 未测量 |

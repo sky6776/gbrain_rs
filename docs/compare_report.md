@@ -1,8 +1,20 @@
 # gbrain TypeScript vs gbrain-rs Rust 对比报告
 
+## 2026-05-04 更新摘要
+
+本报告原始对比基于 2026-04-29 的代码状态。当前 `gbrain_rs` 已完成一批 P0/P1/P2/P3 改进，以下结论覆盖文中仍保留的旧表格：
+
+- Rust schema version 已从 V8 升级到 V9，新增 `deleted_at`、chunk 代码元数据字段和 `chunk_embeddings` fallback embedding 表。
+- `delete_page` 在 Rust 中默认为软删除，并新增 `restore_page`、`purge_deleted_pages` 以及 CLI `restore`、`purge-deleted`。
+- `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
+- `Chunk`/`ChunkInput` 已支持 embedding/model/embedded_at 相关路径，以及 `language`、`symbol_name`、`symbol_type`、`start_line`、`end_line` 等代码元数据。
+- `count_stale_chunks`、`list_stale_chunks` 已实现，并被 CLI embed 和 Autopilot embedding 复用。
+- 搜索已支持 include/exclude slug prefix、默认 hard-exclude、source boost；向量检索在 sqlite-vec 不可用时可退回 `chunk_embeddings` cosine scoring。
+- Rust 已具备轻量 Markdown fenced-code chunk 抽取，但仍缺少 TS 的完整 tree-sitter code chunker、code_edges 和 Cathedral II two-pass code graph 检索。
+
 [English version](./compare_report_en.md) | 中文
 
-**日期**: 2026-04-29
+**日期**: 2026-05-04
 **TS版本**: gbrain v0.22.8 (Bun runtime)
 **Rust版本**: gbrain-rs (native, SQLite + sqlite-vec + FTS5)
 
@@ -38,7 +50,7 @@ Rust版本代码量约为TS版本的41%，主要原因是：
 | **模糊搜索** | pg_trgm (三字符组) | 自实现字符三字符组Jaccard |
 | **连接池** | postgres.js 内置 | 单连接（SQLite不需要池） |
 | **事务支持** | Postgres事务 + advisory lock | BEGIN IMMEDIATE + COMMIT/ROLLBACK |
-| **Schema版本** | V1-V29 | V1-V8 |
+| **Schema版本** | V1-V29 | V1-V9 |
 | **多源支持** | source_id复合键 (v0.18+) | 无 |
 | **PGLite** | 嵌入式WASM Postgres | 无（直接用SQLite） |
 | **PgBouncer** | 自动检测兼容 | 不适用 |
@@ -113,30 +125,30 @@ Rust版本代码量约为TS版本的41%，主要原因是：
 | architecture | ✓ | ✓ | 一致 |
 | meeting | ✓ | ✓ | 一致 |
 | note | ✓ | ✓ | 一致 |
-| **email** | ✓ | ✗ | **Rust缺失** |
-| **slack** | ✓ | ✗ | **Rust缺失** |
-| **calendar-event** | ✓ | ✗ | **Rust缺失** |
-| **code** | ✓ | ✗ | **Rust缺失** |
+| **email** | ✓ | ✓ | 一致 |
+| **slack** | ✓ | ✓ | 一致 |
+| **calendar-event** | ✓ | ✓ | 一致 |
+| **code** | ✓ | ✓ | 一致 |
 
-Rust缺少4个PageType变体：email, slack, calendar-event, code。这些是v0.18+新增的工作流类型。
+Rust 已补齐 v0.18+ 新增的工作流 PageType 变体：email, slack, calendar-event, code。
 
 ### Chunk差异
 
 | 特性 | TS | Rust |
 |------|----|------|
-| chunk_source | compiled_truth / timeline / **fenced_code** | compiled_truth / timeline |
+| chunk_source | compiled_truth / timeline / **fenced_code** | compiled_truth / timeline / **fenced_code** |
 | 代码元数据 | ✓ (language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified) | ✗ |
-| embedding字段 | ✓ (Float32Array) | ✗ (不存储在Chunk结构中) |
+| embedding字段 | ✓ (Float32Array) | ✓（写入 `chunk_embeddings` fallback 表，`ChunkInput` 支持 embedding） |
 | model字段 | ✓ | ✗ |
-| embedded_at | ✓ | ✗ |
+| embedded_at | ✓ | ✓ |
 | StaleChunkRow | ✓ | ✗ |
 
 ### SearchOpts差异
 
 | 特性 | TS | Rust |
 |------|----|------|
-| exclude_slug_prefixes | ✓ | ✗ |
-| include_slug_prefixes | ✓ | ✗ |
+| exclude_slug_prefixes | ✓ | ✓ |
+| include_slug_prefixes | ✓ | ✓ |
 | language | ✓ (v0.20) | ✗ |
 | symbolKind | ✓ (v0.20) | ✗ |
 | nearSymbol | ✓ (v0.20) | ✗ |
@@ -166,7 +178,7 @@ Rust缺少4个PageType变体：email, slack, calendar-event, code。这些是v0.
 
 | 步骤 | TS | Rust | 差异 |
 |------|----|----|------|
-| 1. 关键词搜索 | tsvector + ts_rank + **source-boost** + **hard-exclude** | FTS5 BM25加权 | TS有source-boost和hard-exclude |
+| 1. 关键词搜索 | tsvector + ts_rank + **source-boost** + **hard-exclude** | FTS5 BM25加权 + source boost + hard exclude | 不同SQL引擎，控制能力接近 |
 | 2. 向量搜索 | pgvector cosine distance | sqlite-vec cosine similarity | 不同引擎，相同算法 |
 | 3. 回退拓宽 | ✓ | ✓ | 一致 |
 | 4. RRF融合 | ✓ (k=60) | ✓ (k=60) | 一致 |
@@ -177,15 +189,15 @@ Rust缺少4个PageType变体：email, slack, calendar-event, code。这些是v0.
 | 9. 意图类型提升 | ✓ | ✓ | 一致 |
 | 10. 两遍检索 | ✓ (v0.20 Cathedral II) | ✗ | **TS独有** |
 | 11. 4层去重 | ✓ | ✓ | 一致 |
-| 12. source-boost | ✓ (按slug前缀加权) | ✗ | **TS独有** |
-| 13. hard-exclude | ✓ (按slug前缀排除) | ✗ | **TS独有** |
+| 12. source-boost | ✓ (按slug前缀加权) | ✓ | 已实现 |
+| 13. hard-exclude | ✓ (按slug前缀排除) | ✓ | 已实现 |
 
 ### TS独有搜索特性
 
 | 特性 | 文件 | 说明 |
 |------|------|------|
-| source-boost | search/source-boost.ts | 按slug前缀的搜索结果加权（如 originals/:1.5） |
-| hard-exclude | search/sql-ranking.ts | SQL注入hard-exclude NOT(LIKE)子句 |
+| source-boost | search/source-boost.ts | Rust 已实现按 slug 前缀的搜索结果加权 |
+| hard-exclude | search/sql-ranking.ts | Rust 已实现 include/exclude slug-prefix 过滤 |
 | two-pass retrieval | search/two-pass.ts | Cathedral II代码结构检索（BFS遍历code_edges） |
 | searchKeywordChunks | engine.ts | 代码分块搜索 |
 
@@ -513,10 +525,10 @@ Interface层 (CLI + MCP)
 
 | 模块 | 完整性 | 说明 |
 |------|--------|------|
-| 核心引擎 | 85% | 缺少代码边、多源、stale chunks |
-| 搜索管道 | 80% | 缺少source-boost、hard-exclude、two-pass |
+| 核心引擎 | 88% | 缺少代码边、多源；stale chunks 已实现 |
+| 搜索管道 | 85% | 缺少 two-pass/code graph retrieval；source-boost/hard-exclude 已实现 |
 | MCP工具 | 90% | 缺少pause/resume/replay/send_message |
-| 分块器 | 60% | 缺少code chunker、edge extractor、qualified names |
+| 分块器 | 65% | 已有 fenced-code chunk；仍缺少 tree-sitter code chunker、edge extractor、qualified names |
 | 富化管道 | 90% | 缺少批量extractAndEnrich |
 | 验证器 | 70% | 缺少citation、triple-hr验证器 |
 | 存储后端 | 40% | 缺少S3、Supabase；独有axum文件服务器 |
@@ -571,8 +583,8 @@ Interface层 (CLI + MCP)
 | P0 | HTTP MCP传输 + Bearer认证 | 2-3天 | 安全性关键，远程访问必需 |
 | P0 | 速率限制 | 1天 | 防DoS/滥用 |
 | P1 | citation验证器 | 0.5天 | 数据质量保证 |
-| P1 | PageType扩展 (email/slack/calendar-event/code) | 0.5天 | 类型完整性 |
-| P1 | source-boost + hard-exclude搜索 | 1天 | 搜索质量提升 |
+| P1 | PageType扩展 (email/slack/calendar-event/code) | Done | 类型完整性 |
+| P1 | source-boost + hard-exclude搜索 | Done | 搜索质量提升 |
 | P2 | 多源brain (source_id) | 2天 | 多仓库场景 |
 | P2 | S3存储后端 | 1-2天 | 云部署需求 |
 | P2 | Subagent运行时 | 3-5天 | 自动化工作流 |

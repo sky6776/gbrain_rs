@@ -10,6 +10,10 @@ English | [中文](./README.md)
 
 ## Features
 
+- **Real Embeddings** - CLI, query, and Autopilot paths generate and persist embeddings, with a SQLite fallback table when sqlite-vec is unavailable.
+- **Soft Delete Lifecycle** - `delete` hides pages by default, while `restore` and `purge-deleted` cover recovery and permanent cleanup.
+- **Code-Aware Chunks** - Markdown fenced code blocks are indexed as `fenced_code` chunks with language and line metadata.
+
 - **Hybrid Search** — BM25 keyword + vector cosine similarity + fuzzy trigram, fused via Reciprocal Rank Fusion with multi-query expansion
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry validation
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server for AI agent integration
@@ -54,7 +58,9 @@ cargo build --features file-server   # With axum file server
 | `gbrain init` | Initialize a new brain |
 | `gbrain get <slug>` | Read a page by slug |
 | `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>]` | Create or update a page |
-| `gbrain delete <slug> [--force]` | Delete a page |
+| `gbrain delete <slug> [--force]` | Soft-delete a page |
+| `gbrain restore <slug>` | Restore a soft-deleted page |
+| `gbrain purge-deleted [--older-than-hours <N>]` | Permanently purge old soft-deleted pages |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | List pages with filters |
 | `gbrain query <query> [--limit <N>]` | Hybrid search (alias: `ask`) |
 
@@ -78,8 +84,8 @@ cargo build --features file-server   # With axum file server
 
 | Command | Description |
 |---------|-------------|
-| `gbrain embed [slugs...] [--batch-size <N>]` | Generate embeddings for chunks |
-| `gbrain import <dir> [--embed] [--auto-link]` | Import markdown files |
+| `gbrain embed [slugs...] [--batch-size <N>]` | Generate and persist embeddings for stale chunks |
+| `gbrain import <dir> [--embed] [--auto-link]` | Import markdown files; mismatched frontmatter slugs are skipped |
 | `gbrain export [slugs...] [--dir <DIR>] [--page-type <TYPE>]` | Export pages to markdown |
 | `gbrain extract [--mode links\|timeline\|all]` | Batch extract links/timeline |
 | `gbrain lint [slug] [--fix] [--dry-run]` | Zero-LLM quality check (6 rules) |
@@ -138,7 +144,7 @@ gbrain provides 28 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 |------|-------------|
 | `get_page` | Read a page (supports fuzzy matching) |
 | `put_page` | Write/update a page with markdown + frontmatter |
-| `delete_page` | Delete a page |
+| `delete_page` | Soft-delete a page |
 | `list_pages` | List pages with type/tag/limit filters |
 | `get_chunks` | Get content chunks for a page |
 
@@ -345,8 +351,8 @@ Three-layer design:
 9-step hybrid search pipeline:
 
 1. FTS5 BM25 keyword search (weighted: title 10x, compiled_truth 5x, timeline 2x)
-2. sqlite-vec cosine similarity
-3. Fallback broadened OR query when vector returns <3 results
+2. sqlite-vec cosine similarity, with a `chunk_embeddings` cosine fallback when sqlite-vec is unavailable
+3. Fallback broadened OR query when vector returns fewer than 3 results
 4. RRF fusion (k=60) with multi-list support
 5. Compiled truth boost
 6. Backlink boost
@@ -357,6 +363,8 @@ Three-layer design:
 ---
 
 ## Documentation
+
+Current implementation notes (2026-05-04): schema version 9; soft-delete lifecycle; real embedding write/query/Autopilot flow; `chunk_embeddings` fallback; include/exclude slug-prefix search controls; `email`, `slack`, `calendar-event`, and `code` page types; `fenced_code` chunks for Markdown code blocks.
 
 - [TS vs Rust Comparison Report](./docs/compare_report_en.md) / [中文](./docs/compare_report.md) — Comprehensive comparison of TypeScript and Rust versions (code size, database, search, MCP, security, etc.)
 - [TS vs Rust Module-Level Comparison](./docs/module_detail_en.md) / [中文](./docs/module_detail.md) — Per-module comparison (engine layer, operations, search, chunker, enrichment, validators, etc.)
