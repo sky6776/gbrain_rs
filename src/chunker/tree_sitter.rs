@@ -227,7 +227,13 @@ struct NestedEmitConfig {
 fn nested_emit_config(lang: &str) -> Option<NestedEmitConfig> {
     match lang {
         "rust" => Some(NestedEmitConfig {
-            parent_types: &["impl_item", "struct_item", "enum_item", "trait_item", "mod_item"],
+            parent_types: &[
+                "impl_item",
+                "struct_item",
+                "enum_item",
+                "trait_item",
+                "mod_item",
+            ],
             child_types: &[
                 "function_item",
                 "const_item",
@@ -256,11 +262,7 @@ fn nested_emit_config(lang: &str) -> Option<NestedEmitConfig> {
         }),
         "python" => Some(NestedEmitConfig {
             parent_types: &["class_definition"],
-            child_types: &[
-                "function_definition",
-                "decorated_definition",
-                "assignment",
-            ],
+            child_types: &["function_definition", "decorated_definition", "assignment"],
         }),
         "go" => Some(NestedEmitConfig {
             parent_types: &["type_declaration"],
@@ -387,12 +389,7 @@ fn extract_path_from_slug(slug: &str) -> String {
 
 // ── AST traversal and chunk extraction ────────────────────────────────
 
-fn extract_chunks_from_ast(
-    tree: &Tree,
-    code: &str,
-    lang: &str,
-    path: &str,
-) -> Vec<RawChunk> {
+fn extract_chunks_from_ast(tree: &Tree, code: &str, lang: &str, path: &str) -> Vec<RawChunk> {
     let root = tree.root_node();
     let top_types = top_level_types(lang);
     let nested_config = nested_emit_config(lang);
@@ -544,14 +541,14 @@ fn walk_nested_children(
 ) {
     // Container node types that hold members but are not members themselves
     let container_types: HashSet<&str> = HashSet::from([
-        "declaration_list",     // Rust impl/trait body
+        "declaration_list",       // Rust impl/trait body
         "field_declaration_list", // Rust struct body
-        "class_body",           // TypeScript/Java class body
-        "block",                // Python class body
-        "declaration",          // Go type spec body
-        "enum_body",            // Java enum body
-        "record_body",          // Java record body
-        "namespace_body",       // C++ namespace body
+        "class_body",             // TypeScript/Java class body
+        "block",                  // Python class body
+        "declaration",            // Go type spec body
+        "enum_body",              // Java enum body
+        "record_body",            // Java record body
+        "namespace_body",         // C++ namespace body
     ]);
 
     let mut cursor = node.walk();
@@ -559,9 +556,7 @@ fn walk_nested_children(
         let child_kind = child.kind();
 
         // If this is a direct member, walk it
-        if child_config.child_types.contains(&child_kind)
-            || top_types.contains(child_kind)
-        {
+        if child_config.child_types.contains(&child_kind) || top_types.contains(child_kind) {
             walk_node(
                 child,
                 code,
@@ -636,9 +631,7 @@ fn extract_symbol_name(node: Node, code: &str) -> Option<String> {
             // impl Type or impl Trait for Type — try "trait" then "type" field
             if let Some(trait_node) = node.child_by_field_name("trait") {
                 if let Ok(text) = trait_node.utf8_text(code.as_bytes()) {
-                    return Some(format!("impl {}",
-                        text.trim_start_matches("for ").trim()
-                    ));
+                    return Some(format!("impl {}", text.trim_start_matches("for ").trim()));
                 }
             }
             if let Some(type_node) = node.child_by_field_name("type") {
@@ -734,7 +727,11 @@ fn build_qualified_name(parent: Option<&str>, name: &str, sep: &str) -> String {
 
 fn normalize_symbol_type(kind: &str, _lang: &str) -> String {
     match kind {
-        "function_item" | "function_declaration" | "function_definition" | "arrow_function" | "generator_function_declaration" => "function".to_string(),
+        "function_item"
+        | "function_declaration"
+        | "function_definition"
+        | "arrow_function"
+        | "generator_function_declaration" => "function".to_string(),
         "method_definition" | "method_declaration" => "method".to_string(),
         "constructor_declaration" | "constructor_definition" => "constructor".to_string(),
         "impl_item" => "impl".to_string(),
@@ -742,13 +739,19 @@ fn normalize_symbol_type(kind: &str, _lang: &str) -> String {
         "enum_item" | "enum_declaration" | "enum_specifier" => "enum".to_string(),
         "trait_item" => "trait".to_string(),
         "interface_declaration" => "interface".to_string(),
-        "class_declaration" | "abstract_class_declaration" | "class_specifier" => "class".to_string(),
+        "class_declaration" | "abstract_class_declaration" | "class_specifier" => {
+            "class".to_string()
+        }
         "record_declaration" => "record".to_string(),
         "mod_item" => "module".to_string(),
-        "type_item" | "type_alias_declaration" | "type_definition" | "type_declaration" => "type".to_string(),
+        "type_item" | "type_alias_declaration" | "type_definition" | "type_declaration" => {
+            "type".to_string()
+        }
         "const_item" => "const".to_string(),
         "static_item" => "static".to_string(),
-        "use_declaration" | "import_declaration" | "import_statement" | "import_from_statement" => "import".to_string(),
+        "use_declaration" | "import_declaration" | "import_statement" | "import_from_statement" => {
+            "import".to_string()
+        }
         "lexical_declaration" | "variable_declaration" => "variable".to_string(),
         "field_declaration" => "field".to_string(),
         "assignment" => "assignment".to_string(),
@@ -851,8 +854,8 @@ fn extract_member_digest(node: Node, code: &str, lang: &str) -> Vec<(String, Str
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if cfg.child_types.contains(&child.kind()) {
-                let name = extract_symbol_name(child, code)
-                    .unwrap_or_else(|| child.kind().to_string());
+                let name =
+                    extract_symbol_name(child, code).unwrap_or_else(|| child.kind().to_string());
                 let sym_type = normalize_symbol_type(child.kind(), lang);
                 members.push((sym_type, name));
             }
@@ -972,7 +975,8 @@ fn extract_doc_comment(node: Node, code: &str, lang: &str) -> Option<String> {
                 } else if line.is_empty() {
                     if row > 0 {
                         let prev = lines.get(row - 1).map(|l| l.trim()).unwrap_or("");
-                        if prev.starts_with("/**") || prev.starts_with(" *")
+                        if prev.starts_with("/**")
+                            || prev.starts_with(" *")
                             || prev.starts_with("//")
                         {
                             continue;
@@ -1069,7 +1073,7 @@ fn extract_doc_comment(node: Node, code: &str, lang: &str) -> Option<String> {
 // ── Small sibling merging ─────────────────────────────────────────────
 
 /// Merge adjacent chunks under 15% of target token count.
-/// Never merge chunks with parent_symbol_path. Merged chunks get symbol_type='merged'.
+/// Keep definitions addressable for code_def/search filters.
 fn merge_small_siblings(chunks: Vec<RawChunk>, _lang: &str) -> Vec<RawChunk> {
     if chunks.is_empty() {
         return chunks;
@@ -1082,8 +1086,9 @@ fn merge_small_siblings(chunks: Vec<RawChunk>, _lang: &str) -> Vec<RawChunk> {
     while i < chunks.len() {
         let current = &chunks[i];
 
-        // Never merge chunks with parent_symbol_path
-        if current.parent_symbol_path.is_some() {
+        // Never merge chunks with parent_symbol_path or primary definitions.
+        if current.parent_symbol_path.is_some() || is_primary_semantic_symbol(&current.symbol_type)
+        {
             result.push(current.clone());
             i += 1;
             continue;
@@ -1095,8 +1100,8 @@ fn merge_small_siblings(chunks: Vec<RawChunk>, _lang: &str) -> Vec<RawChunk> {
         if token_count < threshold && i + 1 < chunks.len() {
             let next = &chunks[i + 1];
 
-            // Don't merge across parent boundaries
-            if next.parent_symbol_path.is_some() {
+            // Don't merge across parent boundaries or primary definitions.
+            if next.parent_symbol_path.is_some() || is_primary_semantic_symbol(&next.symbol_type) {
                 result.push(current.clone());
                 i += 1;
                 continue;
@@ -1154,7 +1159,8 @@ fn merge_pass(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
     while i < chunks.len() {
         let current = &chunks[i];
 
-        if current.parent_symbol_path.is_some() {
+        if current.parent_symbol_path.is_some() || is_primary_semantic_symbol(&current.symbol_type)
+        {
             result.push(current.clone());
             i += 1;
             continue;
@@ -1165,7 +1171,7 @@ fn merge_pass(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
         if token_count < threshold && i + 1 < chunks.len() {
             let next = &chunks[i + 1];
 
-            if next.parent_symbol_path.is_some() {
+            if next.parent_symbol_path.is_some() || is_primary_semantic_symbol(&next.symbol_type) {
                 result.push(current.clone());
                 i += 1;
                 continue;
@@ -1199,6 +1205,13 @@ fn merge_pass(chunks: Vec<RawChunk>) -> Vec<RawChunk> {
     }
 
     result
+}
+
+fn is_primary_semantic_symbol(symbol_type: &str) -> bool {
+    matches!(
+        symbol_type,
+        "function" | "method" | "class" | "struct" | "interface" | "enum" | "trait" | "impl"
+    )
 }
 
 // ── CodeIndex building ────────────────────────────────────────────────
@@ -1324,16 +1337,14 @@ fn extract_ast_edges(
     }
 
     // Build a set of known qualified names for resolution
-    let known_symbols: HashSet<String> = symbols
-        .iter()
-        .map(|s| s.qualified_name.clone())
-        .collect();
+    let known_symbols: HashSet<String> = symbols.iter().map(|s| s.qualified_name.clone()).collect();
 
     // Also index by simple name
     let name_to_qualified: HashMap<String, String> = symbols
         .iter()
         .map(|s| {
-            let simple = s.qualified_name
+            let simple = s
+                .qualified_name
                 .rsplit(['.', ':'])
                 .next()
                 .unwrap_or(&s.qualified_name)
@@ -1350,10 +1361,7 @@ fn extract_ast_edges(
 
     for (call_name, call_line) in calls {
         // Resolve caller: find which symbol contains this line
-        let caller = line_to_symbol
-            .get(&call_line)
-            .cloned()
-            .unwrap_or_default();
+        let caller = line_to_symbol.get(&call_line).cloned().unwrap_or_default();
 
         // Resolve callee: try exact match, then simple name
         let callee = if known_symbols.contains(&call_name) {
@@ -1362,10 +1370,7 @@ fn extract_ast_edges(
             qualified.clone()
         } else {
             // Try the last segment of a dotted/path name
-            let simple = call_name
-                .rsplit(['.', ':'])
-                .next()
-                .unwrap_or(&call_name);
+            let simple = call_name.rsplit(['.', ':']).next().unwrap_or(&call_name);
             if let Some(qualified) = name_to_qualified.get(simple) {
                 qualified.clone()
             } else {
@@ -1532,10 +1537,7 @@ fn is_builtin_or_keyword(name: &str) -> bool {
 
 /// Regex-based edge inference as a fallback when AST-based extraction
 /// yields no edges. Operates directly on RawChunk data.
-fn infer_edges_from_raw_chunks(
-    slug: &str,
-    raw_chunks: &[RawChunk],
-) -> Vec<CodeEdgeInput> {
+fn infer_edges_from_raw_chunks(slug: &str, raw_chunks: &[RawChunk]) -> Vec<CodeEdgeInput> {
     // Build symbol lookup: simple name -> qualified name
     let mut symbol_lookup: HashMap<String, String> = HashMap::new();
     for raw in raw_chunks {
@@ -1600,8 +1602,7 @@ fn call_tokens_from_body(body: &str) -> HashSet<String> {
     use regex::Regex;
     static CALL_RE: OnceLock<Regex> = OnceLock::new();
     let re = CALL_RE.get_or_init(|| {
-        Regex::new(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(")
-            .unwrap()
+        Regex::new(r"(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(").unwrap()
     });
 
     re.captures_iter(body)
@@ -1618,14 +1619,35 @@ mod tests {
 
     #[test]
     fn detects_rust_language_from_slug() {
-        assert_eq!(detect_language("code/lib.rs", None), Some("rust".to_string()));
-        assert_eq!(detect_language("code/mod.ts", None), Some("typescript".to_string()));
-        assert_eq!(detect_language("code/app.tsx", None), Some("tsx".to_string()));
-        assert_eq!(detect_language("code/main.py", None), Some("python".to_string()));
-        assert_eq!(detect_language("code/main.go", None), Some("go".to_string()));
-        assert_eq!(detect_language("code/Main.java", None), Some("java".to_string()));
+        assert_eq!(
+            detect_language("code/lib.rs", None),
+            Some("rust".to_string())
+        );
+        assert_eq!(
+            detect_language("code/mod.ts", None),
+            Some("typescript".to_string())
+        );
+        assert_eq!(
+            detect_language("code/app.tsx", None),
+            Some("tsx".to_string())
+        );
+        assert_eq!(
+            detect_language("code/main.py", None),
+            Some("python".to_string())
+        );
+        assert_eq!(
+            detect_language("code/main.go", None),
+            Some("go".to_string())
+        );
+        assert_eq!(
+            detect_language("code/Main.java", None),
+            Some("java".to_string())
+        );
         assert_eq!(detect_language("code/main.c", None), Some("c".to_string()));
-        assert_eq!(detect_language("code/main.cpp", None), Some("cpp".to_string()));
+        assert_eq!(
+            detect_language("code/main.cpp", None),
+            Some("cpp".to_string())
+        );
         assert_eq!(detect_language("code/unknown.txt", None), None);
     }
 
@@ -1745,7 +1767,11 @@ impl User {
                 .iter()
                 .any(|s| s.qualified_name.contains("User") && s.qualified_name.contains("new")),
             "Should have User::new qualified name, got: {:?}",
-            indexed.symbols.iter().map(|s| &s.qualified_name).collect::<Vec<_>>()
+            indexed
+                .symbols
+                .iter()
+                .map(|s| &s.qualified_name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1771,14 +1797,12 @@ class Greeter:
 "#;
         let indexed = chunk_code_tree_sitter("code/greeter.py", code, None, 0);
         // Check Greeter class is found
-        let has_greeter = indexed
-            .symbols
-            .iter()
-            .any(|s| s.name == "Greeter")
-            || indexed
-                .chunks
-                .iter()
-                .any(|c| c.symbol_name.as_ref().map_or(false, |n| n.contains("Greeter")));
+        let has_greeter = indexed.symbols.iter().any(|s| s.name == "Greeter")
+            || indexed.chunks.iter().any(|c| {
+                c.symbol_name
+                    .as_ref()
+                    .map_or(false, |n| n.contains("Greeter"))
+            });
         assert!(has_greeter, "Should find Greeter class");
 
         // Check Greeter.hello is found (methods should be emitted with parent path)
@@ -1786,15 +1810,20 @@ class Greeter:
             .symbols
             .iter()
             .any(|s| s.name == "hello" && s.parent_symbol.as_deref() == Some("Greeter"))
-            || indexed
-                .chunks
-                .iter()
-                .any(|c| c.parent_symbol_path.as_deref() == Some("Greeter")
-                    && c.symbol_name.as_ref().map_or(false, |n| n.contains("hello")));
+            || indexed.chunks.iter().any(|c| {
+                c.parent_symbol_path.as_deref() == Some("Greeter")
+                    && c.symbol_name
+                        .as_ref()
+                        .map_or(false, |n| n.contains("hello"))
+            });
         assert!(
             has_hello,
             "Should find Greeter.hello, got: {:?}",
-            indexed.symbols.iter().map(|s| format!("{}:{}", s.name, s.qualified_name)).collect::<Vec<_>>()
+            indexed
+                .symbols
+                .iter()
+                .map(|s| format!("{}:{}", s.name, s.qualified_name))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1821,14 +1850,12 @@ function isRelevant(r: SearchResult): boolean {
 "#;
         let indexed = chunk_code_tree_sitter("code/search.ts", code, None, 0);
         // Check that at least one symbol or chunk references searchKeyword
-        let found_search = indexed
-            .symbols
-            .iter()
-            .any(|s| s.name == "searchKeyword")
-            || indexed
-                .chunks
-                .iter()
-                .any(|c| c.symbol_name.as_ref().map_or(false, |n| n.contains("searchKeyword")));
+        let found_search = indexed.symbols.iter().any(|s| s.name == "searchKeyword")
+            || indexed.chunks.iter().any(|c| {
+                c.symbol_name
+                    .as_ref()
+                    .map_or(false, |n| n.contains("searchKeyword"))
+            });
         assert!(found_search, "Should find searchKeyword");
     }
 
@@ -1869,10 +1896,7 @@ pub fn main_function() -> i32 {
             .chunks
             .iter()
             .any(|c| c.symbol_type.as_deref() == Some("merged"));
-        let has_main = indexed
-            .symbols
-            .iter()
-            .any(|s| s.name == "main_function")
+        let has_main = indexed.symbols.iter().any(|s| s.name == "main_function")
             || indexed
                 .chunks
                 .iter()
@@ -1927,7 +1951,11 @@ fn gamma() -> i32 {
         assert!(
             has_call_edge,
             "Should detect call edges, got: {:?}",
-            indexed.edges.iter().map(|e| format!("{}->{}", e.from_symbol, e.to_symbol)).collect::<Vec<_>>()
+            indexed
+                .edges
+                .iter()
+                .map(|e| format!("{}->{}", e.from_symbol, e.to_symbol))
+                .collect::<Vec<_>>()
         );
     }
 }

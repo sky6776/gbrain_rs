@@ -287,9 +287,9 @@ fn test_stale_chunks_track_embedding_status() {
                 symbol_type: None,
                 start_line: None,
                 end_line: None,
-            parent_symbol_path: None,
-            symbol_name_qualified: None,
-            doc_comment: None,
+                parent_symbol_path: None,
+                symbol_name_qualified: None,
+                doc_comment: None,
             }],
         )
         .expect("chunks");
@@ -310,9 +310,9 @@ fn test_stale_chunks_track_embedding_status() {
                 symbol_type: None,
                 start_line: None,
                 end_line: None,
-            parent_symbol_path: None,
-            symbol_name_qualified: None,
-            doc_comment: None,
+                parent_symbol_path: None,
+                symbol_name_qualified: None,
+                doc_comment: None,
             }],
         )
         .expect("embedded chunks");
@@ -359,6 +359,141 @@ fn beta() {
     assert!(results
         .iter()
         .any(|r| r.symbol_name.as_deref() == Some("alpha")));
+}
+
+#[test]
+fn test_code_search_filters_language_and_symbol_kind() {
+    let engine = make_engine();
+    let ops = Operations::new(&engine, OpContext::default());
+    let content = r#"---
+language: rust
+---
+
+pub fn alpha() {
+    beta();
+}
+
+fn beta() {
+}
+"#;
+
+    ops.put_page("code/lib", "Lib", content, Some(PageType::Code), None)
+        .expect("put code page");
+
+    let rust_functions = engine
+        .search_keyword_chunks(
+            "alpha",
+            SearchOpts {
+                limit: Some(10),
+                page_type: Some(PageType::Code),
+                language: Some("rust".to_string()),
+                symbol_kind: Some("function".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("search rust functions");
+    assert!(
+        rust_functions
+            .iter()
+            .any(|r| r.symbol_name.as_deref() == Some("alpha")),
+        "got: {rust_functions:?}"
+    );
+
+    let python_functions = engine
+        .search_keyword_chunks(
+            "alpha",
+            SearchOpts {
+                limit: Some(10),
+                page_type: Some(PageType::Code),
+                language: Some("python".to_string()),
+                symbol_kind: Some("function".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("search python functions");
+    assert!(python_functions.is_empty());
+}
+
+#[test]
+fn test_embedding_refresh_preserves_code_metadata() {
+    let engine = make_engine();
+    let ops = Operations::new(&engine, OpContext::default());
+    let content = r#"---
+language: rust
+---
+
+pub fn alpha() {
+}
+"#;
+
+    ops.put_page("code/lib", "Lib", content, Some(PageType::Code), None)
+        .expect("put code page");
+    let alpha = engine
+        .get_chunks("code/lib")
+        .expect("chunks")
+        .into_iter()
+        .find(|c| c.symbol_name.as_deref() == Some("alpha"))
+        .expect("alpha chunk");
+
+    engine
+        .upsert_chunks(
+            "code/lib",
+            &[ChunkInput {
+                chunk_index: alpha.chunk_index,
+                chunk_text: alpha.chunk_text.clone(),
+                source: alpha.source.clone(),
+                token_count: alpha.token_count,
+                embedding: Some(vec![0.1, 0.2, 0.3]),
+                model: Some("test-embedding".to_string()),
+                language: alpha.language.clone(),
+                symbol_name: alpha.symbol_name.clone(),
+                symbol_type: alpha.symbol_type.clone(),
+                start_line: alpha.start_line,
+                end_line: alpha.end_line,
+                parent_symbol_path: alpha.parent_symbol_path.clone(),
+                symbol_name_qualified: alpha.symbol_name_qualified.clone(),
+                doc_comment: alpha.doc_comment.clone(),
+            }],
+        )
+        .expect("embed alpha");
+
+    engine
+        .upsert_chunks(
+            "code/lib",
+            &[ChunkInput {
+                chunk_index: alpha.chunk_index,
+                chunk_text: alpha.chunk_text.clone(),
+                source: alpha.source.clone(),
+                token_count: alpha.token_count,
+                embedding: None,
+                model: alpha.model.clone(),
+                language: alpha.language.clone(),
+                symbol_name: alpha.symbol_name.clone(),
+                symbol_type: alpha.symbol_type.clone(),
+                start_line: alpha.start_line,
+                end_line: alpha.end_line,
+                parent_symbol_path: alpha.parent_symbol_path.clone(),
+                symbol_name_qualified: alpha.symbol_name_qualified.clone(),
+                doc_comment: alpha.doc_comment.clone(),
+            }],
+        )
+        .expect("metadata refresh without embedding");
+
+    let refreshed = engine
+        .get_chunks("code/lib")
+        .expect("chunks")
+        .into_iter()
+        .find(|c| c.id == alpha.id)
+        .expect("refreshed alpha");
+    assert_eq!(refreshed.language.as_deref(), Some("rust"));
+    assert_eq!(refreshed.symbol_name.as_deref(), Some("alpha"));
+    assert_eq!(
+        engine
+            .get_embeddings_by_chunk_ids(&[alpha.id])
+            .expect("embedding")
+            .len(),
+        1
+    );
 }
 
 #[test]

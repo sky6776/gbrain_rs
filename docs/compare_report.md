@@ -4,13 +4,13 @@
 
 本报告原始对比基于 2026-04-29 的代码状态。当前 `gbrain_rs` 已完成一批 P0/P1/P2/P3 改进，以下结论覆盖文中仍保留的旧表格：
 
-- Rust schema version 已从 V8 升级到 V10，新增 `deleted_at`、chunk 代码元数据字段、`chunk_embeddings` fallback embedding 表、`chunks_fts` 和 `code_edges`。
+- Rust schema version 已从 V8 升级到 V11，新增 `deleted_at`、chunk 代码元数据字段、qualified symbol path、doc comment、`chunk_embeddings` fallback embedding 表、`chunks_fts`、`code_edges` 和未解析符号边。
 - `delete_page` 在 Rust 中默认为软删除，并新增 `restore_page`、`purge_deleted_pages` 以及 CLI `restore`、`purge-deleted`。
 - `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
 - `Chunk`/`ChunkInput` 已支持 embedding/model/embedded_at 相关路径，以及 `language`、`symbol_name`、`symbol_type`、`start_line`、`end_line` 等代码元数据。
 - `count_stale_chunks`、`list_stale_chunks` 已实现，并被 CLI embed 和 Autopilot embedding 复用。
 - 搜索已支持 include/exclude slug prefix、默认 hard-exclude、source boost；向量检索在 sqlite-vec 不可用时可退回 `chunk_embeddings` cosine scoring。
-- Rust 已具备确定性多语言代码 chunk 抽取、qualified names、`code_edges` 和 callers/callees 查询；仍缺少 tree-sitter 级 AST 精度和 Cathedral II two-pass code graph 检索。
+- Rust 已具备 tree-sitter 多语言代码 chunk 抽取、qualified names、`code_edges`、未解析符号边、callers/callees、definitions/references 和 Cathedral II two-pass code graph 检索。
 
 [English version](./compare_report_en.md) | 中文
 
@@ -50,7 +50,7 @@ Rust版本代码量约为TS版本的41%，主要原因是：
 | **模糊搜索** | pg_trgm (三字符组) | 自实现字符三字符组Jaccard |
 | **连接池** | postgres.js 内置 | 单连接（SQLite不需要池） |
 | **事务支持** | Postgres事务 + advisory lock | BEGIN IMMEDIATE + COMMIT/ROLLBACK |
-| **Schema版本** | V1-V29 | V1-V10 |
+| **Schema版本** | V1-V29 | V1-V11 |
 | **多源支持** | source_id复合键 (v0.18+) | 无 |
 | **PGLite** | 嵌入式WASM Postgres | 无（直接用SQLite） |
 | **PgBouncer** | 自动检测兼容 | 不适用 |

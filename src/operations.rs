@@ -16,6 +16,7 @@ use crate::link_extraction::{
     EngineSlugResolver,
 };
 use crate::markdown::{infer_type, parse_markdown};
+use crate::search::expansion::expand_query;
 use crate::search::hybrid::{hybrid_search, HybridOpts};
 use crate::search::intent::{classify_intent, detail_for_intent};
 use crate::security::validate_contained;
@@ -257,6 +258,19 @@ impl<'a> Operations<'a> {
 
     /// Query the brain (high-level search with auto-escalate)
     pub fn query(&self, query: &str, opts: SearchOpts) -> Result<Vec<SearchResult>> {
+        Ok(self.query_with_meta(query, opts, false)?.results)
+    }
+
+    /// Query the brain and return metadata about the retrieval path that actually ran.
+    ///
+    /// Mirrors the TS `HybridSearchMeta` side-channel: callers can tell whether
+    /// vector search and expansion really ran instead of inferring from config.
+    pub fn query_with_meta(
+        &self,
+        query: &str,
+        mut opts: SearchOpts,
+        expand: bool,
+    ) -> Result<SearchResultWithMeta> {
         info!(query = %query, limit = opts.limit.unwrap_or(20), "Querying brain");
 
         // Determine detail level from intent if not specified
@@ -265,22 +279,36 @@ impl<'a> Operations<'a> {
             .detail_level
             .or_else(|| detail_for_intent(&intent.intent))
             .unwrap_or(DetailLevel::Medium);
-        let mut opts = opts;
         opts.detail_level = Some(detail);
 
-        let query_embedding = self.embed_query(query);
+        let expanded_queries = if expand && opts.expanded_queries.is_none() {
+            self.expand_query_sync(query)
+        } else {
+            None
+        };
+        if let Some(expanded) = expanded_queries {
+            if expanded.len() > 1 {
+                opts.expanded_queries = Some(expanded);
+            }
+        }
+
+        let (query_embedding, expanded_embeddings) =
+            self.embed_query_set(query, opts.expanded_queries.as_deref().unwrap_or(&[]));
+        if opts.expanded_embeddings.is_none() {
+            opts.expanded_embeddings = expanded_embeddings;
+        }
+
         let hybrid_opts = HybridOpts::default();
-        let result_with_meta = hybrid_search(
+        let mut result_with_meta = hybrid_search(
             self.engine,
             query,
             query_embedding.as_deref(),
             opts.clone(),
             hybrid_opts,
         )?;
-        let mut results = result_with_meta.results;
 
         // Auto-escalate: if results are sparse, try with higher detail
-        if results.len() < 3 && detail != DetailLevel::High {
+        if result_with_meta.results.len() < 3 && detail != DetailLevel::High {
             info!("Auto-escalating to High detail");
             opts.detail_level = Some(DetailLevel::High);
             let escalated = hybrid_search(
@@ -290,13 +318,16 @@ impl<'a> Operations<'a> {
                 opts,
                 HybridOpts::default(),
             )?;
-            if escalated.results.len() > results.len() {
-                results = escalated.results;
+            if escalated.results.len() > result_with_meta.results.len() {
+                result_with_meta = escalated;
             }
         }
 
-        info!(result_count = results.len(), "Query complete");
-        Ok(results)
+        info!(
+            result_count = result_with_meta.results.len(),
+            "Query complete"
+        );
+        Ok(result_with_meta)
     }
 
     pub fn search_keyword_chunks(
@@ -319,23 +350,72 @@ impl<'a> Operations<'a> {
         self.engine.get_edges_by_chunk(chunk_id)
     }
 
+    pub fn find_code_definitions(
+        &self,
+        symbol: &str,
+        language: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Chunk>> {
+        let mut chunks = self
+            .engine
+            .get_chunks_by_symbol(symbol, limit.saturating_mul(4).max(20))?;
+        chunks.retain(|chunk| {
+            chunk.source == ChunkSource::FencedCode
+                && language.is_none_or(|lang| chunk.language.as_deref() == Some(lang))
+        });
+        chunks.truncate(limit);
+        Ok(chunks)
+    }
+
+    pub fn find_code_references(
+        &self,
+        symbol: &str,
+        language: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeChunkResult>> {
+        self.search_keyword_chunks(
+            symbol,
+            SearchOpts {
+                limit: Some(limit),
+                page_type: Some(PageType::Code),
+                language: language.map(str::to_string),
+                ..Default::default()
+            },
+        )
+    }
+
     pub fn reindex_code_page(&self, slug: &str) -> Result<usize> {
         let page = self
             .engine
             .get_page(slug)?
             .ok_or_else(|| crate::error::GBrainError::PageNotFound(slug.to_string()))?;
         let content = page.compiled_truth.clone();
-        let code_index = index_code(slug, &content, None, 0);
+        let language = page
+            .frontmatter
+            .as_deref()
+            .and_then(|fm| serde_json::from_str::<serde_json::Value>(fm).ok())
+            .and_then(|fm| {
+                fm.get("language")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        let code_index = chunk_code_tree_sitter(slug, &content, language.as_deref(), 0);
         self.engine.delete_chunks(slug)?;
         let count = self.engine.upsert_chunks(slug, &code_index.chunks)?;
         reconcile_code_edges(self.engine, slug, &code_index)?;
         Ok(count)
     }
 
-    fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
-        let api_key = self.config.openai_api_key.as_deref()?;
+    fn embed_query_set(
+        &self,
+        query: &str,
+        expanded_queries: &[String],
+    ) -> (Option<Vec<f32>>, Option<Vec<Vec<f32>>>) {
+        let Some(api_key) = self.config.openai_api_key.as_deref() else {
+            return (None, None);
+        };
         if api_key.is_empty() {
-            return None;
+            return (None, None);
         }
         let embedder = Embedder::new(
             api_key,
@@ -343,16 +423,66 @@ impl<'a> Operations<'a> {
             Some(&self.config.embedding_model),
             Some(self.config.embedding_dimensions),
         );
+        let mut texts = vec![query.to_string()];
+        if !expanded_queries.is_empty() {
+            texts.extend(expanded_queries.iter().cloned());
+        }
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .and_then(|rt| {
-                rt.block_on(embedder.embed(query))
+                rt.block_on(embedder.embed_batch(&text_refs))
                     .map_err(|e| std::io::Error::other(e.to_string()))
             }) {
-            Ok(embedding) => Some(embedding),
+            Ok(mut embeddings) => {
+                if embeddings.is_empty() {
+                    return (None, None);
+                }
+                let query_embedding = embeddings.remove(0);
+                let expanded = if expanded_queries.is_empty() {
+                    None
+                } else {
+                    Some(embeddings)
+                };
+                (Some(query_embedding), expanded)
+            }
             Err(e) => {
                 warn!(error = %e, "Query embedding failed; falling back to keyword-only search");
+                (None, None)
+            }
+        }
+    }
+
+    fn expand_query_sync(&self, query: &str) -> Option<Vec<String>> {
+        let api_key = self
+            .config
+            .expansion_api_key
+            .as_deref()
+            .or(self.config.openai_api_key.as_deref())?;
+        if api_key.is_empty() {
+            return None;
+        }
+        let base_url = self
+            .config
+            .expansion_base_url
+            .as_deref()
+            .or(self.config.openai_base_url.as_deref())
+            .unwrap_or("https://api.openai.com/v1");
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|rt| {
+                rt.block_on(expand_query(
+                    query,
+                    api_key,
+                    base_url,
+                    &self.config.expansion_model,
+                ))
+            }) {
+            Ok(expanded) => Some(expanded),
+            Err(e) => {
+                warn!(error = %e, "Query expansion failed; using original query only");
                 None
             }
         }
@@ -367,8 +497,12 @@ impl<'a> Operations<'a> {
     ) -> Result<Vec<SearchResult>> {
         info!(query = %query, embedding_dims = embedding.len(), "Searching with embedding");
         let hybrid_opts = HybridOpts::default();
-        let result_with_meta = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
-        info!(result_count = result_with_meta.results.len(), "Search complete");
+        let result_with_meta =
+            hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
+        info!(
+            result_count = result_with_meta.results.len(),
+            "Search complete"
+        );
         Ok(result_with_meta.results)
     }
 
@@ -381,8 +515,12 @@ impl<'a> Operations<'a> {
     ) -> Result<SearchResultWithMeta> {
         info!(query = %query, embedding_dims = embedding.len(), "Searching with embedding (with meta)");
         let hybrid_opts = HybridOpts::default();
-        let result_with_meta = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
-        info!(result_count = result_with_meta.results.len(), "Search complete");
+        let result_with_meta =
+            hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
+        info!(
+            result_count = result_with_meta.results.len(),
+            "Search complete"
+        );
         Ok(result_with_meta)
     }
 
@@ -671,7 +809,13 @@ impl<'a> Operations<'a> {
         let mut chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
         let next_index = chunks.len() as i32;
         let code_index = if pt == PageType::Code {
-            Some(chunk_code_tree_sitter(slug, &parsed.body, None, next_index))
+            let language = parsed.frontmatter.get("language").and_then(|v| v.as_str());
+            Some(chunk_code_tree_sitter(
+                slug,
+                &parsed.body,
+                language,
+                next_index,
+            ))
         } else {
             Some(extract_fenced_code_index(slug, content, next_index))
         };

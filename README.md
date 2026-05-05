@@ -4,10 +4,10 @@
 
 - `gbrain embed`、查询流程和 Autopilot 已接入真实 embedding 生成与持久化；当 sqlite-vec 不可用时，会使用 `chunk_embeddings` fallback 表做 cosine 检索。
 - `delete` 现在是软删除，新增 `restore` 和 `purge-deleted` 命令；默认读取、列表、搜索、统计和健康检查都会排除软删除页面。
-- schema version 已更新到 10，新增 `deleted_at`、chunk 代码元数据字段、`chunk_embeddings`、`chunks_fts` 和 `code_edges`。
+- schema version 已更新到 11，新增 `deleted_at`、chunk 代码元数据字段、`chunk_embeddings`、`chunks_fts`、`code_edges` 和未解析符号边。
 - `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
-- `put_page` 会从代码页或 Markdown fenced code block 生成符号级代码 chunk；支持 Rust/TS/JS/Python/Go/Java/C 风格声明识别、代码 chunk 搜索和 callers/callees 调用图。
-- Markdown import 会校验 frontmatter `slug` 与路径推导 slug 是否一致，不一致时跳过。
+- `put_page` 会从代码页或 Markdown fenced code block 生成符号级代码 chunk；支持 Rust/TS/TSX/JS/Python/Go/Java/C/C++ 声明识别、代码 chunk 搜索、定义/引用查询和 callers/callees 调用图。
+- Markdown/code import 会校验 frontmatter `slug` 与路径推导 slug 是否一致，不一致时跳过；`--embed` 会立即为导入内容生成 embedding。
 
 [English](./README_EN.md) | 中文
 
@@ -67,7 +67,7 @@ cargo build --features file-server   # 包含 axum 文件服务器
 | `gbrain restore <slug>` | 恢复软删除页面 |
 | `gbrain purge-deleted [--older-than-hours <N>]` | 永久清理旧的软删除页面 |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | 列出页面（可筛选） |
-| `gbrain query <query> [--limit <N>]` | 混合搜索（别名: `ask`） |
+| `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | 混合搜索（别名: `ask`），支持代码过滤和两阶段检索 |
 
 ### 搜索与图谱
 
@@ -76,6 +76,7 @@ cargo build --features file-server   # 包含 axum 文件服务器
 | `gbrain resolve <partial>` | 模糊解析部分 slug |
 | `gbrain graph <slug> [--depth <N>]` | 从页面遍历知识图谱 |
 | `gbrain graph-query <from> [--to <slug>] [--depth <N>] [--link-type <TYPE>]` | 查询页面间的图谱关系 |
+| `gbrain code search/def/refs/callers/callees/edges` | 代码 chunk、符号定义/引用和调用图查询 |
 
 ### 反向链接
 
@@ -90,7 +91,7 @@ cargo build --features file-server   # 包含 axum 文件服务器
 | 命令 | 说明 |
 |------|------|
 | `gbrain embed [slugs...] [--batch-size <N>]` | 为 stale chunks 生成并持久化嵌入向量 |
-| `gbrain import <dir> [--embed] [--auto-link]` | 导入 Markdown 文件；frontmatter slug 与路径不一致时跳过 |
+| `gbrain import <dir> [--embed] [--auto-link]` | 导入 Markdown 和支持的代码文件；frontmatter slug 与路径不一致时跳过 |
 | `gbrain export [slugs...] [--dir <DIR>] [--page-type <TYPE>]` | 导出页面为 Markdown |
 | `gbrain extract [--mode links\|timeline\|all]` | 批量提取链接/时间线 |
 | `gbrain lint [slug] [--fix] [--dry-run]` | 零 LLM 质量检查（6 条规则） |

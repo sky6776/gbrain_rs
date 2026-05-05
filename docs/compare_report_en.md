@@ -24,7 +24,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 - Rust lacks the Minions subsystem (4,478 lines)
 - Rust lacks the Resolver subsystem (1,095 lines)
 - Rust lacks the Skillify/Skillpack system (1,013 lines)
-- Rust now has deterministic multi-language code chunk indexing and code_edges call graph support; it still does not use tree-sitter.
+- Rust now has tree-sitter multi-language code chunk indexing, qualified symbols, code_edges/unresolved symbol edges, definition/reference lookup, and Cathedral II two-pass code graph retrieval.
 
 ---
 
@@ -38,7 +38,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 | **Fuzzy search** | pg_trgm (trigram) | Custom character trigram Jaccard |
 | **Connection pooling** | postgres.js built-in | Single connection (SQLite doesn't need pooling) |
 | **Transaction support** | Postgres transactions + advisory lock | BEGIN IMMEDIATE + COMMIT/ROLLBACK |
-| **Schema version** | V1-V29 | V1-V10 |
+| **Schema version** | V1-V29 | V1-V11 |
 | **Multi-source support** | source_id composite key (v0.18+) | No |
 | **PGLite** | Embedded WASM Postgres | No (uses SQLite directly) |
 | **PgBouncer** | Auto-detect compatibility | Not applicable |
@@ -46,7 +46,7 @@ The Rust codebase is approximately 41% the size of the TS version. Main reasons:
 **Key differences**:
 - TS uses the Postgres ecosystem (pgvector, pg_trgm, tsvector), Rust uses the SQLite ecosystem (sqlite-vec, FTS5)
 - TS supports multi-source brains (source_id composite key), Rust does not
-- TS schema migrations reach V29, Rust is currently V10
+- TS schema migrations reach V29, Rust is currently V11
 - TS has dual engines (PGLite for embedded, remote Postgres for production), Rust only has SQLite
 
 ---

@@ -37,6 +37,11 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "offset", description: "Skip first N results (for pagination)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "expand", description: "Enable multi-query expansion (default: true)", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "detail", description: "Result detail level: low (compiled truth only), medium (default, all with dedup), high (all chunks)", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "lang", description: "Filter code-aware retrieval by language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "symbol_kind", description: "Filter code-aware retrieval by symbol kind", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "near_symbol", description: "Anchor two-pass code graph retrieval near this symbol", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "walk_depth", description: "Walk code graph neighbors up to this depth (0-2)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "include_meta", description: "Return {results, meta} with vector/expansion detail", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
     OperationDef {
@@ -46,6 +51,10 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "query", description: "Search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "offset", description: "Skip first N results (for pagination)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "lang", description: "Filter code-aware retrieval by language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "symbol_kind", description: "Filter code-aware retrieval by symbol kind", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "near_symbol", description: "Anchor two-pass code graph retrieval near this symbol", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "walk_depth", description: "Walk code graph neighbors up to this depth (0-2)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {
@@ -230,11 +239,31 @@ static OPERATION_DEFS: &[OperationDef] = &[
         ],
     },
     OperationDef {
+        name: "code_def",
+        description: "Find code symbol definitions",
+        params: &[
+            ParamDef { name: "symbol", description: "Qualified or local symbol name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "lang", description: "Filter by code language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "code_refs",
+        description: "Find code chunks referencing a symbol",
+        params: &[
+            ParamDef { name: "symbol", description: "Qualified or local symbol name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "lang", description: "Filter by code language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
         name: "search_code_chunks",
         description: "Search indexed code chunks by keyword/symbol text",
         params: &[
             ParamDef { name: "query", description: "Code search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "lang", description: "Filter by code language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "symbol_kind", description: "Filter by symbol kind", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
     OperationDef {

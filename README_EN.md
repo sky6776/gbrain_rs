@@ -12,7 +12,7 @@ English | [中文](./README.md)
 
 - **Real Embeddings** - CLI, query, and Autopilot paths generate and persist embeddings, with a SQLite fallback table when sqlite-vec is unavailable.
 - **Soft Delete Lifecycle** - `delete` hides pages by default, while `restore` and `purge-deleted` cover recovery and permanent cleanup.
-- **Code Knowledge Graph** - Code pages and Markdown fenced code blocks are indexed into symbol-level `fenced_code` chunks with deterministic Rust/TS/JS/Python/Go/Java/C-style parsing, code chunk search, and callers/callees edges.
+- **Code Knowledge Graph** - Code pages and Markdown fenced code blocks are indexed into symbol-level `fenced_code` chunks with deterministic Rust/TS/TSX/JS/Python/Go/Java/C/C++ parsing, code chunk search, definition/reference lookup, and callers/callees edges.
 
 - **Hybrid Search** — BM25 keyword + vector cosine similarity + fuzzy trigram, fused via Reciprocal Rank Fusion with multi-query expansion
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry validation
@@ -62,7 +62,7 @@ cargo build --features file-server   # With axum file server
 | `gbrain restore <slug>` | Restore a soft-deleted page |
 | `gbrain purge-deleted [--older-than-hours <N>]` | Permanently purge old soft-deleted pages |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | List pages with filters |
-| `gbrain query <query> [--limit <N>]` | Hybrid search (alias: `ask`) |
+| `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | Hybrid search (alias: `ask`) with code filters and two-pass retrieval options |
 
 ### Search & Graph
 
@@ -71,6 +71,7 @@ cargo build --features file-server   # With axum file server
 | `gbrain resolve <partial>` | Fuzzy-resolve a partial slug |
 | `gbrain graph <slug> [--depth <N>]` | Traverse knowledge graph from a page |
 | `gbrain graph-query <from> [--to <slug>] [--depth <N>] [--link-type <TYPE>]` | Query graph between pages |
+| `gbrain code search/def/refs/callers/callees/edges` | Query code chunks, symbol definitions/references, and call graph edges |
 
 ### Backlinks
 
@@ -85,7 +86,7 @@ cargo build --features file-server   # With axum file server
 | Command | Description |
 |---------|-------------|
 | `gbrain embed [slugs...] [--batch-size <N>]` | Generate and persist embeddings for stale chunks |
-| `gbrain import <dir> [--embed] [--auto-link]` | Import markdown files; mismatched frontmatter slugs are skipped |
+| `gbrain import <dir> [--embed] [--auto-link]` | Import Markdown and supported code files; mismatched frontmatter slugs are skipped |
 | `gbrain export [slugs...] [--dir <DIR>] [--page-type <TYPE>]` | Export pages to markdown |
 | `gbrain extract [--mode links\|timeline\|all]` | Batch extract links/timeline |
 | `gbrain lint [slug] [--fix] [--dry-run]` | Zero-LLM quality check (6 rules) |
@@ -364,7 +365,7 @@ Three-layer design:
 
 ## Documentation
 
-Current implementation notes (2026-05-04): schema version 10; soft-delete lifecycle; real embedding write/query/Autopilot flow; `chunk_embeddings` fallback; include/exclude slug-prefix search controls; `email`, `slack`, `calendar-event`, and `code` page types; `fenced_code` chunks, `chunks_fts`, and `code_edges` for code search/call graph.
+Current implementation notes (2026-05-05): schema version 11; soft-delete lifecycle; real embedding write/query/Autopilot flow; `chunk_embeddings` fallback; include/exclude slug-prefix search controls; `email`, `slack`, `calendar-event`, and `code` page types; `fenced_code` chunks, `chunks_fts`, `code_edges`, and unresolved symbol edges for code search/call graph; Markdown/code import with optional immediate embedding.
 
 - [TS vs Rust Comparison Report](./docs/compare_report_en.md) / [中文](./docs/compare_report.md) — Comprehensive comparison of TypeScript and Rust versions (code size, database, search, MCP, security, etc.)
 - [TS vs Rust Module-Level Comparison](./docs/module_detail_en.md) / [中文](./docs/module_detail.md) — Per-module comparison (engine layer, operations, search, chunker, enrichment, validators, etc.)

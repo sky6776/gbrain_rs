@@ -6,6 +6,7 @@
 //! Tracks sync state in a SyncManifest and logs failures as JSONL.
 
 use crate::error::{GBrainError, Result};
+use crate::types::PageType;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
@@ -178,8 +179,8 @@ pub fn git_sync(
     // Step 2: Load manifest
     let manifest = load_manifest(manifest_path);
 
-    // Step 3: Walk for .md files
-    let md_files = collect_md_files(local_path);
+    // Step 3: Walk markdown and supported code files
+    let import_files = collect_import_files(local_path);
 
     let mut synced = 0;
     let mut skipped = 0;
@@ -187,7 +188,7 @@ pub fn git_sync(
     let mut failures: Vec<SyncFailure> = Vec::new();
     let mut updated_manifest = manifest.clone();
 
-    for file_path in &md_files {
+    for file_path in &import_files {
         let relative = file_path.strip_prefix(local_path).unwrap_or(file_path);
         let relative_str = relative.to_string_lossy().replace('\\', "/");
 
@@ -208,8 +209,12 @@ pub fn git_sync(
             }
         }
 
-        // Infer slug from path
-        let slug = infer_slug_from_path(&relative_str);
+        let is_code = is_code_file_path(&relative_str);
+        let slug = if is_code {
+            infer_code_slug_from_path(&relative_str)
+        } else {
+            infer_slug_from_path(&relative_str)
+        };
 
         // Validate slug
         if crate::security::validate_page_slug(&slug).is_err() {
@@ -218,9 +223,28 @@ pub fn git_sync(
             continue;
         }
 
-        // Parse and sync the page
-        let _parsed = crate::markdown::parse_markdown(&content);
+        let parsed = crate::markdown::parse_markdown(&content);
+        if !is_code {
+            if let Some(fm_slug) = parsed.frontmatter.get("slug").and_then(|v| v.as_str()) {
+                if fm_slug != slug {
+                    warn!(path = %relative_str, frontmatter_slug = %fm_slug, path_slug = %slug, "Slug mismatch, skipping");
+                    skipped += 1;
+                    continue;
+                }
+            }
+        }
         let title = infer_title_from_path(&relative_str);
+        let page_type = if is_code { Some(PageType::Code) } else { None };
+        let import_content = if is_code {
+            format!(
+                "---\nfile: {}\nlanguage: {}\n---\n\n{}",
+                relative_str,
+                language_from_path(&relative_str).unwrap_or("text"),
+                content
+            )
+        } else {
+            content
+        };
 
         // Connect engine if needed
         let ops = crate::operations::Operations::new(
@@ -233,7 +257,7 @@ pub fn git_sync(
             },
         );
 
-        let result = ops.put_page(&slug, &title, &content, None, Some(&hash));
+        let result = ops.put_page(&slug, &title, &import_content, page_type, Some(&hash));
 
         match result {
             Ok(_) => {
@@ -322,8 +346,8 @@ pub fn sync_brain(
         load_manifest(&manifest_path)
     };
 
-    // Walk for .md files
-    let md_files = collect_md_files(repo_path);
+    // Walk markdown and supported code files
+    let import_files = collect_import_files(repo_path);
 
     let mut synced = 0;
     let mut skipped = 0;
@@ -331,7 +355,7 @@ pub fn sync_brain(
     let mut failures: Vec<SyncFailure> = Vec::new();
     let mut updated_manifest = manifest.clone();
 
-    for file_path in &md_files {
+    for file_path in &import_files {
         let relative = file_path.strip_prefix(repo_path).unwrap_or(file_path);
         let relative_str = relative.to_string_lossy().replace('\\', "/");
 
@@ -366,7 +390,12 @@ pub fn sync_brain(
             }
         }
 
-        let slug = infer_slug_from_path(&relative_str);
+        let is_code = is_code_file_path(&relative_str);
+        let slug = if is_code {
+            infer_code_slug_from_path(&relative_str)
+        } else {
+            infer_slug_from_path(&relative_str)
+        };
 
         if crate::security::validate_page_slug(&slug).is_err() {
             warn!(path = %relative_str, slug = %slug, "Invalid slug, skipping");
@@ -374,7 +403,29 @@ pub fn sync_brain(
             continue;
         }
 
+        let parsed = crate::markdown::parse_markdown(&content);
+        if !is_code {
+            if let Some(fm_slug) = parsed.frontmatter.get("slug").and_then(|v| v.as_str()) {
+                if fm_slug != slug {
+                    warn!(path = %relative_str, frontmatter_slug = %fm_slug, path_slug = %slug, "Slug mismatch, skipping");
+                    skipped += 1;
+                    continue;
+                }
+            }
+        }
+
         let title = infer_title_from_path(&relative_str);
+        let page_type = if is_code { Some(PageType::Code) } else { None };
+        let import_content = if is_code {
+            format!(
+                "---\nfile: {}\nlanguage: {}\n---\n\n{}",
+                relative_str,
+                language_from_path(&relative_str).unwrap_or("text"),
+                content
+            )
+        } else {
+            content
+        };
 
         let ops = crate::operations::Operations::new(
             engine,
@@ -386,7 +437,7 @@ pub fn sync_brain(
             },
         );
 
-        match ops.put_page(&slug, &title, &content, None, Some(&hash)) {
+        match ops.put_page(&slug, &title, &import_content, page_type, Some(&hash)) {
             Ok(_) => {
                 debug!(slug = %slug, "Page synced");
                 synced += 1;
@@ -438,7 +489,7 @@ pub fn build_sync_manifest(repo_path: &Path) -> Result<(Vec<PathBuf>, Vec<String
 
     if !output.status.success() {
         // If git diff fails (e.g., no commits yet), fall back to full scan
-        let all_files = collect_md_files(repo_path);
+        let all_files = collect_import_files(repo_path);
         return Ok((all_files, Vec::new()));
     }
 
@@ -460,7 +511,7 @@ pub fn build_sync_manifest(repo_path: &Path) -> Result<(Vec<PathBuf>, Vec<String
             parts[1]
         };
 
-        if !path.ends_with(".md") {
+        if !path.ends_with(".md") && !is_code_file_path(path) {
             continue;
         }
 
@@ -472,7 +523,11 @@ pub fn build_sync_manifest(repo_path: &Path) -> Result<(Vec<PathBuf>, Vec<String
                 }
             }
             Some('D') => {
-                let slug = slugify_path(path.trim_end_matches(".md"));
+                let slug = if is_code_file_path(path) {
+                    infer_code_slug_from_path(path)
+                } else {
+                    slugify_path(path.trim_end_matches(".md"))
+                };
                 deleted_slugs.push(slug);
             }
             _ => {}
@@ -547,6 +602,34 @@ fn is_combining_mark(c: char) -> bool {
 /// P1-6: Now uses slugify_path for Unicode normalization
 fn infer_slug_from_path(relative_path: &str) -> String {
     slugify_path(relative_path)
+}
+
+fn infer_code_slug_from_path(relative_path: &str) -> String {
+    let without_ext = relative_path
+        .rsplit_once('.')
+        .map(|(base, _)| base)
+        .unwrap_or(relative_path);
+    format!("code/{}", slugify_path(without_ext))
+}
+
+fn is_code_file_path(path: &str) -> bool {
+    language_from_path(path).is_some()
+}
+
+fn language_from_path(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    match ext {
+        "rs" => Some("rust"),
+        "ts" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        _ => None,
+    }
 }
 
 /// Infer title from file path
@@ -661,16 +744,15 @@ fn git_pull(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Collect all .md files from a directory, skipping hidden files
-fn collect_md_files(dir: &Path) -> Vec<PathBuf> {
+/// Collect markdown and supported code files from a directory, skipping hidden files.
+fn collect_import_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    walk_md_dir(dir, dir, &mut files);
+    walk_import_dir(dir, &mut files);
     files.sort();
     files
 }
 
-#[allow(clippy::only_used_in_recursion)]
-fn walk_md_dir(base: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk_import_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -684,9 +766,15 @@ fn walk_md_dir(base: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
         }
 
         let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || meta.len() > 5 * 1024 * 1024 {
+            continue;
+        }
         if path.is_dir() {
-            walk_md_dir(base, &path, files);
-        } else if name_str.ends_with(".md") {
+            walk_import_dir(&path, files);
+        } else if name_str.ends_with(".md") || is_code_file_path(&name_str) {
             files.push(path);
         }
     }

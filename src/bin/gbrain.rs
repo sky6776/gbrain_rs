@@ -111,6 +111,30 @@ enum Commands {
         /// Maximum results
         #[arg(long, default_value = "20")]
         limit: usize,
+
+        /// Result detail level: low, medium, high
+        #[arg(long)]
+        detail: Option<String>,
+
+        /// Filter code-aware retrieval by language (e.g. rust, typescript, python)
+        #[arg(long = "lang")]
+        language: Option<String>,
+
+        /// Filter code-aware retrieval by symbol kind (function, method, class, struct, etc.)
+        #[arg(long = "symbol-kind")]
+        symbol_kind: Option<String>,
+
+        /// Anchor two-pass code graph retrieval near a symbol
+        #[arg(long = "near-symbol")]
+        near_symbol: Option<String>,
+
+        /// Walk code graph neighbors up to this depth (0-2)
+        #[arg(long = "walk-depth", default_value = "0")]
+        walk_depth: usize,
+
+        /// Enable LLM query expansion when configured
+        #[arg(long, default_value_t = false)]
+        expand: bool,
     },
 
     /// Backlink operations (list, check, fix)
@@ -331,11 +355,33 @@ enum CodeCommands {
     /// Rebuild code chunks and code edges for a page
     Reindex { slug: String },
 
+    /// Find symbol definitions
+    Def {
+        symbol: String,
+        #[arg(long = "lang")]
+        language: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
+    /// Find code chunks that reference a symbol
+    Refs {
+        symbol: String,
+        #[arg(long = "lang")]
+        language: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Search indexed code chunks
     Search {
         query: String,
         #[arg(long, default_value = "20")]
         limit: usize,
+        #[arg(long = "lang")]
+        language: Option<String>,
+        #[arg(long = "symbol-kind")]
+        symbol_kind: Option<String>,
     },
 
     /// Show callers of a symbol
@@ -508,18 +554,37 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             }
         }
 
-        Commands::Query { query, limit } => {
+        Commands::Query {
+            query,
+            limit,
+            detail,
+            language,
+            symbol_kind,
+            near_symbol,
+            walk_depth,
+            expand,
+        } => {
+            let detail_level = detail.as_deref().and_then(|d| match d {
+                "low" => Some(DetailLevel::Low),
+                "medium" => Some(DetailLevel::Medium),
+                "high" => Some(DetailLevel::High),
+                _ => None,
+            });
             let opts = SearchOpts {
                 limit: Some(limit),
-                detail_level: Some(DetailLevel::Medium),
+                detail_level,
+                language,
+                symbol_kind,
+                near_symbol,
+                walk_depth: Some(walk_depth.min(2)),
                 ..Default::default()
             };
 
-            let results = ops.query(&query, opts)?;
+            let result_with_meta = ops.query_with_meta(&query, opts, expand)?;
             if cli.json {
-                info!("{}", serde_json::to_string_pretty(&results)?);
+                info!("{}", serde_json::to_string_pretty(&result_with_meta)?);
             } else {
-                for result in &results {
+                for result in &result_with_meta.results {
                     info!("{} | {} | {:.3}", result.slug, result.title, result.score);
                     if !result.chunk_text.is_empty() {
                         info!(
@@ -528,7 +593,13 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                         );
                     }
                 }
-                info!("{} results", results.len());
+                info!(
+                    "{} results (vector_enabled={}, expansion_applied={}, detail={:?})",
+                    result_with_meta.results.len(),
+                    result_with_meta.meta.vector_enabled,
+                    result_with_meta.meta.expansion_applied,
+                    result_with_meta.meta.detail_resolved
+                );
             }
         }
 
@@ -945,6 +1016,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 )));
             }
             let mut count = 0;
+            let mut imported_slugs = Vec::new();
             let mut dirs = vec![import_dir.to_path_buf()];
             while let Some(current) = dirs.pop() {
                 for entry in std::fs::read_dir(&current)? {
@@ -953,6 +1025,9 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     if path.is_dir() {
                         dirs.push(path);
                     } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                        if should_skip_import_file(&path) {
+                            continue;
+                        }
                         let content = std::fs::read_to_string(&path)?;
                         // R3-08: Derive slug from relative path within import dir for
                         // structured slugs (e.g. "people/alice"), and validate it
@@ -983,13 +1058,41 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             .unwrap_or(&slug)
                             .to_string();
                         ops.put_page(&slug, &title, &content, None, None)?;
+                        imported_slugs.push(slug);
+                        count += 1;
+                    } else if is_supported_code_file(&path) {
+                        if should_skip_import_file(&path) {
+                            continue;
+                        }
+                        let content = std::fs::read_to_string(&path)?;
+                        let relative = path.strip_prefix(import_dir).unwrap_or(&path);
+                        let slug = code_slug_from_relative(relative);
+                        if gbrain_core::security::validate_page_slug(&slug).is_err() {
+                            tracing::warn!(slug = %slug, path = %path.display(), "Skipping code file with invalid slug");
+                            continue;
+                        }
+                        let title = relative
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&slug)
+                            .to_string();
+                        let language = language_from_path(&path).unwrap_or("text");
+                        let import_content = format!(
+                            "---\nfile: {}\nlanguage: {}\n---\n\n{}",
+                            relative.to_string_lossy().replace('\\', "/"),
+                            language,
+                            content
+                        );
+                        ops.put_page(&slug, &title, &import_content, Some(PageType::Code), None)?;
+                        imported_slugs.push(slug);
                         count += 1;
                     }
                 }
             }
             info!("Imported {} pages from {}", count, dir);
             if do_embed {
-                info!("Embed flag set — use 'gbrain embed' separately");
+                let embedded = embed_stale_chunks(&ops, config, 100, Some(&imported_slugs))?;
+                info!(embedded, "Embedded imported chunks");
             }
             if auto_link {
                 info!("Auto-link enabled — links extracted during put_page");
@@ -997,81 +1100,13 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         }
 
         Commands::Embed { batch_size, slugs } => {
-            let api_key = config.openai_api_key.as_deref().ok_or_else(|| {
-                GBrainError::InvalidInput(
-                    "GBRAIN_OPENAI_API_KEY is required for embedding".to_string(),
-                )
-            })?;
-            let embedder = Embedder::new(
-                api_key,
-                config.openai_base_url.as_deref(),
-                Some(&config.embedding_model),
-                Some(config.embedding_dimensions),
-            );
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    GBrainError::InvalidInput(format!("failed to start async runtime: {}", e))
-                })?;
-            let stale_chunks: Vec<StaleChunk> = if slugs.is_empty() {
-                ops.engine.list_stale_chunks(None)?
-            } else {
-                let mut rows = Vec::new();
-                for slug in &slugs {
-                    for c in ops.engine.get_chunks(slug)? {
-                        rows.push(StaleChunk {
-                            slug: slug.clone(),
-                            chunk_id: c.id,
-                            chunk_index: c.chunk_index,
-                            chunk_text: c.chunk_text,
-                            source: c.source,
-                            token_count: c.token_count,
-                            model: c.model,
-                        });
-                    }
-                }
-                rows
-            };
-            info!(
-                chunk_count = stale_chunks.len(),
-                batch_size, "Starting embed"
-            );
-            let target_chunk_count = stale_chunks.len();
-            let mut embedded = 0;
-            for batch in stale_chunks.chunks(batch_size.max(1)) {
-                let texts: Vec<&str> = batch.iter().map(|c| c.chunk_text.as_str()).collect();
-                let embeddings = rt
-                    .block_on(embedder.embed_batch(&texts))
-                    .map_err(|e| GBrainError::Embedding(e.to_string()))?;
-                let mut by_slug: std::collections::HashMap<String, Vec<ChunkInput>> =
-                    std::collections::HashMap::new();
-                for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
-                    by_slug
-                        .entry(row.slug.clone())
-                        .or_default()
-                        .push(ChunkInput {
-                            chunk_index: row.chunk_index,
-                            chunk_text: row.chunk_text.clone(),
-                            source: row.source.clone(),
-                            token_count: row.token_count,
-                            embedding: Some(embedding),
-                            model: Some(config.embedding_model.clone()),
-                            language: None,
-                            symbol_name: None,
-                            symbol_type: None,
-                            start_line: None,
-                            end_line: None,
-                            parent_symbol_path: None,
-                            symbol_name_qualified: None,
-                            doc_comment: None,
-                        });
-                }
-                for (slug, chunks) in by_slug {
-                    embedded += ops.engine.upsert_chunks(&slug, &chunks)?;
-                }
-            }
-            info!(embedded, target_chunk_count, "Embed complete");
+            let embedded = embed_stale_chunks(
+                &ops,
+                config,
+                batch_size,
+                if slugs.is_empty() { None } else { Some(&slugs) },
+            )?;
+            info!(embedded, "Embed complete");
         }
 
         Commands::GraphQuery {
@@ -1127,12 +1162,64 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 let count = ops.reindex_code_page(&slug)?;
                 info!(slug = %slug, chunk_count = count, "Code page reindexed");
             }
-            CodeCommands::Search { query, limit } => {
+            CodeCommands::Def {
+                symbol,
+                language,
+                limit,
+            } => {
+                let chunks = ops.find_code_definitions(&symbol, language.as_deref(), limit)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&chunks)?);
+                } else {
+                    for c in &chunks {
+                        info!(
+                            "{}#{} [{}:{}-{}]",
+                            c.slug,
+                            c.symbol_name.as_deref().unwrap_or("<file>"),
+                            c.language.as_deref().unwrap_or(""),
+                            c.start_line.unwrap_or_default(),
+                            c.end_line.unwrap_or_default()
+                        );
+                    }
+                    info!("{} definition chunk(s)", chunks.len());
+                }
+            }
+            CodeCommands::Refs {
+                symbol,
+                language,
+                limit,
+            } => {
+                let refs = ops.find_code_references(&symbol, language.as_deref(), limit)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&refs)?);
+                } else {
+                    for r in &refs {
+                        info!(
+                            "{}#{} [{}:{}-{}] score={:.3}",
+                            r.slug,
+                            r.symbol_name.as_deref().unwrap_or("<file>"),
+                            r.language.as_deref().unwrap_or(""),
+                            r.start_line.unwrap_or_default(),
+                            r.end_line.unwrap_or_default(),
+                            r.score
+                        );
+                    }
+                    info!("{} reference chunk(s)", refs.len());
+                }
+            }
+            CodeCommands::Search {
+                query,
+                limit,
+                language,
+                symbol_kind,
+            } => {
                 let results = ops.search_keyword_chunks(
                     &query,
                     SearchOpts {
                         limit: Some(limit),
                         page_type: Some(PageType::Code),
+                        language,
+                        symbol_kind,
                         ..Default::default()
                     },
                 )?;
@@ -1338,4 +1425,165 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
 
     engine.disconnect()?;
     Ok(())
+}
+
+fn embed_stale_chunks(
+    ops: &Operations<'_>,
+    config: &Config,
+    batch_size: usize,
+    slugs: Option<&[String]>,
+) -> Result<usize> {
+    let api_key = config.openai_api_key.as_deref().ok_or_else(|| {
+        GBrainError::InvalidInput("GBRAIN_OPENAI_API_KEY is required for embedding".to_string())
+    })?;
+    let embedder = Embedder::new(
+        api_key,
+        config.openai_base_url.as_deref(),
+        Some(&config.embedding_model),
+        Some(config.embedding_dimensions),
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| GBrainError::InvalidInput(format!("failed to start async runtime: {}", e)))?;
+
+    let stale_chunks: Vec<StaleChunk> = if let Some(slugs) = slugs {
+        let mut rows = Vec::new();
+        for slug in slugs {
+            for c in ops.engine.get_chunks(slug)? {
+                rows.push(StaleChunk {
+                    slug: slug.clone(),
+                    chunk_id: c.id,
+                    chunk_index: c.chunk_index,
+                    chunk_text: c.chunk_text,
+                    source: c.source,
+                    token_count: c.token_count,
+                    model: c.model,
+                });
+            }
+        }
+        rows
+    } else {
+        ops.engine.list_stale_chunks(None)?
+    };
+
+    info!(
+        chunk_count = stale_chunks.len(),
+        batch_size, "Starting embed"
+    );
+    let mut embedded = 0;
+    for batch in stale_chunks.chunks(batch_size.max(1)) {
+        let texts: Vec<&str> = batch.iter().map(|c| c.chunk_text.as_str()).collect();
+        let embeddings = rt
+            .block_on(embedder.embed_batch(&texts))
+            .map_err(|e| GBrainError::Embedding(e.to_string()))?;
+        let mut by_slug: std::collections::HashMap<String, Vec<ChunkInput>> =
+            std::collections::HashMap::new();
+        for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            let existing = ops.engine.get_chunk_by_id(row.chunk_id)?;
+            by_slug
+                .entry(row.slug.clone())
+                .or_default()
+                .push(ChunkInput {
+                    chunk_index: row.chunk_index,
+                    chunk_text: row.chunk_text.clone(),
+                    source: row.source.clone(),
+                    token_count: row.token_count,
+                    embedding: Some(embedding),
+                    model: Some(config.embedding_model.clone()),
+                    language: existing.as_ref().and_then(|c| c.language.clone()),
+                    symbol_name: existing.as_ref().and_then(|c| c.symbol_name.clone()),
+                    symbol_type: existing.as_ref().and_then(|c| c.symbol_type.clone()),
+                    start_line: existing.as_ref().and_then(|c| c.start_line),
+                    end_line: existing.as_ref().and_then(|c| c.end_line),
+                    parent_symbol_path: existing
+                        .as_ref()
+                        .and_then(|c| c.parent_symbol_path.clone()),
+                    symbol_name_qualified: existing
+                        .as_ref()
+                        .and_then(|c| c.symbol_name_qualified.clone()),
+                    doc_comment: existing.as_ref().and_then(|c| c.doc_comment.clone()),
+                });
+        }
+        for (slug, chunks) in by_slug {
+            embedded += ops.engine.upsert_chunks(&slug, &chunks)?;
+        }
+    }
+    Ok(embedded)
+}
+
+fn is_supported_code_file(path: &std::path::Path) -> bool {
+    language_from_path(path).is_some()
+}
+
+fn language_from_path(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+        "rs" => Some("rust"),
+        "ts" => Some("typescript"),
+        "tsx" => Some("tsx"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "py" => Some("python"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "c" | "h" => Some("c"),
+        "cpp" | "cc" | "cxx" | "hpp" => Some("cpp"),
+        _ => None,
+    }
+}
+
+fn code_slug_from_relative(relative: &std::path::Path) -> String {
+    let without_ext = relative.with_extension("");
+    let mut segments = Vec::new();
+    for segment in without_ext.components() {
+        let text = segment.as_os_str().to_string_lossy();
+        let slugified = slug_segment(&text);
+        if !slugified.is_empty() {
+            segments.push(slugified);
+        }
+    }
+    if segments.is_empty() {
+        "code/imported".to_string()
+    } else {
+        format!("code/{}", segments.join("/"))
+    }
+}
+
+fn slug_segment(value: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in value.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn should_skip_import_file(path: &std::path::Path) -> bool {
+    const MAX_IMPORT_BYTES: u64 = 5 * 1024 * 1024;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                warn!(path = %path.display(), "Skipping symlink during import");
+                return true;
+            }
+            if meta.len() > MAX_IMPORT_BYTES {
+                warn!(
+                    path = %path.display(),
+                    bytes = meta.len(),
+                    "Skipping oversized file during import"
+                );
+                return true;
+            }
+            false
+        }
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "Skipping unreadable file during import");
+            true
+        }
+    }
 }

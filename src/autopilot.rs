@@ -122,6 +122,7 @@ impl<'a> Autopilot<'a> {
             let mut by_slug: std::collections::HashMap<String, Vec<crate::types::ChunkInput>> =
                 std::collections::HashMap::new();
             for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
+                let existing = self.engine.get_chunk_by_id(row.chunk_id)?;
                 by_slug
                     .entry(row.slug.clone())
                     .or_default()
@@ -136,14 +137,18 @@ impl<'a> Autopilot<'a> {
                                 .clone()
                                 .unwrap_or_else(|| "text-embedding-3-large".to_string()),
                         ),
-                        language: None,
-                        symbol_name: None,
-                        symbol_type: None,
-                        start_line: None,
-                        end_line: None,
-                        parent_symbol_path: None,
-                        symbol_name_qualified: None,
-                        doc_comment: None,
+                        language: existing.as_ref().and_then(|c| c.language.clone()),
+                        symbol_name: existing.as_ref().and_then(|c| c.symbol_name.clone()),
+                        symbol_type: existing.as_ref().and_then(|c| c.symbol_type.clone()),
+                        start_line: existing.as_ref().and_then(|c| c.start_line),
+                        end_line: existing.as_ref().and_then(|c| c.end_line),
+                        parent_symbol_path: existing
+                            .as_ref()
+                            .and_then(|c| c.parent_symbol_path.clone()),
+                        symbol_name_qualified: existing
+                            .as_ref()
+                            .and_then(|c| c.symbol_name_qualified.clone()),
+                        doc_comment: existing.as_ref().and_then(|c| c.doc_comment.clone()),
                     });
             }
             for (slug, chunks) in by_slug {

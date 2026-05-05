@@ -6,7 +6,7 @@ use crate::engine::BrainEngine;
 use crate::error::{GBrainError, Result};
 use crate::schema::SCHEMA_DDL;
 use crate::types::*;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -546,7 +546,8 @@ impl SqliteEngine {
         let mut stmt = conn.prepare(
             "SELECT ce.chunk_id, ce.embedding, c.chunk_text, c.chunk_index, c.chunk_source, c.page_id,
                     p.slug, p.title, p.page_type, p.updated_at,
-                    (c.embedded_at IS NULL OR c.embedded_at < p.updated_at) as stale
+                    (c.embedded_at IS NULL OR c.embedded_at < p.updated_at) as stale,
+                    c.language, c.symbol_type
              FROM chunk_embeddings ce
              JOIN chunks c ON c.id = ce.chunk_id
              JOIN pages p ON p.id = c.page_id
@@ -568,6 +569,8 @@ impl SqliteEngine {
                 row.get::<_, String>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, bool>(10).unwrap_or(false),
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
             ))
         })?;
 
@@ -584,14 +587,31 @@ impl SqliteEngine {
                 page_type_str,
                 updated_at,
                 stale,
+                language,
+                symbol_type,
             ) = row?;
             if exclude_exact.contains(&slug) || exclude_prefixes.iter().any(|p| slug.starts_with(p))
             {
                 continue;
             }
+            if let Some(include) = &opts.include_slug_prefixes {
+                if !include.is_empty() && !include.iter().any(|p| slug.starts_with(p)) {
+                    continue;
+                }
+            }
             let page_type = PageType::from_str_lossy(&page_type_str);
             if let Some(ref wanted) = opts.page_type {
                 if &page_type != wanted {
+                    continue;
+                }
+            }
+            if let Some(ref wanted) = opts.language {
+                if language.as_deref() != Some(wanted.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(ref wanted) = opts.symbol_kind {
+                if symbol_type.as_deref() != Some(wanted.as_str()) {
                     continue;
                 }
             }
@@ -622,6 +642,11 @@ impl SqliteEngine {
             });
         }
         apply_source_boosts(&mut results, opts.detail_level);
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         Ok(results)
     }
@@ -1019,10 +1044,20 @@ impl BrainEngine for SqliteEngine {
             if opts.page_type.is_some() {
                 sql.push_str(" AND p.page_type = ?3");
             }
+            let mut next_param_idx = if opts.page_type.is_some() { 4 } else { 3 };
+            if opts.language.is_some() {
+                sql.push_str(&format!(" AND c.language = ?{}", next_param_idx));
+                next_param_idx += 1;
+            }
+            if opts.symbol_kind.is_some() {
+                sql.push_str(&format!(" AND c.symbol_type = ?{}", next_param_idx));
+                next_param_idx += 1;
+            }
             if let Some(ref exclude) = opts.exclude_slugs {
                 if !exclude.is_empty() {
                     // Build placeholder list for exclude slugs
-                    let start_idx = if opts.page_type.is_some() { 4 } else { 3 };
+                    let start_idx = next_param_idx;
+                    next_param_idx += exclude.len();
                     let placeholders: Vec<String> = (0..exclude.len())
                         .map(|i| format!("?{}", start_idx + i))
                         .collect();
@@ -1030,12 +1065,7 @@ impl BrainEngine for SqliteEngine {
                 }
             }
             if !exclude_prefixes.is_empty() {
-                let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
-                let start_idx = if opts.page_type.is_some() {
-                    4 + exact_count
-                } else {
-                    3 + exact_count
-                };
+                let start_idx = next_param_idx;
                 let clauses: Vec<String> = (0..exclude_prefixes.len())
                     .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
                     .collect();
@@ -1056,6 +1086,12 @@ impl BrainEngine for SqliteEngine {
                 param_values.push(Box::new(pt.to_string())); // ?3
             } else {
                 // No page_type filter, but exclude_slugs starts at ?3
+            }
+            if let Some(ref language) = opts.language {
+                param_values.push(Box::new(language.clone()));
+            }
+            if let Some(ref symbol_kind) = opts.symbol_kind {
+                param_values.push(Box::new(symbol_kind.clone()));
             }
             if let Some(ref exclude) = opts.exclude_slugs {
                 for s in exclude {
@@ -1128,6 +1164,9 @@ impl BrainEngine for SqliteEngine {
             );
             if opts.page_type.is_some() {
                 sql.push_str(" AND p.page_type = ?3");
+            }
+            if opts.language.is_some() || opts.symbol_kind.is_some() {
+                return Ok(Vec::new());
             }
             // Bug 15 fix: When detail_level is Low, only return pages with compiled_truth content
             // (mirrors chunk-level query's AND c.chunk_source = 'compiled_truth' filter)
@@ -1240,9 +1279,19 @@ impl BrainEngine for SqliteEngine {
         if opts.page_type.is_some() {
             sql.push_str(" AND p.page_type = ?3");
         }
+        let mut next_param_idx = if opts.page_type.is_some() { 4 } else { 3 };
+        if opts.language.is_some() {
+            sql.push_str(&format!(" AND c.language = ?{}", next_param_idx));
+            next_param_idx += 1;
+        }
+        if opts.symbol_kind.is_some() {
+            sql.push_str(&format!(" AND c.symbol_type = ?{}", next_param_idx));
+            next_param_idx += 1;
+        }
         if let Some(include) = &opts.include_slug_prefixes {
             if !include.is_empty() {
-                let start_idx = if opts.page_type.is_some() { 4 } else { 3 };
+                let start_idx = next_param_idx;
+                next_param_idx += include.len();
                 let clauses: Vec<String> = (0..include.len())
                     .map(|i| format!("p.slug LIKE ?{}", start_idx + i))
                     .collect();
@@ -1250,16 +1299,7 @@ impl BrainEngine for SqliteEngine {
             }
         }
         if !exclude_prefixes.is_empty() {
-            let include_count = opts
-                .include_slug_prefixes
-                .as_ref()
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let start_idx = if opts.page_type.is_some() {
-                4 + include_count
-            } else {
-                3 + include_count
-            };
+            let start_idx = next_param_idx;
             let clauses: Vec<String> = (0..exclude_prefixes.len())
                 .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
                 .collect();
@@ -1272,6 +1312,12 @@ impl BrainEngine for SqliteEngine {
         params_vec.push(Box::new(limit));
         if let Some(ref pt) = opts.page_type {
             params_vec.push(Box::new(pt.to_string()));
+        }
+        if let Some(ref language) = opts.language {
+            params_vec.push(Box::new(language.clone()));
+        }
+        if let Some(ref symbol_kind) = opts.symbol_kind {
+            params_vec.push(Box::new(symbol_kind.clone()));
         }
         if let Some(include) = &opts.include_slug_prefixes {
             for prefix in include {
@@ -1356,13 +1402,33 @@ impl BrainEngine for SqliteEngine {
         if opts.page_type.is_some() {
             sql.push_str(" AND p.page_type = ?3");
         }
+        let mut next_param_idx = if opts.page_type.is_some() { 4 } else { 3 };
         // P-detail: Filter by chunk_source when detail_level is Low (consistency with keyword search)
         if opts.detail_level == Some(DetailLevel::Low) {
             sql.push_str(" AND c.chunk_source = 'compiled_truth'");
         }
+        if opts.language.is_some() {
+            sql.push_str(&format!(" AND c.language = ?{}", next_param_idx));
+            next_param_idx += 1;
+        }
+        if opts.symbol_kind.is_some() {
+            sql.push_str(&format!(" AND c.symbol_type = ?{}", next_param_idx));
+            next_param_idx += 1;
+        }
+        if let Some(include) = &opts.include_slug_prefixes {
+            if !include.is_empty() {
+                let start_idx = next_param_idx;
+                next_param_idx += include.len();
+                let clauses: Vec<String> = (0..include.len())
+                    .map(|i| format!("p.slug LIKE ?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
+            }
+        }
         if let Some(ref exclude) = opts.exclude_slugs {
             if !exclude.is_empty() {
-                let start_idx = if opts.page_type.is_some() { 4 } else { 3 };
+                let start_idx = next_param_idx;
+                next_param_idx += exclude.len();
                 let placeholders: Vec<String> = (0..exclude.len())
                     .map(|i| format!("?{}", start_idx + i))
                     .collect();
@@ -1371,12 +1437,7 @@ impl BrainEngine for SqliteEngine {
         }
         let exclude_prefixes = effective_exclude_prefixes(&opts);
         if !exclude_prefixes.is_empty() {
-            let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
-            let start_idx = if opts.page_type.is_some() {
-                4 + exact_count
-            } else {
-                3 + exact_count
-            };
+            let start_idx = next_param_idx;
             let clauses: Vec<String> = (0..exclude_prefixes.len())
                 .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
                 .collect();
@@ -1392,6 +1453,17 @@ impl BrainEngine for SqliteEngine {
         param_values.push(Box::new(limit)); // ?2
         if let Some(ref pt) = opts.page_type {
             param_values.push(Box::new(pt.to_string())); // ?3
+        }
+        if let Some(ref language) = opts.language {
+            param_values.push(Box::new(language.clone()));
+        }
+        if let Some(ref symbol_kind) = opts.symbol_kind {
+            param_values.push(Box::new(symbol_kind.clone()));
+        }
+        if let Some(include) = &opts.include_slug_prefixes {
+            for prefix in include {
+                param_values.push(Box::new(format!("{}%", prefix)));
+            }
         }
         if let Some(ref exclude) = opts.exclude_slugs {
             for s in exclude {
@@ -1552,7 +1624,13 @@ impl BrainEngine for SqliteEngine {
             for chunk in chunks {
                 let source_str = chunk.source.to_string();
                 let model = chunk.model.as_deref().unwrap_or("text-embedding-3-large");
-                let _has_embedding = chunk.embedding.is_some();
+                let previous_text: Option<String> = tx
+                    .query_row(
+                        "SELECT chunk_text FROM chunks WHERE page_id = ?1 AND chunk_index = ?2 AND chunk_source = ?3",
+                        params![page_id, chunk.chunk_index, source_str.as_str()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
                 let result = tx.execute(
                     "INSERT INTO chunks (
                         page_id, chunk_index, chunk_text, chunk_source, token_count, model,
@@ -1618,7 +1696,10 @@ impl BrainEngine for SqliteEngine {
                             "INSERT OR REPLACE INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
                             params![chunk_id, embedding_to_blob(embedding)],
                         );
-                    } else {
+                    } else if previous_text
+                        .as_deref()
+                        .is_some_and(|old| old != chunk.chunk_text)
+                    {
                         // When no embedding provided and content changed, clear stale
                         // embedding data so embed --stale correctly identifies this
                         // chunk as needing re-embedding (mirrors TS consistency fix).

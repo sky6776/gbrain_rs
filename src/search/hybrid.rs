@@ -374,9 +374,10 @@ pub fn hybrid_search(
     // 10. Two-pass code graph expansion (mirrors TS Cathedral II)
     // Expand anchor set through code_edges, collecting structural neighbors
     // with hop-distance score decay. Best-effort: errors must not break base retrieval.
-    let walk_depth = opts.walk_depth.unwrap_or(0).min(
-        crate::search::two_pass::MAX_WALK_DEPTH,
-    );
+    let walk_depth = opts
+        .walk_depth
+        .unwrap_or(0)
+        .min(crate::search::two_pass::MAX_WALK_DEPTH);
     let needs_expansion = walk_depth > 0 || opts.near_symbol.is_some();
     if needs_expansion {
         let anchor_set: Vec<SearchResult> = fused

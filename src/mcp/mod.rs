@@ -388,10 +388,21 @@ impl McpServer {
                     limit,
                     offset,
                     detail_level,
+                    language: arguments["lang"].as_str().map(ToString::to_string),
+                    symbol_kind: arguments["symbol_kind"].as_str().map(ToString::to_string),
+                    near_symbol: arguments["near_symbol"].as_str().map(ToString::to_string),
+                    walk_depth: arguments["walk_depth"]
+                        .as_u64()
+                        .map(|d| (d as usize).min(2)),
                     ..Default::default()
                 };
-                let results = ops.query(query, opts)?;
-                Ok(serde_json::to_value(results)?)
+                let expand = arguments["expand"].as_bool().unwrap_or(true);
+                let with_meta = ops.query_with_meta(query, opts, expand)?;
+                if arguments["include_meta"].as_bool().unwrap_or(false) {
+                    Ok(serde_json::to_value(with_meta)?)
+                } else {
+                    Ok(serde_json::to_value(with_meta.results)?)
+                }
             }
 
             "search" => {
@@ -401,6 +412,12 @@ impl McpServer {
                 let opts = SearchOpts {
                     limit,
                     offset,
+                    language: arguments["lang"].as_str().map(ToString::to_string),
+                    symbol_kind: arguments["symbol_kind"].as_str().map(ToString::to_string),
+                    near_symbol: arguments["near_symbol"].as_str().map(ToString::to_string),
+                    walk_depth: arguments["walk_depth"]
+                        .as_u64()
+                        .map(|d| (d as usize).min(2)),
                     ..Default::default()
                 };
                 // Use Operations::query() for full hybrid search pipeline
@@ -855,10 +872,34 @@ impl McpServer {
                     SearchOpts {
                         limit,
                         page_type: Some(PageType::Code),
+                        language: arguments["lang"].as_str().map(ToString::to_string),
+                        symbol_kind: arguments["symbol_kind"].as_str().map(ToString::to_string),
                         ..Default::default()
                     },
                 )?;
                 Ok(serde_json::to_value(results)?)
+            }
+
+            "code_def" => {
+                let symbol = arguments["symbol"].as_str().unwrap_or("");
+                let limit = arguments["limit"]
+                    .as_u64()
+                    .map(|l| l as usize)
+                    .unwrap_or(20);
+                let language = arguments["lang"].as_str();
+                let chunks = ops.find_code_definitions(symbol, language, limit)?;
+                Ok(serde_json::to_value(chunks)?)
+            }
+
+            "code_refs" => {
+                let symbol = arguments["symbol"].as_str().unwrap_or("");
+                let limit = arguments["limit"]
+                    .as_u64()
+                    .map(|l| l as usize)
+                    .unwrap_or(20);
+                let language = arguments["lang"].as_str();
+                let refs = ops.find_code_references(symbol, language, limit)?;
+                Ok(serde_json::to_value(refs)?)
             }
 
             "get_callers" => {

@@ -192,8 +192,7 @@ pub fn expand_anchors(
                 }
 
                 // Resolve neighbor chunk IDs from the edge.
-                let neighbor_chunk_ids =
-                    resolve_neighbor_ids(engine, entry.chunk_id, edge);
+                let neighbor_chunk_ids = resolve_neighbor_ids(engine, entry.chunk_id, edge);
 
                 for neighbor_id in neighbor_chunk_ids {
                     if neighbors_this_hop >= NEIGHBOR_CAP_PER_HOP {
@@ -225,8 +224,7 @@ pub fn expand_anchors(
             // These are forward-declaration edges where the target chunk
             // was not yet imported when the source was indexed.
             if neighbors_this_hop < NEIGHBOR_CAP_PER_HOP {
-                let unresolved_ids =
-                    resolve_unresolved_symbol_edges(engine, entry.chunk_id);
+                let unresolved_ids = resolve_unresolved_symbol_edges(engine, entry.chunk_id);
                 for neighbor_id in unresolved_ids {
                     if neighbors_this_hop >= NEIGHBOR_CAP_PER_HOP {
                         break;
@@ -270,8 +268,7 @@ pub fn expand_anchors(
     let result: Vec<ExpandedChunk> = seen.into_values().collect();
     debug!(
         total_expanded = result.len(),
-        walk_depth,
-        "Two-pass expansion complete"
+        walk_depth, "Two-pass expansion complete"
     );
     Ok(result)
 }
@@ -281,11 +278,7 @@ pub fn expand_anchors(
 /// Given the current chunk_id and an edge, determine which chunk(s) are
 /// on the other side. Handles both direct chunk_id links and unresolved
 /// edges where only the symbol name is known.
-fn resolve_neighbor_ids(
-    engine: &SqliteEngine,
-    current_chunk_id: i64,
-    edge: &CodeEdge,
-) -> Vec<i64> {
+fn resolve_neighbor_ids(engine: &SqliteEngine, current_chunk_id: i64, edge: &CodeEdge) -> Vec<i64> {
     let mut neighbors = Vec::new();
 
     // Case 1: Current chunk is the from_chunk -> neighbor is to_chunk_id
@@ -325,10 +318,7 @@ fn resolve_neighbor_ids(
 /// in code_edges_symbol with only to_symbol_qualified (no to_chunk_id).
 /// This function queries that table and attempts to resolve the symbols
 /// to actual chunk IDs.
-fn resolve_unresolved_symbol_edges(
-    engine: &SqliteEngine,
-    chunk_id: i64,
-) -> Vec<i64> {
+fn resolve_unresolved_symbol_edges(engine: &SqliteEngine, chunk_id: i64) -> Vec<i64> {
     let mut neighbors = Vec::new();
 
     match engine.get_unresolved_edges_from(chunk_id) {
@@ -367,10 +357,8 @@ pub fn hydrate_chunks(
     existing_results: &[SearchResult],
 ) -> Result<Vec<SearchResult>, GBrainError> {
     // Step 1: Collect existing chunk_ids to skip
-    let existing_chunk_ids: std::collections::HashSet<i64> = existing_results
-        .iter()
-        .filter_map(|r| r.chunk_id)
-        .collect();
+    let existing_chunk_ids: std::collections::HashSet<i64> =
+        existing_results.iter().filter_map(|r| r.chunk_id).collect();
 
     // Step 2: Find chunk IDs that need hydration (not in existing results)
     let needs_hydration: Vec<i64> = expanded
@@ -384,10 +372,7 @@ pub fn hydrate_chunks(
     }
 
     // Build a score map from expanded chunks (keyed by chunk_id)
-    let score_map: HashMap<i64, f64> = expanded
-        .iter()
-        .map(|ec| (ec.chunk_id, ec.score))
-        .collect();
+    let score_map: HashMap<i64, f64> = expanded.iter().map(|ec| (ec.chunk_id, ec.score)).collect();
 
     // Step 3: Query each chunk by ID and join with page data
     let mut new_results: Vec<SearchResult> = Vec::new();
@@ -395,36 +380,34 @@ pub fn hydrate_chunks(
     for chunk_id in &needs_hydration {
         // Use get_chunk_by_id to retrieve the chunk, then get_page for parent data
         match engine.get_chunk_by_id(*chunk_id) {
-            Ok(Some(chunk)) => {
-                match engine.get_page(&chunk.slug) {
-                    Ok(Some(page)) => {
-                        let score = score_map.get(chunk_id).copied().unwrap_or(0.1);
-                        let chunk_source = chunk.source.clone();
-                        let page_type = page.page_type.clone();
+            Ok(Some(chunk)) => match engine.get_page(&chunk.slug) {
+                Ok(Some(page)) => {
+                    let score = score_map.get(chunk_id).copied().unwrap_or(0.1);
+                    let chunk_source = chunk.source.clone();
+                    let page_type = page.page_type.clone();
 
-                        new_results.push(SearchResult {
-                            slug: chunk.slug.clone(),
-                            title: page.title,
-                            chunk_text: chunk.chunk_text,
-                            score,
-                            page_id: Some(chunk.page_id),
-                            chunk_id: Some(chunk.id),
-                            chunk_index: Some(chunk.chunk_index),
-                            source: Some(chunk_source),
-                            detail_level: DetailLevel::Medium,
-                            page_type: Some(page_type),
-                            stale: false,
-                            updated_at: Some(page.updated_at),
-                        });
-                    }
-                    Ok(None) => {
-                        trace!(chunk_id, "Page not found during hydration, skipping");
-                    }
-                    Err(e) => {
-                        trace!(chunk_id, error = %e, "Page lookup failed during hydration");
-                    }
+                    new_results.push(SearchResult {
+                        slug: chunk.slug.clone(),
+                        title: page.title,
+                        chunk_text: chunk.chunk_text,
+                        score,
+                        page_id: Some(chunk.page_id),
+                        chunk_id: Some(chunk.id),
+                        chunk_index: Some(chunk.chunk_index),
+                        source: Some(chunk_source),
+                        detail_level: DetailLevel::Medium,
+                        page_type: Some(page_type),
+                        stale: false,
+                        updated_at: Some(page.updated_at),
+                    });
                 }
-            }
+                Ok(None) => {
+                    trace!(chunk_id, "Page not found during hydration, skipping");
+                }
+                Err(e) => {
+                    trace!(chunk_id, error = %e, "Page lookup failed during hydration");
+                }
+            },
             Ok(None) => {
                 trace!(chunk_id, "Chunk not found during hydration, skipping");
             }
