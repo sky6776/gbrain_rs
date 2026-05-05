@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     symbol_type TEXT,
     start_line INTEGER,
     end_line INTEGER,
+    parent_symbol_path TEXT,
+    symbol_name_qualified TEXT,
+    doc_comment TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(page_id, chunk_index, chunk_source)
 );
@@ -119,6 +122,8 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_page_id ON chunks(page_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON chunks(symbol_name);
+CREATE INDEX IF NOT EXISTS idx_chunks_symbol_qualified ON chunks(symbol_name_qualified);
+CREATE INDEX IF NOT EXISTS idx_chunks_parent_symbol ON chunks(parent_symbol_path);
 
 -- FTS5 virtual table for chunk/code-chunk search.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -178,8 +183,10 @@ CREATE TABLE IF NOT EXISTS code_edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_slug TEXT NOT NULL,
     from_symbol TEXT NOT NULL,
+    from_symbol_qualified TEXT,
     to_slug TEXT NOT NULL,
     to_symbol TEXT NOT NULL,
+    to_symbol_qualified TEXT,
     edge_type TEXT NOT NULL DEFAULT 'calls',
     confidence REAL NOT NULL DEFAULT 1.0,
     context TEXT,
@@ -193,6 +200,21 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_from ON code_edges(from_slug, from_sym
 CREATE INDEX IF NOT EXISTS idx_code_edges_to ON code_edges(to_slug, to_symbol);
 CREATE INDEX IF NOT EXISTS idx_code_edges_from_chunk ON code_edges(from_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_code_edges_to_chunk ON code_edges(to_chunk_id);
+
+-- Code edges by symbol: unresolved edges where target chunk hasn't been imported yet
+CREATE TABLE IF NOT EXISTS code_edges_symbol (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    from_symbol_qualified TEXT NOT NULL,
+    to_symbol_qualified TEXT NOT NULL,
+    edge_type TEXT NOT NULL DEFAULT 'calls',
+    edge_metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(from_chunk_id, to_symbol_qualified, edge_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_from ON code_edges_symbol(from_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_to ON code_edges_symbol(to_symbol_qualified, edge_type);
 
 -- Tags
 CREATE TABLE IF NOT EXISTS tags (
@@ -562,6 +584,41 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_from_chunk ON code_edges(from_chunk_id
 CREATE INDEX IF NOT EXISTS idx_code_edges_to_chunk ON code_edges(to_chunk_id);
 "#;
 
+/// Migration DDL for schema version 11: qualified symbol paths, doc comments, and
+/// unresolved symbol edges for forward-declaration code graph support.
+pub const MIGRATION_V11_DDL: &str = r#"
+-- Add parent scope path (comma-separated, e.g. "BrainEngine,searchKeyword")
+ALTER TABLE chunks ADD COLUMN parent_symbol_path TEXT;
+-- Add language-aware qualified name (e.g. "BrainEngine.searchKeyword")
+ALTER TABLE chunks ADD COLUMN symbol_name_qualified TEXT;
+-- Add extracted doc comment above symbol
+ALTER TABLE chunks ADD COLUMN doc_comment TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_chunks_symbol_qualified ON chunks(symbol_name_qualified);
+CREATE INDEX IF NOT EXISTS idx_chunks_parent_symbol ON chunks(parent_symbol_path);
+
+-- Add qualified symbol name columns to code_edges for two-pass retrieval
+ALTER TABLE code_edges ADD COLUMN from_symbol_qualified TEXT;
+ALTER TABLE code_edges ADD COLUMN to_symbol_qualified TEXT;
+CREATE INDEX IF NOT EXISTS idx_code_edges_to_symbol_qualified ON code_edges(to_symbol_qualified);
+
+-- Unresolved symbol edges: edges where target chunk hasn't been imported yet.
+-- Allows recording cross-module calls/references before all code is indexed.
+CREATE TABLE IF NOT EXISTS code_edges_symbol (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    from_symbol_qualified TEXT NOT NULL,
+    to_symbol_qualified TEXT NOT NULL,
+    edge_type TEXT NOT NULL DEFAULT 'calls',
+    edge_metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(from_chunk_id, to_symbol_qualified, edge_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_from ON code_edges_symbol(from_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_to ON code_edges_symbol(to_symbol_qualified, edge_type);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -574,5 +631,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (8, MIGRATION_V8_DDL),
         (9, MIGRATION_V9_DDL),
         (10, MIGRATION_V10_DDL),
+        (11, MIGRATION_V11_DDL),
     ]
 }

@@ -234,6 +234,9 @@ fn test_chunks() {
             symbol_type: None,
             start_line: None,
             end_line: None,
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
         },
         ChunkInput {
             chunk_index: 1,
@@ -247,6 +250,9 @@ fn test_chunks() {
             symbol_type: None,
             start_line: None,
             end_line: None,
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
         },
     ];
     engine
@@ -281,6 +287,9 @@ fn test_stale_chunks_track_embedding_status() {
                 symbol_type: None,
                 start_line: None,
                 end_line: None,
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
             }],
         )
         .expect("chunks");
@@ -301,6 +310,9 @@ fn test_stale_chunks_track_embedding_status() {
                 symbol_type: None,
                 start_line: None,
                 end_line: None,
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
             }],
         )
         .expect("embedded chunks");

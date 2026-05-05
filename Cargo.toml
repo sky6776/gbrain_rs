@@ -49,6 +49,17 @@ dirs = "6"
 # YAML frontmatter parsing
 serde_yaml = "0.9"
 
+# Tree-sitter for AST-based code chunking
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+
 # Optional: HTTP file server
 axum = { version = "0.7", optional = true }
 tower-http = { version = "0.5", features = ["fs"], optional = true }

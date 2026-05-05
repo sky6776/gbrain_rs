@@ -5,6 +5,7 @@
 //! CLI and MCP server both dispatch through these operations.
 
 use crate::chunker::chunk_text;
+use crate::chunker::tree_sitter::chunk_code_tree_sitter;
 use crate::code_index::{index_code, CodeIndex};
 use crate::config::Config;
 use crate::embedding::Embedder;
@@ -269,13 +270,14 @@ impl<'a> Operations<'a> {
 
         let query_embedding = self.embed_query(query);
         let hybrid_opts = HybridOpts::default();
-        let mut results = hybrid_search(
+        let result_with_meta = hybrid_search(
             self.engine,
             query,
             query_embedding.as_deref(),
             opts.clone(),
             hybrid_opts,
         )?;
+        let mut results = result_with_meta.results;
 
         // Auto-escalate: if results are sparse, try with higher detail
         if results.len() < 3 && detail != DetailLevel::High {
@@ -288,8 +290,8 @@ impl<'a> Operations<'a> {
                 opts,
                 HybridOpts::default(),
             )?;
-            if escalated.len() > results.len() {
-                results = escalated;
+            if escalated.results.len() > results.len() {
+                results = escalated.results;
             }
         }
 
@@ -365,9 +367,23 @@ impl<'a> Operations<'a> {
     ) -> Result<Vec<SearchResult>> {
         info!(query = %query, embedding_dims = embedding.len(), "Searching with embedding");
         let hybrid_opts = HybridOpts::default();
-        let results = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
-        info!(result_count = results.len(), "Search complete");
-        Ok(results)
+        let result_with_meta = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
+        info!(result_count = result_with_meta.results.len(), "Search complete");
+        Ok(result_with_meta.results)
+    }
+
+    /// Search with vector embedding, returning results with metadata
+    pub fn search_with_meta(
+        &self,
+        query: &str,
+        embedding: &[f32],
+        opts: SearchOpts,
+    ) -> Result<SearchResultWithMeta> {
+        info!(query = %query, embedding_dims = embedding.len(), "Searching with embedding (with meta)");
+        let hybrid_opts = HybridOpts::default();
+        let result_with_meta = hybrid_search(self.engine, query, Some(embedding), opts, hybrid_opts)?;
+        info!(result_count = result_with_meta.results.len(), "Search complete");
+        Ok(result_with_meta)
     }
 
     /// Get a page by slug
@@ -655,7 +671,7 @@ impl<'a> Operations<'a> {
         let mut chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
         let next_index = chunks.len() as i32;
         let code_index = if pt == PageType::Code {
-            Some(index_code(slug, &parsed.body, None, next_index))
+            Some(chunk_code_tree_sitter(slug, &parsed.body, None, next_index))
         } else {
             Some(extract_fenced_code_index(slug, content, next_index))
         };
@@ -1276,6 +1292,9 @@ fn extract_fenced_code_index(slug: &str, content: &str, start_index: i32) -> Cod
                             symbol_type: Some("fenced_code".to_string()),
                             start_line: Some(start_line),
                             end_line: Some(line_idx as i32 + 1),
+                            parent_symbol_path: None,
+                            symbol_name_qualified: None,
+                            doc_comment: None,
                         });
                     } else {
                         let line_offset = start_line - 1;

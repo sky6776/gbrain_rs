@@ -56,6 +56,7 @@ pub trait BrainEngine {
 
     fn upsert_chunks(&self, slug: &str, chunks: &[ChunkInput]) -> Result<usize>;
     fn get_chunks(&self, slug: &str) -> Result<Vec<Chunk>>;
+    fn get_chunk_by_id(&self, chunk_id: i64) -> Result<Option<Chunk>>;
     fn count_stale_chunks(&self) -> Result<usize>;
     fn list_stale_chunks(&self, limit: Option<usize>) -> Result<Vec<StaleChunk>>;
     fn delete_chunks(&self, slug: &str) -> Result<()>;
@@ -66,6 +67,11 @@ pub trait BrainEngine {
     fn get_callers_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>>;
     fn get_callees_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>>;
     fn get_edges_by_chunk(&self, chunk_id: i64) -> Result<Vec<CodeEdge>>;
+    fn get_chunks_by_symbol(&self, symbol_name: &str, limit: usize) -> Result<Vec<Chunk>>;
+    /// Get unresolved edges originating from a chunk (from code_edges_symbol table).
+    /// Returns (to_symbol_qualified, edge_type) pairs for edges where the target
+    /// chunk has not yet been imported.
+    fn get_unresolved_edges_from(&self, chunk_id: i64) -> Result<Vec<(String, String)>>;
 
     // ── Links ──────────────────────────────────────────────────
 

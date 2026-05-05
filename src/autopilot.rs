@@ -141,6 +141,9 @@ impl<'a> Autopilot<'a> {
                         symbol_type: None,
                         start_line: None,
                         end_line: None,
+                        parent_symbol_path: None,
+                        symbol_name_qualified: None,
+                        doc_comment: None,
                     });
             }
             for (slug, chunks) in by_slug {

@@ -39,15 +39,17 @@ src/
 │   ├── mod.rs          # Chunker module entry
 │   ├── recursive.rs    # Recursive text chunker (default, deterministic)
 │   ├── semantic.rs     # Semantic chunker (sentence-embedding similarity + Savitzky-Golay)
+│   ├── tree_sitter.rs  # Tree-sitter AST code chunker (9 languages, nested chunks, call edges)
 │   └── llm.rs         # LLM-guided semantic chunker
 ├── search/
 │   ├── mod.rs          # Search entry point
 │   ├── keyword.rs      # FTS5 BM25 keyword search (weighted columns)
 │   ├── vector.rs       # sqlite-vec cosine similarity search
-│   ├── hybrid.rs       # RRF fusion + multi-list support + fallback + boosting
+│   ├── hybrid.rs       # RRF fusion + multi-list support + fallback + boosting + SearchMeta
 │   ├── intent.rs       # Query intent classification (entity/time/event/general)
 │   ├── dedup.rs        # 4-layer dedup + compiled_truth guarantee
 │   ├── expansion.rs    # Query expansion + injection defense
+│   ├── two_pass.rs     # Cathedral II two-pass structural retrieval (BFS code_edges expansion)
 │   ├── fuzzy.rs        # Character-trigram Jaccard similarity (pg_trgm equivalent)
 │   └── eval.rs         # Search quality eval framework (P@k, R@k, MRR, nDCG@k)
 ├── mcp/
@@ -93,7 +95,7 @@ Three-layer design:
 
 ### Search Pipeline
 
-9-step pipeline:
+10-step pipeline:
 
 1. FTS5 BM25 keyword search (weighted: title 10x, compiled_truth 5x, timeline 2x)
 2. sqlite-vec cosine similarity (requires embedding; falls back to `chunk_embeddings` cosine scoring when sqlite-vec is unavailable)
@@ -103,7 +105,8 @@ Three-layer design:
 6. Backlink boost
 7. Recency boost (time-decay: `1 / (1 + days_since_update / half_life)`)
 8. Intent-type boost (entity intent → entity pages; time/event → pages with timeline)
-9. 4-layer dedup: slug dedup → compiled_truth priority → score sort → truncate
+9. Cathedral II two-pass expansion: BFS walk through code_edges with score decay `1/(1+hop)`, max depth 2, neighbor cap 50/hop; also queries code_edges_symbol for unresolved forward-declaration edges
+10. 4-layer dedup: slug dedup → compiled_truth priority → score sort → truncate
 
 ### Enrichment Pipeline
 
@@ -196,9 +199,9 @@ Audio transcription via Groq Whisper (default, fast) or OpenAI Whisper (fallback
 
 ## Database Tables
 
-pages, chunks, chunks_fts (FTS5 code/chunk search), vec_chunks (sqlite-vec virtual), chunk_embeddings (fallback embedding store), code_edges (symbol call/reference graph), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
+pages, chunks, chunks_fts (FTS5 code/chunk search), vec_chunks (sqlite-vec virtual), chunk_embeddings (fallback embedding store), code_edges (symbol call/reference graph), code_edges_symbol (unresolved forward-declaration edges), pages_fts (FTS5, auto-synced via triggers), links, tags, timeline, raw_data, page_versions, config, ingest_log, files, schema_version (migration tracking), jobs (persistent job queue)
 
-Schema version: 10 (migrations V1-V10; V10 adds chunks_fts and code_edges; V9 adds soft-delete support, chunk code metadata, and chunk_embeddings)
+Schema version: 11 (migrations V1-V11; V11 adds parent_symbol_path, symbol_name_qualified, doc_comment columns on chunks, code_edges_symbol table for unresolved edges, and qualified symbol columns on code_edges; V10 adds chunks_fts and code_edges; V9 adds soft-delete support, chunk code metadata, and chunk_embeddings)
 
 ## Dependencies
 

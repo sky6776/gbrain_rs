@@ -52,6 +52,9 @@ pub fn index_code(slug: &str, code: &str, language: Option<&str>, start_index: i
             symbol_type: Some("file".to_string()),
             start_line: Some(1),
             end_line: Some(code.lines().count().max(1) as i32),
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
         });
         return CodeIndex {
             chunks,
@@ -77,6 +80,9 @@ pub fn index_code(slug: &str, code: &str, language: Option<&str>, start_index: i
             symbol_type: Some(span.symbol.symbol_type.clone()),
             start_line: Some(span.symbol.start_line),
             end_line: Some(span.symbol.end_line),
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
         });
         symbols.push(span.symbol.clone());
         span_records.push(span);
@@ -361,6 +367,8 @@ fn infer_edges(slug: &str, spans: &[SymbolSpan]) -> Vec<CodeEdgeInput> {
                         )),
                         from_chunk_id: None,
                         to_chunk_id: None,
+                        from_symbol_qualified: None,
+                        to_symbol_qualified: None,
                     });
                 }
             }

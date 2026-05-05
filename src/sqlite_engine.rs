@@ -135,14 +135,16 @@ where
                 id: row.get(0)?,
                 from_slug: row.get(1)?,
                 from_symbol: row.get(2)?,
-                to_slug: row.get(3)?,
-                to_symbol: row.get(4)?,
-                edge_type: row.get(5)?,
-                confidence: row.get(6)?,
-                context: row.get(7)?,
-                from_chunk_id: row.get(8)?,
-                to_chunk_id: row.get(9)?,
-                created_at: row.get(10)?,
+                from_symbol_qualified: row.get(3)?,
+                to_slug: row.get(4)?,
+                to_symbol: row.get(5)?,
+                to_symbol_qualified: row.get(6)?,
+                edge_type: row.get(7)?,
+                confidence: row.get(8)?,
+                context: row.get(9)?,
+                from_chunk_id: row.get(10)?,
+                to_chunk_id: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })?
         .filter_map(|r| {
@@ -1550,13 +1552,15 @@ impl BrainEngine for SqliteEngine {
             for chunk in chunks {
                 let source_str = chunk.source.to_string();
                 let model = chunk.model.as_deref().unwrap_or("text-embedding-3-large");
+                let _has_embedding = chunk.embedding.is_some();
                 let result = tx.execute(
                     "INSERT INTO chunks (
                         page_id, chunk_index, chunk_text, chunk_source, token_count, model,
-                        language, symbol_name, symbol_type, start_line, end_line, embedded_at
+                        language, symbol_name, symbol_type, start_line, end_line,
+                        parent_symbol_path, symbol_name_qualified, doc_comment, embedded_at
                      )
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                             CASE WHEN ?12 IS NOT NULL THEN datetime('now') ELSE NULL END)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                             CASE WHEN ?15 IS NOT NULL THEN datetime('now') ELSE NULL END)
                      ON CONFLICT(page_id, chunk_index, chunk_source) DO UPDATE SET
                         chunk_text = excluded.chunk_text,
                         token_count = excluded.token_count,
@@ -1566,7 +1570,14 @@ impl BrainEngine for SqliteEngine {
                         symbol_type = excluded.symbol_type,
                         start_line = excluded.start_line,
                         end_line = excluded.end_line,
-                        embedded_at = CASE WHEN ?12 IS NOT NULL THEN datetime('now') ELSE NULL END",
+                        parent_symbol_path = excluded.parent_symbol_path,
+                        symbol_name_qualified = excluded.symbol_name_qualified,
+                        doc_comment = excluded.doc_comment,
+                        embedded_at = CASE
+                            WHEN ?15 IS NOT NULL THEN datetime('now')
+                            WHEN chunks.chunk_text != excluded.chunk_text THEN NULL
+                            ELSE chunks.embedded_at
+                        END",
                     params![
                         page_id,
                         chunk.chunk_index,
@@ -1579,6 +1590,9 @@ impl BrainEngine for SqliteEngine {
                         chunk.symbol_type.clone(),
                         chunk.start_line,
                         chunk.end_line,
+                        chunk.parent_symbol_path.clone(),
+                        chunk.symbol_name_qualified.clone(),
+                        chunk.doc_comment.clone(),
                         chunk.embedding.as_ref().map(|_| 1_i64),
                     ],
                 );
@@ -1605,6 +1619,9 @@ impl BrainEngine for SqliteEngine {
                             params![chunk_id, embedding_to_blob(embedding)],
                         );
                     } else {
+                        // When no embedding provided and content changed, clear stale
+                        // embedding data so embed --stale correctly identifies this
+                        // chunk as needing re-embedding (mirrors TS consistency fix).
                         tx.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?1", params![chunk_id])?;
                         let _ = tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![chunk_id]);
                     }
@@ -1621,7 +1638,9 @@ impl BrainEngine for SqliteEngine {
         let mut stmt = conn.prepare(
             "SELECT c.id, c.page_id, p.slug, c.chunk_index, c.chunk_text, c.chunk_source,
                     c.token_count, c.model, c.embedded_at, c.language, c.symbol_name,
-                    c.symbol_type, c.start_line, c.end_line, c.created_at
+                    c.symbol_type, c.start_line, c.end_line,
+                    c.parent_symbol_path, c.symbol_name_qualified, c.doc_comment,
+                    c.created_at
              FROM chunks c JOIN pages p ON p.id = c.page_id
              WHERE p.slug = ?1
              ORDER BY c.chunk_index",
@@ -1648,7 +1667,10 @@ impl BrainEngine for SqliteEngine {
                     symbol_type: row.get(11)?,
                     start_line: row.get(12)?,
                     end_line: row.get(13)?,
-                    created_at: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+                    parent_symbol_path: row.get(14)?,
+                    symbol_name_qualified: row.get(15)?,
+                    doc_comment: row.get(16)?,
+                    created_at: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
                 })
             })?
             .filter_map(|r| {
@@ -1745,22 +1767,28 @@ impl BrainEngine for SqliteEngine {
         self.transaction(|tx| {
             let mut count = 0;
             for edge in edges {
+                // Write resolved edge to code_edges table
                 tx.execute(
                     "INSERT INTO code_edges (
-                        from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
-                        context, from_chunk_id, to_chunk_id
+                        from_slug, from_symbol, from_symbol_qualified,
+                        to_slug, to_symbol, to_symbol_qualified,
+                        edge_type, confidence, context, from_chunk_id, to_chunk_id
                      )
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                      ON CONFLICT(from_slug, from_symbol, to_slug, to_symbol, edge_type, from_chunk_id)
                      DO UPDATE SET
                         confidence = excluded.confidence,
                         context = excluded.context,
-                        to_chunk_id = excluded.to_chunk_id",
+                        to_chunk_id = excluded.to_chunk_id,
+                        from_symbol_qualified = excluded.from_symbol_qualified,
+                        to_symbol_qualified = excluded.to_symbol_qualified",
                     params![
                         edge.from_slug,
                         edge.from_symbol,
+                        edge.from_symbol_qualified,
                         edge.to_slug,
                         edge.to_symbol,
+                        edge.to_symbol_qualified,
                         edge.edge_type,
                         edge.confidence,
                         edge.context,
@@ -1768,6 +1796,22 @@ impl BrainEngine for SqliteEngine {
                         edge.to_chunk_id,
                     ],
                 )?;
+
+                // Write unresolved edge to code_edges_symbol table when we have
+                // a from_chunk_id and a to_symbol_qualified but no to_chunk_id.
+                // This mirrors the TS two-table design: resolved edges go to
+                // code_edges, unresolved (symbol-only) go to code_edges_symbol.
+                if let (Some(from_chunk_id), Some(to_sym_qualified), None) =
+                    (edge.from_chunk_id, &edge.to_symbol_qualified, edge.to_chunk_id)
+                {
+                    let _ = tx.execute(
+                        "INSERT INTO code_edges_symbol (from_chunk_id, from_symbol_qualified, to_symbol_qualified, edge_type)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(from_chunk_id, to_symbol_qualified, edge_type) DO NOTHING",
+                        params![from_chunk_id, edge.from_symbol_qualified, to_sym_qualified, edge.edge_type],
+                    );
+                }
+
                 count += 1;
             }
             Ok(count)
@@ -1783,6 +1827,7 @@ impl BrainEngine for SqliteEngine {
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
+        // Delete from code_edges (both directions)
         let sql = format!(
             "DELETE FROM code_edges WHERE from_chunk_id IN ({}) OR to_chunk_id IN ({})",
             placeholders, placeholders
@@ -1794,13 +1839,27 @@ impl BrainEngine for SqliteEngine {
         for id in chunk_ids {
             values.push(id);
         }
-        Ok(conn.execute(&sql, values.as_slice())?)
+        let count = conn.execute(&sql, values.as_slice())?;
+
+        // Also delete from code_edges_symbol (from direction only;
+        // no to_chunk_id column in that table)
+        let sym_sql = format!(
+            "DELETE FROM code_edges_symbol WHERE from_chunk_id IN ({})",
+            placeholders
+        );
+        let mut sym_values: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+        for id in chunk_ids {
+            sym_values.push(id);
+        }
+        let _ = conn.execute(&sym_sql, sym_values.as_slice());
+
+        Ok(count)
     }
 
     fn get_callers_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
         query_code_edges(
             self.conn()?,
-            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+            "SELECT id, from_slug, from_symbol, from_symbol_qualified, to_slug, to_symbol, to_symbol_qualified, edge_type, confidence,
                     context, from_chunk_id, to_chunk_id, created_at
              FROM code_edges
              WHERE to_slug = ?1 AND to_symbol = ?2
@@ -1812,7 +1871,7 @@ impl BrainEngine for SqliteEngine {
     fn get_callees_of(&self, slug: &str, symbol: &str) -> Result<Vec<CodeEdge>> {
         query_code_edges(
             self.conn()?,
-            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+            "SELECT id, from_slug, from_symbol, from_symbol_qualified, to_slug, to_symbol, to_symbol_qualified, edge_type, confidence,
                     context, from_chunk_id, to_chunk_id, created_at
              FROM code_edges
              WHERE from_slug = ?1 AND from_symbol = ?2
@@ -1824,13 +1883,129 @@ impl BrainEngine for SqliteEngine {
     fn get_edges_by_chunk(&self, chunk_id: i64) -> Result<Vec<CodeEdge>> {
         query_code_edges(
             self.conn()?,
-            "SELECT id, from_slug, from_symbol, to_slug, to_symbol, edge_type, confidence,
+            "SELECT id, from_slug, from_symbol, from_symbol_qualified, to_slug, to_symbol, to_symbol_qualified, edge_type, confidence,
                     context, from_chunk_id, to_chunk_id, created_at
              FROM code_edges
              WHERE from_chunk_id = ?1 OR to_chunk_id = ?1
              ORDER BY confidence DESC, created_at DESC",
             params![chunk_id],
         )
+    }
+
+    fn get_chunks_by_symbol(&self, symbol_name: &str, limit: usize) -> Result<Vec<Chunk>> {
+        let conn = self.conn()?;
+        // Try symbol_name first, then fall back to symbol_name_qualified
+        // for robustness when the qualified name is stored in the dedicated column.
+        let sql = "SELECT c.id, c.page_id, p.slug, c.chunk_index, c.chunk_text,
+                    c.chunk_source, c.token_count, c.model, c.embedded_at,
+                    c.language, c.symbol_name, c.symbol_type,
+                    c.start_line, c.end_line,
+                    c.parent_symbol_path, c.symbol_name_qualified, c.doc_comment,
+                    c.created_at
+             FROM chunks c
+             JOIN pages p ON p.id = c.page_id
+             WHERE (c.symbol_name = ?1 OR c.symbol_name_qualified = ?1)
+               AND p.deleted_at IS NULL
+             ORDER BY c.id
+             LIMIT ?2";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map(params![symbol_name, limit], |row| {
+                Ok(Chunk {
+                    id: row.get(0)?,
+                    page_id: row.get(1)?,
+                    slug: row.get(2)?,
+                    chunk_index: row.get(3)?,
+                    chunk_text: row.get(4)?,
+                    source: match row.get::<_, String>(5)?.as_str() {
+                        "timeline" => ChunkSource::Timeline,
+                        "fenced_code" => ChunkSource::FencedCode,
+                        _ => ChunkSource::CompiledTruth,
+                    },
+                    token_count: row.get::<_, Option<i32>>(6)?.unwrap_or(0),
+                    model: row.get(7)?,
+                    embedded_at: row.get(8)?,
+                    language: row.get(9)?,
+                    symbol_name: row.get(10)?,
+                    symbol_type: row.get(11)?,
+                    start_line: row.get(12)?,
+                    end_line: row.get(13)?,
+                    parent_symbol_path: row.get(14)?,
+                    symbol_name_qualified: row.get(15)?,
+                    doc_comment: row.get(16)?,
+                    created_at: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+                })
+            })?
+            .filter_map(|r| {
+                if let Err(e) = &r {
+                    warn!(error = %e, "Chunk row decode error in get_chunks_by_symbol");
+                }
+                r.ok()
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    fn get_unresolved_edges_from(&self, chunk_id: i64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT to_symbol_qualified, edge_type FROM code_edges_symbol WHERE from_chunk_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![chunk_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    fn get_chunk_by_id(&self, chunk_id: i64) -> Result<Option<Chunk>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.page_id, p.slug, c.chunk_index, c.chunk_text, c.chunk_source,
+                    c.token_count, c.model, c.embedded_at, c.language, c.symbol_name,
+                    c.symbol_type, c.start_line, c.end_line,
+                    c.parent_symbol_path, c.symbol_name_qualified, c.doc_comment,
+                    c.created_at
+             FROM chunks c
+             JOIN pages p ON p.id = c.page_id
+             WHERE c.id = ?1
+               AND p.deleted_at IS NULL",
+        )?;
+
+        let result = stmt.query_row(params![chunk_id], |row| {
+            Ok(Chunk {
+                id: row.get(0)?,
+                page_id: row.get(1)?,
+                slug: row.get(2)?,
+                chunk_index: row.get(3)?,
+                chunk_text: row.get(4)?,
+                source: match row.get::<_, String>(5)?.as_str() {
+                    "timeline" => ChunkSource::Timeline,
+                    "fenced_code" => ChunkSource::FencedCode,
+                    _ => ChunkSource::CompiledTruth,
+                },
+                token_count: row.get::<_, Option<i32>>(6)?.unwrap_or(0),
+                model: row.get(7)?,
+                embedded_at: row.get(8)?,
+                language: row.get(9)?,
+                symbol_name: row.get(10)?,
+                symbol_type: row.get(11)?,
+                start_line: row.get(12)?,
+                end_line: row.get(13)?,
+                parent_symbol_path: row.get(14)?,
+                symbol_name_qualified: row.get(15)?,
+                doc_comment: row.get(16)?,
+                created_at: row.get::<_, Option<String>>(17)?.unwrap_or_default(),
+            })
+        });
+
+        match result {
+            Ok(chunk) => Ok(Some(chunk)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(GBrainError::Database(e.to_string())),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

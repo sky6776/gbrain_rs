@@ -159,6 +159,12 @@ pub struct Chunk {
     pub symbol_type: Option<String>,
     pub start_line: Option<i32>,
     pub end_line: Option<i32>,
+    /// Comma-separated parent scope path (e.g. "BrainEngine,searchKeyword")
+    pub parent_symbol_path: Option<String>,
+    /// Language-aware qualified name (e.g. "BrainEngine.searchKeyword")
+    pub symbol_name_qualified: Option<String>,
+    /// Extracted doc comment above symbol
+    pub doc_comment: Option<String>,
     pub created_at: String,
 }
 
@@ -176,6 +182,12 @@ pub struct ChunkInput {
     pub symbol_type: Option<String>,
     pub start_line: Option<i32>,
     pub end_line: Option<i32>,
+    /// Comma-separated parent scope path (e.g. "BrainEngine,searchKeyword")
+    pub parent_symbol_path: Option<String>,
+    /// Language-aware qualified name (e.g. "BrainEngine.searchKeyword")
+    pub symbol_name_qualified: Option<String>,
+    /// Extracted doc comment above symbol
+    pub doc_comment: Option<String>,
 }
 
 impl ChunkInput {
@@ -197,6 +209,9 @@ impl ChunkInput {
             symbol_type: None,
             start_line: None,
             end_line: None,
+            parent_symbol_path: None,
+            symbol_name_qualified: None,
+            doc_comment: None,
         }
     }
 }
@@ -231,6 +246,14 @@ pub struct SearchOpts {
     pub expanded_embeddings: Option<Vec<Vec<f32>>>,
     /// P2-6: Dedup options for customizing dedup behavior (mirrors TS dedupOpts)
     pub dedup_opts: Option<crate::search::dedup::DedupOpts>,
+    /// Language filter for code chunk search (mirrors TS opts.language)
+    pub language: Option<String>,
+    /// Symbol kind filter for code chunk search (mirrors TS opts.symbolKind)
+    pub symbol_kind: Option<String>,
+    /// Anchor at a qualified symbol name for two-pass expansion (mirrors TS opts.nearSymbol)
+    pub near_symbol: Option<String>,
+    /// Walk depth for two-pass code graph expansion (0=off, 1-2=expand N hops)
+    pub walk_depth: Option<usize>,
 }
 
 /// Search result
@@ -250,6 +273,24 @@ pub struct SearchResult {
     pub stale: bool,
     /// P1-1: Page updated_at timestamp for recency boost calculation
     pub updated_at: Option<String>,
+}
+
+/// Metadata about what hybrid search actually did (mirrors TS HybridSearchMeta)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchMeta {
+    /// Whether vector search was actually enabled (has API key + embedding succeeded)
+    pub vector_enabled: bool,
+    /// The detail level that was actually resolved (may differ from requested)
+    pub detail_resolved: Option<DetailLevel>,
+    /// Whether query expansion was applied
+    pub expansion_applied: bool,
+}
+
+/// Search results with metadata about what the search pipeline actually did
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResultWithMeta {
+    pub results: Vec<SearchResult>,
+    pub meta: SearchMeta,
 }
 
 /// Code symbol extracted from a code page or fenced code block.
@@ -276,6 +317,10 @@ pub struct CodeEdgeInput {
     pub context: Option<String>,
     pub from_chunk_id: Option<i64>,
     pub to_chunk_id: Option<i64>,
+    /// Qualified name of the source symbol (e.g. "BrainEngine.searchKeyword")
+    pub from_symbol_qualified: Option<String>,
+    /// Qualified name of the target symbol (e.g. "SqliteEngine.searchKeyword")
+    pub to_symbol_qualified: Option<String>,
 }
 
 /// A stored code edge between symbols/chunks.
@@ -291,6 +336,8 @@ pub struct CodeEdge {
     pub context: Option<String>,
     pub from_chunk_id: Option<i64>,
     pub to_chunk_id: Option<i64>,
+    pub from_symbol_qualified: Option<String>,
+    pub to_symbol_qualified: Option<String>,
     pub created_at: String,
 }
 

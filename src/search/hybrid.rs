@@ -13,6 +13,7 @@ use crate::engine::BrainEngine;
 use crate::search::dedup::dedup_results;
 use crate::search::intent::{classify_intent, detail_for_intent, Intent, QueryIntent};
 use crate::search::keyword::build_fts_query;
+use crate::search::two_pass::{expand_anchors, hydrate_chunks, TwoPassOpts};
 use crate::search::vector::cosine_similarity;
 use crate::sqlite_engine::SqliteEngine;
 use crate::types::*;
@@ -68,13 +69,15 @@ impl Default for HybridOpts {
 const MAX_SEARCH_LIMIT: usize = crate::types::MAX_SEARCH_LIMIT;
 
 /// Perform hybrid search combining keyword and vector results with RRF fusion.
+/// Returns results with metadata about what the search pipeline actually did
+/// (mirrors TS HybridSearchMeta via onMeta callback).
 pub fn hybrid_search(
     engine: &SqliteEngine,
     query: &str,
     embedding: Option<&[f32]>,
-    opts: SearchOpts,
+    mut opts: SearchOpts,
     hybrid_opts: HybridOpts,
-) -> Result<Vec<SearchResult>, crate::error::GBrainError> {
+) -> Result<SearchResultWithMeta, crate::error::GBrainError> {
     let limit = opts.limit.unwrap_or(20);
     // R3-01 fix: Account for offset when computing internal limit and dedup pool size.
     // Without this, pagination (offset > 0) returns fewer results than requested
@@ -83,11 +86,17 @@ pub fn hybrid_search(
     let offset = opts.offset.unwrap_or(0);
     let effective_limit = limit + offset;
 
-    // Guard: empty/whitespace query produces empty FTS5 MATCH expression,
-    // which causes a FTS5 syntax error. Return empty results instead.
+    // Guard: empty/whitespace query produces empty results with keyword-only meta
     if query.trim().is_empty() {
         debug!("Empty query, returning empty results");
-        return Ok(Vec::new());
+        return Ok(SearchResultWithMeta {
+            results: Vec::new(),
+            meta: SearchMeta {
+                vector_enabled: false,
+                detail_resolved: opts.detail_level,
+                expansion_applied: false,
+            },
+        });
     }
 
     // P1-3: Auto-detail detection — when detail_level not specified,
@@ -98,6 +107,14 @@ pub fn hybrid_search(
         .or_else(|| detail_for_intent(&intent.intent));
 
     debug!(query = %query, has_embedding = embedding.is_some(), limit, offset, detail = ?detail, "Starting hybrid search");
+
+    // Track metadata about what the search pipeline actually did (mirrors TS HybridSearchMeta)
+    let expansion_applied = opts
+        .expanded_queries
+        .as_ref()
+        .map(|eq| eq.len() > 1)
+        .unwrap_or(false);
+    let vector_enabled = embedding.is_some();
 
     // P2-5: Cap internal limit to MAX_SEARCH_LIMIT (mirrors TS Math.min(limit * 2, MAX_SEARCH_LIMIT))
     // R3-01 fix: Use effective_limit (limit + offset) so the pool is large enough
@@ -354,7 +371,51 @@ pub fn hybrid_search(
         }
     }
 
-    // 10. Dedup
+    // 10. Two-pass code graph expansion (mirrors TS Cathedral II)
+    // Expand anchor set through code_edges, collecting structural neighbors
+    // with hop-distance score decay. Best-effort: errors must not break base retrieval.
+    let walk_depth = opts.walk_depth.unwrap_or(0).min(
+        crate::search::two_pass::MAX_WALK_DEPTH,
+    );
+    let needs_expansion = walk_depth > 0 || opts.near_symbol.is_some();
+    if needs_expansion {
+        let anchor_set: Vec<SearchResult> = fused
+            .iter()
+            .take(std::cmp::max(10, limit))
+            .cloned()
+            .collect();
+        let two_pass_opts = TwoPassOpts {
+            walk_depth,
+            near_symbol: opts.near_symbol.clone(),
+        };
+        // Best-effort: errors in expansion should not break base retrieval
+        if let Ok(expanded) = expand_anchors(engine, &anchor_set, &two_pass_opts) {
+            if let Ok(new_results) = hydrate_chunks(engine, &expanded, &fused) {
+                if !new_results.is_empty() {
+                    debug!(
+                        new_neighbor_count = new_results.len(),
+                        "Two-pass expansion added structural neighbors"
+                    );
+                    fused.extend(new_results);
+                    fused.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    // Widen dedup cap for structural neighbors
+                    // max_per_page = min(10, max(walk_depth * 5, 5))
+                    if let Some(ref mut dedup_opts) = opts.dedup_opts {
+                        let expanded_cap = (walk_depth * 5).clamp(5, 10);
+                        if expanded_cap > dedup_opts.max_per_page {
+                            dedup_opts.max_per_page = expanded_cap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 11. Dedup
     // P2-6: Pass dedup_opts from SearchOpts (mirrors TS opts?.dedupOpts)
     // R3-01 fix: Use effective_limit (limit + offset) so dedup retains enough
     // candidates for the offset to skip over before returning `limit` results.
@@ -387,7 +448,14 @@ pub fn hybrid_search(
     }
 
     debug!(result_count = fused.len(), "Hybrid search complete");
-    Ok(fused)
+    Ok(SearchResultWithMeta {
+        results: fused,
+        meta: SearchMeta {
+            vector_enabled,
+            detail_resolved: detail,
+            expansion_applied,
+        },
+    })
 }
 
 /// Build a chunk-level RRF key: `slug:chunk_id` or `slug:chunk_text_prefix`

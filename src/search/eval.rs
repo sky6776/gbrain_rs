@@ -181,7 +181,7 @@ pub fn run_eval(
                 ));
             }
             EvalStrategy::Hybrid => {
-                hybrid_search(engine, &qrel.query, None, search_opts, hybrid_opts.clone())?
+                hybrid_search(engine, &qrel.query, None, search_opts, hybrid_opts.clone())?.results
             }
         };
         let retrieved: Vec<String> = hits.iter().map(|r| r.slug.clone()).collect();
