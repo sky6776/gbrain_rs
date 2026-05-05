@@ -1,0 +1,65 @@
+{
+  "name": "gbrain-rs-skills",
+  "version": "0.1.0",
+  "conformance_version": "gbrain-rs",
+  "description": "Skills that are usable with the current gbrain_rs CLI/MCP surface",
+  "skills": [
+    {
+      "name": "ingest",
+      "path": "ingest/SKILL.md",
+      "description": "Route text, links, notes, and meeting content to supported brain ingestion skills."
+    },
+    {
+      "name": "query",
+      "path": "query/SKILL.md",
+      "description": "Answer questions using gbrain_rs search, query, pages, graph, backlinks, and timeline."
+    },
+    {
+      "name": "brain-ops",
+      "path": "brain-ops/SKILL.md",
+      "description": "Core read/write brain workflow using supported gbrain_rs tools."
+    },
+    {
+      "name": "enrich",
+      "path": "enrich/SKILL.md",
+      "description": "Enrich person, company, concept, and source pages with links and timeline entries."
+    },
+    {
+      "name": "idea-ingest",
+      "path": "idea-ingest/SKILL.md",
+      "description": "Ingest links, articles, tweets, and ideas into brain pages."
+    },
+    {
+      "name": "meeting-ingestion",
+      "path": "meeting-ingestion/SKILL.md",
+      "description": "Ingest meeting transcripts with attendee pages, links, and timeline updates."
+    },
+    {
+      "name": "citation-fixer",
+      "path": "citation-fixer/SKILL.md",
+      "description": "Audit and fix citation formatting across brain pages."
+    },
+    {
+      "name": "repo-architecture",
+      "path": "repo-architecture/SKILL.md",
+      "description": "Filing rules and directory conventions for new brain pages."
+    },
+    {
+      "name": "daily-task-manager",
+      "path": "daily-task-manager/SKILL.md",
+      "description": "Maintain a task list as a brain page."
+    },
+    {
+      "name": "reports",
+      "path": "reports/SKILL.md",
+      "description": "Save and load timestamped reports as brain pages."
+    },
+    {
+      "name": "migrate",
+      "path": "migrate/SKILL.md",
+      "description": "Migrate Markdown, CSV, JSON, and other note exports into gbrain_rs-supported pages."
+    }
+  ],
+  "resolver": "RESOLVER.md",
+  "conventions_dir": "conventions/"
+}
