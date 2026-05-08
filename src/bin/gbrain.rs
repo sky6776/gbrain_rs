@@ -461,6 +461,22 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
 
     match cli.command {
         Commands::Init => {
+            // Copy current executable to ~/.gbrain/bin/
+            let bin_dir = Config::base_dir().join("bin");
+            std::fs::create_dir_all(&bin_dir)?;
+            let current_exe = std::env::current_exe()?;
+            let exe_name = current_exe
+                .file_name()
+                .unwrap_or(std::ffi::OsStr::new("gbrain"));
+            let dest = bin_dir.join(exe_name);
+            if current_exe != dest {
+                std::fs::copy(&current_exe, &dest)?;
+                info!(
+                    src = %current_exe.display(),
+                    dest = %dest.display(),
+                    "Copied executable to bin directory"
+                );
+            }
             info!(db_path = %db_path, "Brain initialized");
         }
 
