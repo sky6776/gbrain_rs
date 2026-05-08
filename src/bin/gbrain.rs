@@ -186,7 +186,7 @@ enum Commands {
     },
 
     /// Run as MCP stdio server
-    Mcp,
+    Serve,
 
     /// Lint brain pages for quality issues (zero LLM)
     Lint {
@@ -830,7 +830,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             }
         }
 
-        Commands::Mcp => {
+        Commands::Serve => {
             info!("Starting MCP stdio server");
             let mut server = McpServer::with_config(engine, config.clone());
             server.run()?;
