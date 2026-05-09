@@ -16,7 +16,6 @@ pub struct SemanticSplitter {
     percentile_threshold: f64,
     min_chunk_size: usize,
     chunk_size: usize,
-    #[allow(dead_code)]
     chunk_overlap: usize,
 }
 
@@ -87,7 +86,12 @@ impl SemanticSplitter {
 
             if should_split || exceeds_size {
                 chunks.push(current.trim().to_string());
-                current = String::new();
+                if self.chunk_overlap > 0 && !chunks.is_empty() {
+                    let prev = chunks.last().unwrap();
+                    current = take_tail(prev, self.chunk_overlap);
+                } else {
+                    current = String::new();
+                }
             }
         }
 
@@ -137,4 +141,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     } else {
         0.0
     }
+}
+
+fn take_tail(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.len().saturating_sub(max_chars);
+    chars[start..].iter().collect()
 }
