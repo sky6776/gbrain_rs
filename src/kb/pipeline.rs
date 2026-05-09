@@ -6,13 +6,13 @@
 
 use crate::embedding::Embedder;
 use crate::error::{GBrainError, Result};
-use crate::nlp::chinese;
 use crate::kb::engine::KbEngine;
 use crate::kb::jobs::KbProcessPayload;
 use crate::kb::parser::ParserRegistry;
 use crate::kb::raptor::{self, RaptorConfig};
 use crate::kb::splitter::{create_async_splitter, create_splitter, SplitterConfig};
 use crate::kb::types::*;
+use crate::nlp::chinese;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
