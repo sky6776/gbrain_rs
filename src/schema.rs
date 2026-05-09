@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 15;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -619,6 +619,180 @@ CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_from ON code_edges_symbol(from_
 CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_to ON code_edges_symbol(to_symbol_qualified, edge_type);
 "#;
 
+/// Migration DDL for schema version 12: KB libraries and folders
+pub const MIGRATION_V12_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS kb_libraries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    name TEXT NOT NULL,
+    semantic_segmentation_enabled INTEGER NOT NULL DEFAULT 0,
+    raptor_enabled INTEGER NOT NULL DEFAULT 0,
+    raptor_llm_base_url TEXT NOT NULL DEFAULT '',
+    raptor_llm_secret_ref TEXT NOT NULL DEFAULT '',
+    raptor_llm_model TEXT NOT NULL DEFAULT '',
+    chunk_size INTEGER NOT NULL DEFAULT 512,
+    chunk_overlap INTEGER NOT NULL DEFAULT 50,
+    batch_max_documents INTEGER NOT NULL DEFAULT 3,
+    batch_max_chunks INTEGER NOT NULL DEFAULT 10,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_libraries_name ON kb_libraries(name);
+
+CREATE TABLE IF NOT EXISTS kb_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES kb_folders(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_folders_library_id ON kb_folders(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_folders_parent_id ON kb_folders(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_folders_library_parent_name
+    ON kb_folders(library_id, COALESCE(parent_id, -1), name);
+"#;
+
+/// Migration DDL for schema version 13: KB documents and document nodes
+pub const MIGRATION_V13_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS kb_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    folder_id INTEGER REFERENCES kb_folders(id) ON DELETE SET NULL,
+    original_name TEXT NOT NULL,
+    name_tokens TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,
+    extension TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'local',
+    storage_path TEXT NOT NULL DEFAULT '',
+    original_path TEXT NOT NULL DEFAULT '',
+    job_id TEXT NOT NULL DEFAULT '',
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    parsing_status INTEGER NOT NULL DEFAULT 0,
+    parsing_progress INTEGER NOT NULL DEFAULT 0,
+    parsing_error TEXT NOT NULL DEFAULT '',
+    embedding_status INTEGER NOT NULL DEFAULT 0,
+    embedding_progress INTEGER NOT NULL DEFAULT 0,
+    embedding_error TEXT NOT NULL DEFAULT '',
+    word_total INTEGER NOT NULL DEFAULT 0,
+    split_total INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
+    ON kb_documents(library_id, content_hash);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id ON kb_documents(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id_id ON kb_documents(library_id, id);
+
+CREATE TABLE IF NOT EXISTS kb_document_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    content_tokens TEXT NOT NULL DEFAULT '',
+    level INTEGER NOT NULL DEFAULT 0,
+    parent_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    chunk_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_library_id ON kb_document_nodes(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_document_id ON kb_document_nodes(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_parent_id ON kb_document_nodes(parent_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_level ON kb_document_nodes(level);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_doc_level_order
+    ON kb_document_nodes(document_id, level, chunk_order);
+"#;
+
+/// Migration DDL for schema version 14: KB FTS5 virtual tables + triggers + vec0
+pub const MIGRATION_V14_DDL: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_doc_fts USING fts5(
+    tokens,
+    library_id,
+    document_id UNINDEXED,
+    level UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_insert
+AFTER INSERT ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(rowid, tokens, library_id, document_id, level)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.level);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_update
+AFTER UPDATE OF content_tokens, library_id, document_id, level ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, document_id, level)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.level);
+    INSERT INTO kb_doc_fts(rowid, tokens, library_id, document_id, level)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.level);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_delete
+AFTER DELETE ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, document_id, level)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.level);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_doc_name_fts USING fts5(
+    name_tokens,
+    library_id,
+    document_id UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_insert
+AFTER INSERT ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(rowid, name_tokens, library_id, document_id)
+    VALUES (new.id, new.name_tokens, new.library_id, new.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_delete
+AFTER DELETE ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(kb_doc_name_fts, rowid, name_tokens, library_id, document_id)
+    VALUES('delete', old.id, old.name_tokens, old.library_id, old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_update
+AFTER UPDATE OF name_tokens, library_id ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(kb_doc_name_fts, rowid, name_tokens, library_id, document_id)
+    VALUES('delete', old.id, old.name_tokens, old.library_id, old.id);
+    INSERT INTO kb_doc_name_fts(rowid, name_tokens, library_id, document_id)
+    VALUES (new.id, new.name_tokens, new.library_id, new.id);
+END;
+"#;
+
+/// Migration DDL for schema version 15: KB embedding fallback table
+pub const MIGRATION_V15_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS kb_node_embeddings (
+    node_id INTEGER PRIMARY KEY REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+/// Generate sqlite-vec virtual table DDL for KB nodes
+pub fn vec_kb_nodes_ddl(dimensions: usize) -> String {
+    format!(
+        r#"CREATE VIRTUAL TABLE IF NOT EXISTS vec_kb_nodes USING vec0(
+    node_id INTEGER PRIMARY KEY,
+    embedding float[{}]
+);"#,
+        dimensions
+    )
+}
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -632,5 +806,9 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (9, MIGRATION_V9_DDL),
         (10, MIGRATION_V10_DDL),
         (11, MIGRATION_V11_DDL),
+        (12, MIGRATION_V12_DDL),
+        (13, MIGRATION_V13_DDL),
+        (14, MIGRATION_V14_DDL),
+        (15, MIGRATION_V15_DDL),
     ]
 }

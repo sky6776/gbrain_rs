@@ -66,6 +66,15 @@ pub struct Config {
 
     // --- P2-3: Post-write lint (mirrors TS runPostWriteLint) ---
     pub post_write_lint: bool, // default false, GBRAIN_POST_WRITE_LINT
+
+    // --- KB subsystem config ---
+    pub kb_enabled: bool,
+    pub kb_raptor_secret_ref: Option<String>,
+    pub kb_raptor_base_url: Option<String>,
+    pub kb_raptor_model: String,
+    pub kb_max_file_size_mb: usize,
+    pub kb_allowed_extensions: Vec<String>,
+    pub kb_storage_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -115,6 +124,23 @@ impl Default for Config {
 
             // P2-3: Post-write lint
             post_write_lint: false,
+
+            kb_enabled: true,
+            kb_raptor_secret_ref: Some("GBRAIN_KB_RAPTOR_API_KEY".to_string()),
+            kb_raptor_base_url: None,
+            kb_raptor_model: "gpt-4o-mini".to_string(),
+            kb_max_file_size_mb: 50,
+            kb_allowed_extensions: vec![
+                "pdf".into(),
+                "docx".into(),
+                "xlsx".into(),
+                "csv".into(),
+                "html".into(),
+                "htm".into(),
+                "txt".into(),
+                "md".into(),
+            ],
+            kb_storage_dir: None,
         }
     }
 }
@@ -218,6 +244,32 @@ impl Config {
         // --- P2-3: Post-write lint env var ---
         if let Ok(post_write_lint) = std::env::var("GBRAIN_POST_WRITE_LINT") {
             config.post_write_lint = post_write_lint == "true" || post_write_lint == "1";
+        }
+
+        // KB config
+        config.kb_enabled = std::env::var("GBRAIN_KB_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(config.kb_enabled);
+        config.kb_raptor_secret_ref = std::env::var("GBRAIN_KB_RAPTOR_API_KEY")
+            .ok()
+            .map(|_| "GBRAIN_KB_RAPTOR_API_KEY".to_string())
+            .or(config.kb_raptor_secret_ref);
+        if let Ok(url) = std::env::var("GBRAIN_KB_RAPTOR_BASE_URL") {
+            config.kb_raptor_base_url = Some(url);
+        }
+        if let Ok(model) = std::env::var("GBRAIN_KB_RAPTOR_MODEL") {
+            config.kb_raptor_model = model;
+        }
+        if let Ok(size) = std::env::var("GBRAIN_KB_MAX_FILE_SIZE_MB") {
+            if let Ok(s) = size.parse() {
+                config.kb_max_file_size_mb = s;
+            }
+        }
+        if let Ok(ext) = std::env::var("GBRAIN_KB_ALLOWED_EXTENSIONS") {
+            config.kb_allowed_extensions = ext.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(dir) = std::env::var("GBRAIN_KB_STORAGE_DIR") {
+            config.kb_storage_dir = Some(dir);
         }
 
         info!(
@@ -407,5 +459,21 @@ impl Config {
         // chunk_size and chunk_overlap — always take config file values
         self.chunk_size = other.chunk_size;
         self.chunk_overlap = other.chunk_overlap;
+        // KB subsystem — always take config file values
+        self.kb_enabled = other.kb_enabled;
+        if other.kb_raptor_secret_ref.is_some() {
+            self.kb_raptor_secret_ref = other.kb_raptor_secret_ref;
+        }
+        if other.kb_raptor_base_url.is_some() {
+            self.kb_raptor_base_url = other.kb_raptor_base_url;
+        }
+        self.kb_raptor_model = other.kb_raptor_model;
+        self.kb_max_file_size_mb = other.kb_max_file_size_mb;
+        if !other.kb_allowed_extensions.is_empty() {
+            self.kb_allowed_extensions = other.kb_allowed_extensions;
+        }
+        if other.kb_storage_dir.is_some() {
+            self.kb_storage_dir = other.kb_storage_dir;
+        }
     }
 }

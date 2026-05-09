@@ -137,6 +137,29 @@ fn validate_params(tool_name: &str, arguments: &Value) -> Option<String> {
             spec!("summary", "string", STRING),
         ]],
         "sync_brain" => &[&[spec!("repo_path", "string", STRING)]],
+        "kb_create_library" => &[&[spec!("name", "string", STRING)]],
+        "kb_update_library" => &[&[spec!("library_id", "integer", INTEGER)]],
+        "kb_delete_library" => &[&[
+            spec!("library_id", "integer", INTEGER),
+            spec!("confirm", "boolean", |v: &Value| v.is_boolean()),
+        ]],
+        "kb_upload_document" => &[&[
+            spec!("library_id", "integer", INTEGER),
+            spec!("file_path", "string", STRING),
+        ]],
+        "kb_get_document_status" => &[&[spec!("document_id", "integer", INTEGER)]],
+        "kb_retry_document" => &[&[spec!("document_id", "integer", INTEGER)]],
+        "kb_cancel_document_job" => &[&[spec!("document_id", "integer", INTEGER)]],
+        "kb_delete_document" => &[&[
+            spec!("document_id", "integer", INTEGER),
+            spec!("confirm", "boolean", |v: &Value| v.is_boolean()),
+        ]],
+        "kb_list_documents" => &[&[spec!("library_id", "integer", INTEGER)]],
+        "kb_search" => &[&[spec!("query", "string", STRING)]],
+        "kb_create_folder" => &[&[
+            spec!("library_id", "integer", INTEGER),
+            spec!("name", "string", STRING),
+        ]],
         _ => &[],
     };
 
@@ -371,7 +394,7 @@ impl McpServer {
             dry_run: false,
             subagent_id: None,
         };
-        let ops = Operations::with_config(&self.engine, ctx, self.config.clone());
+        let ops = Operations::with_config(&self.engine, ctx.clone(), self.config.clone());
 
         match tool_name.as_str() {
             "query" => {
@@ -940,6 +963,335 @@ impl McpServer {
                 crate::security::validate_contained(path, &working_dir, true)?;
                 let result = crate::sync::sync_brain(&self.engine, path, force_full, true)?;
                 Ok(serde_json::to_value(result)?)
+            }
+
+            // --- KB subsystem tools ---
+            "kb_list_libraries" => {
+                let kb = self.engine.kb_engine()?;
+                let libraries = kb.list_libraries()?;
+                Ok(serde_json::to_value(libraries)?)
+            }
+
+            "kb_create_library" => {
+                let kb = self.engine.kb_engine()?;
+                let input = crate::kb::types::CreateLibraryInput {
+                    name: arguments["name"].as_str().unwrap_or("").to_string(),
+                    semantic_segmentation_enabled: arguments["semantic_segmentation_enabled"]
+                        .as_bool(),
+                    raptor_enabled: arguments["raptor_enabled"].as_bool(),
+                    raptor_llm_base_url: arguments["raptor_llm_base_url"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    raptor_llm_secret_ref: arguments["raptor_llm_secret_ref"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    raptor_llm_model: arguments["raptor_llm_model"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    chunk_size: arguments["chunk_size"].as_u64().map(|v| v as usize),
+                    chunk_overlap: arguments["chunk_overlap"].as_u64().map(|v| v as usize),
+                    batch_max_documents: arguments["batch_max_documents"]
+                        .as_u64()
+                        .map(|v| v as usize),
+                    batch_max_chunks: arguments["batch_max_chunks"].as_u64().map(|v| v as usize),
+                };
+                let id = kb.create_library(&input)?;
+                Ok(serde_json::json!({"id": id}))
+            }
+
+            "kb_update_library" => {
+                let kb = self.engine.kb_engine()?;
+                let library_id = arguments["library_id"].as_i64().unwrap_or(0);
+                let input = crate::kb::types::UpdateLibraryInput {
+                    name: arguments["name"].as_str().map(|s| s.to_string()),
+                    semantic_segmentation_enabled: arguments["semantic_segmentation_enabled"]
+                        .as_bool(),
+                    raptor_enabled: arguments["raptor_enabled"].as_bool(),
+                    raptor_llm_base_url: arguments["raptor_llm_base_url"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    raptor_llm_secret_ref: arguments["raptor_llm_secret_ref"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    raptor_llm_model: arguments["raptor_llm_model"]
+                        .as_str()
+                        .map(|s| s.to_string()),
+                    chunk_size: arguments["chunk_size"].as_u64().map(|v| v as usize),
+                    chunk_overlap: arguments["chunk_overlap"].as_u64().map(|v| v as usize),
+                };
+                kb.update_library(library_id, &input)?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+
+            "kb_delete_library" => {
+                let confirm = arguments["confirm"].as_bool().unwrap_or(false);
+                if !confirm {
+                    return Err(GBrainError::InvalidInput(
+                        "kb_delete_library requires confirm=true to prevent accidental deletion"
+                            .to_string(),
+                    ));
+                }
+                let kb = self.engine.kb_engine()?;
+                let library_id = arguments["library_id"].as_i64().unwrap_or(0);
+                kb.delete_library(library_id)?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+
+            "kb_upload_document" => {
+                let library_id = arguments["library_id"].as_i64().unwrap_or(0);
+                let file_path = arguments["file_path"].as_str().unwrap_or("");
+                let folder_id = arguments["folder_id"].as_i64();
+                let working_dir = ctx.working_dir.clone();
+                let max_file_bytes = self.config.kb_max_file_size_mb * 1024 * 1024;
+
+                // Validate source path (remote callers confined to working_dir)
+                let validated_path = crate::kb::security::validate_upload_source(
+                    std::path::Path::new(file_path),
+                    true, // remote
+                    &working_dir,
+                    max_file_bytes,
+                )?;
+
+                let ext = crate::kb::security::validated_extension(&validated_path)?;
+                let file_data = std::fs::read(&validated_path)?;
+                let mime = crate::kb::security::detect_and_validate_mime(&file_data, &ext)?;
+
+                // SHA-256 dedup check
+                let content_hash = {
+                    use sha2::{Digest, Sha256};
+                    hex::encode(Sha256::digest(&file_data))
+                };
+
+                let kb = self.engine.kb_engine()?;
+
+                // Check for duplicate
+                if let Some(existing) = kb.find_document_by_hash(library_id, &content_hash)? {
+                    return Ok(serde_json::json!({
+                        "id": existing.id,
+                        "status": "duplicate",
+                        "message": "Document with same content already exists in this library"
+                    }));
+                }
+
+                // Store file
+                let base_dir = self
+                    .config
+                    .kb_storage_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::config::Config::base_dir().join("kb_files"));
+                let storage_path = crate::kb::security::store_kb_file(
+                    library_id,
+                    &content_hash,
+                    &ext,
+                    &file_data,
+                    &base_dir,
+                )?;
+
+                // Tokenize name for FTS5
+                let original_name = validated_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let name_tokens = crate::kb::chinese::tokenize_name(&original_name);
+
+                // Create processing_run_id and enqueue job
+                let processing_run_id = crate::kb::jobs::new_run_id();
+
+                // Create document record
+                let doc = crate::kb::types::Document {
+                    library_id,
+                    folder_id,
+                    original_name,
+                    name_tokens,
+                    file_size: file_data.len() as i64,
+                    content_hash,
+                    extension: ext,
+                    mime_type: mime,
+                    source_type: "upload".to_string(),
+                    storage_path,
+                    original_path: validated_path.to_string_lossy().to_string(),
+                    job_id: String::new(),
+                    processing_run_id,
+                    ..Default::default()
+                };
+
+                let doc_id = kb.create_document(&doc)?;
+
+                // Update payload with real document_id and enqueue
+                let payload = crate::kb::jobs::KbProcessPayload {
+                    kind: "kb_process".to_string(),
+                    document_id: doc_id,
+                    library_id,
+                    processing_run_id: doc.processing_run_id.clone(),
+                    storage_path: doc.storage_path.clone(),
+                    extension: doc.extension.clone(),
+                };
+                let conn = self.engine.connection()?;
+                let job_db_id = crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
+
+                Ok(serde_json::json!({
+                    "id": doc_id,
+                    "job_id": job_db_id,
+                    "status": "pending",
+                    "storage_path": payload.storage_path,
+                }))
+            }
+
+            "kb_get_document_status" => {
+                let kb = self.engine.kb_engine()?;
+                let document_id = arguments["document_id"].as_i64().unwrap_or(0);
+                let doc = kb.get_document(document_id)?;
+                Ok(serde_json::json!({
+                    "id": doc.id,
+                    "parsing_status": doc.parsing_status,
+                    "parsing_progress": doc.parsing_progress,
+                    "parsing_error": doc.parsing_error,
+                    "embedding_status": doc.embedding_status,
+                    "embedding_progress": doc.embedding_progress,
+                    "embedding_error": doc.embedding_error,
+                    "word_total": doc.word_total,
+                    "split_total": doc.split_total,
+                }))
+            }
+
+            "kb_retry_document" => {
+                let kb = self.engine.kb_engine()?;
+                let document_id = arguments["document_id"].as_i64().unwrap_or(0);
+                let doc = kb.get_document(document_id)?;
+
+                // Only retry failed documents
+                if doc.parsing_status != crate::kb::types::STATUS_FAILED
+                    && doc.embedding_status != crate::kb::types::STATUS_FAILED
+                {
+                    return Err(GBrainError::InvalidInput(
+                        "Document is not in a failed state; cannot retry".to_string(),
+                    ));
+                }
+
+                // Create new processing run
+                let processing_run_id = crate::kb::jobs::new_run_id();
+                let payload = crate::kb::jobs::KbProcessPayload {
+                    kind: "kb_process".to_string(),
+                    document_id,
+                    library_id: doc.library_id,
+                    processing_run_id: processing_run_id.clone(),
+                    storage_path: doc.storage_path.clone(),
+                    extension: doc.extension.clone(),
+                };
+
+                // Reset status and enqueue
+                kb.update_document_status(
+                    document_id,
+                    Some(crate::kb::types::STATUS_PENDING),
+                    Some(0),
+                    None,
+                    Some(crate::kb::types::STATUS_PENDING),
+                    Some(0),
+                    None,
+                )?;
+
+                let conn = self.engine.connection()?;
+                let job_db_id = crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
+
+                Ok(serde_json::json!({"id": document_id, "job_id": job_db_id, "status": "pending"}))
+            }
+
+            "kb_cancel_document_job" => {
+                let kb = self.engine.kb_engine()?;
+                let document_id = arguments["document_id"].as_i64().unwrap_or(0);
+                let doc = kb.get_document(document_id)?;
+
+                if !doc.job_id.is_empty() {
+                    let conn = self.engine.connection()?;
+                    if let Ok(job_db_id) = doc.job_id.parse::<i64>() {
+                        crate::kb::jobs::cancel_kb_job(conn, job_db_id)?;
+                    }
+                }
+
+                kb.update_document_status(
+                    document_id,
+                    Some(crate::kb::types::STATUS_FAILED),
+                    None,
+                    Some("cancelled"),
+                    None,
+                    None,
+                    None,
+                )?;
+
+                Ok(serde_json::json!({"ok": true}))
+            }
+
+            "kb_delete_document" => {
+                let confirm = arguments["confirm"].as_bool().unwrap_or(false);
+                if !confirm {
+                    return Err(GBrainError::InvalidInput(
+                        "kb_delete_document requires confirm=true to prevent accidental deletion"
+                            .to_string(),
+                    ));
+                }
+                let kb = self.engine.kb_engine()?;
+                let document_id = arguments["document_id"].as_i64().unwrap_or(0);
+                kb.delete_document(document_id)?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+
+            "kb_list_documents" => {
+                let kb = self.engine.kb_engine()?;
+                let library_id = arguments["library_id"].as_i64().unwrap_or(0);
+                let folder_id = arguments["folder_id"].as_i64();
+                let limit = arguments["limit"]
+                    .as_u64()
+                    .map(|v| v as usize)
+                    .unwrap_or(50);
+                let docs = kb.list_documents(library_id, folder_id, limit)?;
+                Ok(serde_json::to_value(docs)?)
+            }
+
+            "kb_search" => {
+                let query = arguments["query"].as_str().unwrap_or("");
+                let library_ids: Vec<i64> = arguments
+                    .get("library_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+                    .unwrap_or_default();
+                let level = arguments["level"].as_i64().map(|v| v as i32);
+                let top_k = arguments["top_k"]
+                    .as_u64()
+                    .map(|v| v as usize)
+                    .unwrap_or(10)
+                    .min(50);
+
+                let input = crate::kb::types::KbSearchInput {
+                    query: query.to_string(),
+                    library_ids,
+                    level,
+                    top_k,
+                };
+
+                // Use keyword-only search in MCP (sync context).
+                // Vector search requires async embedding which isn't available in
+                // the sync MCP server. Embeddings are computed during document
+                // processing and stored in the DB for vector retrieval.
+                // If a pre-computed query vector is needed, callers should embed
+                // externally and pass it through a future API extension.
+                let conn = self.engine.connection()?;
+                let results = crate::kb::search::kb_search(
+                    conn, &input, None, // No query vector in sync MCP context
+                )?;
+                Ok(serde_json::to_value(results)?)
+            }
+
+            "kb_create_folder" => {
+                let kb = self.engine.kb_engine()?;
+                let input = crate::kb::types::CreateFolderInput {
+                    library_id: arguments["library_id"].as_i64().unwrap_or(0),
+                    parent_id: arguments["parent_id"].as_i64(),
+                    name: arguments["name"].as_str().unwrap_or("").to_string(),
+                };
+                let id = kb.create_folder(&input)?;
+                Ok(serde_json::json!({"id": id}))
             }
 
             _ => Err(crate::error::GBrainError::InvalidInput(format!(

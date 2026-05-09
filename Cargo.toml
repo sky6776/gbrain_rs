@@ -60,6 +60,25 @@ tree-sitter-java = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
 
+# KB document parsing
+lopdf = "0.34"
+zip = "2"
+quick-xml = "0.37"
+calamine = "0.26"
+csv = "1"
+html2text = "0.13"
+pulldown-cmark = "0.12"
+
+# KB Chinese NLP
+jieba-rs = "0.7"
+pinyin = "0.10"
+
+# KB random (KMeans++)
+rand = "0.8"
+
+# KB hex encoding
+hex = "0.4"
+
 # Optional: HTTP file server
 axum = { version = "0.7", optional = true }
 tower-http = { version = "0.5", features = ["fs"], optional = true }

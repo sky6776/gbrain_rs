@@ -351,6 +351,112 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "force_full", description: "Force full sync instead of incremental (default: false)", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
+    // --- KB subsystem tools ---
+    OperationDef {
+        name: "kb_list_libraries",
+        description: "List all knowledge base libraries with document and chunk counts",
+        params: &[],
+    },
+    OperationDef {
+        name: "kb_create_library",
+        description: "Create a new knowledge base library",
+        params: &[
+            ParamDef { name: "name", description: "Library name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "semantic_segmentation_enabled", description: "Enable semantic segmentation", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "raptor_enabled", description: "Enable Raptor tree summarization", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "raptor_llm_base_url", description: "Raptor LLM base URL override", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "raptor_llm_secret_ref", description: "Raptor LLM API key env var name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "raptor_llm_model", description: "Raptor LLM model name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "chunk_size", description: "Chunk size in characters", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "chunk_overlap", description: "Chunk overlap in characters", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "batch_max_documents", description: "Max documents per batch", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "batch_max_chunks", description: "Max chunks per batch", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_update_library",
+        description: "Update a knowledge base library configuration",
+        params: &[
+            ParamDef { name: "library_id", description: "Library ID to update", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "name", description: "New library name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "semantic_segmentation_enabled", description: "Enable semantic segmentation", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "raptor_enabled", description: "Enable Raptor tree summarization", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_delete_library",
+        description: "Delete a knowledge base library (requires confirm=true)",
+        params: &[
+            ParamDef { name: "library_id", description: "Library ID to delete", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "confirm", description: "Must be true to confirm deletion", required: true, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_upload_document",
+        description: "Upload a document file to a knowledge base library for processing",
+        params: &[
+            ParamDef { name: "library_id", description: "Target library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "file_path", description: "Local file path to upload", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "folder_id", description: "Optional folder ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_get_document_status",
+        description: "Get the processing status of a document",
+        params: &[
+            ParamDef { name: "document_id", description: "Document ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_retry_document",
+        description: "Retry processing a failed document",
+        params: &[
+            ParamDef { name: "document_id", description: "Document ID to retry", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_cancel_document_job",
+        description: "Cancel a document processing job",
+        params: &[
+            ParamDef { name: "document_id", description: "Document ID to cancel", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_delete_document",
+        description: "Delete a document from a library (requires confirm=true)",
+        params: &[
+            ParamDef { name: "document_id", description: "Document ID to delete", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "confirm", description: "Must be true to confirm deletion", required: true, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_list_documents",
+        description: "List documents in a knowledge base library",
+        params: &[
+            ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Max results (default 50)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "offset", description: "Skip first N results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_search",
+        description: "Search across knowledge base libraries using hybrid vector + keyword search",
+        params: &[
+            ParamDef { name: "query", description: "Search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "library_ids", description: "Library IDs to search (empty = all)", required: false, param_type: ParamType::Array, enum_values: None, items_type: Some(ParamType::Integer) },
+            ParamDef { name: "level", description: "Raptor tree level filter", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "top_k", description: "Max results (default 10, max 50)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_create_folder",
+        description: "Create a folder in a knowledge base library",
+        params: &[
+            ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "name", description: "Folder name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "parent_id", description: "Parent folder ID (null = root)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
 ];
 
 /// Build all tool definitions from structured operation definitions

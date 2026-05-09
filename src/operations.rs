@@ -1295,6 +1295,42 @@ impl<'a> Operations<'a> {
             pages_scanned: pages.len(),
         })
     }
+
+    // -----------------------------------------------------------------------
+    // KB query methods
+    // -----------------------------------------------------------------------
+
+    /// Query the KB subsystem (keyword-only FTS5 search).
+    ///
+    /// Vector search is not performed here because the embedding client is
+    /// async and `Operations` is synchronous. Callers that need hybrid
+    /// search should use `crate::kb::search::kb_search` directly with a
+    /// pre-computed query vector.
+    pub fn kb_query(
+        &self,
+        input: &crate::kb::KbSearchInput,
+    ) -> crate::error::Result<Vec<crate::kb::KbSearchResult>> {
+        let conn = self.engine.connection()?;
+        crate::kb::search::kb_search(conn, input, None)
+    }
+
+    /// Combined query across both the brain (pages/chunks) and the KB.
+    ///
+    /// Returns brain results first, then KB results, both sorted by
+    /// relevance. The two result sets are kept separate because they have
+    /// different schemas.
+    pub fn combined_query(
+        &self,
+        brain_query: &str,
+        kb_input: &crate::kb::KbSearchInput,
+    ) -> crate::error::Result<(
+        Vec<crate::types::SearchResult>,
+        Vec<crate::kb::KbSearchResult>,
+    )> {
+        let brain_results = self.query(brain_query, SearchOpts::default())?;
+        let kb_results = self.kb_query(kb_input)?;
+        Ok((brain_results, kb_results))
+    }
 }
 
 /// Collect non-markdown files from a directory, skipping hidden files and symlinks

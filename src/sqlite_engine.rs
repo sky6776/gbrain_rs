@@ -209,7 +209,18 @@ impl SqliteEngine {
         self.conn.as_ref().ok_or(GBrainError::NotConnected)
     }
 
-    /// Run a function inside a SQLite transaction (raw Transaction access)
+    /// Public accessor for the underlying SQLite connection.
+    /// Used by KB subsystem tools that need direct Connection access
+    /// for job queue operations and search.
+    pub fn connection(&self) -> Result<&Connection> {
+        self.conn.as_ref().ok_or(GBrainError::NotConnected)
+    }
+
+    /// Create a KbEngine borrowing the current connection
+    pub fn kb_engine(&self) -> Result<crate::kb::engine::KbEngine<'_>> {
+        let conn = self.conn.as_ref().ok_or(GBrainError::NotConnected)?;
+        Ok(crate::kb::engine::KbEngine::new(conn))
+    }
     pub fn transaction<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Transaction) -> Result<T>,
