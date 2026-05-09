@@ -151,7 +151,7 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn update_library(&self, id: i64, input: &UpdateLibraryInput) -> Result<()> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             let mut sets = Vec::new();
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -427,7 +427,7 @@ impl<'a> KbEngine<'a> {
         embedding_progress: Option<i32>,
         embedding_error: Option<&str>,
     ) -> Result<()> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             let mut sets = Vec::new();
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -473,7 +473,7 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn update_document_stats(&self, id: i64, word_total: i32, split_total: i32) -> Result<()> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             conn.execute(
                 "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                  parsing_status = ?3, embedding_status = ?3, \
@@ -514,16 +514,20 @@ impl<'a> KbEngine<'a> {
             // Delete document (CASCADE handles document_nodes)
             conn.execute("DELETE FROM kb_documents WHERE id = ?1", [id])?;
 
-            // Remove storage file
-            if !storage_path.is_empty() {
-                let path = std::path::Path::new(&storage_path);
-                if path.exists() {
-                    let _ = std::fs::remove_file(path);
+            Ok(())
+        })?;
+
+        // Remove storage file after transaction commits to avoid data loss on rollback
+        if !storage_path.is_empty() {
+            let path = std::path::Path::new(&storage_path);
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(path) {
+                    tracing::warn!("failed to remove storage file {}: {}", storage_path, e);
                 }
             }
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 
     // --- DocumentNode operations ---
@@ -662,7 +666,7 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn create_folder(&self, input: &CreateFolderInput) -> Result<i64> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             // Verify library exists
             let exists: bool = conn
                 .query_row(
@@ -746,7 +750,7 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn move_document_to_folder(&self, document_id: i64, folder_id: Option<i64>) -> Result<()> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             if let Some(fid) = folder_id {
                 // Verify folder belongs to same library as document
                 let lib_id: i64 = conn

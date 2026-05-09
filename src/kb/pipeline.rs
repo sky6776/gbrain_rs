@@ -100,7 +100,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         e
     })?;
 
-    let word_total: i32 = parsed.content.split_whitespace().count() as i32;
+    let word_total: i32 = count_words(&parsed.content) as i32;
     kb.update_document_status(
         doc_id,
         Some(STATUS_PROCESSING),
@@ -253,7 +253,7 @@ pub async fn process_document_async(
         e
     })?;
 
-    let word_total: i32 = parsed.content.split_whitespace().count() as i32;
+    let word_total: i32 = count_words(&parsed.content) as i32;
     kb.update_document_status(
         doc_id,
         Some(STATUS_PROCESSING),
@@ -462,7 +462,7 @@ pub async fn process_document_async(
 pub async fn ingest_directory(
     conn: &Connection,
     library_id: i64,
-    _folder_id: Option<i64>,
+    folder_id: Option<i64>,
     dir_path: &Path,
     embedder: Option<Arc<Embedder>>,
     raptor_config: Option<&RaptorConfig>,
@@ -533,7 +533,7 @@ pub async fn ingest_directory(
         let name_tokens = crate::nlp::chinese::tokenize_name(&original_name);
         let doc = Document {
             library_id,
-            folder_id: _folder_id,
+            folder_id,
             original_name: original_name.clone(),
             name_tokens,
             file_size: file_data.len() as i64,
@@ -618,11 +618,9 @@ fn persist_nodes_and_vectors(
     _lib_id: i64,
     nodes: &[RaptorNode],
 ) -> Result<()> {
-    let kb = KbEngine::new(conn);
-
     // Wrap all operations in a transaction to prevent partial writes
     let tx = conn.unchecked_transaction()?;
-    let result = persist_nodes_inner(conn, doc_id, &kb, nodes);
+    let result = persist_nodes_inner(conn, doc_id, nodes);
     match result {
         Ok(_) => tx.commit()?,
         Err(_) => {
@@ -632,14 +630,32 @@ fn persist_nodes_and_vectors(
     result
 }
 
-fn persist_nodes_inner(
-    conn: &Connection,
-    doc_id: i64,
-    kb: &KbEngine,
-    nodes: &[RaptorNode],
-) -> Result<()> {
-    // 删除此文档的旧节点/向量
-    kb.delete_document_nodes(doc_id)?;
+fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> Result<()> {
+    // 删除此文档的旧节点/向量 (内联操作, 避免嵌套事务)
+    {
+        let node_ids: Vec<i64> = {
+            let mut stmt =
+                conn.prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")?;
+            let rows = stmt.query_map([doc_id], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        for &node_id in &node_ids {
+            let _ = conn.execute(
+                "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            );
+            let _ = conn.execute(
+                "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            );
+        }
+
+        conn.execute(
+            "DELETE FROM kb_document_nodes WHERE document_id = ?1",
+            [doc_id],
+        )?;
+    }
 
     // 按 level ASC, chunk_order ASC 排序插入, 确保父节点先于子节点
     let mut sorted_nodes: Vec<&RaptorNode> = nodes.iter().collect();
@@ -673,7 +689,12 @@ fn persist_nodes_inner(
     for node in &sorted_nodes {
         if let Some(parent_temp_id) = node.parent_id {
             if let Some(&parent_db_id) = id_map.get(&parent_temp_id) {
-                let db_id = id_map.get(&node.id).expect("节点 ID 必须在 id_map 中存在");
+                let &db_id = id_map.get(&node.id).ok_or_else(|| {
+                    GBrainError::Database(format!(
+                        "节点临时 ID {} 在 id_map 中不存在 (插入后应存在)",
+                        node.id
+                    ))
+                })?;
                 conn.execute(
                     "UPDATE kb_document_nodes SET parent_id = ?1 WHERE id = ?2",
                     rusqlite::params![parent_db_id, db_id],
@@ -685,7 +706,12 @@ fn persist_nodes_inner(
     // 将向量插入 BLOB 回退表和 sqlite-vec 虚拟表
     for node in &sorted_nodes {
         if let Some(ref vector) = node.vector {
-            let db_id = id_map.get(&node.id).expect("节点 ID 必须在 id_map 中存在");
+            let &db_id = id_map.get(&node.id).ok_or_else(|| {
+                GBrainError::Database(format!(
+                    "节点临时 ID {} 在 id_map 中不存在 (插入后应存在)",
+                    node.id
+                ))
+            })?;
             let blob = embedding_to_blob(vector);
 
             // BLOB 回退 (始终成功)
@@ -759,6 +785,17 @@ pub fn reembed_document_nodes(
 /// 将 f32 嵌入向量转换为小端序 BLOB 用于 SQLite 存储
 pub fn embedding_to_blob(vector: &[f32]) -> Vec<u8> {
     vector.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// Count words in text, using jieba tokenization for Chinese content
+/// and whitespace splitting for other text.
+fn count_words(text: &str) -> usize {
+    if crate::nlp::chinese::has_chinese(text) {
+        let tokens = crate::nlp::chinese::tokenize_content(text);
+        tokens.split_whitespace().count()
+    } else {
+        text.split_whitespace().count()
+    }
 }
 
 /// 报告进度 (如果提供了回调)

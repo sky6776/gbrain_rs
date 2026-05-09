@@ -267,8 +267,10 @@ fn try_vec_knn(
 
 /// Brute-force cosine similarity search over kb_node_embeddings BLOB table.
 ///
-/// This is the fallback when sqlite-vec is not available. It loads all
-/// candidate embeddings into memory and computes cosine similarity.
+/// This is the fallback when sqlite-vec is not available. It loads candidate
+/// embeddings into memory (capped at 10000 rows) and computes cosine similarity.
+const VECTOR_FALLBACK_MAX_ROWS: usize = 10000;
+
 fn vector_search_fallback(
     conn: &Connection,
     embedding: &[f32],
@@ -306,6 +308,11 @@ fn vector_search_fallback(
         sql.push_str(&format!(" AND n.level = ?{}", idx));
         param_values.push(Box::new(lvl));
     }
+
+    // Cap candidate rows to prevent unbounded memory allocation
+    let limit_idx = param_values.len() + 1;
+    sql.push_str(&format!(" LIMIT ?{}", limit_idx));
+    param_values.push(Box::new(VECTOR_FALLBACK_MAX_ROWS as i64));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
         param_values.iter().map(|p| p.as_ref()).collect();
@@ -421,7 +428,14 @@ fn embedding_to_blob(vector: &[f32]) -> Vec<u8> {
 }
 
 /// Decode a BLOB back into an f32 vector.
+/// Returns an error if the blob length is not a multiple of 4.
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    if blob.len() % 4 != 0 && !blob.is_empty() {
+        tracing::warn!(
+            "embedding blob has {} bytes (not multiple of 4); trailing bytes dropped",
+            blob.len() % 4
+        );
+    }
     blob.chunks_exact(4)
         .filter_map(|chunk| {
             let bytes: [u8; 4] = chunk.try_into().ok()?;

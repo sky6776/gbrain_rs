@@ -1,19 +1,10 @@
 # gbrain-rs
 
-## 2026-05-04 当前实现状态
-
-- `gbrain embed`、查询流程和 Autopilot 已接入真实 embedding 生成与持久化；当 sqlite-vec 不可用时，会使用 `chunk_embeddings` fallback 表做 cosine 检索。
-- `delete` 现在是软删除，新增 `restore` 和 `purge-deleted` 命令；默认读取、列表、搜索、统计和健康检查都会排除软删除页面。
-- schema version 已更新到 11，新增 `deleted_at`、chunk 代码元数据字段、`chunk_embeddings`、`chunks_fts`、`code_edges` 和未解析符号边。
-- `PageType` 已补齐 `email`、`slack`、`calendar-event`、`code`；`ChunkSource` 已支持 `fenced_code`。
-- `put_page` 会从代码页或 Markdown fenced code block 生成符号级代码 chunk；支持 Rust/TS/TSX/JS/Python/Go/Java/C/C++ 声明识别、代码 chunk 搜索、定义/引用查询和 callers/callees 调用图。
-- Markdown/code import 会校验 frontmatter `slug` 与路径推导 slug 是否一致，不一致时跳过；`--embed` 会立即为导入内容生成 embedding。
-
 [English](./README_EN.md) | 中文
 
-**个人知识大脑引擎** — [gbrain](https://github.com/garrytan/gbrain) 的 Rust 实现。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式知识库，支持混合搜索、知识图谱和 MCP 智能体集成。
+**个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增 KB 子系统（异步文档处理管线 + RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期（restore/purge-deleted）、时间衰减搜索等特性。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式架构，开箱即用。
 
-> 原始 TypeScript 版本由 [Garry Tan](https://github.com/garrytan) 开发，本项目为 Rust 移植版。本项目采用**Vibe coding**构建。
+> 原始 TypeScript 版本由 [Garry Tan](https://github.com/garrytan) 开发。本项目采用**Vibe coding**构建。
 
 ---
 
@@ -21,12 +12,14 @@
 
 - **混合搜索** — BM25 关键词 + 向量余弦相似度 + 模糊三元组，通过倒数排名融合（RRF）合并，支持多查询扩展
 - **知识图谱** — Wiki 链接提取、类型化链接、图遍历、反向链接对称性验证
-- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，用于 AI 智能体集成
+- **KB 子系统** — 异步五阶段文档处理管线（解析→拆分→嵌入→RAPTOR→持久化），RAPTOR 递归摘要树，文档上传与处理，多格式解析器（Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本/代码），语义分块（Savitzky-Golay 平滑 + chunk_overlap 重叠）
+- **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
+- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，51 个工具，用于 AI 智能体集成
 - **零配置** — 嵌入式 SQLite，无需外部服务（嵌入向量可选）
 - **分层丰富** — 自动实体检测与提升（提及 → 存根 → 完善）
 - **版本历史** — 完整的页面版本管理，支持回滚
 - **自动驾驶** — 自维护守护进程，自动嵌入过期内容并执行完整性检查
-- **安全防护** — 路径遍历防护、slug 验证、远程调用输入清理
+- **安全防护** — 路径遍历防护、slug 验证、远程调用输入清理、参数化查询防 SQL 注入
 
 ---
 
@@ -36,12 +29,6 @@
 cargo build --release          # 构建
 cargo install --path .         # 安装到 ~/.cargo/bin/
 gbrain install                 # 安装到 ~/.gbrain/bin/
-```
-
-可选特性:
-
-```bash
-cargo build --features file-server   # 包含 axum 文件服务器
 ```
 
 ---
@@ -127,20 +114,20 @@ cargo build --features file-server   # 包含 axum 文件服务器
 | `gbrain report --report-type <TYPE> [--title <TITLE>] [--content <TEXT>]` | 生成知识库报告 |
 | `gbrain ingest-log [--limit <N>]` | 查看导入日志 |
 | `gbrain tools-json` | 以 JSON 输出 MCP 工具定义 |
-| `gbrain mcp` | 作为 MCP stdio 服务器运行 |
+| `gbrain serve` | 作为 MCP stdio 服务器运行 |
 
 ---
 
 ## MCP 工具
 
-gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
+gbrain 提供 51 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
 
 ### 搜索
 
 | 工具 | 说明 |
 |------|------|
-| `query` | 混合搜索（向量 + 关键词 + 扩展），支持详情级别 |
-| `search` | 全文搜索 |
+| `query` | 混合搜索（向量 + 关键词 + 扩展），支持详情级别、代码过滤、两阶段检索和搜索元数据 |
+| `search` | 全文搜索（向量 + 关键词 + RRF 融合），支持代码过滤 |
 | `find_by_title_fuzzy` | 基于三元组相似度的标题模糊搜索 |
 | `resolve_slugs` | 模糊解析部分 slug 到匹配页面 |
 
@@ -193,6 +180,26 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `put_raw_data` | 存储页面的原始 API 响应数据 |
 | `get_raw_data` | 获取页面的原始数据 |
 
+### 代码知识图谱
+
+| 工具 | 说明 |
+|------|------|
+| `code_def` | 查找代码符号定义 |
+| `code_refs` | 查找引用某符号的代码块 |
+| `search_code_chunks` | 按关键词/符号文本搜索代码块 |
+| `get_callers` | 获取符号的调用者 |
+| `get_callees` | 获取符号的被调用者 |
+| `get_code_edges_by_chunk` | 获取代码块关联的代码图边 |
+| `reindex_code_page` | 重建代码页的代码块和代码边 |
+
+### 文件存储
+
+| 工具 | 说明 |
+|------|------|
+| `file_upload` | 上传文件到存储 |
+| `file_list` | 列出已存储的文件 |
+| `file_url` | 获取文件的 URL/路径 |
+
 ### 导入与同步
 
 | 工具 | 说明 |
@@ -200,6 +207,7 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `log_ingest` | 记录导入事件 |
 | `get_ingest_log` | 获取最近的导入日志 |
 | `sync_brain` | 从 Git 仓库同步知识库 |
+| `find_orphans` | 查找无入站链接的孤立页面 |
 
 ### 健康与统计
 
@@ -207,6 +215,23 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 |------|------|
 | `get_stats` | 知识库统计（页面数、块数等） |
 | `get_health` | 健康仪表盘（嵌入覆盖率、孤立页面等） |
+
+### KB 子系统
+
+| 工具 | 说明 |
+|------|------|
+| `kb_list_libraries` | 列出所有知识库（含文档和块计数） |
+| `kb_create_library` | 创建知识库（支持语义分块/RAPTOR/分块参数配置） |
+| `kb_update_library` | 更新知识库配置 |
+| `kb_delete_library` | 删除知识库 |
+| `kb_upload_document` | 上传文档到知识库处理 |
+| `kb_get_document_status` | 获取文档处理状态 |
+| `kb_retry_document` | 重试处理失败的文档 |
+| `kb_cancel_document_job` | 取消文档处理作业 |
+| `kb_delete_document` | 从知识库删除文档 |
+| `kb_list_documents` | 列出知识库中的文档 |
+| `kb_search` | 跨库混合搜索（向量 + 关键词 + RRF 融合） |
+| `kb_create_folder` | 在知识库中创建文件夹 |
 
 ---
 
@@ -221,6 +246,11 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `offset` | integer | 否 | 分页偏移量 |
 | `expand` | boolean | 否 | 启用多查询扩展（默认 true） |
 | `detail` | string | 否 | `low` / `medium` / `high`（默认 medium） |
+| `lang` | string | 否 | 按编程语言过滤代码检索 |
+| `symbol_kind` | string | 否 | 按符号类型过滤代码检索 |
+| `near_symbol` | string | 否 | 锚定两阶段代码图检索的起始符号 |
+| `walk_depth` | integer | 否 | 代码图邻居遍历深度（0-2） |
+| `include_meta` | boolean | 否 | 返回 `{results, meta}` 含向量/扩展详情 |
 
 ### `put_page`
 
@@ -253,6 +283,30 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 |------|------|------|------|
 | `repo_path` | string | 是 | Git 仓库路径 |
 | `force_full` | boolean | 否 | 强制全量同步（默认 false） |
+
+### `kb_create_library`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 知识库名称 |
+| `semantic_segmentation_enabled` | boolean | 否 | 启用语义分块 |
+| `raptor_enabled` | boolean | 否 | 启用 RAPTOR 摘要树 |
+| `raptor_llm_base_url` | string | 否 | RAPTOR LLM 基础 URL 覆盖 |
+| `raptor_llm_secret_ref` | string | 否 | RAPTOR LLM API 密钥环境变量名 |
+| `raptor_llm_model` | string | 否 | RAPTOR LLM 模型名称 |
+| `chunk_size` | integer | 否 | 分块大小（字符数） |
+| `chunk_overlap` | integer | 否 | 分块重叠（字符数） |
+| `batch_max_documents` | integer | 否 | 每批最大文档数 |
+| `batch_max_chunks` | integer | 否 | 每批最大块数 |
+
+### `kb_search`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索查询 |
+| `library_ids` | integer[] | 否 | 限定搜索的知识库 ID（空 = 全部） |
+| `level` | integer | 否 | RAPTOR 树层级过滤 |
+| `top_k` | integer | 否 | 最大结果数（默认 10，上限 50） |
 
 ---
 
@@ -301,6 +355,18 @@ gbrain 提供 28 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `GBRAIN_TRANSCRIPTION_GROQ_BASE_URL` | Groq 转录基础 URL | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI 转录 API 密钥 | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI 转录基础 URL | — |
+
+### KB 子系统
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `GBRAIN_KB_ENABLED` | 启用 KB 子系统 | `true` |
+| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API 密钥 | 回退到 `GBRAIN_EXPANSION_API_KEY` |
+| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM 基础 URL | 回退到 `GBRAIN_EXPANSION_BASE_URL` |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM 模型 | `gpt-4o-mini` |
+| `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB 文件大小上限（MB） | `50` |
+| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB 允许的文件扩展名（逗号分隔） | `pdf,docx,xlsx,csv,html,htm,txt,md` |
+| `GBRAIN_KB_STORAGE_DIR` | KB 文件存储目录 | — |
 
 ### 日志
 
@@ -365,6 +431,22 @@ cargo clippy                  # 代码检查
 7. 时效性提升（时间衰减）
 8. 意图类型提升（实体/时间/事件）
 9. 4 层去重（slug → compiled_truth 优先 → 分数排序 → 截断）
+
+### KB 子系统架构
+
+异步五阶段文档处理管线:
+
+1. **解析** — 文档解析器（Markdown / PDF / DOCX / XLSX / CSV / HTML / 纯文本 / 代码）
+2. **拆分** — 递归拆分器 / 语义拆分器（Savitzky-Golay 平滑 + chunk_overlap 重叠），支持 `semantic_enabled` 标志切换
+3. **嵌入** — 向量嵌入生成与持久化
+4. **RAPTOR** — 递归摘要树（K-Means++ 聚类 + LLM 摘要，三级回退链：库级配置 → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`）
+5. **持久化** — 事务保护的节点/向量写入
+
+### 中文 NLP 模块
+
+- **分词索引** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构
+- **中文分块** — 中文标点加入句子/子句分隔层级，CJK 标点无需后续空格即可断句
+- **预分词列** — schema V16 新增 `_tokens` 列，FTS5 改用 `unicode61` 分词器，写入时自动同步
 
 ---
 

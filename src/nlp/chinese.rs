@@ -175,12 +175,28 @@ pub fn split_by_non_word(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Escape a token for safe use in FTS5 MATCH queries by removing special characters.
+/// Filter a token for safe use in FTS5 MATCH queries by removing special characters
+/// and FTS5 boolean keywords (AND, OR, NOT, NEAR).
 pub fn escape_fts5_token(token: &str) -> String {
-    token
+    // FTS5 boolean keywords that must not appear as bare tokens
+    const FTS5_KEYWORDS: &[&str] = &["AND", "OR", "NOT", "NEAR"];
+
+    let filtered: String = token
         .chars()
-        .filter(|c| !matches!(c, '"' | '\'' | '*' | '(' | ')' | ':' | '^' | '-'))
-        .collect()
+        .filter(|c| {
+            !matches!(
+                c,
+                '"' | '\'' | '*' | '(' | ')' | ':' | '^' | '-' | '{' | '}' | '+' | '[' | ']'
+            )
+        })
+        .collect();
+
+    // If the filtered result is an FTS5 keyword, prefix with underscore to neutralize
+    if FTS5_KEYWORDS.contains(&filtered.to_uppercase().as_str()) {
+        format!("_{}", filtered)
+    } else {
+        filtered
+    }
 }
 
 /// Generate pinyin tokens from Chinese text.

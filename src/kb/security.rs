@@ -81,7 +81,12 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
         if mime_matches_extension(&detected, ext) {
             return Ok(detected);
         }
-        // Mismatch: log warning but allow (some PDFs report as application/x-zip etc.)
+        // MIME 不匹配: 记录警告后回退到扩展名推断
+        tracing::warn!(
+            "MIME 类型不匹配: 检测到 '{}' 但扩展名 '{}' 暗示不同格式",
+            detected,
+            ext
+        );
     }
 
     // Fallback to extension-based MIME
@@ -97,7 +102,7 @@ fn mime_matches_extension(mime: &str, ext: &str) -> bool {
         "html" | "htm" => mime == "text/html",
         "txt" => mime.starts_with("text/"),
         "md" => mime.starts_with("text/"),
-        _ => true, // Allow unknown matches
+        _ => false, // 拒绝未知扩展名 (安全边界应默认拒绝)
     }
 }
 
