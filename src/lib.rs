@@ -18,6 +18,7 @@ pub mod fail_improve;
 pub mod file_storage;
 pub mod jobs;
 pub mod kb;
+pub mod nlp;
 pub mod link_extraction;
 pub mod lint;
 pub mod logging;

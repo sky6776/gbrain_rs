@@ -6,7 +6,7 @@
 
 use crate::embedding::Embedder;
 use crate::error::{GBrainError, Result};
-use crate::kb::chinese;
+use crate::nlp::chinese;
 use crate::kb::engine::KbEngine;
 use crate::kb::jobs::KbProcessPayload;
 use crate::kb::parser::ParserRegistry;
@@ -530,7 +530,7 @@ pub async fn ingest_directory(
             use sha2::{Digest, Sha256};
             hex::encode(Sha256::digest(&file_data))
         };
-        let name_tokens = crate::kb::chinese::tokenize_name(&original_name);
+        let name_tokens = crate::nlp::chinese::tokenize_name(&original_name);
         let doc = Document {
             library_id,
             folder_id: _folder_id,

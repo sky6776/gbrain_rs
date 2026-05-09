@@ -4,6 +4,7 @@
 use crate::config::Config;
 use crate::engine::BrainEngine;
 use crate::error::{GBrainError, Result};
+use crate::nlp::chinese;
 use crate::schema::SCHEMA_DDL;
 use crate::types::*;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -771,14 +772,22 @@ impl BrainEngine for SqliteEngine {
             .map(|v| v.to_string())
             .unwrap_or_default();
 
+        // 写入时进行中文分词，用于 FTS5 索引
+        let title_tokens = chinese::tokenize_content(&input.title);
+        let compiled_truth_tokens = chinese::tokenize_content(&input.compiled_truth);
+        let timeline_tokens = chinese::tokenize_content(&timeline_str);
+
         conn.execute(
-            "INSERT INTO pages (slug, page_type, title, compiled_truth, timeline, frontmatter, content_hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+            "INSERT INTO pages (slug, page_type, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens, frontmatter, content_hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
              ON CONFLICT(slug) DO UPDATE SET
                 page_type = excluded.page_type,
                 title = excluded.title,
+                title_tokens = excluded.title_tokens,
                 compiled_truth = excluded.compiled_truth,
+                compiled_truth_tokens = excluded.compiled_truth_tokens,
                 timeline = excluded.timeline,
+                timeline_tokens = excluded.timeline_tokens,
                 frontmatter = excluded.frontmatter,
                 content_hash = excluded.content_hash,
                 deleted_at = NULL,
@@ -787,8 +796,11 @@ impl BrainEngine for SqliteEngine {
                 slug,
                 input.page_type.to_string(),
                 input.title,
+                title_tokens,
                 input.compiled_truth,
+                compiled_truth_tokens,
                 timeline_str,
+                timeline_tokens,
                 frontmatter_str,
                 input.content_hash,
             ],
@@ -1041,8 +1053,8 @@ impl BrainEngine for SqliteEngine {
             // P1-2: Support detail_level filter (exclude timeline chunks for Low)
             // P1-4: Compute stale flag from embedding staleness (embedded_at < updated_at)
             let mut sql = String::from(
-                "SELECT p.slug, p.title, snippet(chunks_fts, 2, '<<', '>>', '...', 64) as snippet,
-                        bm25(chunks_fts) as score,
+                "SELECT p.slug, p.title, snippet(chunks_fts, 0, '<<', '>>', '...', 64) as snippet,
+                        bm25(chunks_fts, 1.0, 1.0, 0.5, 3.0, 2.0) as score,
                         c.id as chunk_id, c.chunk_index, c.chunk_source, c.page_id,
                         p.page_type,
                         (c.embedded_at IS NULL OR c.embedded_at < p.updated_at) as stale,
@@ -1163,8 +1175,8 @@ impl BrainEngine for SqliteEngine {
             // Optimize9: Weighted bm25 — title (10x) > compiled_truth (5x) > timeline (2x) > slug (1x)
             // Mirrors TS tsvector weights: title=A, compiled_truth=B, timeline=C
             let mut sql = String::from(
-                "SELECT p.slug, p.title, snippet(pages_fts, 2, '<<', '>>', '...', 64) as snippet,
-                        bm25(pages_fts, 1.0, 10.0, 5.0, 2.0) as score,
+                "SELECT p.slug, p.title, snippet(pages_fts, 3, '<<', '>>', '...', 64) as snippet,
+                        bm25(pages_fts, 1.0, 10.0, 10.0, 5.0, 5.0, 2.0, 2.0) as score,
                         p.page_type,
                         NOT EXISTS(SELECT 1 FROM chunks c WHERE c.page_id = p.id
                                    AND c.embedded_at IS NOT NULL AND c.embedded_at >= p.updated_at) as stale,
@@ -1278,7 +1290,7 @@ impl BrainEngine for SqliteEngine {
         let mut sql = String::from(
             "SELECT p.slug, p.title, c.id, c.chunk_index,
                     snippet(chunks_fts, 0, '<<', '>>', '...', 80) as snippet,
-                    bm25(chunks_fts, 1.0, 0.5, 3.0, 2.0) as score,
+                    bm25(chunks_fts, 1.0, 1.0, 0.5, 3.0, 2.0) as score,
                     c.language, c.symbol_name, c.symbol_type, c.start_line, c.end_line
              FROM chunks_fts
              JOIN chunks c ON c.id = chunks_fts.rowid
@@ -1635,6 +1647,8 @@ impl BrainEngine for SqliteEngine {
             for chunk in chunks {
                 let source_str = chunk.source.to_string();
                 let model = chunk.model.as_deref().unwrap_or("text-embedding-3-large");
+                // 写入时进行中文分词，用于 FTS5 索引
+                let chunk_text_tokens = chinese::tokenize_content(&chunk.chunk_text);
                 let previous_text: Option<String> = tx
                     .query_row(
                         "SELECT chunk_text FROM chunks WHERE page_id = ?1 AND chunk_index = ?2 AND chunk_source = ?3",
@@ -1644,14 +1658,15 @@ impl BrainEngine for SqliteEngine {
                     .optional()?;
                 let result = tx.execute(
                     "INSERT INTO chunks (
-                        page_id, chunk_index, chunk_text, chunk_source, token_count, model,
+                        page_id, chunk_index, chunk_text, chunk_text_tokens, chunk_source, token_count, model,
                         language, symbol_name, symbol_type, start_line, end_line,
                         parent_symbol_path, symbol_name_qualified, doc_comment, embedded_at
                      )
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                             CASE WHEN ?15 IS NOT NULL THEN datetime('now') ELSE NULL END)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                             CASE WHEN ?16 IS NOT NULL THEN datetime('now') ELSE NULL END)
                      ON CONFLICT(page_id, chunk_index, chunk_source) DO UPDATE SET
                         chunk_text = excluded.chunk_text,
+                        chunk_text_tokens = excluded.chunk_text_tokens,
                         token_count = excluded.token_count,
                         model = excluded.model,
                         language = excluded.language,
@@ -1663,7 +1678,7 @@ impl BrainEngine for SqliteEngine {
                         symbol_name_qualified = excluded.symbol_name_qualified,
                         doc_comment = excluded.doc_comment,
                         embedded_at = CASE
-                            WHEN ?15 IS NOT NULL THEN datetime('now')
+                            WHEN ?16 IS NOT NULL THEN datetime('now')
                             WHEN chunks.chunk_text != excluded.chunk_text THEN NULL
                             ELSE chunks.embedded_at
                         END",
@@ -1671,6 +1686,7 @@ impl BrainEngine for SqliteEngine {
                         page_id,
                         chunk.chunk_index,
                         chunk.chunk_text,
+                        chunk_text_tokens,
                         source_str.as_str(),
                         chunk.token_count,
                         model,

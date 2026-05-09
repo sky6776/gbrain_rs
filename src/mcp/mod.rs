@@ -1094,7 +1094,7 @@ impl McpServer {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let name_tokens = crate::kb::chinese::tokenize_name(&original_name);
+                let name_tokens = crate::nlp::chinese::tokenize_name(&original_name);
 
                 // Create processing_run_id and enqueue job
                 let processing_run_id = crate::kb::jobs::new_run_id();

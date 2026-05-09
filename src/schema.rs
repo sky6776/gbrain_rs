@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS pages (
     content_hash TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    deleted_at TEXT
+    deleted_at TEXT,
+    title_tokens TEXT NOT NULL DEFAULT '',
+    compiled_truth_tokens TEXT NOT NULL DEFAULT '',
+    timeline_tokens TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_pages_slug ON pages(slug);
@@ -46,28 +49,32 @@ CREATE INDEX IF NOT EXISTS idx_pages_deleted_at ON pages(deleted_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
     slug,
     title,
+    title_tokens,
     compiled_truth,
+    compiled_truth_tokens,
     timeline,
+    timeline_tokens,
     content='pages',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='unicode61'
 );
 
 -- Triggers to keep FTS5 in sync
 CREATE TRIGGER IF NOT EXISTS pages_fts_insert AFTER INSERT ON pages BEGIN
-    INSERT INTO pages_fts(rowid, slug, title, compiled_truth, timeline)
-    VALUES (new.id, new.slug, new.title, new.compiled_truth, new.timeline);
+    INSERT INTO pages_fts(rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES (new.id, new.slug, new.title, new.title_tokens, new.compiled_truth, new.compiled_truth_tokens, new.timeline, new.timeline_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS pages_fts_update AFTER UPDATE ON pages BEGIN
-    INSERT INTO pages_fts(pages_fts, rowid, slug, title, compiled_truth, timeline)
-    VALUES ('delete', old.id, old.slug, old.title, old.compiled_truth, old.timeline);
-    INSERT INTO pages_fts(rowid, slug, title, compiled_truth, timeline)
-    VALUES (new.id, new.slug, new.title, new.compiled_truth, new.timeline);
+    INSERT INTO pages_fts(pages_fts, rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES ('delete', old.id, old.slug, old.title, old.title_tokens, old.compiled_truth, old.compiled_truth_tokens, old.timeline, old.timeline_tokens);
+    INSERT INTO pages_fts(rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES (new.id, new.slug, new.title, new.title_tokens, new.compiled_truth, new.compiled_truth_tokens, new.timeline, new.timeline_tokens);
 END;
 
 CREATE TRIGGER IF NOT EXISTS pages_fts_delete AFTER DELETE ON pages BEGIN
-    INSERT INTO pages_fts(pages_fts, rowid, slug, title, compiled_truth, timeline)
-    VALUES ('delete', old.id, old.slug, old.title, old.compiled_truth, old.timeline);
+    INSERT INTO pages_fts(pages_fts, rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES ('delete', old.id, old.slug, old.title, old.title_tokens, old.compiled_truth, old.compiled_truth_tokens, old.timeline, old.timeline_tokens);
 END;
 
 -- FTS5 trigram virtual table for fuzzy title matching
@@ -115,6 +122,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     parent_symbol_path TEXT,
     symbol_name_qualified TEXT,
     doc_comment TEXT,
+    chunk_text_tokens TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(page_id, chunk_index, chunk_source)
 );
@@ -128,28 +136,34 @@ CREATE INDEX IF NOT EXISTS idx_chunks_parent_symbol ON chunks(parent_symbol_path
 -- FTS5 virtual table for chunk/code-chunk search.
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_text,
+    chunk_text_tokens,
     language,
     symbol_name,
     symbol_type,
     content='chunks',
-    content_rowid='id'
+    content_rowid='id',
+    tokenize='unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
-    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+    INSERT INTO chunks_fts(rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, new.chunk_text_tokens,
+            coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
-    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
-    INSERT INTO chunks_fts(rowid, chunk_text, language, symbol_name, symbol_type)
-    VALUES (new.id, new.chunk_text, coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, old.chunk_text_tokens,
+            coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+    INSERT INTO chunks_fts(rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, new.chunk_text_tokens,
+            coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, language, symbol_name, symbol_type)
-    VALUES ('delete', old.id, old.chunk_text, coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, old.chunk_text_tokens,
+            coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
 END;
 
 -- Portable fallback embedding store. sqlite-vec is used when available; this
@@ -782,6 +796,92 @@ CREATE TABLE IF NOT EXISTS kb_node_embeddings (
 );
 "#;
 
+/// 数据库迁移 V16：中文 NLP 预分词 FTS5
+///
+/// 为 pages 和 chunks 表添加 _tokens 列，重建 pages_fts 和 chunks_fts，
+/// 使用原始列与分词列组合 + unicode61 分词器。
+pub const MIGRATION_V16_DDL: &str = r#"
+-- 为中文 FTS5 支持添加预分词列
+ALTER TABLE pages ADD COLUMN title_tokens TEXT NOT NULL DEFAULT '';
+ALTER TABLE pages ADD COLUMN compiled_truth_tokens TEXT NOT NULL DEFAULT '';
+ALTER TABLE pages ADD COLUMN timeline_tokens TEXT NOT NULL DEFAULT '';
+ALTER TABLE chunks ADD COLUMN chunk_text_tokens TEXT NOT NULL DEFAULT '';
+
+-- 重建 pages_fts，添加分词列 + unicode61 分词器
+DROP TRIGGER IF EXISTS pages_fts_insert;
+DROP TRIGGER IF EXISTS pages_fts_update;
+DROP TRIGGER IF EXISTS pages_fts_delete;
+DROP TABLE IF EXISTS pages_fts;
+
+CREATE VIRTUAL TABLE pages_fts USING fts5(
+    slug,
+    title,
+    title_tokens,
+    compiled_truth,
+    compiled_truth_tokens,
+    timeline,
+    timeline_tokens,
+    content='pages',
+    content_rowid='id',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER pages_fts_insert AFTER INSERT ON pages BEGIN
+    INSERT INTO pages_fts(rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES (new.id, new.slug, new.title, new.title_tokens, new.compiled_truth, new.compiled_truth_tokens, new.timeline, new.timeline_tokens);
+END;
+
+CREATE TRIGGER pages_fts_update AFTER UPDATE ON pages BEGIN
+    INSERT INTO pages_fts(pages_fts, rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES ('delete', old.id, old.slug, old.title, old.title_tokens, old.compiled_truth, old.compiled_truth_tokens, old.timeline, old.timeline_tokens);
+    INSERT INTO pages_fts(rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES (new.id, new.slug, new.title, new.title_tokens, new.compiled_truth, new.compiled_truth_tokens, new.timeline, new.timeline_tokens);
+END;
+
+CREATE TRIGGER pages_fts_delete AFTER DELETE ON pages BEGIN
+    INSERT INTO pages_fts(pages_fts, rowid, slug, title, title_tokens, compiled_truth, compiled_truth_tokens, timeline, timeline_tokens)
+    VALUES ('delete', old.id, old.slug, old.title, old.title_tokens, old.compiled_truth, old.compiled_truth_tokens, old.timeline, old.timeline_tokens);
+END;
+
+-- 重建 chunks_fts，添加分词列 + unicode61 分词器
+DROP TRIGGER IF EXISTS chunks_fts_insert;
+DROP TRIGGER IF EXISTS chunks_fts_update;
+DROP TRIGGER IF EXISTS chunks_fts_delete;
+DROP TABLE IF EXISTS chunks_fts;
+
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    chunk_text,
+    chunk_text_tokens,
+    language,
+    symbol_name,
+    symbol_type,
+    content='chunks',
+    content_rowid='id',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, new.chunk_text_tokens,
+            coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER chunks_fts_update AFTER UPDATE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, old.chunk_text_tokens,
+            coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+    INSERT INTO chunks_fts(rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES (new.id, new.chunk_text, new.chunk_text_tokens,
+            coalesce(new.language, ''), coalesce(new.symbol_name, ''), coalesce(new.symbol_type, ''));
+END;
+
+CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_text_tokens, language, symbol_name, symbol_type)
+    VALUES ('delete', old.id, old.chunk_text, old.chunk_text_tokens,
+            coalesce(old.language, ''), coalesce(old.symbol_name, ''), coalesce(old.symbol_type, ''));
+END;
+"#;
+
 /// Generate sqlite-vec virtual table DDL for KB nodes
 pub fn vec_kb_nodes_ddl(dimensions: usize) -> String {
     format!(
@@ -810,5 +910,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (13, MIGRATION_V13_DDL),
         (14, MIGRATION_V14_DDL),
         (15, MIGRATION_V15_DDL),
+        (16, MIGRATION_V16_DDL),
     ]
 }

@@ -738,26 +738,11 @@ fn apply_intent_type_boost(results: &mut [SearchResult], intent: &QueryIntent, m
     }
 }
 
-/// P2-1: Broaden FTS query by splitting into OR terms.
-/// When vector search returns few results, we relax the keyword query
-/// from AND (all terms required) to OR (any term matches).
-/// Mirrors TS: fallbackStrategy = "broaden_or"
+/// P2-1: 放宽 FTS 查询，将词项以 OR 连接。
+/// 当向量搜索返回结果较少时，将关键词查询从 AND（所有词项必须匹配）
+/// 放宽为 OR（任一词项匹配即可）。
+/// 对应 TS: fallbackStrategy = "broaden_or"
 fn broaden_fts_query(query: &str) -> String {
-    // Escape each term to prevent FTS5 syntax injection
-    let terms: Vec<String> = query
-        .split_whitespace()
-        .filter(|t| t.len() >= 2)
-        .map(crate::search::keyword::escape_fts_term)
-        .filter(|t| !t.is_empty())
-        .collect();
-    if terms.len() <= 1 {
-        // Can't broaden a single-term query
-        return build_fts_query(query);
-    }
-    // Join terms with OR for broader matching
-    // Double-quote each term with prefix wildcard (*) to prevent FTS5 operators
-    // (AND, OR, NOT, NEAR) from being interpreted as query syntax and to enable
-    // prefix matching — matches build_fts_query pattern
-    let quoted: Vec<String> = terms.iter().map(|t| format!("\"{}\"*", t)).collect();
-    quoted.join(" OR ")
+    // 使用 jieba 分词构建 FTS5 查询，支持中文分词
+    crate::nlp::chinese::build_fts_match_query(query)
 }

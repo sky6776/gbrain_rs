@@ -9,7 +9,7 @@
 //! All functions accept `&Connection` so callers control the transaction scope.
 
 use crate::error::Result;
-use crate::kb::chinese;
+use crate::nlp::chinese;
 use crate::kb::types::*;
 use rusqlite::Connection;
 use std::collections::HashMap;

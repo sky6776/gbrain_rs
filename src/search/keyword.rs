@@ -1,71 +1,23 @@
-//! Keyword search via FTS5
-//! Mirrors gbrain's src/core/search/keyword.ts
+//! 关键词搜索（基于 FTS5）
+//! 对应 gbrain 的 src/core/search/keyword.ts
 
 use tracing::trace;
 
-/// Build an FTS5 match expression from a user query.
-/// Escapes FTS5 special characters to prevent syntax injection.
-/// Returns empty string for empty/whitespace-only queries (caller must handle).
+/// 从用户查询构建 FTS5 MATCH 表达式。
+/// 使用 jieba 分词处理中文查询，支持中英混合输入。
+/// 对空查询返回空字符串（调用方需自行处理）。
 pub fn build_fts_query(query: &str) -> String {
-    trace!(query = %query, "Building FTS5 query");
-    let terms: Vec<&str> = query.split_whitespace().filter(|t| !t.is_empty()).collect();
-
-    if terms.is_empty() {
-        return String::new();
-    }
-
-    if terms.len() > 1 {
-        // Phrase search: strip internal quotes and sanitize FTS5-special characters
-        // to prevent column filter injection (e.g., "title:secret" being interpreted
-        // as a column-scoped search by FTS5).
-        let clean_query: String = query
-            .chars()
-            .filter(|c| *c != '"')
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' || c == '\'' || c.is_whitespace() {
-                    c
-                } else {
-                    ' '
-                }
-            })
-            .collect();
-        let phrase = format!("\"{}\"", clean_query);
-        // Individual token search: escape each term, filter empty, add prefix wildcard.
-        // Each term is double-quoted to prevent FTS5 operators (AND, OR, NOT, NEAR)
-        // from being interpreted as query syntax rather than literal search terms.
-        let individual: Vec<String> = terms
-            .iter()
-            .filter_map(|t| {
-                let escaped = escape_fts_term(t);
-                if escaped.is_empty() {
-                    None
-                } else {
-                    Some(format!("\"{}\"*", escaped))
-                }
-            })
-            .collect();
-        if individual.is_empty() {
-            // All terms were stripped to nothing — return phrase only
-            return phrase;
-        }
-        format!("{} OR {}", phrase, individual.join(" AND "))
-    } else {
-        let escaped = escape_fts_term(terms[0]);
-        if escaped.is_empty() {
-            return String::new();
-        }
-        format!("\"{}\"*", escaped)
-    }
+    trace!(query = %query, "构建 FTS5 查询");
+    crate::nlp::chinese::build_fts_match_query(query)
 }
 
-/// Escape special FTS5 characters that could inject query syntax.
-/// Removes: quotes, parens, braces, colon, caret, asterisk, dot, brackets.
-/// FTS5 boolean operators (AND, OR, NOT, NEAR) are handled by
-/// splitting on whitespace and joining with explicit operators,
-/// plus double-quoting terms in build_fts_query.
+/// 转义 FTS5 特殊字符，防止查询语法注入。
+/// 移除：引号、括号、花括号、冒号、脱字符、星号、点号、方括号。
+/// FTS5 布尔运算符（AND、OR、NOT、NEAR）通过按空白拆分并以显式运算符拼接来处理，
+/// 并在 build_fts_query 中对词项加双引号。
 pub fn escape_fts_term(term: &str) -> String {
-    // Replace special chars with spaces (not strip) to preserve search semantics.
-    // E.g. "C++" becomes "C  " → first word "C", "state-of-the-art" → "state of the art" → "state"
+    // 将特殊字符替换为空格（而非直接删除），以保留搜索语义。
+    // 例如 "C++" 变为 "C  " → 取第一个词 "C"，"state-of-the-art" → "state of the art" → "state"
     term.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' || c == '\'' {

@@ -21,8 +21,8 @@ const CHARS_PER_WORD: usize = 6;
 /// Characters per token (rough estimate for English text)
 const CHARS_PER_TOKEN: usize = 4;
 
-/// P2-4: Sentence boundary pattern for overlap alignment
-const SENTENCE_BOUNDARY: &[char] = &['.', '!', '?'];
+/// P2-4: 句子边界模式，用于重叠对齐（包含中文标点）
+const SENTENCE_BOUNDARY: &[char] = &['.', '!', '?', '。', '！', '？', '；'];
 
 /// Chunk a text string into overlapping segments.
 /// Uses 5-level delimiter hierarchy matching TS recursive chunker:
@@ -62,9 +62,16 @@ pub fn chunk_text(
         .collect()
 }
 
-/// Count words in text (whitespace-separated tokens)
+/// 统计文本词数。
+/// 中文文本使用 jieba 分词（中文无空格分隔），
+/// 其他文本使用空格分隔计数。
 fn word_count(text: &str) -> usize {
-    text.split_whitespace().count()
+    if crate::nlp::chinese::has_chinese(text) {
+        let tokens = crate::nlp::chinese::tokenize_content(text);
+        tokens.split_whitespace().count()
+    } else {
+        text.split_whitespace().count()
+    }
 }
 
 /// 5-level delimiter hierarchy matching TS:
@@ -98,8 +105,8 @@ fn split_recursive(text: &str, target_words: usize) -> Vec<String> {
         return result;
     }
 
-    // Level 3: sentences
-    let sentences = split_by_regex(text, &['.', '!', '?'], &[' ']);
+    // Level 3: sentences (includes Chinese sentence punctuation)
+    let sentences = split_by_regex(text, &['.', '!', '?', '。', '！', '？', '；'], &[' ']);
     if sentences.len() > 1 {
         let mut result = Vec::new();
         for sentence in sentences {
@@ -108,8 +115,8 @@ fn split_recursive(text: &str, target_words: usize) -> Vec<String> {
         return result;
     }
 
-    // Level 4: clauses
-    let clauses = split_by_regex(text, &[';', ':', ','], &[' ']);
+    // Level 4: clauses (includes Chinese clause punctuation)
+    let clauses = split_by_regex(text, &[';', ':', ',', '；', '：', '，'], &[' ']);
     if clauses.len() > 1 {
         let mut result = Vec::new();
         for clause in clauses {
@@ -142,7 +149,9 @@ fn split_recursive(text: &str, target_words: usize) -> Vec<String> {
     result
 }
 
-/// Split text by punctuation followed by expected_next chars
+/// Split text by punctuation followed by expected_next chars.
+/// Chinese punctuation delimiters split immediately without checking expected_next,
+/// since Chinese text does not use spaces after punctuation.
 fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut result = Vec::new();
@@ -150,9 +159,16 @@ fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Ve
 
     for (i, &c) in chars.iter().enumerate() {
         if delimiters.contains(&c) {
+            let is_chinese_delim = is_cjk_punctuation(c);
             let next_i = i + 1;
-            if next_i < chars.len() && expected_next.contains(&chars[next_i]) {
-                // Found boundary: delimiter followed by space
+
+            if is_chinese_delim {
+                // Chinese punctuation: split immediately regardless of next char
+                let segment: String = chars[start..=i].iter().collect();
+                result.push(segment);
+                start = next_i;
+            } else if next_i < chars.len() && expected_next.contains(&chars[next_i]) {
+                // English punctuation: delimiter followed by space
                 let segment: String = chars[start..=i].iter().collect();
                 result.push(segment);
                 start = next_i; // include the space in the next segment (preserves it)
@@ -169,6 +185,12 @@ fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Ve
     }
 
     result
+}
+
+/// Check if a character is CJK punctuation (Chinese full-width punctuation).
+/// These characters do not require a following space to act as delimiters.
+fn is_cjk_punctuation(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '；' | '：' | '，')
 }
 
 /// P2-4: Align overlap to sentence boundary.
@@ -357,5 +379,68 @@ mod tests {
         // The aligned position should be at a sentence start
         let prefix = &text[..aligned];
         assert!(prefix.ends_with(". ") || prefix.ends_with(".") || aligned == 0);
+    }
+
+    #[test]
+    fn test_word_count_chinese() {
+        // Chinese text without spaces should be counted via jieba, not return 1
+        let count = word_count("这是一个中文句子");
+        assert!(count > 1, "Chinese word count should be > 1, got {}", count);
+    }
+
+    #[test]
+    fn test_word_count_mixed() {
+        // Mixed Chinese and English
+        let count = word_count("Hello 世界");
+        assert!(count >= 2, "Mixed word count should be >= 2, got {}", count);
+    }
+
+    #[test]
+    fn test_split_by_regex_chinese_sentence() {
+        // Chinese sentence punctuation splits without requiring a following space
+        let result = split_by_regex("第一句话。第二句话", &['。'], &[' ']);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "第一句话。");
+        assert_eq!(result[1], "第二句话");
+    }
+
+    #[test]
+    fn test_split_by_regex_chinese_clause() {
+        // Chinese clause punctuation splits without requiring a following space
+        let result = split_by_regex("前半句，后半句", &['，'], &[' ']);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "前半句，");
+        assert_eq!(result[1], "后半句");
+    }
+
+    #[test]
+    fn test_split_by_regex_english_still_requires_space() {
+        // English punctuation still requires a following space to split
+        let result = split_by_regex("Hello.World", &['.'], &[' ']);
+        assert_eq!(result.len(), 1); // No split without space after period
+
+        let result = split_by_regex("Hello. World", &['.'], &[' ']);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_is_cjk_punctuation() {
+        assert!(is_cjk_punctuation('。'));
+        assert!(is_cjk_punctuation('！'));
+        assert!(is_cjk_punctuation('？'));
+        assert!(is_cjk_punctuation('；'));
+        assert!(is_cjk_punctuation('：'));
+        assert!(is_cjk_punctuation('，'));
+        assert!(!is_cjk_punctuation('.'));
+        assert!(!is_cjk_punctuation('!'));
+        assert!(!is_cjk_punctuation(','));
+    }
+
+    #[test]
+    fn test_chunk_chinese_text() {
+        // Chinese text should be chunkable with proper word counting
+        let text = "这是第一段内容。这是第二段内容。这是第三段内容。";
+        let chunks = chunk_text(text, Some(5), Some(1), ChunkSource::CompiledTruth);
+        assert!(!chunks.is_empty());
     }
 }
