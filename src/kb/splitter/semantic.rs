@@ -1,18 +1,24 @@
-//! Semantic splitter using embedding similarity
+//! 基于嵌入相似度的语义分割器
 
+use super::{AsyncDocumentSplitter, Chunks};
 use crate::embedding::Embedder;
 use crate::error::GBrainError;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
-pub type Chunks = Vec<String>;
-
-pub struct SemanticSplitter<'a> {
-    embedder: &'a Embedder,
+/// 基于嵌入相似度的语义分割器
+///
+/// 通过计算相邻段落的嵌入向量余弦相似度，
+/// 在相似度低于百分位阈值且当前块达到最小长度时进行分割。
+pub struct SemanticSplitter {
+    embedder: Arc<Embedder>,
     percentile_threshold: f64,
     min_chunk_size: usize,
 }
 
-impl<'a> SemanticSplitter<'a> {
-    pub fn new(embedder: &'a Embedder) -> Self {
+impl SemanticSplitter {
+    pub fn new(embedder: Arc<Embedder>) -> Self {
         Self {
             embedder,
             percentile_threshold: 0.6,
@@ -72,6 +78,15 @@ impl<'a> SemanticSplitter<'a> {
         }
 
         Ok(chunks)
+    }
+}
+
+impl AsyncDocumentSplitter for SemanticSplitter {
+    fn split_async<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Chunks, GBrainError>> + Send + 'a>> {
+        Box::pin(self.split(text))
     }
 }
 

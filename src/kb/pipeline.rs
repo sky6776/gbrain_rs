@@ -11,7 +11,7 @@ use crate::kb::engine::KbEngine;
 use crate::kb::jobs::KbProcessPayload;
 use crate::kb::parser::ParserRegistry;
 use crate::kb::raptor::{self, RaptorConfig};
-use crate::kb::splitter::{create_splitter, SplitterConfig};
+use crate::kb::splitter::{create_async_splitter, create_splitter, SplitterConfig};
 use crate::kb::types::*;
 use rusqlite::Connection;
 use std::path::Path;
@@ -273,8 +273,20 @@ pub async fn process_document_async(
         semantic_enabled: library.semantic_segmentation_enabled,
     };
 
-    let splitter = create_splitter(&splitter_config);
-    let chunks = splitter.split(&parsed.content).map_err(|e| {
+    let splitter = create_async_splitter(&splitter_config, embedder.clone())
+        .map_err(|e| {
+            let _ = kb.update_document_status(
+                doc_id,
+                Some(STATUS_FAILED),
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+                None,
+            );
+            e
+        })?;
+    let chunks = splitter.split_async(&parsed.content).await.map_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
             Some(STATUS_FAILED),
