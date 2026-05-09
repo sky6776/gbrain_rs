@@ -283,17 +283,35 @@ fn vector_search_fallback(
          WHERE 1=1",
     );
 
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
     if !library_ids.is_empty() {
-        let ids: Vec<String> = library_ids.iter().map(|id| id.to_string()).collect();
-        sql.push_str(&format!(" AND n.library_id IN ({})", ids.join(",")));
+        let start = param_values.len() + 1;
+        let placeholders: Vec<String> = library_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", start + i))
+            .collect();
+        sql.push_str(&format!(
+            " AND n.library_id IN ({})",
+            placeholders.join(",")
+        ));
+        for &id in library_ids {
+            param_values.push(Box::new(id));
+        }
     }
 
     if let Some(lvl) = level {
-        sql.push_str(&format!(" AND n.level = {}", lvl));
+        let idx = param_values.len() + 1;
+        sql.push_str(&format!(" AND n.level = ?{}", idx));
+        param_values.push(Box::new(lvl));
     }
 
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         let node_id: i64 = row.get(0)?;
         let blob: Vec<u8> = row.get(1)?;
         Ok((node_id, blob))
@@ -339,7 +357,11 @@ fn fetch_node_details(
         .map(|r| (r.node_id, r.score))
         .collect();
 
-    let ids: Vec<String> = node_ids.iter().map(|id| id.to_string()).collect();
+    let placeholders: Vec<String> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT n.id, n.document_id, n.content, n.level, \
                 d.original_name, n.library_id, l.name \
@@ -347,11 +369,18 @@ fn fetch_node_details(
          INNER JOIN kb_documents d ON d.id = n.document_id \
          INNER JOIN kb_libraries l ON l.id = n.library_id \
          WHERE n.id IN ({})",
-        ids.join(",")
+        placeholders.join(",")
     );
 
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = node_ids
+        .iter()
+        .map(|&id| Box::new(id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(KbSearchResult {
             node_id: row.get(0)?,
             document_id: row.get(1)?,
@@ -403,17 +432,33 @@ fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
 
 /// Compute cosine similarity between two f32 vectors, returned as f64.
 fn cosine_similarity_f64(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let dot: f64 = a[..len]
         .iter()
-        .zip(b.iter())
+        .zip(b[..len].iter())
         .map(|(x, y)| (*x as f64) * (*y as f64))
         .sum();
-    let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
+    let norm_a: f64 = a[..len]
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b: f64 = b[..len]
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if !norm_a.is_finite() || !norm_b.is_finite() || norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    let result = dot / (norm_a * norm_b);
+    if result.is_finite() {
+        result
     } else {
-        dot / (norm_a * norm_b)
+        0.0
     }
 }
 

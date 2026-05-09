@@ -66,7 +66,11 @@ pub fn create_async_splitter(
     if config.semantic_enabled {
         if let Some(emb) = embedder {
             tracing::info!("使用语义分割器 (基于嵌入相似度)");
-            return Ok(Box::new(semantic::SemanticSplitter::new(emb)));
+            return Ok(Box::new(semantic::SemanticSplitter::with_config(
+                emb,
+                config.chunk_size,
+                config.chunk_overlap,
+            )));
         }
         tracing::warn!("semantic_enabled=true 但无 Embedder, 回退到递归分割");
     }
@@ -83,10 +87,7 @@ pub fn create_async_splitter(
         )))
     } else {
         Ok(Box::new(SyncAsAsyncAdapter(
-            recursive::RecursiveCharSplitter::new(
-                config.chunk_size,
-                config.chunk_overlap,
-            ),
+            recursive::RecursiveCharSplitter::new(config.chunk_size, config.chunk_overlap),
         )))
     }
 }

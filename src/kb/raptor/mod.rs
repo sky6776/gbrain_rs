@@ -282,17 +282,22 @@ pub fn average_embeddings(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
     }
     let dims = vectors[0].len();
     let mut avg = vec![0.0_f32; dims];
+    let mut count = 0usize;
     for v in vectors {
         if v.len() != dims {
             continue;
         }
+        count += 1;
         for (i, &val) in v.iter().enumerate() {
             avg[i] += val;
         }
     }
-    let count = vectors.len() as f32;
+    if count == 0 {
+        return None;
+    }
+    let divisor = count as f32;
     for val in avg.iter_mut() {
-        *val /= count;
+        *val /= divisor;
     }
     Some(avg)
 }

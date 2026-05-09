@@ -108,19 +108,40 @@ impl<'a> JobQueue<'a> {
     /// Uses a loop with retry limit instead of recursion to prevent stack overflow
     /// under high contention.
     pub fn dequeue(&self) -> Result<Option<Job>> {
+        self.dequeue_inner(None)
+    }
+
+    /// Dequeue the next pending job of a specific type.
+    /// Same atomic semantics as `dequeue` but filters by job_type.
+    pub fn dequeue_by_type(&self, job_type: &str) -> Result<Option<Job>> {
+        self.dequeue_inner(Some(job_type))
+    }
+
+    fn dequeue_inner(&self, job_type_filter: Option<&str>) -> Result<Option<Job>> {
         let max_retries = 10;
         for _ in 0..max_retries {
-            // Find next pending job
-            let mut stmt = self.conn.prepare(
-                "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
-                 FROM jobs
-                 WHERE status = 'pending'
-                 ORDER BY priority DESC, created_at ASC
-                 LIMIT 1",
-            )?;
+            // Find next pending job (optionally filtered by type)
+            let job = if let Some(jt) = job_type_filter {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                     FROM jobs
+                     WHERE status = 'pending' AND job_type = ?1
+                     ORDER BY priority DESC, created_at ASC
+                     LIMIT 1",
+                )?;
+                stmt.query_row(params![jt], Self::row_to_job).ok()
+            } else {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                     FROM jobs
+                     WHERE status = 'pending'
+                     ORDER BY priority DESC, created_at ASC
+                     LIMIT 1",
+                )?;
+                stmt.query_row([], Self::row_to_job).ok()
+            };
 
-            let result = stmt.query_row([], Self::row_to_job).ok();
-            let Some(job) = result else {
+            let Some(job) = job else {
                 return Ok(None);
             };
 

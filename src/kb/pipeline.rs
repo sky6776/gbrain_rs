@@ -273,19 +273,18 @@ pub async fn process_document_async(
         semantic_enabled: library.semantic_segmentation_enabled,
     };
 
-    let splitter = create_async_splitter(&splitter_config, embedder.clone())
-        .map_err(|e| {
-            let _ = kb.update_document_status(
-                doc_id,
-                Some(STATUS_FAILED),
-                None,
-                Some(&e.to_string()),
-                None,
-                None,
-                None,
-            );
-            e
-        })?;
+    let splitter = create_async_splitter(&splitter_config, embedder.clone()).map_err(|e| {
+        let _ = kb.update_document_status(
+            doc_id,
+            Some(STATUS_FAILED),
+            None,
+            Some(&e.to_string()),
+            None,
+            None,
+            None,
+        );
+        e
+    })?;
     let chunks = splitter.split_async(&parsed.content).await.map_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
@@ -476,10 +475,7 @@ pub async fn ingest_directory(
         )));
     }
 
-    let supported_extensions = [
-        "md", "txt", "rst", "html", "htm", "pdf", "rs", "py", "js", "ts", "go", "java", "c", "cpp",
-        "h",
-    ];
+    let supported_extensions = SUPPORTED_EXTENSIONS;
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_supported_files(dir_path, &supported_extensions, &mut files);
@@ -516,11 +512,56 @@ pub async fn ingest_directory(
             .to_string();
 
         let run_id = crate::kb::jobs::new_run_id();
-        let _job_id = crate::kb::jobs::new_job_id();
+
+        // Create document record before calling the pipeline
+        let kb = KbEngine::new(conn);
+        let file_data = match std::fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                report_progress(
+                    on_progress,
+                    "ingest",
+                    &format!("无法读取 {}: {}", original_name, e),
+                );
+                continue;
+            }
+        };
+        let content_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&file_data))
+        };
+        let name_tokens = crate::kb::chinese::tokenize_name(&original_name);
+        let doc = Document {
+            library_id,
+            folder_id: _folder_id,
+            original_name: original_name.clone(),
+            name_tokens,
+            file_size: file_data.len() as i64,
+            content_hash,
+            extension: ext.clone(),
+            mime_type: format!("text/{}", ext),
+            source_type: "ingest".to_string(),
+            storage_path: file_path.to_string_lossy().to_string(),
+            original_path: file_path.to_string_lossy().to_string(),
+            job_id: String::new(),
+            processing_run_id: run_id.clone(),
+            ..Default::default()
+        };
+        let doc_id = match kb.create_document(&doc) {
+            Ok(id) => id,
+            Err(e) => {
+                report_progress(
+                    on_progress,
+                    "ingest",
+                    &format!("无法创建文档记录 {}: {}", original_name, e),
+                );
+                continue;
+            }
+        };
 
         let payload = KbProcessPayload {
             kind: "kb_process_document".to_string(),
-            document_id: 0, // 将在管道中创建
+            document_id: doc_id,
             library_id,
             processing_run_id: run_id,
             storage_path: file_path.to_string_lossy().to_string(),
@@ -579,6 +620,24 @@ fn persist_nodes_and_vectors(
 ) -> Result<()> {
     let kb = KbEngine::new(conn);
 
+    // Wrap all operations in a transaction to prevent partial writes
+    let tx = conn.unchecked_transaction()?;
+    let result = persist_nodes_inner(conn, doc_id, &kb, nodes);
+    match result {
+        Ok(_) => tx.commit()?,
+        Err(_) => {
+            let _ = tx.rollback();
+        }
+    }
+    result
+}
+
+fn persist_nodes_inner(
+    conn: &Connection,
+    doc_id: i64,
+    kb: &KbEngine,
+    nodes: &[RaptorNode],
+) -> Result<()> {
     // 删除此文档的旧节点/向量
     kb.delete_document_nodes(doc_id)?;
 

@@ -15,6 +15,9 @@ pub struct SemanticSplitter {
     embedder: Arc<Embedder>,
     percentile_threshold: f64,
     min_chunk_size: usize,
+    chunk_size: usize,
+    #[allow(dead_code)]
+    chunk_overlap: usize,
 }
 
 impl SemanticSplitter {
@@ -23,6 +26,18 @@ impl SemanticSplitter {
             embedder,
             percentile_threshold: 0.6,
             min_chunk_size: 300,
+            chunk_size: 512,
+            chunk_overlap: 50,
+        }
+    }
+
+    pub fn with_config(embedder: Arc<Embedder>, chunk_size: usize, chunk_overlap: usize) -> Self {
+        Self {
+            embedder,
+            percentile_threshold: 0.6,
+            min_chunk_size: chunk_size / 2,
+            chunk_size,
+            chunk_overlap,
         }
     }
 
@@ -67,7 +82,10 @@ impl SemanticSplitter {
                 && similarities[i] < threshold
                 && current.chars().count() >= self.min_chunk_size;
 
-            if should_split {
+            // Also split if chunk exceeds chunk_size
+            let exceeds_size = current.chars().count() > self.chunk_size;
+
+            if should_split || exceeds_size {
                 chunks.push(current.trim().to_string());
                 current = String::new();
             }
@@ -91,16 +109,32 @@ impl AsyncDocumentSplitter for SemanticSplitter {
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let dot: f64 = a[..len]
         .iter()
-        .zip(b.iter())
+        .zip(b[..len].iter())
         .map(|(x, y)| (*x as f64) * (*y as f64))
         .sum();
-    let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
+    let norm_a: f64 = a[..len]
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b: f64 = b[..len]
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    if !norm_a.is_finite() || !norm_b.is_finite() || norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    let result = dot / (norm_a * norm_b);
+    if result.is_finite() {
+        result
     } else {
-        dot / (norm_a * norm_b)
+        0.0
     }
 }

@@ -15,19 +15,17 @@ impl<'a> KbEngine<'a> {
         Self { conn }
     }
 
-    /// Execute in a transaction
+    /// Execute in a transaction (RAII: auto-rollback on Drop if commit not called)
     pub fn transaction<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
-        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let tx = self.conn.unchecked_transaction()?;
         let result = f(self.conn);
         match &result {
-            Ok(_) => {
-                self.conn.execute("COMMIT", [])?;
-            }
+            Ok(_) => tx.commit()?,
             Err(_) => {
-                let _ = self.conn.execute("ROLLBACK", []);
+                let _ = tx.rollback();
             }
         }
         result
@@ -77,7 +75,7 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn create_library(&self, input: &CreateLibraryInput) -> Result<i64> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             let chunk_size = input.chunk_size.unwrap_or(512).clamp(200, 5000) as i32;
             let chunk_overlap = input.chunk_overlap.unwrap_or(50).clamp(0, 1000) as i32;
             let batch_max_docs = input.batch_max_documents.unwrap_or(3).clamp(1, 5) as i32;
@@ -239,7 +237,7 @@ impl<'a> KbEngine<'a> {
     // --- Document CRUD ---
 
     pub fn create_document(&self, doc: &Document) -> Result<i64> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             conn.execute(
                 "INSERT INTO kb_documents \
                  (library_id, folder_id, original_name, name_tokens, \
@@ -717,34 +715,32 @@ impl<'a> KbEngine<'a> {
 
     pub fn delete_folder(&self, folder_id: i64) -> Result<()> {
         self.transaction(|conn| {
-            // Set documents' folder_id to NULL (move to ungrouped)
-            conn.execute(
-                "UPDATE kb_documents SET folder_id = NULL WHERE folder_id = ?1",
-                [folder_id],
-            )?;
-
-            // Recursively handle child folders
-            let child_ids: Vec<i64> = {
-                let mut stmt = conn.prepare("SELECT id FROM kb_folders WHERE parent_id = ?1")?;
+            // Move all documents in this folder and its descendants to ungrouped
+            // Use recursive CTE to find all descendant folder IDs
+            let descendant_ids: Vec<i64> = {
+                let mut stmt = conn.prepare(
+                    "WITH RECURSIVE descendants(id) AS (\
+                     SELECT ?1 UNION ALL \
+                     SELECT f.id FROM kb_folders f INNER JOIN descendants d ON f.parent_id = d.id\
+                     ) SELECT id FROM descendants",
+                )?;
                 let rows = stmt.query_map([folder_id], |row| row.get(0))?;
                 rows.filter_map(|r| r.ok()).collect()
             };
 
-            for cid in &child_ids {
-                // Move child folder documents to ungrouped
+            for &fid in &descendant_ids {
                 conn.execute(
                     "UPDATE kb_documents SET folder_id = NULL WHERE folder_id = ?1",
-                    [cid],
+                    [fid],
                 )?;
             }
 
-            // Delete child folders (their documents already ungrouped above)
-            for cid in &child_ids {
-                conn.execute("DELETE FROM kb_folders WHERE id = ?1", [cid])?;
+            // Delete all descendant folders and the target folder itself
+            // (documents already moved to ungrouped above)
+            for &fid in &descendant_ids {
+                conn.execute("DELETE FROM kb_folders WHERE id = ?1", [fid])?;
             }
 
-            // Delete the folder itself
-            conn.execute("DELETE FROM kb_folders WHERE id = ?1", [folder_id])?;
             Ok(())
         })
     }

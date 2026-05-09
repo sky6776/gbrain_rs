@@ -41,6 +41,7 @@ pub struct Library {
     pub semantic_segmentation_enabled: bool,
     pub raptor_enabled: bool,
     pub raptor_llm_base_url: String,
+    #[serde(skip_serializing)]
     pub raptor_llm_secret_ref: String,
     pub raptor_llm_model: String,
     pub chunk_size: usize,

@@ -83,21 +83,13 @@ pub fn cancel_kb_job(conn: &Connection, job_db_id: i64) -> Result<()> {
 /// Dequeues from the global jobs table filtering by job_type.
 pub fn claim_next_kb_job(conn: &Connection) -> Result<Option<KbProcessPayload>> {
     let queue = JobQueue::new(conn);
-    // Dequeue the next pending job (any type), then check if it's a KB job
-    match queue.dequeue() {
+    // Dequeue the next pending job filtering by KB type
+    match queue.dequeue_by_type("kb_process_document") {
         Ok(Some(job)) => {
-            if job.job_type == "kb_process_document" {
-                let payload: KbProcessPayload =
-                    serde_json::from_value(job.payload).map_err(|e| {
-                        GBrainError::Serialization(format!("invalid KB job payload: {}", e))
-                    })?;
-                Ok(Some(payload))
-            } else {
-                // Not a KB job — complete it and return None
-                // (In production, you'd want a more sophisticated dispatcher)
-                let _ = queue.complete(job.id);
-                Ok(None)
-            }
+            let payload: KbProcessPayload = serde_json::from_value(job.payload).map_err(|e| {
+                GBrainError::Serialization(format!("invalid KB job payload: {}", e))
+            })?;
+            Ok(Some(payload))
         }
         Ok(None) => Ok(None),
         Err(e) => Err(e),
