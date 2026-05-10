@@ -9,6 +9,7 @@ pub mod engine;
 pub mod granularity;
 pub mod jobs;
 pub mod lifecycle;
+pub mod metadata;
 pub mod parser;
 pub mod pipeline;
 pub mod raptor;

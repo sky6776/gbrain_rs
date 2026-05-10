@@ -264,6 +264,34 @@ pub async fn process_document_async(
 
     let word_total: i32 = count_words(&parsed.content) as i32;
 
+    // P1-013: 元数据抽取（文件系统 + 格式特定）
+    let storage = std::path::Path::new(storage_path);
+    let mut doc_meta = crate::kb::metadata::DocumentMetadata::from_file_path(storage);
+    let format_meta = match ext.as_str() {
+        "md" => crate::kb::metadata::extract_markdown_metadata(&parsed.content, &file_data),
+        "pdf" => crate::kb::metadata::extract_pdf_metadata(&parsed.content, &file_data),
+        "docx" => crate::kb::metadata::extract_docx_metadata(&parsed.content, &file_data),
+        "html" | "htm" => crate::kb::metadata::extract_html_metadata(&parsed.content, &file_data),
+        _ => crate::kb::metadata::DocumentMetadata::default(),
+    };
+    doc_meta.merge_with(&format_meta);
+    // P1-019: 关键词和实体抽取
+    let (keywords, entities) = crate::kb::metadata::extract_keywords_and_entities(
+        &parsed.content,
+        doc_meta.language.as_deref().unwrap_or("zh"),
+    );
+    // 落库元数据
+    let _ = kb.update_document_metadata(
+        doc_id,
+        doc_meta.title.as_deref().unwrap_or(""),
+        doc_meta.author.as_deref().unwrap_or(""),
+        &keywords,
+        &entities,
+        doc_meta.source_uri.as_deref().unwrap_or(""),
+        doc_meta.document_date.as_deref(),
+        doc_meta.modified_at.as_deref(),
+    );
+
     // P1-014: 文档粒度分类（解析完成后立即判定）
     let char_count = parsed.content.chars().count();
     let page_count = 0; // 将在 P2 PDF/DOCX parser 中填充

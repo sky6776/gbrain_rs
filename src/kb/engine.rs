@@ -800,6 +800,42 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// 写入文档元数据（title/author/keywords/entities/source/dates）
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_metadata(
+        &self,
+        id: i64,
+        title: &str,
+        _author: &str,
+        keywords: &str,
+        entity_names: &str,
+        source_uri: &str,
+        document_date: Option<&str>,
+        modified_at: Option<&str>,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            let title_val = if !title.is_empty() { title } else { "" };
+            conn.execute(
+                "UPDATE kb_documents SET title = COALESCE(NULLIF(?1, ''), title), \
+                 keywords = ?2, entity_names = ?3, source_uri = COALESCE(NULLIF(?4, ''), source_uri), \
+                 document_date = COALESCE(?5, document_date), \
+                 modified_at = COALESCE(?6, modified_at), \
+                 updated_at = datetime('now') \
+                 WHERE id = ?7",
+                rusqlite::params![
+                    title_val,
+                    keywords,
+                    entity_names,
+                    source_uri,
+                    document_date,
+                    modified_at,
+                    id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     /// 更新文档的 granularity 和 chunk 策略
     pub fn update_document_granularity(
         &self,
