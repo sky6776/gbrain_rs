@@ -81,8 +81,8 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
     if let Some(kind) = infer::get(data) {
         let detected = kind.mime_type().to_string();
         if mime_matches_extension(&detected, ext) {
-            // ZIP-based formats: verify internal structure to prevent arbitrary ZIP masquerading
-            if detected == "application/zip" && matches!(ext, "docx" | "xlsx") {
+            // DOCX/XLSX: 始终验证 ZIP 内部结构，防止任意 ZIP 伪装
+            if matches!(ext, "docx" | "xlsx") {
                 validate_zip_structure(data, ext)?;
             }
             return Ok(detected);
@@ -100,9 +100,15 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
             detected,
             ext
         );
+    } else if is_binary_extension(ext) {
+        // 无法识别内容的二进制格式：直接拒绝，不允许按扩展名放行
+        return Err(GBrainError::InvalidInput(format!(
+            "无法识别文件内容类型，二进制格式 '.{}' 不允许按扩展名放行",
+            ext
+        )));
     }
 
-    // 回退到基于扩展名的 MIME
+    // 回退到基于扩展名的 MIME（仅文本格式）
     Ok(crate::kb::types::mime_type_for_ext(ext).to_string())
 }
 
