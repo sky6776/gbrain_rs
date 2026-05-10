@@ -5,6 +5,7 @@
 use crate::error::{GBrainError, Result};
 use crate::kb::types::{is_supported_extension, SUPPORTED_EXTENSIONS};
 use crate::security::validate_upload_path;
+use std::io::Cursor;
 use std::path::Path;
 
 /// Default max file size: 50 MB
@@ -80,6 +81,10 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
     if let Some(kind) = infer::get(data) {
         let detected = kind.mime_type().to_string();
         if mime_matches_extension(&detected, ext) {
+            // ZIP-based formats: verify internal structure to prevent arbitrary ZIP masquerading
+            if detected == "application/zip" && matches!(ext, "docx" | "xlsx") {
+                validate_zip_structure(data, ext)?;
+            }
             return Ok(detected);
         }
         // 二进制格式 MIME 不匹配：直接拒绝（防止伪装文件攻击）
@@ -104,6 +109,45 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
 /// 判断扩展名是否属于二进制格式（需要严格 MIME 校验）
 fn is_binary_extension(ext: &str) -> bool {
     matches!(ext, "pdf" | "docx" | "xlsx")
+}
+
+/// 验证 ZIP 内部结构，防止任意 ZIP 伪装为 DOCX/XLSX。
+/// DOCX 必须包含 `word/document.xml`，XLSX 必须包含 `xl/workbook.xml`。
+fn validate_zip_structure(data: &[u8], ext: &str) -> Result<()> {
+    let required_entry = match ext {
+        "docx" => "word/document.xml",
+        "xlsx" => "xl/workbook.xml",
+        _ => return Ok(()),
+    };
+
+    let reader = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
+        GBrainError::InvalidInput(format!(
+            "无法解析为有效的 ZIP 文件 (扩展名 '.{}'): {}",
+            ext, e
+        ))
+    })?;
+
+    let mut found = false;
+    for i in 0..archive.len() {
+        if let Ok(file) = archive.by_index(i) {
+            if file.name() == required_entry {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if !found {
+        return Err(GBrainError::InvalidInput(format!(
+            "ZIP 内部结构不匹配扩展名 '.{}': 缺少必需文件 '{}'，可能不是有效的 {} 文件",
+            ext,
+            required_entry,
+            ext.to_uppercase()
+        )));
+    }
+
+    Ok(())
 }
 
 /// 判断检测到的 MIME 类型是否与文件扩展名匹配

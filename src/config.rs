@@ -143,7 +143,7 @@ impl Default for Config {
                 "md".into(),
             ],
             kb_storage_dir: None,
-            kb_worker_enabled: false,
+            kb_worker_enabled: true,
             kb_worker_poll_interval_secs: 30,
         }
     }
@@ -487,5 +487,7 @@ impl Config {
         if other.kb_storage_dir.is_some() {
             self.kb_storage_dir = other.kb_storage_dir;
         }
+        self.kb_worker_enabled = other.kb_worker_enabled;
+        self.kb_worker_poll_interval_secs = other.kb_worker_poll_interval_secs;
     }
 }
