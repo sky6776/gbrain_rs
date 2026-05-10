@@ -119,6 +119,50 @@ pub fn incremental_scan(
     Ok(results)
 }
 
+/// P6-005: 删除策略执行 — 对 missing 的文件执行对应操作
+pub fn apply_delete_policy(
+    conn: &Connection,
+    item_path: &str,
+    delete_policy: &str,
+) -> Result<String> {
+    match delete_policy {
+        "soft_delete" => {
+            // 根据 item_path 查找 document_id 并软删除
+            if let Ok(doc_id) = conn.query_row(
+                "SELECT document_id FROM kb_source_items WHERE item_path=?1 AND document_id IS NOT NULL",
+                params![item_path], |row| row.get::<_, Option<i64>>(0),
+            ) {
+                if let Some(id) = doc_id {
+                    conn.execute(
+                        "UPDATE kb_documents SET deleted_at=datetime('now'), document_status='deleted' WHERE id=?1",
+                        params![id],
+                    )?;
+                    return Ok(format!("soft_deleted doc {}", id));
+                }
+            }
+            Ok("no_doc_found".into())
+        }
+        "mark_only" => Ok("marked_missing".into()),
+        "ignore" => Ok("ignored".into()),
+        _ => Ok("unknown_policy".into()),
+    }
+}
+
+/// P6-006: 记录同步失败项
+pub fn record_sync_failure(
+    conn: &Connection,
+    source_id: i64,
+    item_path: &str,
+    error: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE kb_source_items SET sync_status='failed', sync_error=?1 \
+         WHERE source_id=?2 AND item_path=?3",
+        params![error, source_id, item_path],
+    )?;
+    Ok(())
+}
+
 /// 汇总增量扫描结果
 pub fn summarize_scan(results: &[(std::path::PathBuf, SyncAction, Option<String>)]) -> SyncSummary {
     let mut new_count = 0;

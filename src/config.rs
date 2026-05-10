@@ -77,6 +77,10 @@ pub struct Config {
     pub kb_storage_dir: Option<String>,
     pub kb_worker_enabled: bool,
     pub kb_worker_poll_interval_secs: u64,
+    /// P3-003: 同义词文件路径
+    pub kb_synonyms_file: Option<String>,
+    /// P3-004: 别名映射文件路径
+    pub kb_aliases_file: Option<String>,
 }
 
 impl Default for Config {
@@ -145,6 +149,8 @@ impl Default for Config {
             kb_storage_dir: None,
             kb_worker_enabled: true,
             kb_worker_poll_interval_secs: 30,
+            kb_synonyms_file: None,
+            kb_aliases_file: None,
         }
     }
 }
@@ -542,5 +548,7 @@ impl Config {
         }
         self.kb_worker_enabled = other.kb_worker_enabled;
         self.kb_worker_poll_interval_secs = other.kb_worker_poll_interval_secs;
+        if other.kb_synonyms_file.is_some() { self.kb_synonyms_file = other.kb_synonyms_file.clone(); }
+        if other.kb_aliases_file.is_some() { self.kb_aliases_file = other.kb_aliases_file.clone(); }
     }
 }

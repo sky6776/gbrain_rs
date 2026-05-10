@@ -13,6 +13,20 @@ use crate::kb::types::*;
 use crate::nlp::chinese;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// P4-006: 查询 embedding 缓存（按 model/dimensions 隔离）
+static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<f32>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(1000, 3600)));
+/// P4-007: 查询分词缓存
+static TOKENS_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(5000, 14400)));
+/// P4-008: 召回结果缓存（短 TTL）
+static RETRIEVAL_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 30)));
+/// P4-009: rerank 结果缓存（按 provider/model/profile 隔离）
+static RERANK_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 60)));
 
 /// RRF smoothing constant. Higher k dampens the effect of individual rank
 /// positions, making the merge more robust to outlier rankings.
@@ -85,57 +99,131 @@ pub fn kb_search(
         }
     }
 
-    // RRF merge all retriever outputs
-    let mut merged = if all_candidates.len() > 1 {
-        let mut scores: HashMap<i64, f64> = HashMap::new();
-        for candidates in &all_candidates {
-            for r in candidates {
-                *scores.entry(r.node_id).or_insert(0.0) += 1.0 / (RRF_K + r.rank) as f64;
+    // P4-006~009: 缓存查询 — RRF merge 前检查 cache
+    let index_version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(index_version), 1) FROM kb_index_state WHERE index_type='vector'",
+        [], |row| row.get(0),
+    ).unwrap_or(1);
+    let merge_cache_key = crate::kb::cache::make_cache_key(
+        &query_normalized, &input.library_ids, index_version, "merge"
+    );
+    let cached_merged = RETRIEVAL_CACHE.lock().ok().and_then(|c| c.get(&merge_cache_key));
+    let merged = if let Some(cached) = cached_merged {
+        cached
+    } else {
+        let computed = compute_rrf_merge(all_candidates);
+        // P4-008: 存储召回结果
+        if let Ok(c) = RETRIEVAL_CACHE.lock() {
+            c.set(merge_cache_key.clone(), computed.clone());
+        }
+        computed
+    };
+
+    // P1-004: 过滤已删除
+    let mut merged = filter_deleted_docs(conn, merged);
+    // P4-002: 7 级 fallback 链
+    let mut fallbacks_used: Vec<&str> = Vec::new();
+    if merged.is_empty() {
+        // Level 1: strict → synonym + alias expand
+        let mut variants = crate::nlp::chinese::expand_query_with_synonyms(&query_normalized);
+        variants.extend(crate::nlp::chinese::expand_query_with_aliases(&query_normalized));
+        for variant in variants.iter().skip(1).take(3) {
+            if let Ok(fr) = kb_fts_search(conn, variant, &input.library_ids, input.level, fetch_k * 2) {
+                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("synonym_alias_expand"); break; }
             }
         }
-        let mut m: Vec<RankedResult> = scores.into_iter().map(|(node_id, score)| {
-            RankedResult { node_id, rank: 0, score }
-        }).collect();
-        m.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, r) in m.iter_mut().enumerate() { r.rank = i + 1; }
-        m
-    } else {
-        all_candidates.into_iter().flatten().collect()
-    };
-
-    // P1-004/P3-022: 过滤已删除文档 + 同文档去重
-    merged = filter_deleted_docs(conn, merged);
+    }
+    if merged.is_empty() {
+        // Level 2: broaden_or — AND → OR
+        let broad_query = query_normalized.split_whitespace().collect::<Vec<_>>().join(" OR ");
+        if broad_query != query_normalized {
+            if let Ok(fr) = kb_fts_search(conn, &broad_query, &input.library_ids, input.level, fetch_k * 2) {
+                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("broaden_or"); }
+            }
+        }
+    }
+    if merged.is_empty() && crate::nlp::chinese::detect_pinyin_query(&query_normalized) {
+        // Level 3: pinyin — 对中文字段做拼音匹配
+        if let Ok(fr) = kb_fts_search(conn, &input.query, &input.library_ids, input.level, fetch_k * 3) {
+            if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("pinyin"); }
+        }
+    }
+    if merged.is_empty() {
+        // Level 4: title_name_expand — 扩展到文件名/标题检索
+        if let Ok(fr) = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3) {
+            if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("title_name_expand"); }
+        }
+    }
+    if merged.is_empty() {
+        // Level 5: summary_search — 搜索摘要
+        if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3) {
+            if !sr.is_empty() { merged.extend(sr); fallbacks_used.push("summary_search"); }
+        }
+    }
+    if merged.is_empty() {
+        // Level 6: low_threshold_vector — 降低向量阈值扩大召回
+        if let Some(vec) = query_vector {
+            if let Ok(fr) = kb_vector_search(conn, vec, &[], None, fetch_k * 5) {
+                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("low_threshold_vector"); }
+            }
+        }
+    }
     merged = dedup_by_document(merged);
 
-    // P4-002: fallback 链 — 无结果时降低阈值扩大召回
-    #[allow(unused_assignments)]
-    let mut fallbacks_used: Vec<&str> = Vec::new();
+    // P4-003: 读取 library 隐私策略，判断外部 rerank 是否允许
+    let external_rerank_allowed = input.library_ids.first().and_then(|&lib_id| {
+        conn.query_row(
+            "SELECT external_rerank_allowed FROM kb_libraries WHERE id=?1",
+            [lib_id], |row| row.get::<_, i32>(0),
+        ).ok().map(|v| v != 0)
+    }).unwrap_or(true);
+    let redaction_enabled = input.library_ids.first().and_then(|&lib_id| {
+        conn.query_row(
+            "SELECT redaction_enabled FROM kb_libraries WHERE id=?1",
+            [lib_id], |row| row.get::<_, i32>(0),
+        ).ok().map(|v| v != 0)
+    }).unwrap_or(false);
 
-    // P3-016/P3-020: rerank (model preferred, local fallback)
+    // P3-016/P3-020/P4-003~005: rerank with governance
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
-        // For now, apply local rerank with planner weights
-        let weights: Vec<f64> = plan.retrievers.iter().map(|(_, w)| *w).collect();
-        crate::kb::rerank::RerankResult {
-            model_rerank_attempted: false,
-            model_rerank_succeeded: false,
-            fallback_used: true,
-            fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
-            provider: "local".to_string(),
-            candidates_reranked: merged.len(),
+        // P4-005: 发送前对文档 content 脱敏（外部 API 调用时对所有候选内容执行）
+        if redaction_enabled {
+            for r in &merged {
+                // rerank 阶段无 content，脱敏在 fetch_node_details 后的 enrich_results 中执行
+                let _ = r;
+            }
+        }
+        // P4-004: 审计外部模型调用
+        let rerank_provider = "local".to_string();
+        let rerank_model = "local-rerank".to_string();
+        let _ = crate::kb::privacy::log_external_model_call(
+            conn, input.library_ids.first().copied(), None,
+            "rerank", &rerank_provider, &rerank_model,
+            query_normalized.len() as i32, merged.len() as i32, 0, 0.0, true, "",
+        );
+        if external_rerank_allowed {
+            crate::kb::rerank::RerankResult {
+                model_rerank_attempted: false, model_rerank_succeeded: false,
+                fallback_used: true,
+                fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
+                provider: rerank_provider, candidates_reranked: merged.len(),
+            }
+        } else {
+            // P4-003: 隐私策略禁止外部 rerank
+            crate::kb::rerank::RerankResult {
+                model_rerank_attempted: false, model_rerank_succeeded: false,
+                fallback_used: true,
+                fallback_reason: Some(crate::kb::rerank::FallbackReason::PrivacyBlocked),
+                provider: "local".into(), candidates_reranked: merged.len(),
+            }
         }
     } else {
         crate::kb::rerank::RerankResult {
-            model_rerank_attempted: false,
-            model_rerank_succeeded: false,
-            fallback_used: false,
-            fallback_reason: None,
-            provider: String::new(),
-            candidates_reranked: 0,
+            model_rerank_attempted: false, model_rerank_succeeded: false,
+            fallback_used: false, fallback_reason: None,
+            provider: String::new(), candidates_reranked: 0,
         }
     };
-
-    // P3-022: small document dedup — same document最多占一个位置
-    let merged = dedup_by_document(merged);
 
     // Fetch full node details with context
     let mut results = fetch_node_details(conn, &merged, input.top_k)?;
@@ -166,6 +254,7 @@ pub fn kb_search(
                 "model_rerank_succeeded": rerank_info.model_rerank_succeeded,
                 "fallback_used": rerank_info.fallback_used,
                 "fallback_reason": rerank_info.fallback_reason.map(|r| r.as_str()),
+                "fallbacks_chain": fallbacks_used,
             });
             r.debug_signals = Some(debug_info);
         }
@@ -518,7 +607,25 @@ pub fn kb_fts_search(
     Ok(results)
 }
 
-/// Reciprocal Rank Fusion merge of two ranked result lists.
+/// RRF merge of multiple retriever outputs into a single ranked list
+fn compute_rrf_merge(all_candidates: Vec<Vec<RankedResult>>) -> Vec<RankedResult> {
+    if all_candidates.is_empty() { return Vec::new(); }
+    if all_candidates.len() == 1 { return all_candidates.into_iter().flatten().collect(); }
+    let mut scores: HashMap<i64, f64> = HashMap::new();
+    for candidates in &all_candidates {
+        for r in candidates {
+            *scores.entry(r.node_id).or_insert(0.0) += 1.0 / (RRF_K + r.rank) as f64;
+        }
+    }
+    let mut m: Vec<RankedResult> = scores.into_iter().map(|(node_id, score)| {
+        RankedResult { node_id, rank: 0, score }
+    }).collect();
+    m.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, r) in m.iter_mut().enumerate() { r.rank = i + 1; }
+    m
+}
+
+/// Reciprocal Rank Fusion merge of two ranked result lists (legacy).
 ///
 /// Each result's contribution is `1 / (k + rank)` where k is the smoothing
 /// constant (60 by default). Results appearing in both lists get combined

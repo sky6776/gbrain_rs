@@ -441,12 +441,20 @@ static OPERATION_DEFS: &[OperationDef] = &[
     },
     OperationDef {
         name: "kb_search",
-        description: "Search across knowledge base libraries using hybrid vector + keyword search",
+        description: "Search across knowledge base libraries using hybrid vector + keyword + summary + table + metadata search with RRF fusion and rerank",
         params: &[
             ParamDef { name: "query", description: "Search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "library_ids", description: "Library IDs to search (empty = all)", required: false, param_type: ParamType::Array, enum_values: None, items_type: Some(ParamType::Integer) },
             ParamDef { name: "level", description: "Raptor tree level filter", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "top_k", description: "Max results (default 10, max 50)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "profile", description: "Search profile: fast|balanced|accurate|file_lookup|table", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "debug", description: "Enable debug mode (returns planner/rerank/fallback info)", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "include_context", description: "Include context before/after matched nodes", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "context_before", description: "Characters of context before match (default 200)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "context_after", description: "Characters of context after match (default 200)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "include_highlights", description: "Return highlight character ranges", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "group_by_document", description: "Group results by document", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "folder_id", description: "Filter to folder", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {
@@ -456,6 +464,60 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "name", description: "Folder name", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "parent_id", description: "Parent folder ID (null = root)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    // P5/P6 operations tools
+    OperationDef {
+        name: "kb_purge_document",
+        description: "Permanently destroy a soft-deleted document and all its associated data",
+        params: &[
+            ParamDef { name: "document_id", description: "Document ID to purge", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "confirm", description: "Must be true to confirm permanent destruction", required: true, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_check_index_health",
+        description: "Run index health check (orphan nodes/embeddings/summaries, missing FTS, split mismatches)",
+        params: &[],
+    },
+    OperationDef {
+        name: "kb_repair_index",
+        description: "Repair missing FTS entries for document nodes",
+        params: &[],
+    },
+    OperationDef {
+        name: "kb_backup",
+        description: "Backup KB database to output directory",
+        params: &[
+            ParamDef { name: "output", description: "Output directory path", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_restore",
+        description: "Restore KB database from backup directory",
+        params: &[
+            ParamDef { name: "input", description: "Input directory path containing backup", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_add_eval_query",
+        description: "Add a search evaluation query with expected document IDs",
+        params: &[
+            ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "query", description: "Evaluation query text", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "query_type", description: "Query type classification", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "expected_document_ids", description: "Comma-separated expected document IDs", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_add_search_feedback",
+        description: "Submit relevance feedback for a search result",
+        params: &[
+            ParamDef { name: "search_log_id", description: "Search log entry ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "document_id", description: "Document ID rated", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "node_id", description: "Node ID rated", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "rating", description: "Relevance rating 0-5", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "comment", description: "Optional feedback comment", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
 ];

@@ -1030,6 +1030,111 @@ impl<'a> KbEngine<'a> {
             Ok(())
         })
     }
+
+    // --- Section CRUD (P1-008) ---
+
+    /// 写入文档章节
+    pub fn insert_section(&self, document_id: i64, parent_section_id: Option<i64>,
+        title: &str, title_path: &str, heading_level: i32, section_order: i32,
+        page_number: Option<i32>, source_start: Option<i32>, source_end: Option<i32>,
+    ) -> Result<i64> {
+        self.transaction(|conn| {
+            conn.execute(
+                "INSERT INTO kb_document_sections (document_id, parent_section_id, title, \
+                 title_path, heading_level, section_order, page_number, source_start, source_end) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![document_id, parent_section_id, title, title_path, heading_level,
+                    section_order, page_number, source_start, source_end],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// 获取文档的所有章节
+    pub fn get_sections_for_document(&self, document_id: i64) -> Result<Vec<(i64, String, String, i32)>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, title_path, heading_level FROM kb_document_sections \
+                 WHERE document_id = ?1 ORDER BY section_order"
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            let results: Vec<(i64, String, String, i32)> = rows.filter_map(|r| r.ok()).collect();
+            Ok(results)
+        })
+    }
+
+    // --- Summary CRUD (P4-011) ---
+
+    /// 写入文档/章节/表格摘要
+    pub fn insert_summary(&self, document_id: i64, section_id: Option<i64>,
+        summary_type: &str, summary_text: &str, model: &str,
+    ) -> Result<i64> {
+        self.transaction(|conn| {
+            let tokens = crate::nlp::chinese::tokenize_content(summary_text);
+            conn.execute(
+                "INSERT INTO kb_document_summaries (document_id, section_id, summary_type, \
+                 summary_text, summary_tokens, model) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![document_id, section_id, summary_type, summary_text, tokens, model],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// 获取文档摘要
+    pub fn get_summaries_for_document(&self, document_id: i64) -> Result<Vec<(i64, String, String)>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, summary_type, summary_text FROM kb_document_summaries \
+                 WHERE document_id = ?1"
+            )?;
+            let rows = stmt.query_map(params![document_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            let results: Vec<(i64, String, String)> = rows.filter_map(|r| r.ok()).collect();
+            Ok(results)
+        })
+    }
+
+    // --- Source CRUD (P6-001/002) ---
+
+    /// 创建导入源
+    pub fn create_source(&self, library_id: i64, source_type: &str, source_uri: &str,
+        display_name: &str, delete_policy: &str,
+    ) -> Result<i64> {
+        self.transaction(|conn| {
+            conn.execute(
+                "INSERT INTO kb_sources (library_id, source_type, source_uri, display_name, \
+                 delete_policy, sync_status) VALUES (?1,?2,?3,?4,?5,'idle')",
+                params![library_id, source_type, source_uri, display_name, delete_policy],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// 列出库的导入源
+    pub fn list_sources(&self, library_id: i64) -> Result<Vec<(i64, String, String, String)>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, source_type, source_uri, display_name FROM kb_sources WHERE library_id=?1"
+            )?;
+            let rows = stmt.query_map(params![library_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            let results: Vec<(i64, String, String, String)> = rows.filter_map(|r| r.ok()).collect();
+            Ok(results)
+        })
+    }
+
+    /// 删除导入源
+    pub fn delete_source(&self, source_id: i64) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute("DELETE FROM kb_source_items WHERE source_id=?1", params![source_id])?;
+            conn.execute("DELETE FROM kb_sources WHERE id=?1", params![source_id])?;
+            Ok(())
+        })
+    }
 }
 
 /// Build a tree from a flat list of folders.

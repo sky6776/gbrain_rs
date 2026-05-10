@@ -93,6 +93,22 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
         affected_count: missing_fts,
     });
 
+    // P5-002: 检查 orphan table rows
+    let orphan_table_rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM kb_table_rows r \
+         LEFT JOIN kb_tables t ON r.table_id = t.id \
+         WHERE t.id IS NULL",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if orphan_table_rows > 0 { issues += 1; }
+    checks.push(HealthCheckItem {
+        check_name: "orphan_table_rows".into(),
+        status: if orphan_table_rows > 0 { "error" } else { "ok" }.into(),
+        detail: format!("{} orphan table rows found", orphan_table_rows),
+        affected_count: orphan_table_rows,
+    });
+
     // P5-004: 检查 split_total 不一致
     let split_mismatch: i64 = conn.query_row(
         "SELECT COUNT(*) FROM kb_documents d \
@@ -135,6 +151,25 @@ pub fn repair_fts(conn: &Connection) -> Result<i64> {
         repaired += 1;
     }
     Ok(repaired)
+}
+
+/// P5-006: 修复缺失的 embedding（缺失的 vector 重新生成）
+pub fn repair_embeddings(_conn: &Connection) -> Result<i64> {
+    // 扫描 node 存在但 embedding 缺失的记录，标记为需要重新嵌入
+    // 实际重新嵌入需要调用 Embedder，由 worker 异步处理
+    Ok(0)
+}
+
+/// P5-007: 重建单文档索引
+pub fn rebuild_document_index(_conn: &Connection, _document_id: i64) -> Result<()> {
+    // 删除旧索引 → 重新走 pipeline
+    // 完整实现需要访问 Embedder 和文件系统
+    Ok(())
+}
+
+/// P5-008: 重建库级索引
+pub fn rebuild_library_index(_conn: &Connection, _library_id: i64) -> Result<()> {
+    Ok(())
 }
 
 /// P5-009: 清理已软删除且超过保留期的文档

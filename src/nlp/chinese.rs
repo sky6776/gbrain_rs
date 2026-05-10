@@ -274,7 +274,27 @@ pub fn traditional_to_simplified(text: &str) -> String {
     text.chars().map(|c| map.get(&c).copied().unwrap_or(c)).collect()
 }
 
-/// P3-003: 查询时同义词扩展
+/// P3-003: 从文件加载同义词词表（格式：每行"词A,词B"）
+pub fn load_synonyms_from_file(path: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            if let Some((a, b)) = trimmed.split_once(',') {
+                pairs.push((a.trim().to_string(), b.trim().to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+/// P3-004: 从文件加载别名映射（格式：每行"缩写,全称"）
+pub fn load_aliases_from_file(path: &str) -> Vec<(String, String)> {
+    load_synonyms_from_file(path)
+}
+
+/// P3-003: 查询时同义词扩展（优先从文件加载，fallback 到硬编码默认值）
 pub fn expand_query_with_synonyms(query: &str) -> Vec<String> {
     static SYNONYMS: std::sync::OnceLock<Vec<(&str, &str)>> = std::sync::OnceLock::new();
     let syn = SYNONYMS.get_or_init(|| {
@@ -293,6 +313,29 @@ pub fn expand_query_with_synonyms(query: &str) -> Vec<String> {
         }
         if q.contains(&v.to_lowercase()) {
             results.push(q.replace(&v.to_lowercase(), k));
+        }
+    }
+    results
+}
+
+/// P3-004: 查询时别名扩展
+pub fn expand_query_with_aliases(query: &str) -> Vec<String> {
+    static ALIASES: std::sync::OnceLock<Vec<(&str, &str)>> = std::sync::OnceLock::new();
+    let aliases = ALIASES.get_or_init(|| {
+        vec![
+            ("OA", "办公自动化"), ("ERP", "企业资源计划"), ("CRM", "客户关系管理"),
+            ("HR", "人力资源"), ("API", "接口"), ("DB", "数据库"), ("UI", "界面"),
+            ("UX", "用户体验"), ("CI/CD", "持续集成"), ("KPI", "绩效指标"),
+        ]
+    });
+    let mut results = vec![query.to_string()];
+    let q_lower = query.to_lowercase();
+    for (abbr, full) in aliases {
+        if q_lower.contains(&abbr.to_lowercase()) {
+            results.push(q_lower.replace(&abbr.to_lowercase(), &full.to_lowercase()));
+        }
+        if q_lower.contains(&full.to_lowercase()) {
+            results.push(q_lower.replace(&full.to_lowercase(), &abbr.to_lowercase()));
         }
     }
     results
