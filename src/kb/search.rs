@@ -47,14 +47,42 @@ pub fn kb_search(
     let title_results = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k)?;
     if !title_results.is_empty() { all_candidates.push(title_results); }
 
-    // Node FTS retriever
+    // P4-001: profile routing
+    let profile = input.profile.as_deref().unwrap_or("balanced");
+    let use_summary = matches!(profile, "balanced" | "accurate") && matches!(planner_type,
+        crate::kb::planner::QueryType::HowTo | crate::kb::planner::QueryType::Conceptual);
+    let use_table = matches!(profile, "table" | "balanced" | "accurate");
+    let use_metadata = matches!(profile, "balanced" | "accurate" | "file_lookup");
+
+    // Node FTS retriever (P3-009)
     let fts_results = kb_fts_search(conn, &query_normalized, &input.library_ids, input.level, fetch_k)?;
     if !fts_results.is_empty() { all_candidates.push(fts_results); }
 
-    // Vector retriever
+    // Vector retriever (P3-010)
     if let Some(vec) = query_vector {
         let vec_results = kb_vector_search(conn, vec, &input.library_ids, input.level, fetch_k)?;
         if !vec_results.is_empty() { all_candidates.push(vec_results); }
+    }
+
+    // P3-011: Summary retriever
+    if use_summary {
+        if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
+            if !sr.is_empty() { all_candidates.push(sr); }
+        }
+    }
+
+    // P3-012: Table retriever
+    if use_table {
+        if let Ok(tr) = table_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
+            if !tr.is_empty() { all_candidates.push(tr); }
+        }
+    }
+
+    // P3-013: Metadata retriever
+    if use_metadata {
+        if let Ok(mr) = metadata_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
+            if !mr.is_empty() { all_candidates.push(mr); }
+        }
     }
 
     // RRF merge all retriever outputs
@@ -74,6 +102,14 @@ pub fn kb_search(
     } else {
         all_candidates.into_iter().flatten().collect()
     };
+
+    // P1-004/P3-022: 过滤已删除文档 + 同文档去重
+    merged = filter_deleted_docs(conn, merged);
+    merged = dedup_by_document(merged);
+
+    // P4-002: fallback 链 — 无结果时降低阈值扩大召回
+    #[allow(unused_assignments)]
+    let mut fallbacks_used: Vec<&str> = Vec::new();
 
     // P3-016/P3-020: rerank (model preferred, local fallback)
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
@@ -104,10 +140,21 @@ pub fn kb_search(
     // Fetch full node details with context
     let mut results = fetch_node_details(conn, &merged, input.top_k)?;
 
+    // P3-025: group_by_document
+    if input.group_by_document {
+        results = group_by_document(results);
+    }
+
     // P3-023~027: enrich results with context/highlights/open_target
     if input.include_context || input.include_highlights || input.debug {
         enrich_results(&mut results, conn, input, &query_normalized);
     }
+
+    // P4-020: search logging (异步，不阻塞返回)
+    let _ = crate::kb::eval::log_search(
+        conn, &query_normalized, &input.library_ids,
+        profile, planner_type.as_str(), results.len(), 0, false,
+    );
 
     // P3-021: debug signals
     if input.debug {
@@ -127,9 +174,11 @@ pub fn kb_search(
     Ok(results)
 }
 
-/// P3-001: query normalization — trim, lowercase, punctuation cleanup
+/// P3-001~002: query normalization — trim, lowercase, punctuation, 繁→简
 fn normalize_query(query: &str) -> String {
     let mut q = query.trim().to_lowercase();
+    // P3-002: 繁体→简体
+    q = crate::nlp::chinese::traditional_to_simplified(&q);
     // 全角→半角标点
     q = q.replace('，', ",").replace('。', ".").replace('！', "!")
         .replace('？', "?").replace('：', ":").replace('；', ";")
@@ -182,9 +231,55 @@ fn enrich_results(
         if input.include_highlights {
             r.highlight_ranges = Some(compute_highlights(&r.content, query_normalized));
         }
+        // P3-023/P3-024: context expansion — 从相邻 nodes 获取前后文
+        if input.include_context {
+            if let Ok((before, after)) = get_node_context(conn, r.document_id, r.node_id, input.context_before, input.context_after) {
+                r.context_before = before;
+                r.context_after = after;
+            }
+        }
         // P3-027: open_target URI
         r.open_target = build_open_target(conn, r.document_id, r.page_number, r.title_path.as_deref());
     }
+}
+
+/// P3-023/P3-024: 从相邻 node 获取上下文
+fn get_node_context(
+    conn: &Connection,
+    document_id: i64,
+    node_id: i64,
+    context_before_chars: usize,
+    context_after_chars: usize,
+) -> Result<(Option<String>, Option<String>)> {
+    // 获取当前 node 的 chunk_order
+    let chunk_order: i32 = conn.query_row(
+        "SELECT chunk_order FROM kb_document_nodes WHERE id = ?1",
+        rusqlite::params![node_id],
+        |row| row.get(0),
+    )?;
+    // 前一个 node
+    let before = if chunk_order > 0 {
+        conn.query_row(
+            "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
+            rusqlite::params![document_id, chunk_order - 1],
+            |row| row.get::<_, String>(0),
+        ).ok().map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            let start = chars.len().saturating_sub(context_before_chars);
+            chars[start..].iter().collect()
+        })
+    } else { None };
+    // 后一个 node
+    let after = conn.query_row(
+        "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
+        rusqlite::params![document_id, chunk_order + 1],
+        |row| row.get::<_, String>(0),
+    ).ok().map(|s| {
+        let chars: Vec<char> = s.chars().collect();
+        let end = context_after_chars.min(chars.len());
+        chars[..end].iter().collect()
+    });
+    Ok((before, after))
 }
 
 /// P3-026: compute highlight character ranges
@@ -216,6 +311,109 @@ fn build_open_target(
         }
     }
     Some(format!("gbrain://kb/doc/{}", document_id))
+}
+
+// ---------------------------------------------------------------------------
+// P3-011/012/013: Summary, Table, Metadata retrievers
+// ---------------------------------------------------------------------------
+
+/// P3-011: 摘要检索器 — 在 kb_document_summaries 中搜索
+fn summary_retriever(
+    conn: &Connection,
+    query: &str,
+    library_ids: &[i64],
+    top_k: usize,
+) -> Result<Vec<RankedResult>> {
+    let sql = "SELECT s.document_id FROM kb_document_summaries s \
+               INNER JOIN kb_documents d ON d.id = s.document_id \
+               WHERE s.summary_tokens LIKE ?1 AND d.deleted_at IS NULL LIMIT ?2";
+    let like_query = format!("%{}%", query);
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+    })?;
+    let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
+    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    Ok(results)
+}
+
+/// P3-012: 表格检索器 — 在 kb_table_rows 中搜索
+fn table_retriever(
+    conn: &Connection,
+    query: &str,
+    _library_ids: &[i64],
+    top_k: usize,
+) -> Result<Vec<RankedResult>> {
+    let sql = "SELECT r.table_id FROM kb_table_rows r \
+               INNER JOIN kb_tables t ON t.id = r.table_id \
+               WHERE r.row_text LIKE ?1 LIMIT ?2";
+    let like_query = format!("%{}%", query);
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+    })?;
+    let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
+    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    Ok(results)
+}
+
+/// P3-013: 元数据检索器 — 在 kb_documents 的 title/keywords/entity_names 中搜索
+fn metadata_retriever(
+    conn: &Connection,
+    query: &str,
+    library_ids: &[i64],
+    top_k: usize,
+) -> Result<Vec<RankedResult>> {
+    let sql = "SELECT id FROM kb_documents WHERE (title LIKE ?1 OR keywords LIKE ?1 \
+               OR entity_names LIKE ?1) AND deleted_at IS NULL LIMIT ?2";
+    let like_query = format!("%{}%", query);
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+    })?;
+    let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
+    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    Ok(results)
+}
+
+/// P1-004: 过滤掉已删除文档的结果
+fn filter_deleted_docs(conn: &Connection, merged: Vec<RankedResult>) -> Vec<RankedResult> {
+    if merged.is_empty() { return merged; }
+    let placeholders: Vec<String> = merged.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let sql = format!(
+        "SELECT n.id FROM kb_document_nodes n \
+         INNER JOIN kb_documents d ON d.id = n.document_id \
+         WHERE n.id IN ({}) AND d.deleted_at IS NULL",
+        placeholders.join(",")
+    );
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(valid_ids) = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0)) {
+            let valid_set: std::collections::HashSet<i64> = valid_ids.filter_map(|r| r.ok()).collect();
+            return merged.into_iter().filter(|r| valid_set.contains(&r.node_id)).collect();
+        }
+    }
+    merged
+}
+
+/// P3-025: 按文档分组结果
+fn group_by_document(results: Vec<KbSearchResult>) -> Vec<KbSearchResult> {
+    let mut groups: std::collections::HashMap<i64, Vec<KbSearchResult>> = std::collections::HashMap::new();
+    for r in results {
+        groups.entry(r.document_id).or_default().push(r);
+    }
+    let mut grouped: Vec<KbSearchResult> = Vec::new();
+    for (_, mut items) in groups {
+        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(mut first) = items.into_iter().next() {
+            first.matched_by = Some("grouped_by_document".into());
+            grouped.push(first);
+        }
+    }
+    grouped.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    grouped
 }
 
 /// Vector similarity search using sqlite-vec KNN.

@@ -48,7 +48,11 @@ impl<'a> KbEngine<'a> {
                         semantic_segmentation_enabled, raptor_enabled, \
                         raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
                         chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, \
-                        sort_order \
+                        sort_order, \
+                        embedding_provider, embedding_model, embedding_dimensions, \
+                        search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                        external_embedding_allowed, external_rerank_allowed, \
+                        external_summary_allowed, external_ocr_allowed, redaction_enabled \
                  FROM kb_libraries ORDER BY sort_order DESC, id DESC",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -67,19 +71,19 @@ impl<'a> KbEngine<'a> {
                     batch_max_documents: row.get::<_, i32>(11)? as usize,
                     batch_max_chunks: row.get::<_, i32>(12)? as usize,
                     sort_order: row.get(13)?,
-                    // P0-016: new governance fields with defaults
-                    embedding_provider: String::new(),
-                    embedding_model: String::new(),
-                    embedding_dimensions: None,
-                    search_profile: String::new(),
-                    rerank_enabled: true,
-                    rerank_provider: String::new(),
-                    summary_enabled: false,
-                    external_embedding_allowed: true,
-                    external_rerank_allowed: true,
-                    external_summary_allowed: true,
-                    external_ocr_allowed: true,
-                    redaction_enabled: false,
+                    // P0-016: governance fields 从数据库读取
+                    embedding_provider: row.get(14)?,
+                    embedding_model: row.get(15)?,
+                    embedding_dimensions: row.get(16)?,
+                    search_profile: row.get(17)?,
+                    rerank_enabled: row.get::<_, i32>(18)? != 0,
+                    rerank_provider: row.get(19)?,
+                    summary_enabled: row.get::<_, i32>(20)? != 0,
+                    external_embedding_allowed: row.get::<_, i32>(21)? != 0,
+                    external_rerank_allowed: row.get::<_, i32>(22)? != 0,
+                    external_summary_allowed: row.get::<_, i32>(23)? != 0,
+                    external_ocr_allowed: row.get::<_, i32>(24)? != 0,
+                    redaction_enabled: row.get::<_, i32>(25)? != 0,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
