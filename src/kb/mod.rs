@@ -13,8 +13,10 @@ pub mod search;
 pub mod security;
 pub mod splitter;
 pub mod types;
+pub mod worker;
 
 pub use engine::KbEngine;
 pub use pipeline::{ingest_directory, process_document, process_document_async};
 pub use search::kb_search;
 pub use types::*;
+pub use worker::{run_kb_worker_loop, run_kb_worker_once, spawn_kb_worker_thread};

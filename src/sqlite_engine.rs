@@ -713,9 +713,11 @@ impl BrainEngine for SqliteEngine {
         let conn = self.conn()?;
         conn.execute_batch(SCHEMA_DDL)?;
 
-        // Try to create sqlite-vec virtual table
+        // Try to create sqlite-vec virtual tables
         let vec_ddl = crate::schema::vec_chunks_ddl(self.embedding_dimensions);
         let _ = conn.execute_batch(&vec_ddl); // Ignore error if extension not loaded
+        let vec_kb_ddl = crate::schema::vec_kb_nodes_ddl(self.embedding_dimensions);
+        let _ = conn.execute_batch(&vec_kb_ddl); // Ignore error if extension not loaded
 
         // Run pending migrations
         self.run_pending_migrations()?;

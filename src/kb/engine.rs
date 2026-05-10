@@ -472,6 +472,28 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// 更新文档的 job_id
+    pub fn update_document_job_id(&self, id: i64, job_id: &str) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET job_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![job_id, id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// 更新文档的 processing_run_id
+    pub fn update_document_run_id(&self, id: i64, processing_run_id: &str) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET processing_run_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![processing_run_id, id],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn update_document_stats(&self, id: i64, word_total: i32, split_total: i32) -> Result<()> {
         self.transaction(|conn| {
             conn.execute(
@@ -486,7 +508,9 @@ impl<'a> KbEngine<'a> {
     }
 
     pub fn delete_document(&self, id: i64) -> Result<()> {
-        let storage_path = self.get_document(id)?.storage_path;
+        let doc = self.get_document(id)?;
+        let storage_path = doc.storage_path;
+        let source_type = doc.source_type;
 
         self.transaction(|conn| {
             // Get node IDs for vector cleanup
@@ -517,12 +541,12 @@ impl<'a> KbEngine<'a> {
             Ok(())
         })?;
 
-        // Remove storage file after transaction commits to avoid data loss on rollback
-        if !storage_path.is_empty() {
+        // 仅对 upload 类型删除物理文件；ingest 类型的 storage_path 是用户原始文件，不应删除
+        if !storage_path.is_empty() && source_type == "upload" {
             let path = std::path::Path::new(&storage_path);
             if path.exists() {
                 if let Err(e) = std::fs::remove_file(path) {
-                    tracing::warn!("failed to remove storage file {}: {}", storage_path, e);
+                    tracing::warn!("删除存储文件失败 {}: {}", storage_path, e);
                 }
             }
         }

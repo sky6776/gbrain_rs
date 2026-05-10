@@ -1302,16 +1302,39 @@ impl<'a> Operations<'a> {
 
     /// Query the KB subsystem (keyword-only FTS5 search).
     ///
-    /// Vector search is not performed here because the embedding client is
-    /// async and `Operations` is synchronous. Callers that need hybrid
-    /// search should use `crate::kb::search::kb_search` directly with a
-    /// pre-computed query vector.
+    /// KB 关键词搜索（当配置了 API key 时自动启用向量混合搜索）。
+    /// 通过 tokio 运行时计算查询向量，实现 FTS5 + 向量 RRF 混合搜索。
     pub fn kb_query(
         &self,
         input: &crate::kb::KbSearchInput,
     ) -> crate::error::Result<Vec<crate::kb::KbSearchResult>> {
         let conn = self.engine.connection()?;
-        crate::kb::search::kb_search(conn, input, None)
+
+        // 尝试计算查询向量以启用混合搜索
+        let query_vector: Option<Vec<f32>> =
+            if let Some(api_key) = self.config.openai_api_key.as_deref() {
+                let embedder = crate::embedding::Embedder::new(
+                    api_key,
+                    self.config.openai_base_url.as_deref(),
+                    Some(&self.config.embedding_model),
+                    Some(self.config.embedding_dimensions),
+                );
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok();
+                match rt {
+                    Some(rt) => rt
+                        .block_on(embedder.embed_batch(&[&input.query]))
+                        .ok()
+                        .and_then(|v| v.into_iter().next()),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+        crate::kb::search::kb_search(conn, input, query_vector.as_deref())
     }
 
     /// Combined query across both the brain (pages/chunks) and the KB.

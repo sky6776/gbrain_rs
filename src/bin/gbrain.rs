@@ -314,6 +314,17 @@ enum Commands {
         #[arg(long, default_value = "all")]
         mode: String,
     },
+
+    /// Run KB document processing worker (claim jobs from queue, process, complete/fail)
+    KbWorker {
+        /// Run once and exit (default: loop continuously)
+        #[arg(long)]
+        once: bool,
+
+        /// Polling interval in seconds when no jobs are available
+        #[arg(long, default_value = "30")]
+        interval: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -832,6 +843,16 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
 
         Commands::Serve => {
             info!("Starting MCP stdio server");
+            // 当配置启用时，在后台启动 KB worker 线程
+            if config.kb_worker_enabled {
+                let kb_db_path = config.db_path();
+                gbrain_core::kb::spawn_kb_worker_thread(
+                    kb_db_path,
+                    config.clone(),
+                    config.kb_worker_poll_interval_secs,
+                );
+                info!("KB worker: 后台线程已随 MCP 服务启动");
+            }
             let mut server = McpServer::with_config(engine, config.clone());
             server.run()?;
             return Ok(());
@@ -1436,6 +1457,21 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     "Extract complete"
                 );
             }
+        }
+
+        Commands::KbWorker { once, interval } => {
+            if once {
+                let processed = gbrain_core::kb::run_kb_worker_once(&engine, config)?;
+                if processed {
+                    info!("KB worker: processed one job");
+                } else {
+                    info!("KB worker: no pending jobs");
+                }
+            } else {
+                info!(interval, "KB worker: starting daemon mode");
+                gbrain_core::kb::run_kb_worker_loop(&engine, config, interval);
+            }
+            return Ok(());
         }
     }
 

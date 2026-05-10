@@ -1,6 +1,6 @@
-//! KB upload security validation
+//! KB 上传安全验证
 //!
-//! Reuses gbrain_rs existing path/filename validation and adds KB-specific checks.
+//! 复用 gbrain_rs 现有的路径/文件名验证，并添加 KB 特定检查。
 
 use crate::error::{GBrainError, Result};
 use crate::kb::types::{is_supported_extension, SUPPORTED_EXTENSIONS};
@@ -71,28 +71,42 @@ pub fn validated_extension(path: &Path) -> Result<String> {
     Ok(ext_lower)
 }
 
-/// Detect and validate MIME type from file content.
-/// Uses the `infer` crate for content-based detection, falling back to extension-based.
+/// 从文件内容检测并验证 MIME 类型。
+/// 使用 `infer` crate 进行基于内容的检测，回退到基于扩展名的推断。
+/// 对于二进制格式（pdf, docx, xlsx），内容检测的 MIME 与扩展名不匹配时直接拒绝。
+/// 对于文本格式（txt, md, csv, html），允许回退到扩展名推断（因为 infer 对短文本检测不准）。
 pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
-    // Try content-based detection first
+    // 先尝试基于内容的检测
     if let Some(kind) = infer::get(data) {
         let detected = kind.mime_type().to_string();
-        // Validate that detected MIME matches expected extension
         if mime_matches_extension(&detected, ext) {
             return Ok(detected);
         }
-        // MIME 不匹配: 记录警告后回退到扩展名推断
+        // 二进制格式 MIME 不匹配：直接拒绝（防止伪装文件攻击）
+        if is_binary_extension(ext) {
+            return Err(GBrainError::InvalidInput(format!(
+                "MIME 类型不匹配: 检测到 '{}' 但扩展名 '{}' 暗示不同格式，二进制文件不允许回退",
+                detected, ext
+            )));
+        }
+        // 文本格式 MIME 不匹配：允许回退到扩展名推断
         tracing::warn!(
-            "MIME 类型不匹配: 检测到 '{}' 但扩展名 '{}' 暗示不同格式",
+            "MIME 类型不匹配: 检测到 '{}' 但扩展名 '{}' 暗示不同格式，文本格式允许回退",
             detected,
             ext
         );
     }
 
-    // Fallback to extension-based MIME
+    // 回退到基于扩展名的 MIME
     Ok(crate::kb::types::mime_type_for_ext(ext).to_string())
 }
 
+/// 判断扩展名是否属于二进制格式（需要严格 MIME 校验）
+fn is_binary_extension(ext: &str) -> bool {
+    matches!(ext, "pdf" | "docx" | "xlsx")
+}
+
+/// 判断检测到的 MIME 类型是否与文件扩展名匹配
 fn mime_matches_extension(mime: &str, ext: &str) -> bool {
     match ext {
         "pdf" => mime == "application/pdf",

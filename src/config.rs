@@ -75,6 +75,8 @@ pub struct Config {
     pub kb_max_file_size_mb: usize,
     pub kb_allowed_extensions: Vec<String>,
     pub kb_storage_dir: Option<String>,
+    pub kb_worker_enabled: bool,
+    pub kb_worker_poll_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -141,6 +143,8 @@ impl Default for Config {
                 "md".into(),
             ],
             kb_storage_dir: None,
+            kb_worker_enabled: false,
+            kb_worker_poll_interval_secs: 30,
         }
     }
 }
@@ -270,6 +274,14 @@ impl Config {
         }
         if let Ok(dir) = std::env::var("GBRAIN_KB_STORAGE_DIR") {
             config.kb_storage_dir = Some(dir);
+        }
+        config.kb_worker_enabled = std::env::var("GBRAIN_KB_WORKER_ENABLED")
+            .map(|v| v == "true")
+            .unwrap_or(config.kb_worker_enabled);
+        if let Ok(secs) = std::env::var("GBRAIN_KB_WORKER_POLL_INTERVAL") {
+            if let Ok(s) = secs.parse() {
+                config.kb_worker_poll_interval_secs = s;
+            }
         }
 
         info!(

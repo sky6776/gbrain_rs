@@ -1131,11 +1131,13 @@ impl McpServer {
                 let conn = self.engine.connection()?;
                 let job_db_id = crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
 
+                // 写回 job_id 到文档记录
+                kb.update_document_job_id(doc_id, &job_db_id.to_string())?;
+
                 Ok(serde_json::json!({
                     "id": doc_id,
                     "job_id": job_db_id,
                     "status": "pending",
-                    "storage_path": payload.storage_path,
                 }))
             }
 
@@ -1192,8 +1194,14 @@ impl McpServer {
                     None,
                 )?;
 
+                // 写回新的 processing_run_id
+                kb.update_document_run_id(document_id, &processing_run_id)?;
+
                 let conn = self.engine.connection()?;
                 let job_db_id = crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
+
+                // 写回 job_id
+                kb.update_document_job_id(document_id, &job_db_id.to_string())?;
 
                 Ok(serde_json::json!({"id": document_id, "job_id": job_db_id, "status": "pending"}))
             }
@@ -1270,16 +1278,32 @@ impl McpServer {
                     top_k,
                 };
 
-                // Use keyword-only search in MCP (sync context).
-                // Vector search requires async embedding which isn't available in
-                // the sync MCP server. Embeddings are computed during document
-                // processing and stored in the DB for vector retrieval.
-                // If a pre-computed query vector is needed, callers should embed
-                // externally and pass it through a future API extension.
+                // 尝试计算查询向量以启用混合搜索
+                let query_vector: Option<Vec<f32>> =
+                    if let Some(api_key) = self.config.openai_api_key.as_deref() {
+                        let embedder = crate::embedding::Embedder::new(
+                            api_key,
+                            self.config.openai_base_url.as_deref(),
+                            Some(&self.config.embedding_model),
+                            Some(self.config.embedding_dimensions),
+                        );
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .ok();
+                        match rt {
+                            Some(rt) => rt
+                                .block_on(embedder.embed_batch(&[query]))
+                                .ok()
+                                .and_then(|v| v.into_iter().next()),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+
                 let conn = self.engine.connection()?;
-                let results = crate::kb::search::kb_search(
-                    conn, &input, None, // No query vector in sync MCP context
-                )?;
+                let results = crate::kb::search::kb_search(conn, &input, query_vector.as_deref())?;
                 Ok(serde_json::to_value(results)?)
             }
 
