@@ -966,9 +966,15 @@ impl McpServer {
             }
 
             // --- KB subsystem tools ---
+            _ if tool_name.starts_with("kb_") && !self.config.kb_enabled => {
+                Err(GBrainError::InvalidInput(
+                    "KB subsystem is disabled (kb_enabled=false)".to_string(),
+                ))
+            }
+
             "kb_list_libraries" => {
                 let kb = self.engine.kb_engine()?;
-                let libraries = kb.list_libraries()?;
+                let libraries = kb.list_libraries_with_stats()?;
                 Ok(serde_json::to_value(libraries)?)
             }
 
@@ -1050,6 +1056,7 @@ impl McpServer {
                     true, // remote
                     &working_dir,
                     max_file_bytes,
+                    &self.config.kb_allowed_extensions,
                 )?;
 
                 let ext = crate::kb::security::validated_extension(&validated_path)?;

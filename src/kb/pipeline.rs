@@ -197,6 +197,9 @@ pub async fn process_document_async(
     payload: &KbProcessPayload,
     embedder: Option<Arc<Embedder>>,
     raptor_config: Option<&RaptorConfig>,
+    kb_raptor_secret_ref: Option<&str>,
+    kb_raptor_base_url: Option<&str>,
+    kb_raptor_model: Option<&str>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<ProcessResult> {
     let kb = KbEngine::new(conn);
@@ -366,7 +369,7 @@ pub async fn process_document_async(
         if let Some(rc) = raptor_config {
             report_progress(on_progress, "raptor", "构建 RAPTOR 树");
 
-            match raptor::resolve_raptor_llm_config(Some(&library)) {
+            match raptor::resolve_raptor_llm_config(Some(&library), kb_raptor_secret_ref, kb_raptor_base_url, kb_raptor_model) {
                 Ok(llm_config) => {
                     let max_tokens = rc.max_tokens_per_summary;
                     let llm_cfg = llm_config.clone();
@@ -568,7 +571,7 @@ pub async fn ingest_directory(
             extension: ext,
         };
 
-        match process_document_async(conn, &payload, embedder.clone(), raptor_config, on_progress)
+        match process_document_async(conn, &payload, embedder.clone(), raptor_config, None, None, None, on_progress)
             .await
         {
             Ok(_) => success_count += 1,

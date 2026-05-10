@@ -44,12 +44,16 @@ pub struct RaptorLlmConfig {
 
 /// Resolve RAPTOR LLM configuration with fallback chain:
 /// 1. Library-specific config (raptor_llm_secret_ref, raptor_llm_base_url, raptor_llm_model)
-/// 2. GBRAIN_EXPANSION_* env vars
-/// 3. GBRAIN_CHUNKER_* env vars
+/// 2. KB-level config (kb_raptor_secret_ref, kb_raptor_base_url, kb_raptor_model)
+/// 3. GBRAIN_EXPANSION_* env vars
+/// 4. GBRAIN_CHUNKER_* env vars
 ///
 /// Returns an error if no API key can be resolved.
 pub fn resolve_raptor_llm_config(
     library: Option<&Library>,
+    kb_raptor_secret_ref: Option<&str>,
+    kb_raptor_base_url: Option<&str>,
+    kb_raptor_model: Option<&str>,
 ) -> Result<RaptorLlmConfig, GBrainError> {
     // Try library-specific config first
     if let Some(lib) = library {
@@ -77,6 +81,28 @@ pub fn resolve_raptor_llm_config(
                     model,
                 });
             }
+        }
+    }
+
+    // Try KB-level config (kb_raptor_secret_ref is an env var name)
+    if let Some(secret_ref) = kb_raptor_secret_ref {
+        let api_key = std::env::var(secret_ref).unwrap_or_default();
+        if !api_key.is_empty() {
+            let base_url = kb_raptor_base_url
+                .map(|s| s.to_string())
+                .or_else(resolve_expansion_base_url)
+                .or_else(resolve_chunker_base_url)
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = kb_raptor_model
+                .map(|s| s.to_string())
+                .or_else(resolve_expansion_model)
+                .or_else(resolve_chunker_model)
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            return Ok(RaptorLlmConfig {
+                api_key,
+                base_url,
+                model,
+            });
         }
     }
 

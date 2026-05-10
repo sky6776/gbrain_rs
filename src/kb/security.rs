@@ -3,7 +3,7 @@
 //! 复用 gbrain_rs 现有的路径/文件名验证，并添加 KB 特定检查。
 
 use crate::error::{GBrainError, Result};
-use crate::kb::types::{is_supported_extension, SUPPORTED_EXTENSIONS};
+use crate::kb::types::SUPPORTED_EXTENSIONS;
 use crate::security::validate_upload_path;
 use std::io::Cursor;
 use std::path::Path;
@@ -14,13 +14,14 @@ pub const DEFAULT_MAX_FILE_SIZE_BYTES: usize = 50 * 1024 * 1024;
 /// Validate a KB upload source path.
 /// - Checks path traversal, null bytes
 /// - For remote callers: confines to working directory
-/// - Validates extension against SUPPORTED_EXTENSIONS
+/// - Validates extension against allowed_extensions (defaults to SUPPORTED_EXTENSIONS)
 /// - Checks file size
 pub fn validate_upload_source(
     path: &Path,
     remote: bool,
     working_dir: &Path,
     max_file_bytes: usize,
+    allowed_extensions: &[String],
 ) -> Result<std::path::PathBuf> {
     // 1. Path security (reuses existing gbrain_rs validation)
     validate_upload_path(path, remote, working_dir)?;
@@ -37,8 +38,8 @@ pub fn validate_upload_source(
         ));
     }
 
-    // 4. Extension validation (validated_extension also checks support)
-    validated_extension(path)?;
+    // 4. Extension validation
+    validated_extension_with(path, allowed_extensions)?;
 
     // 5. File size check
     let metadata = std::fs::metadata(path)
@@ -54,18 +55,23 @@ pub fn validate_upload_source(
     Ok(path.to_path_buf())
 }
 
-/// Get validated extension from a file path
+/// Get validated extension from a file path (uses default SUPPORTED_EXTENSIONS)
 pub fn validated_extension(path: &Path) -> Result<String> {
+    validated_extension_with(path, &SUPPORTED_EXTENSIONS.iter().map(|s| s.to_string()).collect::<Vec<String>>())
+}
+
+/// Get validated extension from a file path, checking against a configurable allowed list.
+fn validated_extension_with(path: &Path, allowed_extensions: &[String]) -> Result<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .ok_or_else(|| GBrainError::InvalidInput("file must have an extension".to_string()))?;
 
     let ext_lower = ext.to_lowercase();
-    if !is_supported_extension(&ext_lower) {
+    if !allowed_extensions.iter().any(|a| a == &ext_lower) {
         return Err(GBrainError::InvalidInput(format!(
-            "file extension '.{}' not supported for KB upload. Supported: {:?}",
-            ext_lower, SUPPORTED_EXTENSIONS
+            "file extension '.{}' not allowed for KB upload. Allowed: {:?}",
+            ext_lower, allowed_extensions
         )));
     }
 

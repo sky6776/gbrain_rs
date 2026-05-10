@@ -74,6 +74,37 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// List libraries with document_count and chunk_count stats.
+    pub fn list_libraries_with_stats(&self) -> Result<Vec<LibraryListItem>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT l.id, l.name, l.sort_order, l.raptor_enabled, \
+                        l.semantic_segmentation_enabled, l.raptor_llm_secret_ref, \
+                        COALESCE(d.doc_count, 0), COALESCE(n.chunk_count, 0) \
+                 FROM kb_libraries l \
+                 LEFT JOIN (SELECT library_id, COUNT(*) as doc_count FROM kb_documents GROUP BY library_id) d \
+                    ON l.id = d.library_id \
+                 LEFT JOIN (SELECT library_id, COUNT(*) as chunk_count FROM kb_document_nodes GROUP BY library_id) n \
+                    ON l.id = n.library_id \
+                 ORDER BY l.sort_order DESC, l.id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(LibraryListItem {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    document_count: row.get(6)?,
+                    chunk_count: row.get(7)?,
+                    sort_order: row.get(2)?,
+                    raptor_enabled: row.get::<_, i32>(3)? != 0,
+                    semantic_segmentation_enabled: row.get::<_, i32>(4)? != 0,
+                    has_raptor_secret: !row.get::<_, String>(5)?.is_empty(),
+                })
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| GBrainError::Database(e.to_string()))
+        })
+    }
+
     pub fn create_library(&self, input: &CreateLibraryInput) -> Result<i64> {
         self.transaction(|conn| {
             let chunk_size = input.chunk_size.unwrap_or(512).clamp(200, 5000) as i32;

@@ -431,11 +431,11 @@ static OPERATION_DEFS: &[OperationDef] = &[
     },
     OperationDef {
         name: "kb_list_documents",
-        description: "List documents in a knowledge base library",
+        description: "List documents in a knowledge base library, optionally filtered by folder",
         params: &[
             ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "folder_id", description: "Optional folder ID to filter documents", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "limit", description: "Max results (default 50)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "offset", description: "Skip first N results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {

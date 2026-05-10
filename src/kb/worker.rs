@@ -59,6 +59,9 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
         &payload,
         embedder,
         Some(&raptor_config),
+        config.kb_raptor_secret_ref.as_deref(),
+        config.kb_raptor_base_url.as_deref(),
+        if config.kb_raptor_model.is_empty() { None } else { Some(config.kb_raptor_model.as_str()) },
         None,
     ));
 
