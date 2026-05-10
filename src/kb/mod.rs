@@ -4,9 +4,11 @@
 //! and hybrid search (vector + FTS5 + RRF).
 
 pub mod chinese;
+pub mod context;
 pub mod engine;
 pub mod granularity;
 pub mod jobs;
+pub mod lifecycle;
 pub mod parser;
 pub mod pipeline;
 pub mod raptor;

@@ -757,6 +757,69 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    // --- Lifecycle helpers ---
+
+    /// 软删除文档：设置 deleted_at 并将 document_status 设为 deleted
+    pub fn soft_delete_document(&self, id: i64) -> Result<()> {
+        self.transaction(|conn| {
+            crate::kb::lifecycle::soft_delete_document(conn, id)
+        })
+    }
+
+    /// 彻底清理已软删除的文档及其所有关联数据
+    pub fn purge_document(&self, id: i64) -> Result<()> {
+        crate::kb::lifecycle::purge_document(self, id)
+    }
+
+    /// 转换文档处理状态，带状态机合法性检查和可选的 run_id 守卫
+    pub fn transition_document_status(
+        &self,
+        id: i64,
+        new_status: crate::kb::lifecycle::DocumentStatus,
+        run_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        self.query(|conn| {
+            crate::kb::lifecycle::transition_document_status(conn, id, new_status, run_id, error_message)
+        })
+    }
+
+    /// 创建文档版本快照
+    pub fn create_document_version(
+        &self,
+        document_id: i64,
+        version_label: &str,
+        processing_run_id: &str,
+        char_count: i32,
+        node_count: i32,
+    ) -> Result<i64> {
+        self.transaction(|conn| {
+            crate::kb::lifecycle::create_document_version(
+                conn, document_id, version_label, processing_run_id, char_count, node_count,
+            )
+        })
+    }
+
+    /// 更新文档的 granularity 和 chunk 策略
+    pub fn update_document_granularity(
+        &self,
+        id: i64,
+        granularity: &str,
+        chunk_strategy: &str,
+        char_count: i32,
+        page_count: i32,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
+                 content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
+                 WHERE id = ?5",
+                params![granularity, chunk_strategy, char_count, page_count, id],
+            )?;
+            Ok(())
+        })
+    }
+
     // --- Run guard ---
 
     pub fn ensure_document_run_current(

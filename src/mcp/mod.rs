@@ -1281,8 +1281,23 @@ impl McpServer {
                 }
                 let kb = self.engine.kb_engine()?;
                 let document_id = arguments["document_id"].as_i64().unwrap_or(0);
-                kb.delete_document(document_id)?;
-                Ok(serde_json::json!({"ok": true}))
+                // 软删除：设置 deleted_at，搜索默认过滤
+                kb.soft_delete_document(document_id)?;
+                Ok(serde_json::json!({"ok": true, "deleted": true}))
+            }
+
+            "kb_purge_document" => {
+                let confirm = arguments["confirm"].as_bool().unwrap_or(false);
+                if !confirm {
+                    return Err(GBrainError::InvalidInput(
+                        "kb_purge_document requires confirm=true — this permanently destroys data"
+                            .to_string(),
+                    ));
+                }
+                let kb = self.engine.kb_engine()?;
+                let document_id = arguments["document_id"].as_i64().unwrap_or(0);
+                kb.purge_document(document_id)?;
+                Ok(serde_json::json!({"ok": true, "purged": true}))
             }
 
             "kb_list_documents" => {

@@ -263,6 +263,14 @@ pub async fn process_document_async(
     })?;
 
     let word_total: i32 = count_words(&parsed.content) as i32;
+
+    // P1-014: 文档粒度分类（解析完成后立即判定）
+    let char_count = parsed.content.chars().count();
+    let page_count = 0; // 将在 P2 PDF/DOCX parser 中填充
+    let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
+    let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
+    kb.update_document_granularity(doc_id, granularity.as_str(), chunk_strategy, char_count as i32, page_count as i32)?;
+
     kb.update_document_status(
         doc_id,
         Some(STATUS_PROCESSING),
@@ -309,27 +317,59 @@ pub async fn process_document_async(
 
     let split_total: i32 = chunks.len() as i32;
 
-    // 构建 Level-0 RaptorNode 列表
+    // P1-006/P1-007: 根据粒度应用节点策略 + P1-011: 生成 contextual embedding 文本
+    let doc_title = ""; // metadata 将在 P1-013 后可用
     let mut nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
-        .map(|(i, chunk)| RaptorNode {
-            id: -((i as i64) + 1),
-            library_id: lib_id,
-            document_id: doc_id,
-            content: chunk.clone(),
-            level: 0,
-            parent_id: None,
-            chunk_order: i as i32,
-            vector: None,
-            title_path: String::new(),
-            page_number: None,
-            source_start: None,
-            source_end: None,
-            node_metadata: String::new(),
-            embedding_text: String::new(),
+        .map(|(i, chunk)| {
+            let embedding_text = crate::kb::context::build_embedding_text(
+                doc_title, "", // title_path 待 parser 提供
+                None,         // page_number 待 parser 提供
+                chunk,
+            );
+            RaptorNode {
+                id: -((i as i64) + 1),
+                library_id: lib_id,
+                document_id: doc_id,
+                content: chunk.clone(),
+                level: 0,
+                parent_id: None,
+                chunk_order: i as i32,
+                vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text,
+            }
         })
         .collect();
+
+    // P1-006: micro 文档策略 — 仅保留一个 whole-document node
+    if granularity == crate::kb::granularity::DocumentGranularity::Micro {
+        if !chunks.is_empty() {
+            let full_text = parsed.content.clone();
+            let embedding_text = crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
+            nodes = vec![RaptorNode {
+                id: -1,
+                library_id: lib_id,
+                document_id: doc_id,
+                content: full_text,
+                level: 0,
+                parent_id: None,
+                chunk_order: 0,
+                vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: "{\"node_type\":\"whole_document\"}".to_string(),
+                embedding_text,
+            }];
+        }
+    }
 
     // --- 阶段 3: 嵌入 ---
     if let Some(ref emb) = embedder {
@@ -348,7 +388,17 @@ pub async fn process_document_async(
             None,
         )?;
 
-        let texts: Vec<&str> = nodes.iter().map(|n| n.content.as_str()).collect();
+        // P1-012: embedding 使用 embedding_text，为空时 fallback 到 content
+        let texts: Vec<&str> = nodes
+            .iter()
+            .map(|n| {
+                if n.embedding_text.is_empty() {
+                    n.content.as_str()
+                } else {
+                    n.embedding_text.as_str()
+                }
+            })
+            .collect();
         match emb.embed_batch(&texts).await {
             Ok(vectors) => {
                 for (i, node) in nodes.iter_mut().enumerate() {
@@ -690,15 +740,22 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
 
         conn.execute(
             "INSERT INTO kb_document_nodes \
-             (library_id, document_id, content, content_tokens, level, chunk_order) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (library_id, document_id, content, content_tokens, level, chunk_order, \
+              title_path, page_number, source_start, source_end, node_metadata, embedding_text) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 node.library_id,
                 doc_id,
                 node.content,
                 content_tokens,
                 node.level,
-                node.chunk_order
+                node.chunk_order,
+                node.title_path,
+                node.page_number,
+                node.source_start,
+                node.source_end,
+                node.node_metadata,
+                node.embedding_text,
             ],
         )?;
 

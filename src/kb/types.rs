@@ -407,6 +407,55 @@ pub struct ProcessResult {
     pub split_total: i32,
 }
 
+// --- Parser block abstraction (P1-010) ---
+
+/// 所有 parser 输出的统一 block 结构，屏蔽格式差异。
+#[derive(Debug, Clone)]
+pub struct ParsedBlock {
+    /// 文本内容（原文）
+    pub text: String,
+    /// 标题路径，如 "第一章 / 1.1 概述"
+    pub title_path: String,
+    /// 页码（PDF 等，非页面格式为 None）
+    pub page_number: Option<i32>,
+    /// 在原文件中的起始字符偏移
+    pub source_start: Option<i32>,
+    /// 在原文件中的结束字符偏移
+    pub source_end: Option<i32>,
+    /// block 类型：paragraph, heading, list_item, table, code, whole_document
+    pub block_type: String,
+    /// 扩展元数据 JSON
+    pub metadata: String,
+}
+
+impl ParsedBlock {
+    /// 创建一个简单段落 block
+    pub fn paragraph(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            block_type: "paragraph".to_string(),
+            metadata: String::new(),
+        }
+    }
+
+    /// 创建一个全文 block（用于 micro/small 文档）
+    pub fn whole_document(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            block_type: "whole_document".to_string(),
+            metadata: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Parsing,
