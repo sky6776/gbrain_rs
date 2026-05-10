@@ -67,6 +67,19 @@ impl<'a> KbEngine<'a> {
                     batch_max_documents: row.get::<_, i32>(11)? as usize,
                     batch_max_chunks: row.get::<_, i32>(12)? as usize,
                     sort_order: row.get(13)?,
+                    // P0-016: new governance fields with defaults
+                    embedding_provider: String::new(),
+                    embedding_model: String::new(),
+                    embedding_dimensions: None,
+                    search_profile: String::new(),
+                    rerank_enabled: true,
+                    rerank_provider: String::new(),
+                    summary_enabled: false,
+                    external_embedding_allowed: true,
+                    external_rerank_allowed: true,
+                    external_summary_allowed: true,
+                    external_ocr_allowed: true,
+                    redaction_enabled: false,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -174,6 +187,19 @@ impl<'a> KbEngine<'a> {
                         batch_max_documents: row.get::<_, i32>(11)? as usize,
                         batch_max_chunks: row.get::<_, i32>(12)? as usize,
                         sort_order: row.get(13)?,
+                        // P0-016: new governance fields with defaults
+                        embedding_provider: String::new(),
+                        embedding_model: String::new(),
+                        embedding_dimensions: None,
+                        search_profile: String::new(),
+                        rerank_enabled: true,
+                        rerank_provider: String::new(),
+                        summary_enabled: false,
+                        external_embedding_allowed: true,
+                        external_rerank_allowed: true,
+                        external_summary_allowed: true,
+                        external_ocr_allowed: true,
+                        redaction_enabled: false,
                     })
                 },
             )
@@ -333,6 +359,31 @@ impl<'a> KbEngine<'a> {
                         embedding_error: row.get(21)?,
                         word_total: row.get(22)?,
                         split_total: row.get(23)?,
+                        // P0-010: new extended fields with defaults
+                        title: String::new(),
+                        summary: String::new(),
+                        keywords: String::new(),
+                        entity_names: String::new(),
+                        source_uri: String::new(),
+                        modified_at: None,
+                        document_date: None,
+                        normalized_content_hash: String::new(),
+                        simhash: String::new(),
+                        document_family_id: None,
+                        version_label: String::new(),
+                        document_granularity: "micro".to_string(),
+                        content_char_count: 0,
+                        content_token_count: 0,
+                        page_count: 0,
+                        section_count: 0,
+                        chunk_strategy: "auto".to_string(),
+                        document_status: "queued".to_string(),
+                        index_status: "pending".to_string(),
+                        current_version_id: None,
+                        deleted_at: None,
+                        purged_at: None,
+                        last_indexed_at: None,
+                        last_seen_at: None,
                     })
                 },
             )
@@ -345,20 +396,23 @@ impl<'a> KbEngine<'a> {
         library_id: i64,
         folder_id: Option<i64>,
         limit: usize,
+        offset: usize,
     ) -> Result<Vec<DocumentListItem>> {
         self.query(|conn| {
             let sql = if folder_id.is_some() {
                 "SELECT id, original_name, extension, file_size, \
                         parsing_status, parsing_progress, embedding_status, embedding_progress, \
-                        job_id, folder_id, updated_at \
+                        job_id, folder_id, updated_at, \
+                        title, document_granularity \
                  FROM kb_documents WHERE library_id = ?1 AND folder_id = ?2 \
-                 ORDER BY updated_at DESC LIMIT ?3"
+                 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4"
             } else {
                 "SELECT id, original_name, extension, file_size, \
                         parsing_status, parsing_progress, embedding_status, embedding_progress, \
-                        job_id, folder_id, updated_at \
+                        job_id, folder_id, updated_at, \
+                        title, document_granularity \
                  FROM kb_documents WHERE library_id = ?1 \
-                 ORDER BY updated_at DESC LIMIT ?3"
+                 ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4"
             };
 
             let mut stmt = conn.prepare(sql)?;
@@ -378,15 +432,17 @@ impl<'a> KbEngine<'a> {
                         job_id: row.get(8)?,
                         folder_id: row.get(9)?,
                         updated_at: row.get(10)?,
+                        title: row.get(11)?,
+                        document_granularity: row.get(12)?,
                     })
                 };
 
             let rows: Vec<DocumentListItem> = if let Some(fid) = folder_id {
-                stmt.query_map(params![library_id, fid, limit as i64], map_row)?
+                stmt.query_map(params![library_id, fid, limit as i64, offset as i64], map_row)?
                     .filter_map(|r| r.ok())
                     .collect()
             } else {
-                stmt.query_map(params![library_id, limit as i64], map_row)?
+                stmt.query_map(params![library_id, limit as i64, offset as i64], map_row)?
                     .filter_map(|r| r.ok())
                     .collect()
             };
@@ -437,6 +493,31 @@ impl<'a> KbEngine<'a> {
                         embedding_error: row.get(21)?,
                         word_total: row.get(22)?,
                         split_total: row.get(23)?,
+                        // P0-010: new extended fields with defaults
+                        title: String::new(),
+                        summary: String::new(),
+                        keywords: String::new(),
+                        entity_names: String::new(),
+                        source_uri: String::new(),
+                        modified_at: None,
+                        document_date: None,
+                        normalized_content_hash: String::new(),
+                        simhash: String::new(),
+                        document_family_id: None,
+                        version_label: String::new(),
+                        document_granularity: "micro".to_string(),
+                        content_char_count: 0,
+                        content_token_count: 0,
+                        page_count: 0,
+                        section_count: 0,
+                        chunk_strategy: "auto".to_string(),
+                        document_status: "queued".to_string(),
+                        index_status: "pending".to_string(),
+                        current_version_id: None,
+                        deleted_at: None,
+                        purged_at: None,
+                        last_indexed_at: None,
+                        last_seen_at: None,
                     })
                 },
             );
@@ -608,6 +689,14 @@ impl<'a> KbEngine<'a> {
                     level: row.get(7)?,
                     parent_id: row.get(8)?,
                     chunk_order: row.get(9)?,
+                    // P0-011: new node metadata fields
+                    section_id: None,
+                    title_path: String::new(),
+                    page_number: None,
+                    source_start: None,
+                    source_end: None,
+                    node_metadata: String::new(),
+                    embedding_text: String::new(),
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()

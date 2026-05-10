@@ -9,14 +9,8 @@ pub const STATUS_PROCESSING: i32 = 1;
 pub const STATUS_COMPLETED: i32 = 2;
 pub const STATUS_FAILED: i32 = 3;
 
-// --- Supported extensions ---
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"];
-
-pub fn is_supported_extension(ext: &str) -> bool {
-    SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str())
-}
-
+/// 扩展名对应的 MIME 类型映射（格式映射，非安全校验）
+/// 安全校验的允许扩展名列表由 Config.kb_allowed_extensions 控制。
 pub fn mime_type_for_ext(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
         "pdf" => "application/pdf",
@@ -49,6 +43,19 @@ pub struct Library {
     pub batch_max_documents: usize,
     pub batch_max_chunks: usize,
     pub sort_order: i32,
+    // P0-016: 库级治理和模型配置
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: Option<i32>,
+    pub search_profile: String,
+    pub rerank_enabled: bool,
+    pub rerank_provider: String,
+    pub summary_enabled: bool,
+    pub external_embedding_allowed: bool,
+    pub external_rerank_allowed: bool,
+    pub external_summary_allowed: bool,
+    pub external_ocr_allowed: bool,
+    pub redaction_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +79,31 @@ pub struct CreateLibraryInput {
     pub batch_max_documents: Option<usize>,
     #[serde(default)]
     pub batch_max_chunks: Option<usize>,
+    // P0-016: 库级治理和模型配置
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_dimensions: Option<i32>,
+    #[serde(default)]
+    pub search_profile: Option<String>,
+    #[serde(default)]
+    pub rerank_enabled: Option<bool>,
+    #[serde(default)]
+    pub rerank_provider: Option<String>,
+    #[serde(default)]
+    pub summary_enabled: Option<bool>,
+    #[serde(default)]
+    pub external_embedding_allowed: Option<bool>,
+    #[serde(default)]
+    pub external_rerank_allowed: Option<bool>,
+    #[serde(default)]
+    pub external_summary_allowed: Option<bool>,
+    #[serde(default)]
+    pub external_ocr_allowed: Option<bool>,
+    #[serde(default)]
+    pub redaction_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +116,19 @@ pub struct UpdateLibraryInput {
     pub raptor_llm_model: Option<String>,
     pub chunk_size: Option<usize>,
     pub chunk_overlap: Option<usize>,
+    // P0-016: 库级治理和模型配置
+    pub embedding_provider: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_dimensions: Option<i32>,
+    pub search_profile: Option<String>,
+    pub rerank_enabled: Option<bool>,
+    pub rerank_provider: Option<String>,
+    pub summary_enabled: Option<bool>,
+    pub external_embedding_allowed: Option<bool>,
+    pub external_rerank_allowed: Option<bool>,
+    pub external_summary_allowed: Option<bool>,
+    pub external_ocr_allowed: Option<bool>,
+    pub redaction_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +200,31 @@ pub struct Document {
     pub embedding_error: String,
     pub word_total: i32,
     pub split_total: i32,
+    // P0-010: 扩展文档元数据字段
+    pub title: String,
+    pub summary: String,
+    pub keywords: String,
+    pub entity_names: String,
+    pub source_uri: String,
+    pub modified_at: Option<String>,
+    pub document_date: Option<String>,
+    pub normalized_content_hash: String,
+    pub simhash: String,
+    pub document_family_id: Option<String>,
+    pub version_label: String,
+    pub document_granularity: String,
+    pub content_char_count: i32,
+    pub content_token_count: i32,
+    pub page_count: i32,
+    pub section_count: i32,
+    pub chunk_strategy: String,
+    pub document_status: String,
+    pub index_status: String,
+    pub current_version_id: Option<i64>,
+    pub deleted_at: Option<String>,
+    pub purged_at: Option<String>,
+    pub last_indexed_at: Option<String>,
+    pub last_seen_at: Option<String>,
 }
 
 impl Default for Document {
@@ -184,6 +254,31 @@ impl Default for Document {
             embedding_error: String::new(),
             word_total: 0,
             split_total: 0,
+            // P0-010: 新字段默认值
+            title: String::new(),
+            summary: String::new(),
+            keywords: String::new(),
+            entity_names: String::new(),
+            source_uri: String::new(),
+            modified_at: None,
+            document_date: None,
+            normalized_content_hash: String::new(),
+            simhash: String::new(),
+            document_family_id: None,
+            version_label: String::new(),
+            document_granularity: "micro".to_string(),
+            content_char_count: 0,
+            content_token_count: 0,
+            page_count: 0,
+            section_count: 0,
+            chunk_strategy: "auto".to_string(),
+            document_status: "queued".to_string(),
+            index_status: "pending".to_string(),
+            current_version_id: None,
+            deleted_at: None,
+            purged_at: None,
+            last_indexed_at: None,
+            last_seen_at: None,
         }
     }
 }
@@ -201,6 +296,10 @@ pub struct DocumentListItem {
     pub job_id: String,
     pub folder_id: Option<i64>,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_granularity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +340,14 @@ pub struct DocumentNode {
     pub level: i32,
     pub parent_id: Option<i64>,
     pub chunk_order: i32,
+    // P0-011: 扩展节点元数据字段
+    pub section_id: Option<i64>,
+    pub title_path: String,
+    pub page_number: Option<i32>,
+    pub source_start: Option<i32>,
+    pub source_end: Option<i32>,
+    pub node_metadata: String,
+    pub embedding_text: String,
 }
 
 /// In-memory RAPTOR node (with vector, not stored in DB directly)
@@ -254,6 +361,13 @@ pub struct RaptorNode {
     pub parent_id: Option<i64>,
     pub chunk_order: i32,
     pub vector: Option<Vec<f32>>,
+    // P0-011: 扩展节点元数据字段
+    pub title_path: String,
+    pub page_number: Option<i32>,
+    pub source_start: Option<i32>,
+    pub source_end: Option<i32>,
+    pub node_metadata: String,
+    pub embedding_text: String,
 }
 
 // --- Search model ---

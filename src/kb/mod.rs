@@ -5,6 +5,7 @@
 
 pub mod chinese;
 pub mod engine;
+pub mod granularity;
 pub mod jobs;
 pub mod parser;
 pub mod pipeline;

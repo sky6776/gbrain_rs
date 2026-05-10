@@ -843,8 +843,8 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
 
         Commands::Serve => {
             info!("Starting MCP stdio server");
-            // 当配置启用时，在后台启动 KB worker 线程
-            if config.kb_worker_enabled {
+            // 当 KB 子系统启用且 worker 启用时，在后台启动 KB worker 线程
+            if config.kb_enabled && config.kb_worker_enabled {
                 let kb_db_path = PathBuf::from(db_path.clone());
                 gbrain_core::kb::spawn_kb_worker_thread(
                     kb_db_path,

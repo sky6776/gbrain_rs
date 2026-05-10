@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -893,6 +893,260 @@ pub fn vec_kb_nodes_ddl(dimensions: usize) -> String {
     )
 }
 
+/// 数据库迁移 V17：KB P0 Foundation — 扩展 kb_documents/kb_document_nodes/kb_libraries + 新增 13 张表
+///
+/// 为 KB 子系统补齐核心字段和表结构，支持文档分级、生命周期、多 Embedding 索引、
+/// 搜索评测、表格索引、导入源追踪、外部模型审计等能力。
+pub const MIGRATION_V17_DDL: &str = r#"
+-- ============================================================================
+-- kb_documents 扩展：增加 25 个新字段
+-- ============================================================================
+ALTER TABLE kb_documents ADD COLUMN title TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN keywords TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN entity_names TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN source_uri TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN modified_at TEXT;
+ALTER TABLE kb_documents ADD COLUMN document_date TEXT;
+ALTER TABLE kb_documents ADD COLUMN normalized_content_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN simhash TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN document_family_id TEXT;
+ALTER TABLE kb_documents ADD COLUMN version_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_documents ADD COLUMN document_granularity TEXT NOT NULL DEFAULT 'micro';
+ALTER TABLE kb_documents ADD COLUMN content_char_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_documents ADD COLUMN content_token_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_documents ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_documents ADD COLUMN section_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_documents ADD COLUMN chunk_strategy TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE kb_documents ADD COLUMN document_status TEXT NOT NULL DEFAULT 'queued';
+ALTER TABLE kb_documents ADD COLUMN index_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE kb_documents ADD COLUMN current_version_id INTEGER;
+ALTER TABLE kb_documents ADD COLUMN deleted_at TEXT;
+ALTER TABLE kb_documents ADD COLUMN purged_at TEXT;
+ALTER TABLE kb_documents ADD COLUMN last_indexed_at TEXT;
+ALTER TABLE kb_documents ADD COLUMN last_seen_at TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_kb_docs_document_status ON kb_documents(document_status);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_deleted_at ON kb_documents(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_granularity ON kb_documents(document_granularity);
+
+-- ============================================================================
+-- kb_document_nodes 扩展：增加 7 个新字段
+-- ============================================================================
+ALTER TABLE kb_document_nodes ADD COLUMN section_id INTEGER;
+ALTER TABLE kb_document_nodes ADD COLUMN title_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_document_nodes ADD COLUMN page_number INTEGER;
+ALTER TABLE kb_document_nodes ADD COLUMN source_start INTEGER;
+ALTER TABLE kb_document_nodes ADD COLUMN source_end INTEGER;
+ALTER TABLE kb_document_nodes ADD COLUMN node_metadata TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE kb_document_nodes ADD COLUMN embedding_text TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_section_id ON kb_document_nodes(section_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_page_number ON kb_document_nodes(page_number);
+
+-- ============================================================================
+-- kb_libraries 扩展：增加 11 个治理和模型配置字段
+-- ============================================================================
+ALTER TABLE kb_libraries ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_libraries ADD COLUMN embedding_model TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_libraries ADD COLUMN embedding_dimensions INTEGER;
+ALTER TABLE kb_libraries ADD COLUMN search_profile TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_libraries ADD COLUMN rerank_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE kb_libraries ADD COLUMN rerank_provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE kb_libraries ADD COLUMN summary_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_libraries ADD COLUMN external_embedding_allowed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE kb_libraries ADD COLUMN external_rerank_allowed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE kb_libraries ADD COLUMN external_summary_allowed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE kb_libraries ADD COLUMN external_ocr_allowed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE kb_libraries ADD COLUMN redaction_enabled INTEGER NOT NULL DEFAULT 0;
+
+-- ============================================================================
+-- 新增 13 张表
+-- ============================================================================
+
+-- 1. 文档版本表
+CREATE TABLE IF NOT EXISTS kb_document_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    version_label TEXT NOT NULL DEFAULT '',
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    char_count INTEGER NOT NULL DEFAULT 0,
+    node_count INTEGER NOT NULL DEFAULT 0,
+    index_status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_document_versions(document_id);
+
+-- 2. 文档章节表
+CREATE TABLE IF NOT EXISTS kb_document_sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    parent_section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE SET NULL,
+    title TEXT NOT NULL DEFAULT '',
+    title_path TEXT NOT NULL DEFAULT '',
+    heading_level INTEGER NOT NULL DEFAULT 0,
+    section_order INTEGER NOT NULL DEFAULT 0,
+    page_number INTEGER,
+    source_start INTEGER,
+    source_end INTEGER,
+    content_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_doc ON kb_document_sections(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_parent ON kb_document_sections(parent_section_id);
+
+-- 3. 文档摘要表
+CREATE TABLE IF NOT EXISTS kb_document_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE CASCADE,
+    summary_type TEXT NOT NULL DEFAULT 'document',
+    summary_text TEXT NOT NULL DEFAULT '',
+    summary_tokens TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    UNIQUE(document_id, section_id, summary_type)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_summaries_doc ON kb_document_summaries(document_id);
+
+-- 4. 搜索评测查询集
+CREATE TABLE IF NOT EXISTS kb_search_eval_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    query_text TEXT NOT NULL,
+    query_type TEXT NOT NULL DEFAULT 'manual',
+    expected_document_ids TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT ''
+);
+
+-- 5. 索引状态表（驱动缓存失效和增量重建）
+CREATE TABLE IF NOT EXISTS kb_index_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    index_name TEXT NOT NULL UNIQUE,
+    index_version INTEGER NOT NULL DEFAULT 1,
+    index_type TEXT NOT NULL DEFAULT 'vector',
+    dimensions INTEGER,
+    model TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'active',
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    last_rebuilt_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 6. Embedding 索引注册表（多模型并存）
+CREATE TABLE IF NOT EXISTS kb_embedding_indexes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    index_type TEXT NOT NULL DEFAULT 'vec0',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_kb_emb_idx_library ON kb_embedding_indexes(library_id);
+
+-- 7. 搜索日志表
+CREATE TABLE IF NOT EXISTS kb_search_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    query_normalized TEXT NOT NULL DEFAULT '',
+    library_ids TEXT NOT NULL DEFAULT '[]',
+    profile TEXT NOT NULL DEFAULT '',
+    planner_type TEXT NOT NULL DEFAULT '',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    debug_mode INTEGER NOT NULL DEFAULT 0
+);
+
+-- 8. 搜索反馈表
+CREATE TABLE IF NOT EXISTS kb_search_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    search_log_id INTEGER REFERENCES kb_search_logs(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL DEFAULT 0,
+    comment TEXT NOT NULL DEFAULT ''
+);
+
+-- 9. 表格元数据表
+CREATE TABLE IF NOT EXISTS kb_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    sheet_name TEXT NOT NULL DEFAULT '',
+    headers TEXT NOT NULL DEFAULT '[]',
+    column_count INTEGER NOT NULL DEFAULT 0,
+    row_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_kb_tables_doc ON kb_tables(document_id);
+
+-- 10. 表格行数据表
+CREATE TABLE IF NOT EXISTS kb_table_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    table_id INTEGER NOT NULL REFERENCES kb_tables(id) ON DELETE CASCADE,
+    row_index INTEGER NOT NULL DEFAULT 0,
+    row_text TEXT NOT NULL DEFAULT '',
+    row_tokens TEXT NOT NULL DEFAULT '',
+    row_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_table_rows_table ON kb_table_rows(table_id);
+
+-- 11. 外部模型调用审计表
+CREATE TABLE IF NOT EXISTS kb_external_model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    call_type TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cost_estimate REAL NOT NULL DEFAULT 0.0,
+    success INTEGER NOT NULL DEFAULT 1,
+    error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_ext_calls_library ON kb_external_model_calls(library_id);
+
+-- 12. 导入源表
+CREATE TABLE IF NOT EXISTS kb_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL DEFAULT 'local',
+    source_uri TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    connector_config TEXT NOT NULL DEFAULT '{}',
+    delete_policy TEXT NOT NULL DEFAULT 'mark_only',
+    sync_status TEXT NOT NULL DEFAULT 'idle',
+    last_synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sources_library ON kb_sources(library_id);
+
+-- 13. 导入源条目表（增量同步追踪）
+CREATE TABLE IF NOT EXISTS kb_source_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source_id INTEGER NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    item_path TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    sync_error TEXT NOT NULL DEFAULT '',
+    UNIQUE(source_id, item_path)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -911,5 +1165,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (14, MIGRATION_V14_DDL),
         (15, MIGRATION_V15_DDL),
         (16, MIGRATION_V16_DDL),
+        (17, MIGRATION_V17_DDL),
     ]
 }

@@ -149,6 +149,14 @@ impl Default for Config {
     }
 }
 
+/// Resolved RAPTOR LLM configuration (avoids cross-module dependency).
+#[derive(Debug, Clone)]
+pub struct ResolvedRaptorConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+}
+
 impl Config {
     /// Load configuration from environment and config file
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
@@ -391,6 +399,51 @@ impl Config {
                 .or(self.openai_base_url.as_deref()),
             _ => self.transcription_groq_base_url.as_deref(),
         }
+    }
+
+    /// 解析 RAPTOR LLM 配置，按优先级：
+    /// 1. GBRAIN_KB_RAPTOR_* 环境变量
+    /// 2. kb_raptor_secret_ref 指向的环境变量
+    /// 3. expansion_api/chunker_api 的 fallback
+    /// 4. 默认值 "https://api.openai.com/v1" / "gpt-4o-mini"
+    pub fn raptor_config_resolved(&self) -> ResolvedRaptorConfig {
+        // API key: GBRAIN_KB_RAPTOR_API_KEY env → kb_raptor_secret_ref → expansion → chunker → shared
+        let api_key = std::env::var("GBRAIN_KB_RAPTOR_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.kb_raptor_secret_ref
+                    .as_deref()
+                    .and_then(|ref_name| std::env::var(ref_name).ok())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| self.expansion_api_key_resolved().map(|s| s.to_string()))
+            .or_else(|| self.chunker_api_key_resolved().map(|s| s.to_string()))
+            .unwrap_or_default();
+        // base_url: KB env → KB config → expansion → chunker → shared
+        let base_url = std::env::var("GBRAIN_KB_RAPTOR_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.kb_raptor_base_url.clone().filter(|s| !s.is_empty()))
+            .or_else(|| self.expansion_base_url_resolved().map(|s| s.to_string()))
+            .or_else(|| self.chunker_base_url_resolved().map(|s| s.to_string()))
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        // model: KB env → KB config → expansion → chunker → default
+        let model = std::env::var("GBRAIN_KB_RAPTOR_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if !self.kb_raptor_model.is_empty() {
+                    self.kb_raptor_model.clone()
+                } else if !self.expansion_model.is_empty() {
+                    self.expansion_model.clone()
+                } else if !self.chunker_model.is_empty() {
+                    self.chunker_model.clone()
+                } else {
+                    "gpt-4o-mini".to_string()
+                }
+            });
+        ResolvedRaptorConfig { api_key, base_url, model }
     }
 
     /// Save configuration to config.json with restrictive permissions (0o600 on Unix).

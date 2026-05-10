@@ -966,6 +966,8 @@ impl McpServer {
             }
 
             // --- KB subsystem tools ---
+            // 【KB 总入口守卫】⚠️ 此 catch-all 必须在所有具体 kb_* handler 之前！
+            // 当 kb_enabled=false 时，拦截所有 kb_* 前缀的工具调用。
             _ if tool_name.starts_with("kb_") && !self.config.kb_enabled => {
                 Err(GBrainError::InvalidInput(
                     "KB subsystem is disabled (kb_enabled=false)".to_string(),
@@ -1000,6 +1002,19 @@ impl McpServer {
                         .as_u64()
                         .map(|v| v as usize),
                     batch_max_chunks: arguments["batch_max_chunks"].as_u64().map(|v| v as usize),
+                    // P0-016: 库级治理和模型配置
+                    embedding_provider: arguments["embedding_provider"].as_str().map(|s| s.to_string()),
+                    embedding_model: arguments["embedding_model"].as_str().map(|s| s.to_string()),
+                    embedding_dimensions: arguments["embedding_dimensions"].as_i64().map(|v| v as i32),
+                    search_profile: arguments["search_profile"].as_str().map(|s| s.to_string()),
+                    rerank_enabled: arguments["rerank_enabled"].as_bool(),
+                    rerank_provider: arguments["rerank_provider"].as_str().map(|s| s.to_string()),
+                    summary_enabled: arguments["summary_enabled"].as_bool(),
+                    external_embedding_allowed: arguments["external_embedding_allowed"].as_bool(),
+                    external_rerank_allowed: arguments["external_rerank_allowed"].as_bool(),
+                    external_summary_allowed: arguments["external_summary_allowed"].as_bool(),
+                    external_ocr_allowed: arguments["external_ocr_allowed"].as_bool(),
+                    redaction_enabled: arguments["redaction_enabled"].as_bool(),
                 };
                 let id = kb.create_library(&input)?;
                 Ok(serde_json::json!({"id": id}))
@@ -1024,6 +1039,19 @@ impl McpServer {
                         .map(|s| s.to_string()),
                     chunk_size: arguments["chunk_size"].as_u64().map(|v| v as usize),
                     chunk_overlap: arguments["chunk_overlap"].as_u64().map(|v| v as usize),
+                    // P0-016: 库级治理和模型配置
+                    embedding_provider: arguments["embedding_provider"].as_str().map(|s| s.to_string()),
+                    embedding_model: arguments["embedding_model"].as_str().map(|s| s.to_string()),
+                    embedding_dimensions: arguments["embedding_dimensions"].as_i64().map(|v| v as i32),
+                    search_profile: arguments["search_profile"].as_str().map(|s| s.to_string()),
+                    rerank_enabled: arguments["rerank_enabled"].as_bool(),
+                    rerank_provider: arguments["rerank_provider"].as_str().map(|s| s.to_string()),
+                    summary_enabled: arguments["summary_enabled"].as_bool(),
+                    external_embedding_allowed: arguments["external_embedding_allowed"].as_bool(),
+                    external_rerank_allowed: arguments["external_rerank_allowed"].as_bool(),
+                    external_summary_allowed: arguments["external_summary_allowed"].as_bool(),
+                    external_ocr_allowed: arguments["external_ocr_allowed"].as_bool(),
+                    redaction_enabled: arguments["redaction_enabled"].as_bool(),
                 };
                 kb.update_library(library_id, &input)?;
                 Ok(serde_json::json!({"ok": true}))
@@ -1059,7 +1087,12 @@ impl McpServer {
                     &self.config.kb_allowed_extensions,
                 )?;
 
-                let ext = crate::kb::security::validated_extension(&validated_path)?;
+                // 扩展名已在 validate_upload_source 中通过 config.kb_allowed_extensions 验证
+                let ext = validated_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
                 let file_data = std::fs::read(&validated_path)?;
                 let mime = crate::kb::security::detect_and_validate_mime(&file_data, &ext)?;
 
@@ -1260,7 +1293,8 @@ impl McpServer {
                     .as_u64()
                     .map(|v| v as usize)
                     .unwrap_or(50);
-                let docs = kb.list_documents(library_id, folder_id, limit)?;
+                let offset = arguments["offset"].as_u64().map(|v| v as usize).unwrap_or(0);
+                let docs = kb.list_documents(library_id, folder_id, limit, offset)?;
                 Ok(serde_json::to_value(docs)?)
             }
 

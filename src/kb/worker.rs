@@ -124,8 +124,12 @@ pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs:
 }
 
 /// 在独立线程中启动 KB worker 守护进程。
-/// 返回数据库路径，调用方需自行创建 SqliteEngine。
 pub fn spawn_kb_worker_thread(db_path: PathBuf, config: Config, interval_secs: u64) {
+    // 防御性检查：kb_enabled=false 时不启动 worker
+    if !config.kb_enabled {
+        info!("KB subsystem is disabled, worker thread not spawned");
+        return;
+    }
     std::thread::Builder::new()
         .name("kb-worker".to_string())
         .spawn(move || {

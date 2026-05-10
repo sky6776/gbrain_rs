@@ -367,6 +367,12 @@ where
                     parent_id: None,
                     chunk_order: 0,
                     vector: None,
+                    title_path: String::new(),
+                    page_number: None,
+                    source_start: None,
+                    source_end: None,
+                    node_metadata: String::new(),
+                    embedding_text: String::new(),
                 };
 
                 for node in nodes.iter_mut() {
@@ -394,6 +400,12 @@ where
                 parent_id: None,
                 chunk_order: 0,
                 vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text: String::new(),
             };
 
             for node in nodes.iter_mut() {
@@ -452,6 +464,12 @@ where
                 parent_id: None,
                 chunk_order: cluster_idx as i32,
                 vector: avg_vector,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text: String::new(),
             };
 
             for node in nodes.iter_mut() {
@@ -507,6 +525,12 @@ mod tests {
                 parent_id: None,
                 chunk_order: 0,
                 vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text: String::new(),
             },
             RaptorNode {
                 id: 2,
@@ -517,6 +541,12 @@ mod tests {
                 parent_id: None,
                 chunk_order: 1,
                 vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text: String::new(),
             },
         ];
         let refs: Vec<&RaptorNode> = nodes.iter().collect();

@@ -436,6 +436,7 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "library_id", description: "Library ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "folder_id", description: "Optional folder ID to filter documents", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "limit", description: "Max results (default 50)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "offset", description: "Skip first N results (for pagination)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {

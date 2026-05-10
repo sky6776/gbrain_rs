@@ -157,6 +157,12 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             parent_id: None,
             chunk_order: i as i32,
             vector: None,
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            node_metadata: String::new(),
+            embedding_text: String::new(),
         })
         .collect();
 
@@ -316,6 +322,12 @@ pub async fn process_document_async(
             parent_id: None,
             chunk_order: i as i32,
             vector: None,
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            node_metadata: String::new(),
+            embedding_text: String::new(),
         })
         .collect();
 
@@ -395,6 +407,12 @@ pub async fn process_document_async(
                                     parent_id: None,
                                     chunk_order: i as i32,
                                     vector: None,
+                                    title_path: String::new(),
+                                    page_number: None,
+                                    source_start: None,
+                                    source_end: None,
+                                    node_metadata: String::new(),
+                                    embedding_text: String::new(),
                                 })
                                 .collect();
                             let refs: Vec<&RaptorNode> = temp_nodes.iter().collect();
@@ -478,10 +496,10 @@ pub async fn ingest_directory(
         )));
     }
 
-    let supported_extensions = SUPPORTED_EXTENSIONS;
+    let supported_extensions: &[&str] = &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
-    collect_supported_files(dir_path, &supported_extensions, &mut files);
+    collect_supported_files(dir_path, supported_extensions, &mut files);
 
     if files.is_empty() {
         report_progress(on_progress, "done", "未找到支持的文件");
