@@ -3,19 +3,31 @@
 //! Handles document upload, parsing, splitting, embedding, RAPTOR summarization,
 //! and hybrid search (vector + FTS5 + RRF).
 
+pub mod backup;
+pub mod cache;
 pub mod chinese;
 pub mod context;
+pub mod cost;
+pub mod embedding_index;
 pub mod engine;
+pub mod eval;
 pub mod granularity;
+pub mod health;
 pub mod jobs;
 pub mod lifecycle;
 pub mod metadata;
+pub mod ocr;
 pub mod parser;
 pub mod pipeline;
+pub mod planner;
+pub mod privacy;
 pub mod raptor;
+pub mod rerank;
 pub mod search;
 pub mod security;
 pub mod splitter;
+pub mod sync;
+pub mod table_index;
 pub mod types;
 pub mod worker;
 
