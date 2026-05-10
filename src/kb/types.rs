@@ -378,6 +378,36 @@ pub struct KbSearchInput {
     pub query: String,
     pub level: Option<i32>,
     pub top_k: usize,
+    // P3-028: 扩展搜索参数
+    pub profile: Option<String>,
+    pub planner_override: Option<String>,
+    pub debug: bool,
+    pub include_context: bool,
+    pub context_before: usize,
+    pub context_after: usize,
+    pub include_highlights: bool,
+    pub group_by_document: bool,
+    pub folder_id: Option<i64>,
+}
+
+impl Default for KbSearchInput {
+    fn default() -> Self {
+        Self {
+            library_ids: vec![],
+            query: String::new(),
+            level: None,
+            top_k: 10,
+            profile: None,
+            planner_override: None,
+            debug: false,
+            include_context: false,
+            context_before: 200,
+            context_after: 200,
+            include_highlights: false,
+            group_by_document: false,
+            folder_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +420,23 @@ pub struct KbSearchResult {
     pub score: f64,
     pub library_id: i64,
     pub library_name: String,
+    // P3-024~027: 扩展返回字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_number: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight_ranges: Option<Vec<(usize, usize)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_signals: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

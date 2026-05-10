@@ -65,7 +65,20 @@ impl DocumentParser for PdfParser {
         metadata.insert("needs_ocr".to_string(), needs_ocr.to_string());
         metadata.insert("low_density_pages".to_string(), low_density_pages.to_string());
 
-        Ok(ParsedDocument { content, metadata })
+        // P1-010/P2-004: 构建结构化 blocks（每页一个 block，带 page_number）
+        let blocks: Vec<crate::kb::types::ParsedBlock> = page_texts.iter().enumerate().map(|(i, text)| {
+            crate::kb::types::ParsedBlock {
+                text: text.clone(),
+                title_path: String::new(),
+                page_number: Some((i + 1) as i32),
+                source_start: None,
+                source_end: None,
+                block_type: "page".to_string(),
+                metadata: String::new(),
+            }
+        }).collect();
+
+        Ok(ParsedDocument { content, metadata, blocks: Some(blocks) })
     }
 
     fn extensions(&self) -> &[&str] {

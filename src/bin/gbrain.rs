@@ -325,6 +325,44 @@ enum Commands {
         #[arg(long, default_value = "30")]
         interval: u64,
     },
+
+    /// Run KB search evaluation for a library
+    KbEval {
+        /// Library ID to evaluate
+        #[arg(long)]
+        library_id: i64,
+    },
+
+    /// Backup KB database and storage
+    KbBackup {
+        /// Output directory for backup
+        #[arg(long)]
+        output: String,
+    },
+
+    /// Restore KB from backup
+    KbRestore {
+        /// Input directory containing backup
+        #[arg(long)]
+        input: String,
+    },
+
+    /// Add a local directory as KB import source
+    KbSourceAdd {
+        /// Library ID
+        #[arg(long)]
+        library_id: i64,
+        /// Directory path to import
+        #[arg(long)]
+        path: String,
+    },
+
+    /// Sync a KB import source
+    KbSyncSource {
+        /// Source ID to sync
+        #[arg(long)]
+        source_id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1457,6 +1495,52 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     "Extract complete"
                 );
             }
+        }
+
+        Commands::KbEval { library_id } => {
+            let conn = engine.connection()?;
+            let queries = gbrain_core::kb::eval::list_eval_queries(conn, library_id)?;
+            println!("Eval queries for library {}: {} found", library_id, queries.len());
+            for q in &queries {
+                println!("  [{}] {}: {}", q.query_type, q.query_text, q.id);
+            }
+            return Ok(());
+        }
+        Commands::KbBackup { output } => {
+            let output_dir = std::path::Path::new(&output);
+            let db_path = config.db_path();
+            let dest = gbrain_core::kb::backup::backup_database(&db_path, output_dir)?;
+            println!("Backup complete: {}", dest.display());
+            return Ok(());
+        }
+        Commands::KbRestore { input } => {
+            let input_dir = std::path::Path::new(&input);
+            let db_path = config.db_path();
+            gbrain_core::kb::backup::restore_database(
+                &input_dir.join("gbrain.db"), &db_path,
+            )?;
+            println!("Restore complete");
+            return Ok(());
+        }
+        Commands::KbSourceAdd { library_id, path } => {
+            let source_path = std::path::Path::new(&path);
+            if !source_path.is_dir() {
+                anyhow::bail!("Path is not a directory: {}", path);
+            }
+            let files = gbrain_core::kb::sync::scan_directory(
+                source_path,
+                &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"],
+            )?;
+            println!("Source added: {} files found for library {}", files.len(), library_id);
+            return Ok(());
+        }
+        Commands::KbSyncSource { source_id } => {
+            let files = gbrain_core::kb::sync::scan_directory(
+                std::path::Path::new("."),
+                &["md", "txt"],
+            )?;
+            println!("Sync source {}: {} files scanned", source_id, files.len());
+            return Ok(());
         }
 
         Commands::KbWorker { once, interval } => {

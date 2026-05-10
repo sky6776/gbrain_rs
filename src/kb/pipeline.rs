@@ -345,16 +345,24 @@ pub async fn process_document_async(
 
     let split_total: i32 = chunks.len() as i32;
 
+    // P1-010: 从 parser blocks 中提取每块的元数据
+    let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed.blocks.as_ref()
+        .map(|blocks| blocks.iter().map(|b| {
+            (b.title_path.clone(), b.page_number, b.source_start, b.source_end)
+        }).collect())
+        .unwrap_or_default();
+
     // P1-006/P1-007: 根据粒度应用节点策略 + P1-011: 生成 contextual embedding 文本
-    let doc_title = ""; // metadata 将在 P1-013 后可用
+    let doc_title = doc_meta.title.as_deref().unwrap_or("");
     let mut nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
+            let (title_path, page_num, src_start, src_end) = block_meta_vec.get(i)
+                .cloned()
+                .unwrap_or_default();
             let embedding_text = crate::kb::context::build_embedding_text(
-                doc_title, "", // title_path 待 parser 提供
-                None,         // page_number 待 parser 提供
-                chunk,
+                doc_title, &title_path, page_num, chunk,
             );
             RaptorNode {
                 id: -((i as i64) + 1),
@@ -365,15 +373,49 @@ pub async fn process_document_async(
                 parent_id: None,
                 chunk_order: i as i32,
                 vector: None,
-                title_path: String::new(),
-                page_number: None,
-                source_start: None,
-                source_end: None,
+                title_path,
+                page_number: page_num,
+                source_start: src_start,
+                source_end: src_end,
                 node_metadata: String::new(),
                 embedding_text,
             }
         })
         .collect();
+
+    // P2-013/P2-014: 表格文档写入 kb_tables / kb_table_rows
+    if granularity == crate::kb::granularity::DocumentGranularity::Table {
+        if let Some(ref blocks) = parsed.blocks {
+            for block in blocks {
+                if block.block_type == "table" && !block.metadata.is_empty() {
+                    if let Ok(sheet_data) = serde_json::from_str::<serde_json::Value>(&block.metadata) {
+                        if let Some(name) = sheet_data.get("name").and_then(|v| v.as_str()) {
+                            let headers: Vec<String> = sheet_data.get("headers")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                .unwrap_or_default();
+                            let row_count = sheet_data.get("row_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            if let Ok(table_id) = crate::kb::table_index::insert_table(
+                                conn, doc_id, name, &headers, row_count,
+                            ) {
+                                if let Some(rows) = sheet_data.get("rows").and_then(|v| v.as_array()) {
+                                    for (ri, row) in rows.iter().enumerate() {
+                                        let row_text = headers.iter().enumerate()
+                                            .filter_map(|(hi, h)| row.get(h).and_then(|v| v.as_str()).map(|s| format!("{}: {}", h, s)))
+                                            .collect::<Vec<_>>().join(" ");
+                                        let row_json = serde_json::to_string(row).unwrap_or_default();
+                                        let _ = crate::kb::table_index::insert_table_row(
+                                            conn, table_id, ri as i32, &row_text, &row_json,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // P1-006: micro 文档策略 — 仅保留一个 whole-document node
     if granularity == crate::kb::granularity::DocumentGranularity::Micro {

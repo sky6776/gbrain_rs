@@ -54,7 +54,7 @@ impl DocumentParser for CsvParser {
                 serde_json::to_string(&row_records).unwrap_or_default());
         }
 
-        Ok(ParsedDocument { content, metadata })
+        Ok(ParsedDocument { content, metadata, blocks: None })
     }
 
     fn extensions(&self) -> &[&str] {

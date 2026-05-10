@@ -17,6 +17,9 @@ use std::sync::Arc;
 pub struct ParsedDocument {
     pub content: String,
     pub metadata: HashMap<String, String>,
+    /// P1-010: 结构化 block 列表（含 title_path/page/source offsets/block_type）
+    /// 解析器应尽量填充此字段；为 None 时 pipeline 回退到 content 字符串
+    pub blocks: Option<Vec<crate::kb::types::ParsedBlock>>,
 }
 
 /// Document parser trait

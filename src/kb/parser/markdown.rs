@@ -21,6 +21,7 @@ impl DocumentParser for MarkdownParser {
         Ok(ParsedDocument {
             content,
             metadata: HashMap::new(),
+            blocks: None,
         })
     }
 

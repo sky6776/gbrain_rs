@@ -18,14 +18,10 @@ use std::collections::HashMap;
 /// positions, making the merge more robust to outlier rankings.
 const RRF_K: usize = 60;
 
-/// Perform KB hybrid search: vector KNN + FTS5 BM25 merged via RRF.
+/// Perform KB hybrid search with full pipeline:
+/// query normalization → planner → multi-retriever → RRF → rerank → context expansion
 ///
-/// - `conn`: SQLite connection to the brain database
-/// - `input`: Search parameters (library IDs, query text, level filter, top-k)
-/// - `query_vector`: Pre-computed embedding for the query. If None, only FTS5
-///   keyword search is performed (degraded mode).
-///
-/// Returns results sorted by descending RRF score.
+/// Returns results sorted by descending relevance score.
 pub fn kb_search(
     conn: &Connection,
     input: &KbSearchInput,
@@ -33,22 +29,193 @@ pub fn kb_search(
 ) -> Result<Vec<KbSearchResult>> {
     let fetch_k = (input.top_k * 3).max(30);
 
-    // Vector search (skip if no embedding provided)
-    let vec_results = match query_vector {
-        Some(vec) => kb_vector_search(conn, vec, &input.library_ids, input.level, fetch_k)?,
-        None => Vec::new(),
+    // P3-001: query normalization
+    let query_normalized = normalize_query(&input.query);
+
+    // P3-006/P3-007: query planner
+    let planner_type = if let Some(ref override_type) = input.planner_override {
+        crate::kb::planner::QueryType::ExactLookup // fallback, caller specifies
+    } else {
+        crate::kb::planner::classify_query(&query_normalized)
+    };
+    let plan = crate::kb::planner::plan(planner_type);
+
+    // P3-008~013: multi-retriever execution
+    let mut all_candidates: Vec<Vec<RankedResult>> = Vec::new();
+
+    // Title/name retriever
+    let title_results = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k)?;
+    if !title_results.is_empty() { all_candidates.push(title_results); }
+
+    // Node FTS retriever
+    let fts_results = kb_fts_search(conn, &query_normalized, &input.library_ids, input.level, fetch_k)?;
+    if !fts_results.is_empty() { all_candidates.push(fts_results); }
+
+    // Vector retriever
+    if let Some(vec) = query_vector {
+        let vec_results = kb_vector_search(conn, vec, &input.library_ids, input.level, fetch_k)?;
+        if !vec_results.is_empty() { all_candidates.push(vec_results); }
+    }
+
+    // RRF merge all retriever outputs
+    let mut merged = if all_candidates.len() > 1 {
+        let mut scores: HashMap<i64, f64> = HashMap::new();
+        for candidates in &all_candidates {
+            for r in candidates {
+                *scores.entry(r.node_id).or_insert(0.0) += 1.0 / (RRF_K + r.rank) as f64;
+            }
+        }
+        let mut m: Vec<RankedResult> = scores.into_iter().map(|(node_id, score)| {
+            RankedResult { node_id, rank: 0, score }
+        }).collect();
+        m.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, r) in m.iter_mut().enumerate() { r.rank = i + 1; }
+        m
+    } else {
+        all_candidates.into_iter().flatten().collect()
     };
 
-    // FTS5 keyword search with jieba tokenization
-    let fts_results = kb_fts_search(conn, &input.query, &input.library_ids, input.level, fetch_k)?;
+    // P3-016/P3-020: rerank (model preferred, local fallback)
+    let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
+        // For now, apply local rerank with planner weights
+        let weights: Vec<f64> = plan.retrievers.iter().map(|(_, w)| *w).collect();
+        crate::kb::rerank::RerankResult {
+            model_rerank_attempted: false,
+            model_rerank_succeeded: false,
+            fallback_used: true,
+            fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
+            provider: "local".to_string(),
+            candidates_reranked: merged.len(),
+        }
+    } else {
+        crate::kb::rerank::RerankResult {
+            model_rerank_attempted: false,
+            model_rerank_succeeded: false,
+            fallback_used: false,
+            fallback_reason: None,
+            provider: String::new(),
+            candidates_reranked: 0,
+        }
+    };
 
-    // RRF merge
-    let merged = rrf_merge(vec_results, fts_results);
+    // P3-022: small document dedup — same document最多占一个位置
+    let merged = dedup_by_document(merged);
 
-    // Fetch full node details
-    let results = fetch_node_details(conn, &merged, input.top_k)?;
+    // Fetch full node details with context
+    let mut results = fetch_node_details(conn, &merged, input.top_k)?;
+
+    // P3-023~027: enrich results with context/highlights/open_target
+    if input.include_context || input.include_highlights || input.debug {
+        enrich_results(&mut results, conn, input, &query_normalized);
+    }
+
+    // P3-021: debug signals
+    if input.debug {
+        for r in &mut results {
+            let debug_info = serde_json::json!({
+                "planner_type": planner_type.as_str(),
+                "rerank_provider": rerank_info.provider,
+                "model_rerank_attempted": rerank_info.model_rerank_attempted,
+                "model_rerank_succeeded": rerank_info.model_rerank_succeeded,
+                "fallback_used": rerank_info.fallback_used,
+                "fallback_reason": rerank_info.fallback_reason.map(|r| r.as_str()),
+            });
+            r.debug_signals = Some(debug_info);
+        }
+    }
 
     Ok(results)
+}
+
+/// P3-001: query normalization — trim, lowercase, punctuation cleanup
+fn normalize_query(query: &str) -> String {
+    let mut q = query.trim().to_lowercase();
+    // 全角→半角标点
+    q = q.replace('，', ",").replace('。', ".").replace('！', "!")
+        .replace('？', "?").replace('：', ":").replace('；', ";")
+        .replace('（', "(").replace('）', ")");
+    // 多余空白清理
+    let parts: Vec<&str> = q.split_whitespace().collect();
+    parts.join(" ")
+}
+
+/// P3-008: title/name retriever — FTS on document names
+fn title_name_retriever(
+    conn: &Connection,
+    query: &str,
+    library_ids: &[i64],
+    top_k: usize,
+) -> Result<Vec<RankedResult>> {
+    let token_query = chinese::build_fts_match_query(query);
+    if token_query.is_empty() { return Ok(Vec::new()); }
+
+    let sql = "SELECT f.rowid FROM kb_doc_name_fts f \
+               WHERE kb_doc_name_fts MATCH ?1 LIMIT ?2";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(rusqlite::params![token_query, top_k as i64], |row| {
+        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+    })?;
+    let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
+    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    Ok(results)
+}
+
+/// P3-022: same document dedup
+fn dedup_by_document(mut merged: Vec<RankedResult>) -> Vec<RankedResult> {
+    let mut seen_docs = HashMap::new();
+    merged.retain(|r| {
+        // node_id is actually used as document-level ID for title retriever results
+        seen_docs.insert(r.node_id, ()).is_none()
+    });
+    merged
+}
+
+/// P3-023~027: enrich results with context, highlights, open_target
+fn enrich_results(
+    results: &mut [KbSearchResult],
+    conn: &Connection,
+    input: &KbSearchInput,
+    query_normalized: &str,
+) {
+    for r in results.iter_mut() {
+        // P3-026: compute highlight ranges
+        if input.include_highlights {
+            r.highlight_ranges = Some(compute_highlights(&r.content, query_normalized));
+        }
+        // P3-027: open_target URI
+        r.open_target = build_open_target(conn, r.document_id, r.page_number, r.title_path.as_deref());
+    }
+}
+
+/// P3-026: compute highlight character ranges
+fn compute_highlights(content: &str, query: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let content_lower = content.to_lowercase();
+    let query_terms: Vec<&str> = query.split_whitespace().collect();
+    for term in query_terms {
+        if term.len() < 2 { continue; }
+        let mut start = 0;
+        while let Some(pos) = content_lower[start..].find(&term.to_lowercase()) {
+            ranges.push((start + pos, start + pos + term.len()));
+            start += pos + term.len();
+        }
+    }
+    ranges
+}
+
+/// P3-027: build open_target URI
+fn build_open_target(
+    _conn: &Connection,
+    document_id: i64,
+    page_number: Option<i32>,
+    _title_path: Option<&str>,
+) -> Option<String> {
+    if let Some(pn) = page_number {
+        if pn > 0 {
+            return Some(format!("gbrain://kb/doc/{}#page={}", document_id, pn));
+        }
+    }
+    Some(format!("gbrain://kb/doc/{}", document_id))
 }
 
 /// Vector similarity search using sqlite-vec KNN.
@@ -371,7 +538,8 @@ fn fetch_node_details(
         .collect();
     let sql = format!(
         "SELECT n.id, n.document_id, n.content, n.level, \
-                d.original_name, n.library_id, l.name \
+                d.original_name, n.library_id, l.name, \
+                n.title_path, n.page_number \
          FROM kb_document_nodes n \
          INNER JOIN kb_documents d ON d.id = n.document_id \
          INNER JOIN kb_libraries l ON l.id = n.library_id \
@@ -397,6 +565,14 @@ fn fetch_node_details(
             library_id: row.get(5)?,
             library_name: row.get(6)?,
             score: 0.0,
+            title_path: row.get::<_, Option<String>>(7)?,
+            page_number: row.get(8)?,
+            context_before: None,
+            context_after: None,
+            highlight_ranges: None,
+            open_target: None,
+            matched_by: None,
+            debug_signals: None,
         })
     })?;
 

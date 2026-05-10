@@ -38,7 +38,9 @@ impl DocumentParser for HtmlParser {
             .map_err(|e| GBrainError::FileError(format!("HTML parse failed: {}", e)))?;
         let content = clean_html_text(&text);
 
-        Ok(ParsedDocument { content, metadata })
+        // P1-010/P2-010: 构建结构化 blocks（按标题层级分段）
+        let blocks = build_html_blocks(&text, &headings);
+        Ok(ParsedDocument { content, metadata, blocks: Some(blocks) })
     }
 
     fn extensions(&self) -> &[&str] {
@@ -142,6 +144,29 @@ fn clean_html_text(text: &str) -> String {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// P2-010: 从纯文本和标题列表构建 ParsedBlock
+fn build_html_blocks(text: &str, headings: &[String]) -> Vec<crate::kb::types::ParsedBlock> {
+    let heading_str = if headings.is_empty() { String::new() } else { headings.join(" > ") };
+    let paragraphs: Vec<&str> = text.split("\n\n").filter(|p| !p.trim().is_empty()).collect();
+    if paragraphs.is_empty() {
+        return vec![crate::kb::types::ParsedBlock::paragraph(text)];
+    }
+    let mut offset = 0usize;
+    paragraphs.iter().map(|p| {
+        let start = offset as i32;
+        offset += p.len() + 2; // +2 for \n\n separator
+        crate::kb::types::ParsedBlock {
+            text: p.to_string(),
+            title_path: heading_str.clone(),
+            page_number: None,
+            source_start: Some(start),
+            source_end: Some(offset as i32 - 2),
+            block_type: "paragraph".to_string(),
+            metadata: String::new(),
+        }
+    }).collect()
 }
 
 #[cfg(test)]

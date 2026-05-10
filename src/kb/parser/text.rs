@@ -21,6 +21,7 @@ impl DocumentParser for TextParser {
         Ok(ParsedDocument {
             content,
             metadata: HashMap::new(),
+            blocks: None,
         })
     }
 

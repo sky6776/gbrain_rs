@@ -23,7 +23,7 @@ impl DocumentParser for DocxParser {
         if !headings.is_empty() {
             metadata.insert("headings".to_string(), headings.join(" > "));
         }
-        Ok(ParsedDocument { content, metadata })
+        Ok(ParsedDocument { content, metadata, blocks: None })
     }
 
     fn extensions(&self) -> &[&str] {

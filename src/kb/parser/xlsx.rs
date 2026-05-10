@@ -75,7 +75,21 @@ impl DocumentParser for XlsxParser {
         metadata.insert("sheet_data".to_string(),
             serde_json::to_string(&sheet_metas).unwrap_or_default());
 
-        Ok(ParsedDocument { content, metadata })
+        // P1-010/P2-012: 构建结构化 blocks（每 sheet 一个 block）
+        let blocks: Vec<crate::kb::types::ParsedBlock> = parts.iter().enumerate().map(|(i, text)| {
+            crate::kb::types::ParsedBlock {
+                text: text.clone(),
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                block_type: "table".to_string(),
+                metadata: if i < sheet_metas.len() {
+                    serde_json::to_string(&sheet_metas[i]).unwrap_or_default()
+                } else { String::new() },
+            }
+        }).collect();
+        Ok(ParsedDocument { content, metadata, blocks: Some(blocks) })
     }
 
     fn extensions(&self) -> &[&str] {

@@ -1327,11 +1327,21 @@ impl McpServer {
                     .unwrap_or(10)
                     .min(50);
 
+                let debug = arguments["debug"].as_bool().unwrap_or(false);
+                let profile = arguments["profile"].as_str().map(|s| s.to_string());
                 let input = crate::kb::types::KbSearchInput {
                     query: query.to_string(),
                     library_ids,
                     level,
                     top_k,
+                    profile,
+                    debug,
+                    include_context: arguments["include_context"].as_bool().unwrap_or(false),
+                    context_before: arguments["context_before"].as_u64().map(|v| v as usize).unwrap_or(200),
+                    context_after: arguments["context_after"].as_u64().map(|v| v as usize).unwrap_or(200),
+                    include_highlights: arguments["include_highlights"].as_bool().unwrap_or(false),
+                    group_by_document: arguments["group_by_document"].as_bool().unwrap_or(false),
+                    ..Default::default()
                 };
 
                 // 尝试计算查询向量以启用混合搜索
@@ -1371,6 +1381,60 @@ impl McpServer {
                     name: arguments["name"].as_str().unwrap_or("").to_string(),
                 };
                 let id = kb.create_folder(&input)?;
+                Ok(serde_json::json!({"id": id}))
+            }
+
+            // --- P5/P6: KB operations & governance tools ---
+            "kb_check_index_health" => {
+                let conn = self.engine.connection()?;
+                let health = crate::kb::health::check_index_health(conn)?;
+                Ok(serde_json::to_value(health)?)
+            }
+            "kb_repair_index" => {
+                let conn = self.engine.connection()?;
+                let repaired = crate::kb::health::repair_fts(conn)?;
+                Ok(serde_json::json!({"repaired_fts_rows": repaired}))
+            }
+            "kb_backup" => {
+                let output = arguments["output"].as_str().unwrap_or("");
+                if output.is_empty() {
+                    return Err(GBrainError::InvalidInput("output path required".into()));
+                }
+                let output_dir = std::path::Path::new(output);
+                let db_path = self.config.db_path();
+                crate::kb::backup::backup_database(&db_path, output_dir)?;
+                let manifest = crate::kb::backup::create_manifest(17, vec![], vec![], 0, 0);
+                Ok(serde_json::to_value(manifest)?)
+            }
+            "kb_restore" => {
+                let input = arguments["input"].as_str().unwrap_or("");
+                if input.is_empty() {
+                    return Err(GBrainError::InvalidInput("input path required".into()));
+                }
+                let db_path = self.config.db_path();
+                crate::kb::backup::restore_database(std::path::Path::new(input).join("gbrain.db").as_path(), &db_path)?;
+                Ok(serde_json::json!({"ok": true}))
+            }
+            "kb_add_eval_query" => {
+                let conn = self.engine.connection()?;
+                let library_id = arguments["library_id"].as_i64().unwrap_or(0);
+                let query_text = arguments["query"].as_str().unwrap_or("");
+                let query_type = arguments["query_type"].as_str().unwrap_or("manual");
+                let expected_ids: Vec<i64> = arguments["expected_document_ids"]
+                    .as_str()
+                    .map(|s| s.split(',').filter_map(|id| id.trim().parse().ok()).collect())
+                    .unwrap_or_default();
+                let id = crate::kb::eval::add_eval_query(conn, library_id, query_text, query_type, &expected_ids)?;
+                Ok(serde_json::json!({"id": id}))
+            }
+            "kb_add_search_feedback" => {
+                let conn = self.engine.connection()?;
+                let search_log_id = arguments["search_log_id"].as_i64();
+                let document_id = arguments["document_id"].as_i64();
+                let node_id = arguments["node_id"].as_i64();
+                let rating = arguments["rating"].as_i64().map(|v| v as i32).unwrap_or(0);
+                let comment = arguments["comment"].as_str().unwrap_or("");
+                let id = crate::kb::eval::add_search_feedback(conn, search_log_id, document_id, node_id, rating, comment)?;
                 Ok(serde_json::json!({"id": id}))
             }
 
