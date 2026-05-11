@@ -186,12 +186,9 @@ fn reembed_single_node(
     let vec = vectors.into_iter().next()
         .ok_or_else(|| GBrainError::InvalidInput("embedding 返回空结果".into()))?;
     let dims = vec.len();
-    let blob = vec.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
 
-    conn.execute(
-        "INSERT OR REPLACE INTO kb_node_embeddings (node_id, embedding, dimensions, model, embedding_index_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![node_id, blob, dims as i32, "text-embedding-3-large", resolved_index_id],
+    crate::kb::embedding_index::upsert_node_embedding_for_index(
+        conn, node_id, resolved_index_id, &vec, dims as i32, "text-embedding-3-large",
     )?;
     Ok(dims)
 }
@@ -210,15 +207,15 @@ fn reembed_document_nodes(
     let resolved_index_id = if target_index_id > 0 {
         target_index_id
     } else {
-        // 通过文档的第一个节点查找其 library 的 active index
         conn.query_row(
-            "SELECT COALESCE(
-                (SELECT ei.id FROM kb_embedding_indexes ei
-                 JOIN kb_document_nodes n ON n.library_id = ei.library_id
-                 WHERE n.document_id = ?1 AND ei.is_active = 1 LIMIT 1), 0)",
+            "SELECT ei.id FROM kb_embedding_indexes ei \
+             JOIN kb_document_nodes n ON n.library_id = ei.library_id \
+             WHERE n.document_id = ?1 AND ei.is_active = 1 LIMIT 1",
             rusqlite::params![document_id],
             |row| row.get::<_, i64>(0),
-        ).unwrap_or(0)
+        ).map_err(|_| GBrainError::InvalidInput(
+            format!("文档 {} 所属 library 没有 active embedding index", document_id)
+        ))?
     };
 
     // 查找文档中无目标 index embedding 的节点
@@ -249,32 +246,30 @@ fn reembed_document_nodes(
         }).collect();
         let vectors = rt.block_on(embedder.embed_batch(&texts))?;
         for ((node_id, _, _), vec) in chunk.iter().zip(vectors.iter()) {
-            let blob = vec.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
             let dims = vec.len() as i32;
-            conn.execute(
-                "INSERT OR REPLACE INTO kb_node_embeddings (node_id, embedding, dimensions, model, embedding_index_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![node_id, blob, dims, "text-embedding-3-large", resolved_index_id],
+            crate::kb::embedding_index::upsert_node_embedding_for_index(
+                conn, *node_id, resolved_index_id, vec, dims, "text-embedding-3-large",
             )?;
         }
     }
     Ok(node_ids.len())
 }
 
-/// 解析 target_index_id：0 → 查询节点所属 library 的 active index
+/// 解析 target_index_id：0 → 查询节点所属 library 的 active index。
+/// 找不到 active index 时返回明确错误，不再 fallback 到无效的 0。
 fn resolve_target_index(conn: &Connection, node_id: i64, target_index_id: i64) -> Result<i64> {
     if target_index_id > 0 {
         return Ok(target_index_id);
     }
-    let resolved: i64 = conn.query_row(
-        "SELECT COALESCE(
-            (SELECT ei.id FROM kb_embedding_indexes ei
-             JOIN kb_document_nodes n ON n.library_id = ei.library_id
-             WHERE n.id = ?1 AND ei.is_active = 1 LIMIT 1), 0)",
+    conn.query_row(
+        "SELECT ei.id FROM kb_embedding_indexes ei \
+         JOIN kb_document_nodes n ON n.library_id = ei.library_id \
+         WHERE n.id = ?1 AND ei.is_active = 1 LIMIT 1",
         rusqlite::params![node_id],
         |row| row.get(0),
-    )?;
-    Ok(resolved)
+    ).map_err(|_| GBrainError::InvalidInput(
+        format!("节点 {} 所属 library 没有 active embedding index", node_id)
+    ))
 }
 
 /// 以守护进程模式运行 KB worker：持续轮询并处理所有类型的 KB 作业。

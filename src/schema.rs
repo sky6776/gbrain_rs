@@ -1189,18 +1189,30 @@ AND EXISTS (
 /// V19 新增了 embedding_index_id 列但 PK 仍是 node_id，导致 INSERT OR REPLACE
 /// 对同一 node 的不同 index 会互相覆盖。改为复合主键后，同一 node 可以拥有
 /// 多条 embedding 记录（每条对应不同的 embedding_index_id）。
+/// 不再使用 0 作为默认/哨兵 index；新建库时自动创建 active embedding index。
 pub const MIGRATION_V20_DDL: &str = r#"
--- 将剩余 NULL embedding_index_id 回填为 0（语义：默认 index）
-UPDATE kb_node_embeddings SET embedding_index_id = 0 WHERE embedding_index_id IS NULL;
+-- 回填 NULL embedding_index_id：通过所属 library 的 active index 解析
+UPDATE kb_node_embeddings
+SET embedding_index_id = (
+    SELECT ei.id FROM kb_embedding_indexes ei
+    INNER JOIN kb_document_nodes dn ON dn.id = kb_node_embeddings.node_id
+    INNER JOIN kb_documents d ON d.id = dn.document_id
+    WHERE ei.library_id = d.library_id AND ei.is_active = 1
+    LIMIT 1
+)
+WHERE embedding_index_id IS NULL;
 
--- 重建表：复合主键 (node_id, embedding_index_id)
+-- 无法解析的剩余 NULL 行：该 library 无 active index，删除孤立 embedding
+DELETE FROM kb_node_embeddings WHERE embedding_index_id IS NULL;
+
+-- 重建表：复合主键 (node_id, embedding_index_id)，FK 级联删除
 CREATE TABLE kb_node_embeddings_v20 (
     node_id INTEGER NOT NULL REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
     embedding BLOB NOT NULL,
     dimensions INTEGER NOT NULL,
     model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
     embedded_at TEXT NOT NULL DEFAULT (datetime('now')),
-    embedding_index_id INTEGER NOT NULL DEFAULT 0 REFERENCES kb_embedding_indexes(id) ON DELETE SET DEFAULT,
+    embedding_index_id INTEGER NOT NULL REFERENCES kb_embedding_indexes(id) ON DELETE CASCADE,
     PRIMARY KEY (node_id, embedding_index_id)
 );
 

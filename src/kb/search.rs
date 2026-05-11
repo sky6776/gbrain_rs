@@ -181,32 +181,12 @@ pub fn kb_search(
         merged = filter_by_folder(conn, merged, folder_id);
     }
 
-    // P4-003: 读取所有参与库的隐私策略，取最严格约束
-    // 任一库禁止外部 rerank → 全局 fallback 本地；任一库需脱敏 → 对所有内容 redact
-    let (external_rerank_allowed, redaction_enabled) = if input.library_ids.is_empty() {
+    // P4-003: 基于实际候选 node_ids 解析隐私策略，取最严格约束
+    // 候选为空时可默认允许（不会发送任何内容到外部模型）
+    let (external_rerank_allowed, redaction_enabled) = if merged.is_empty() {
         (true, false)
     } else {
-        let placeholders: Vec<String> = input.library_ids.iter().enumerate()
-            .map(|(i, _)| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT external_rerank_allowed, redaction_enabled FROM kb_libraries WHERE id IN ({})",
-            placeholders.join(",")
-        );
-        let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = input.library_ids.iter()
-            .map(|&id| Box::new(id) as Box<dyn rusqlite::types::ToSql>).collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        conn.prepare(&sql).ok().and_then(|mut stmt| {
-            let rows = stmt.query_map(param_refs.as_slice(), |row| {
-                Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
-            }).ok()?;
-            let mut all_allowed = true;
-            let mut any_redaction = false;
-            for r in rows.filter_map(|r| r.ok()) {
-                if r.0 == 0 { all_allowed = false; }
-                if r.1 != 0 { any_redaction = true; }
-            }
-            Some((all_allowed, any_redaction))
-        }).unwrap_or((true, false))
+        resolve_rerank_policy_for_candidate_nodes(conn, &merged)?
     };
 
     // P3-016/P3-020/P4-003~005: 模型 rerank 优先，失败 fallback 本地 rerank
@@ -779,24 +759,24 @@ pub fn kb_vector_search(
 ) -> Result<Vec<RankedResult>> {
     let query_blob = embedding_to_blob(embedding);
 
-    // P5-012: Try per-index vec table first if embedding_index_id is specified
+    // P5-012: 指定 index 时只查 per-index vec 表，失败则 fallback 到同 index 的 BLOB 表
     if let Some(index_id) = embedding_index_id {
         let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
         let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, &per_index_table);
-        if let Ok(results) = result {
-            if !results.is_empty() {
-                return Ok(results);
+        match result {
+            Ok(results) if !results.is_empty() => return Ok(results),
+            _ => {
+                // 不 fallback 到 legacy vec_kb_nodes，只 fallback 到同 index 的 BLOB 表
+                return vector_search_fallback(conn, embedding, library_ids, level, top_k, embedding_index_id);
             }
         }
     }
 
-    // Try legacy sqlite-vec table
+    // 未指定 index：legacy 路径，先查 legacy vec 表，再 fallback BLOB
     let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, "vec_kb_nodes");
-
     match result {
         Ok(results) if !results.is_empty() => Ok(results),
         _ => {
-            // Fallback to brute-force cosine similarity on BLOB table
             vector_search_fallback(conn, embedding, library_ids, level, top_k, embedding_index_id)
         }
     }
@@ -1096,6 +1076,44 @@ fn vector_search_fallback(
             score: 0.0,
         })
         .collect())
+}
+
+/// P4-003: 基于候选 node_id 反查所属 library 的隐私策略，取最严格约束。
+///
+/// 不依赖 `input.library_ids`（可能为空，表示全库搜索），而是按实际命中的
+/// 节点所属 library 逐条判断。任一库禁止外部 rerank 则全局禁用；任一库要求
+/// 脱敏则全局启用。
+fn resolve_rerank_policy_for_candidate_nodes(
+    conn: &Connection,
+    merged: &[RankedResult],
+) -> Result<(bool, bool)> {
+    let placeholders: Vec<String> = merged.iter().enumerate()
+        .map(|(i, _)| format!("?{}", i + 1)).collect();
+    // 查询所有候选节点所属 library 的隐私策略（DISTINCT 去重）
+    let sql = format!(
+        "SELECT DISTINCT l.external_rerank_allowed, l.redaction_enabled \
+         FROM kb_document_nodes n \
+         JOIN kb_libraries l ON l.id = n.library_id \
+         WHERE n.id IN ({})",
+        placeholders.join(",")
+    );
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
+    })?;
+
+    let mut all_allowed = true;
+    let mut any_redaction = false;
+    for r in rows {
+        let (allowed, redact) = r?;
+        if allowed == 0 { all_allowed = false; }
+        if redact != 0 { any_redaction = true; }
+    }
+    Ok((all_allowed, any_redaction))
 }
 
 /// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）

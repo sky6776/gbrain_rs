@@ -253,20 +253,20 @@ pub fn import_library(
     )?;
     let new_lib_id = conn.last_insert_rowid();
 
+    // Import embedding indexes FIRST — 后面的 embedding 导入依赖 index_id 映射
+    let index_id_map = import_embedding_indexes(conn, archive_dir, new_lib_id)?;
+
     // Import documents — assign new IDs and remap library_id
     let doc_id_map = import_documents(conn, archive_dir, new_lib_id)?;
 
     // 导入节点 — 重映射 document_id 和 library_id，返回 old→new node_id 映射
     let node_id_map = import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
 
-    // 导入 embedding — 使用 node_id_map 重映射
-    import_embeddings(conn, archive_dir, &node_id_map)?;
+    // 导入 embedding — 使用 node_id_map + index_id_map 重映射
+    import_embeddings(conn, archive_dir, &node_id_map, &index_id_map)?;
 
     // Import summaries — remap document_id
     import_summaries(conn, archive_dir, &doc_id_map)?;
-
-    // Import embedding indexes — remap library_id
-    import_embedding_indexes(conn, archive_dir, new_lib_id)?;
 
     // Import folders — remap library_id
     import_folders(conn, archive_dir, new_lib_id)?;
@@ -463,6 +463,7 @@ fn import_embeddings(
     conn: &Connection,
     archive_dir: &Path,
     node_id_map: &std::collections::HashMap<i64, i64>,
+    index_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
     let path = archive_dir.join("embeddings.json");
     if !path.exists() { return Ok(()); }
@@ -475,21 +476,39 @@ fn import_embeddings(
         let old_node_id = emb.get("node_id").and_then(|v| v.as_i64()).unwrap_or(0);
         let new_node_id = match node_id_map.get(&old_node_id).copied() {
             Some(id) => id,
-            None => continue, // 无法映射的节点跳过，由 worker 重新生成
+            None => return Err(GBrainError::FileError(
+                format!("embedding 引用的 node_id={} 在导入的节点中不存在", old_node_id)
+            )),
         };
-        // 导出时使用 hex(embedding) as embedding_hex
+        let old_index_id = emb.get("embedding_index_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let new_index_id = if old_index_id > 0 {
+            index_id_map.get(&old_index_id).copied().ok_or_else(|| {
+                GBrainError::FileError(format!(
+                    "embedding 引用的 embedding_index_id={} 在导入的索引中不存在", old_index_id
+                ))
+            })?
+        } else {
+            // 旧数据没有 index_id，使用第一个导入的 index
+            index_id_map.values().next().copied().unwrap_or(0)
+        };
+
         let hex_str = emb.get("embedding_hex").and_then(|v| v.as_str()).unwrap_or("");
-        if hex_str.is_empty() { continue; }
-        let blob = hex::decode(hex_str).unwrap_or_default();
-        if !blob.is_empty() {
-            let dimensions = emb.get("dimensions").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let model = emb.get("model").and_then(|v| v.as_str()).unwrap_or("");
-            conn.execute(
-                "INSERT OR IGNORE INTO kb_node_embeddings (node_id, embedding, dimensions, model) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![new_node_id, blob, dimensions, model],
-            ).ok();
+        if hex_str.is_empty() {
+            return Err(GBrainError::FileError("embedding_hex 字段为空".into()));
         }
+        let blob = hex::decode(hex_str).map_err(|e| {
+            GBrainError::FileError(format!("embedding hex 解码失败: {}", e))
+        })?;
+        let dimensions = emb.get("dimensions").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let model = emb.get("model").and_then(|v| v.as_str()).unwrap_or("text-embedding-3-large");
+
+        // 写入完整字段（含 embedding_index_id）
+        conn.execute(
+            "INSERT OR REPLACE INTO kb_node_embeddings \
+             (node_id, embedding_index_id, embedding, dimensions, model, embedded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+            params![new_node_id, new_index_id, blob, dimensions, model],
+        )?;
     }
     Ok(())
 }
@@ -530,20 +549,23 @@ fn import_embedding_indexes(
     conn: &Connection,
     archive_dir: &Path,
     new_lib_id: i64,
-) -> Result<()> {
+) -> Result<std::collections::HashMap<i64, i64>> {
     let path = archive_dir.join("embedding_indexes.json");
-    if !path.exists() { return Ok(()); }
+    if !path.exists() { return Ok(std::collections::HashMap::new()); }
     let data = std::fs::read_to_string(&path)
         .map_err(|e| GBrainError::FileError(format!("cannot read embedding_indexes.json: {}", e)))?;
     let indexes: Vec<crate::kb::embedding_index::EmbeddingIndex> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse embedding_indexes.json: {}", e)))?;
 
+    let mut id_map = std::collections::HashMap::new();
     for idx in &indexes {
+        let old_id = idx.id;
         crate::kb::embedding_index::create_embedding_index(
             conn, new_lib_id, &idx.provider, &idx.model, idx.dimensions, &idx.index_type,
         )?;
+        id_map.insert(old_id, conn.last_insert_rowid());
     }
-    Ok(())
+    Ok(id_map)
 }
 
 fn import_folders(

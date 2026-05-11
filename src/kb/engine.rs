@@ -160,8 +160,20 @@ impl<'a> KbEngine<'a> {
                     max_sort + 1,
                 ],
             )?;
+            let lib_id = conn.last_insert_rowid();
 
-            Ok(conn.last_insert_rowid())
+            // 自动创建默认 embedding index 并设为 active
+            let dims = input.embedding_dimensions.unwrap_or(1536);
+            let provider = input.embedding_provider.as_deref().unwrap_or("openai");
+            let model = input.embedding_model.as_deref().unwrap_or("text-embedding-3-large");
+            crate::kb::embedding_index::create_embedding_index(
+                conn, lib_id, provider, model, dims, "vec0",
+            )?;
+            // 将新 index 设为 active
+            let index_id = conn.last_insert_rowid();
+            crate::kb::embedding_index::activate_index(conn, index_id)?;
+
+            Ok(lib_id)
         })
     }
 

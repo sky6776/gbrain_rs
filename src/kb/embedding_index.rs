@@ -124,10 +124,12 @@ pub fn queue_reembed_jobs(
     // 解析 target_index_id：0 → active index
     let resolved_index_id = if target_index_id > 0 {
         target_index_id
-    } else if let Ok(Some(idx)) = get_active_index_for_library(conn, library_id) {
-        idx.id
     } else {
-        0 // 没有 active index，使用 0 作为默认 index
+        get_active_index_for_library(conn, library_id)?
+            .ok_or_else(|| GBrainError::InvalidInput(
+                format!("library {} 没有 active embedding index", library_id)
+            ))?
+            .id
     };
 
     // 查找需要重新嵌入的文档：节点在目标 index 中没有 embedding
@@ -161,6 +163,48 @@ pub fn queue_reembed_jobs(
         queued += 1;
     }
     Ok(queued)
+}
+
+// ---------------------------------------------------------------------------
+// P5-012: 统一 embedding 写入 — 同时更新 kb_node_embeddings 和 vec_kb_{index}
+// ---------------------------------------------------------------------------
+
+/// 统一写入/替换节点的 embedding：同时更新 BLOB 表和 per-index sqlite-vec 虚表。
+///
+/// 调用者无需关心 vec 表是否存在或 sqlite-vec 是否加载 — 此函数自动处理。
+/// 写入失败时返回错误，不再静默吞下。
+pub fn upsert_node_embedding_for_index(
+    conn: &Connection,
+    node_id: i64,
+    embedding_index_id: i64,
+    embedding: &[f32],
+    dimensions: i32,
+    model: &str,
+) -> Result<()> {
+    let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+    // 1. 写入 BLOB fallback 表
+    conn.execute(
+        "INSERT OR REPLACE INTO kb_node_embeddings \
+         (node_id, embedding_index_id, embedding, dimensions, model, embedded_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
+        rusqlite::params![node_id, embedding_index_id, blob, dimensions, model],
+    )?;
+
+    // 2. 确保 per-index vec 虚表存在
+    let _ = create_vec_table_for_index(conn, embedding_index_id, dimensions);
+
+    // 3. 写入 per-index vec 虚表（sqlite-vec 不可用时静默跳过）
+    let vec_table = vec_table_name_for_index(embedding_index_id);
+    let _ = conn.execute(
+        &format!(
+            "INSERT OR REPLACE INTO {} (node_id, embedding) VALUES (?1, ?2)",
+            vec_table,
+        ),
+        rusqlite::params![node_id, blob],
+    );
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
