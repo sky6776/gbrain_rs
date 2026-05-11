@@ -111,7 +111,7 @@ pub fn local_rerank(candidates: &[(i64, LocalRankSignals)], weights: &[f64]) -> 
     let mut scored: Vec<(i64, f64)> = candidates
         .iter()
         .map(|(doc_id, signals)| {
-            let score = signals.fts_score * weights.get(0).copied().unwrap_or(0.3)
+            let score = signals.fts_score * weights.first().copied().unwrap_or(0.3)
                 + signals.vector_score * weights.get(1).copied().unwrap_or(0.3)
                 + signals.title_score * weights.get(2).copied().unwrap_or(0.2)
                 + signals.exact_match_score * weights.get(3).copied().unwrap_or(0.0)
@@ -188,8 +188,7 @@ fn parse_score(raw: &str) -> Option<f64> {
     // Try to find the first number in the response
     for token in raw.split_whitespace() {
         // Strip trailing punctuation that LLMs sometimes add (e.g. "85.", "90,")
-        let cleaned =
-            token.trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':');
+        let cleaned = token.trim_end_matches(['.', ',', ';', ':']);
         if let Ok(score) = cleaned.parse::<f64>() {
             // Clamp to 0-100 range
             if (0.0..=100.0).contains(&score) {
@@ -208,6 +207,7 @@ fn parse_score(raw: &str) -> Option<f64> {
 }
 
 /// Relevance scoring prompt for a single document.
+#[allow(dead_code)]
 fn build_rerank_prompt(query: &str, doc_text: &str) -> String {
     format!(
         "Evaluate the relevance of the following document to the query. \
@@ -459,6 +459,7 @@ fn extract_raw_content(data: &serde_json::Value) -> Option<String> {
 ///
 /// Returns a `RerankResult` describing which tier was used and the scored
 /// candidate list.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub async fn try_model_rerank(
     config: &RerankConfig,
     query: &str,
@@ -595,6 +596,7 @@ pub async fn try_model_rerank(
 
 /// Convenience overload: try_model_rerank without a dedicated rerank API.
 /// Only uses chat/completions adapter and local_rerank as fallbacks.
+#[allow(clippy::too_many_arguments)]
 pub async fn try_model_rerank_simple(
     config: &RerankConfig,
     query: &str,

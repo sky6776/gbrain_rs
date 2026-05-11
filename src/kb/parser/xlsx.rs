@@ -7,6 +7,12 @@ use std::collections::HashMap;
 
 pub struct XlsxParser;
 
+impl Default for XlsxParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl XlsxParser {
     pub fn new() -> Self {
         Self
@@ -21,14 +27,15 @@ impl DocumentParser for XlsxParser {
 
         let sheets = workbook.sheet_names().to_vec();
         let mut parts = Vec::new();
-        let mut sheet_metas: Vec<HashMap<String, serde_json::Value>> = Vec::new();
+        let mut blocks: Vec<crate::kb::types::ParsedBlock> = Vec::new();
 
         for sheet_name in &sheets {
-            parts.push(format!("=== {} ===", sheet_name));
+            let sheet_header = format!("=== {} ===", sheet_name);
+            parts.push(sheet_header.clone());
 
             let mut headers: Vec<String> = Vec::new();
-            let mut row_data: Vec<String> = Vec::new();
-            let mut row_count = 0;
+            let mut row_data: Vec<serde_json::Value> = Vec::new();
+            let mut row_count: usize = 0;
 
             if let Ok(range) = workbook.worksheet_range(sheet_name) {
                 for row in range.rows() {
@@ -49,73 +56,43 @@ impl DocumentParser for XlsxParser {
                         headers = cells.clone();
                     }
 
-                    let row_json = serde_json::to_string(
-                        &headers
+                    // 存储为 JSON object 而非 JSON string
+                    let row_obj: serde_json::Value = serde_json::to_value(
+                        headers
                             .iter()
                             .enumerate()
                             .map(|(i, h)| (h.clone(), cells.get(i).cloned().unwrap_or_default()))
                             .collect::<HashMap<_, _>>(),
                     )
-                    .unwrap_or_default();
-                    row_data.push(row_json);
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                    row_data.push(row_obj);
                     parts.push(cells.join("\t"));
                     row_count += 1;
                 }
             }
 
-            sheet_metas.push({
-                let mut m = HashMap::new();
-                m.insert(
-                    "name".to_string(),
-                    serde_json::Value::String(sheet_name.clone()),
-                );
-                m.insert(
-                    "headers".to_string(),
-                    serde_json::Value::Array(
-                        headers
-                            .iter()
-                            .map(|h| serde_json::Value::String(h.clone()))
-                            .collect(),
-                    ),
-                );
-                m.insert(
-                    "row_count".to_string(),
-                    serde_json::Value::Number((row_count - 1).into()),
-                );
-                m.insert(
-                    "rows".to_string(),
-                    serde_json::to_value(&row_data).unwrap_or_default(),
-                );
-                m
+            // 每个 sheet 一个 ParsedBlock，metadata 包含完整 sheet 数据
+            let sheet_meta = serde_json::json!({
+                "name": sheet_name,
+                "headers": headers,
+                "row_count": row_count.saturating_sub(1) as i32,
+                "rows": row_data,
+            });
+            blocks.push(crate::kb::types::ParsedBlock {
+                text: parts[parts.len() - row_count - 1..].join("\n"),
+                title_path: sheet_name.clone(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                block_type: "table".to_string(),
+                metadata: serde_json::to_string(&sheet_meta).unwrap_or_default(),
             });
         }
 
         let content = parts.join("\n");
         let mut metadata = HashMap::new();
         metadata.insert("sheet_count".to_string(), sheets.len().to_string());
-        metadata.insert(
-            "sheet_data".to_string(),
-            serde_json::to_string(&sheet_metas).unwrap_or_default(),
-        );
 
-        // P1-010/P2-012: 构建结构化 blocks（每 sheet 一个 block）
-        let blocks: Vec<crate::kb::types::ParsedBlock> = parts
-            .iter()
-            .enumerate()
-            .map(|(i, text)| crate::kb::types::ParsedBlock {
-                text: text.clone(),
-                title_path: String::new(),
-                page_number: None,
-                source_start: None,
-                source_end: None,
-                block_type: "table".to_string(),
-                metadata: if i < sheet_metas.len() {
-                    serde_json::to_string(&sheet_metas[i]).unwrap_or_default()
-                } else {
-                    String::new()
-                },
-            })
-            .collect();
         Ok(ParsedDocument {
             content,
             metadata,

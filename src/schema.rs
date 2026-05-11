@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -1059,7 +1059,9 @@ CREATE TABLE IF NOT EXISTS kb_search_logs (
     result_count INTEGER NOT NULL DEFAULT 0,
     latency_ms INTEGER NOT NULL DEFAULT 0,
     cache_hit INTEGER NOT NULL DEFAULT 0,
-    debug_mode INTEGER NOT NULL DEFAULT 0
+    debug_mode INTEGER NOT NULL DEFAULT 0,
+    embedding_index_id INTEGER,
+    result_document_ids TEXT NOT NULL DEFAULT '[]'
 );
 
 -- 8. 搜索反馈表
@@ -1139,6 +1141,7 @@ CREATE TABLE IF NOT EXISTS kb_source_items (
     external_id TEXT NOT NULL DEFAULT '',
     item_path TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
     last_seen_at TEXT,
     sync_status TEXT NOT NULL DEFAULT 'pending',
     sync_error TEXT NOT NULL DEFAULT '',
@@ -1223,6 +1226,13 @@ ALTER TABLE kb_node_embeddings_v20 RENAME TO kb_node_embeddings;
 CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
 "#;
 
+/// V21: 为 kb_source_items 添加 file_size 列；为 kb_search_logs 添加 embedding_index_id 和 result_document_ids 列
+pub const MIGRATION_V21_DDL: &str = r#"
+ALTER TABLE kb_source_items ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kb_search_logs ADD COLUMN embedding_index_id INTEGER;
+ALTER TABLE kb_search_logs ADD COLUMN result_document_ids TEXT NOT NULL DEFAULT '[]';
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1245,5 +1255,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (18, MIGRATION_V18_DDL),
         (19, MIGRATION_V19_DDL),
         (20, MIGRATION_V20_DDL),
+        (21, MIGRATION_V21_DDL),
     ]
 }

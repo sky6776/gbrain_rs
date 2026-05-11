@@ -471,6 +471,6 @@ pub fn spawn_kb_worker_pool(
                     }
                 }
             })
-            .expect(&format!("无法创建 {} 线程", thread_name));
+            .unwrap_or_else(|_| panic!("无法创建 {} 线程", thread_name));
     }
 }

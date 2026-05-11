@@ -6,6 +6,12 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 pub struct MarkdownHeaderSplitter;
 
+impl Default for MarkdownHeaderSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarkdownHeaderSplitter {
     pub fn new() -> Self {
         Self

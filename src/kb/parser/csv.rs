@@ -8,6 +8,12 @@ pub struct CsvParser {
     delimiter: u8,
 }
 
+impl Default for CsvParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CsvParser {
     pub fn new() -> Self {
         Self { delimiter: b',' }

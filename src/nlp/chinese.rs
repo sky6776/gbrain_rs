@@ -150,7 +150,7 @@ pub fn is_chinese(c: char) -> bool {
 
 /// Check if a string contains any Chinese characters.
 pub fn has_chinese(text: &str) -> bool {
-    text.chars().any(|c| is_chinese(c))
+    text.chars().any(is_chinese)
 }
 
 /// Extract only Chinese characters from a string.
@@ -466,7 +466,7 @@ pub fn expand_query_with_aliases(query: &str) -> Vec<String> {
 
 /// P3-005: 查询时拼音/首字母匹配 — 检测 query 是否为拼音
 pub fn detect_pinyin_query(query: &str) -> bool {
-    let has_chinese = query.chars().any(|c| is_chinese(c));
+    let has_chinese = query.chars().any(is_chinese);
     if has_chinese {
         return false;
     }

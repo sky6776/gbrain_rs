@@ -130,9 +130,11 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     // P5-004: 检查 split_total 不一致
+    // Only compare against level=0 nodes, since split_total counts original
+    // splits and excludes RAPTOR parent nodes (level > 0).
     let split_mismatch: i64 = conn.query_row(
         "SELECT COUNT(*) FROM kb_documents d \
-         WHERE d.split_total != (SELECT COUNT(*) FROM kb_document_nodes n WHERE n.document_id = d.id)",
+         WHERE d.split_total != (SELECT COUNT(*) FROM kb_document_nodes n WHERE n.document_id = d.id AND n.level = 0)",
         [],
         |row| row.get(0),
     ).unwrap_or(0);
@@ -346,30 +348,23 @@ pub struct RebuildLibrarySummary {
 
 /// P5-009: 清理已软删除且超过保留期的文档
 pub fn purge_deleted(conn: &Connection, older_than_days: i32) -> Result<i64> {
-    let mut purged = 0i64;
-    let mut stmt = conn.prepare(
-        "SELECT id FROM kb_documents WHERE deleted_at IS NOT NULL \
-         AND deleted_at < datetime('now', ?1)",
-    )?;
-    let ids: Vec<i64> = stmt
-        .query_map(params![format!("-{} days", older_than_days)], |row| {
-            row.get(0)
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-    purged = ids.len() as i64;
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM kb_documents WHERE deleted_at IS NOT NULL \
+             AND deleted_at < datetime('now', ?1)",
+        )?;
+        let rows = stmt.query_map(params![format!("-{} days", older_than_days)], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
 
-    for id in ids {
-        conn.execute(
-            "DELETE FROM kb_document_nodes WHERE document_id = ?1",
-            params![id],
-        )?;
-        conn.execute(
-            "UPDATE kb_documents SET purged_at = datetime('now') WHERE id = ?1",
-            params![id],
-        )?;
+    let count = ids.len() as i64;
+    let kb = crate::kb::engine::KbEngine::new(conn);
+    for id in &ids {
+        crate::kb::lifecycle::purge_document(&kb, *id)?;
     }
-    Ok(purged)
+    Ok(count)
 }
 
 #[cfg(test)]

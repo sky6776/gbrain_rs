@@ -36,7 +36,7 @@ impl DocumentGranularity {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_granularity(s: &str) -> Self {
         match s {
             "table" => Self::Table,
             "micro" => Self::Micro,
@@ -189,7 +189,7 @@ mod tests {
             DocumentGranularity::Medium,
             DocumentGranularity::Large,
         ] {
-            assert_eq!(DocumentGranularity::from_str(g.as_str()), g);
+            assert_eq!(DocumentGranularity::parse_granularity(g.as_str()), g);
         }
     }
 }

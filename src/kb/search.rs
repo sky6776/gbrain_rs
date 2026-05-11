@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// P4-006: 查询 embedding 缓存（按 model/dimensions 隔离）
+#[allow(dead_code)]
 static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<f32>>>> =
     std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(1000, 3600)));
 /// P4-007: 查询分词缓存
+#[allow(dead_code)]
 static TOKENS_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(5000, 14400)));
 /// P4-008: 召回结果缓存（短 TTL）
@@ -26,6 +28,7 @@ static RETRIEVAL_CACHE: std::sync::LazyLock<
     Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 30)));
 /// P4-009: rerank 结果缓存（按 provider/model/profile 隔离）
+#[allow(dead_code)]
 static RERANK_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
     std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 60)));
 
@@ -48,61 +51,76 @@ pub fn kb_search(
     let query_normalized = normalize_query(&input.query);
 
     // P3-006/P3-007: query planner
-    let planner_type = if let Some(ref override_type) = input.planner_override {
-        crate::kb::planner::QueryType::ExactLookup // fallback, caller specifies
+    let planner_type = if let Some(ref override_str) = input.planner_override {
+        // 解析 override 字符串为 QueryType
+        match override_str.to_lowercase().as_str() {
+            "exact_lookup" | "exact" => crate::kb::planner::QueryType::ExactLookup,
+            "how_to" | "howto" => crate::kb::planner::QueryType::HowTo,
+            "fact_lookup" | "fact" => crate::kb::planner::QueryType::FactLookup,
+            "conceptual" | "concept" => crate::kb::planner::QueryType::Conceptual,
+            "table_lookup" | "table" => crate::kb::planner::QueryType::TableLookup,
+            "recent_or_timebound" | "recent" | "timebound" => {
+                crate::kb::planner::QueryType::RecentOrTimebound
+            }
+            "small_document" | "small" => crate::kb::planner::QueryType::SmallDocument,
+            _ => crate::kb::planner::classify_query(&query_normalized),
+        }
     } else {
         crate::kb::planner::classify_query(&query_normalized)
     };
     let plan = crate::kb::planner::plan(planner_type);
 
-    // P3-008~013: multi-retriever execution
+    // P3-008~013: multi-retriever execution — use plan to decide retrievers
     let mut all_candidates: Vec<Vec<RankedResult>> = Vec::new();
 
+    let retriever_set: std::collections::HashSet<crate::kb::planner::RetrieverType> =
+        plan.retrievers.iter().map(|(rt, _)| *rt).collect();
+
     // Title/name retriever
-    let title_results = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k)?;
-    if !title_results.is_empty() {
-        all_candidates.push(title_results);
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::TitleName) {
+        let title_results =
+            title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k)?;
+        if !title_results.is_empty() {
+            all_candidates.push(title_results);
+        }
     }
 
-    // P4-001: profile routing
+    // P4-001: profile routing (override by planner)
     let profile = input.profile.as_deref().unwrap_or("balanced");
-    let use_summary = matches!(profile, "balanced" | "accurate")
-        && matches!(
-            planner_type,
-            crate::kb::planner::QueryType::HowTo | crate::kb::planner::QueryType::Conceptual
-        );
-    let use_table = matches!(profile, "table" | "balanced" | "accurate");
-    let use_metadata = matches!(profile, "balanced" | "accurate" | "file_lookup");
 
     // Node FTS retriever (P3-009)
-    let fts_results = kb_fts_search(
-        conn,
-        &query_normalized,
-        &input.library_ids,
-        input.level,
-        fetch_k,
-    )?;
-    if !fts_results.is_empty() {
-        all_candidates.push(fts_results);
-    }
-
-    // Vector retriever (P3-010)
-    if let Some(vec) = query_vector {
-        let vec_results = kb_vector_search(
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::NodeFts) {
+        let fts_results = kb_fts_search(
             conn,
-            vec,
+            &query_normalized,
             &input.library_ids,
             input.level,
             fetch_k,
-            input.embedding_index_id,
         )?;
-        if !vec_results.is_empty() {
-            all_candidates.push(vec_results);
+        if !fts_results.is_empty() {
+            all_candidates.push(fts_results);
+        }
+    }
+
+    // Vector retriever (P3-010)
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::Vector) {
+        if let Some(vec) = query_vector {
+            let vec_results = kb_vector_search(
+                conn,
+                vec,
+                &input.library_ids,
+                input.level,
+                fetch_k,
+                input.embedding_index_id,
+            )?;
+            if !vec_results.is_empty() {
+                all_candidates.push(vec_results);
+            }
         }
     }
 
     // P3-011: Summary retriever
-    if use_summary {
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::Summary) {
         if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
             if !sr.is_empty() {
                 all_candidates.push(sr);
@@ -111,7 +129,7 @@ pub fn kb_search(
     }
 
     // P3-012: Table retriever
-    if use_table {
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::Table) {
         if let Ok(tr) = table_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
             if !tr.is_empty() {
                 all_candidates.push(tr);
@@ -120,7 +138,7 @@ pub fn kb_search(
     }
 
     // P3-013: Metadata retriever
-    if use_metadata {
+    if retriever_set.contains(&crate::kb::planner::RetrieverType::Metadata) {
         if let Ok(mr) = metadata_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
             if !mr.is_empty() {
                 all_candidates.push(mr);
@@ -136,11 +154,32 @@ pub fn kb_search(
             |row| row.get(0),
         )
         .unwrap_or(1);
-    let merge_cache_key = crate::kb::cache::make_cache_key(
-        &query_normalized,
-        &input.library_ids,
+    // 缓存 key 纳入所有影响召回的参数
+    let level_str = input
+        .level
+        .map_or_else(|| "-".to_string(), |l| l.to_string());
+    let folder_str = input
+        .folder_id
+        .map_or_else(|| "-".to_string(), |f| f.to_string());
+    let eidx_str = input
+        .embedding_index_id
+        .map_or_else(|| "-".to_string(), |e| e.to_string());
+    let merge_cache_key = format!(
+        "merge:{}|libs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}",
+        query_normalized,
+        input
+            .library_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
         index_version,
-        "merge",
+        input.top_k,
+        level_str,
+        input.profile.as_deref().unwrap_or("-"),
+        folder_str,
+        eidx_str,
+        query_vector.is_some(),
     );
     let cached_merged = RETRIEVAL_CACHE
         .lock()
@@ -332,7 +371,7 @@ pub fn kb_search(
         let has_api_key = input
             .rerank_api_key
             .as_deref()
-            .map_or(false, |k| !k.is_empty());
+            .is_some_and(|k| !k.is_empty());
         let (scored, rerank_result) = if external_rerank_allowed
             && rerank_cfg.model_rerank_enabled
             && has_api_key
@@ -451,6 +490,7 @@ pub fn kb_search(
     }
 
     // P4-020: search logging (异步，不阻塞返回)
+    let result_doc_ids: Vec<i64> = results.iter().map(|r| r.document_id).collect();
     let _ = crate::kb::eval::log_search(
         conn,
         &query_normalized,
@@ -460,6 +500,8 @@ pub fn kb_search(
         results.len(),
         0,
         false,
+        input.embedding_index_id,
+        &result_doc_ids,
     );
 
     // P3-021: debug signals
@@ -1113,9 +1155,7 @@ fn compute_rrf_merge(all_candidates: Vec<Vec<RankedResult>>) -> Vec<RankedResult
     if all_candidates.is_empty() {
         return Vec::new();
     }
-    if all_candidates.len() == 1 {
-        return all_candidates.into_iter().flatten().collect();
-    }
+    // 即使只有一个候选列表，也按 RRF 公式计算分数
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for candidates in &all_candidates {
         for r in candidates {
@@ -1527,7 +1567,7 @@ fn embedding_to_blob(vector: &[f32]) -> Vec<u8> {
 /// Decode a BLOB back into an f32 vector.
 /// Returns an error if the blob length is not a multiple of 4.
 fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    if blob.len() % 4 != 0 && !blob.is_empty() {
+    if !blob.len().is_multiple_of(4) && !blob.is_empty() {
         tracing::warn!(
             "embedding blob has {} bytes (not multiple of 4); trailing bytes dropped",
             blob.len() % 4

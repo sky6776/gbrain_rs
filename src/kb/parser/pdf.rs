@@ -10,6 +10,12 @@ use std::collections::HashMap;
 
 pub struct PdfParser;
 
+impl Default for PdfParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PdfParser {
     pub fn new() -> Self {
         Self

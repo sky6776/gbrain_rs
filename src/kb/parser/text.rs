@@ -6,6 +6,12 @@ use std::collections::HashMap;
 
 pub struct TextParser;
 
+impl Default for TextParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextParser {
     pub fn new() -> Self {
         Self

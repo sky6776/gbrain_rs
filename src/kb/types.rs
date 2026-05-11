@@ -8,6 +8,7 @@ pub const STATUS_PENDING: i32 = 0;
 pub const STATUS_PROCESSING: i32 = 1;
 pub const STATUS_COMPLETED: i32 = 2;
 pub const STATUS_FAILED: i32 = 3;
+pub const STATUS_SKIPPED: i32 = 4;
 
 /// 扩展名对应的 MIME 类型映射（格式映射，非安全校验）
 /// 安全校验的允许扩展名列表由 Config.kb_allowed_extensions 控制。

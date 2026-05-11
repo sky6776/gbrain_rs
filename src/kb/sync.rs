@@ -92,10 +92,8 @@ pub fn incremental_scan(
             row.get::<_, Option<i64>>(2)?,
         ))
     })?;
-    for row in rows {
-        if let Ok((path, hash, doc_id)) = row {
-            existing.insert(path, (hash, doc_id));
-        }
+    for (path, hash, doc_id) in rows.flatten() {
+        existing.insert(path, (hash, doc_id));
     }
 
     // 对比当前文件
@@ -136,17 +134,15 @@ pub fn apply_delete_policy(
     match delete_policy {
         "soft_delete" => {
             // 根据 item_path 查找 document_id 并软删除
-            if let Ok(doc_id) = conn.query_row(
+            if let Ok(Some(id)) = conn.query_row(
                 "SELECT document_id FROM kb_source_items WHERE item_path=?1 AND document_id IS NOT NULL",
                 params![item_path], |row| row.get::<_, Option<i64>>(0),
             ) {
-                if let Some(id) = doc_id {
-                    conn.execute(
-                        "UPDATE kb_documents SET deleted_at=datetime('now'), document_status='deleted' WHERE id=?1",
-                        params![id],
-                    )?;
-                    return Ok(format!("soft_deleted doc {}", id));
-                }
+                conn.execute(
+                    "UPDATE kb_documents SET deleted_at=datetime('now'), document_status='deleted' WHERE id=?1",
+                    params![id],
+                )?;
+                return Ok(format!("soft_deleted doc {}", id));
             }
             Ok("no_doc_found".into())
         }

@@ -69,7 +69,7 @@ pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrPageResult]) -> Vec<ParsedBlock> {
     let mut offset = 0i32;
 
     for page in ocr_pages {
-        let text_len = page.text.len() as i32;
+        let text_len = page.text.chars().count() as i32;
         blocks.push(ParsedBlock {
             text: page.text.clone(),
             title_path: String::new(),
@@ -99,6 +99,7 @@ pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrPageResult]) -> Vec<ParsedBlock> {
 ///
 /// 注意：此函数不执行 OCR 识别本身，仅处理识别后的文本回写。
 /// 调用方应在 OCR 完成后调用此函数。
+#[allow(clippy::too_many_arguments)]
 pub fn writeback_ocr_results(
     conn: &Connection,
     doc_id: i64,
@@ -146,6 +147,7 @@ pub fn writeback_ocr_results(
         .map_err(|e| GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e)))?;
 
     // 3. 为每个 chunk 找到对应的 block 元数据（page_number, source offsets）
+    #[allow(clippy::type_complexity)]
     let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = blocks
         .iter()
         .map(|b| {
@@ -213,7 +215,7 @@ pub fn writeback_ocr_results(
     } else {
         full_text.split_whitespace().count() as i32
     };
-    kb.update_document_stats(doc_id, word_total, nodes_created as i32)?;
+    kb.update_document_stats(doc_id, word_total, nodes_created as i32, None)?;
 
     Ok(WritebackResult {
         blocks_created: blocks.len(),
@@ -287,8 +289,28 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         // Second block offset starts after first page text
         assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[1].source_start, Some(10)); // "Page one".len() + 1(换行符) == 10
-        assert_eq!(blocks[1].source_end, Some(19)); // 10 + "Page two".len()
+        assert_eq!(blocks[1].source_start, Some(9)); // "Page one".chars().count() + 1(换行符) == 9
+        assert_eq!(blocks[1].source_end, Some(17)); // 9 + "Page two".chars().count()
+    }
+
+    #[test]
+    fn test_ocr_to_parsed_blocks_chinese() {
+        let pages = vec![
+            OcrPageResult {
+                page_number: 1,
+                text: "第一页内容".to_string(),
+            },
+            OcrPageResult {
+                page_number: 2,
+                text: "第二页内容".to_string(),
+            },
+        ];
+        let blocks = ocr_to_parsed_blocks(&pages);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].source_start, Some(0));
+        assert_eq!(blocks[0].source_end, Some(5)); // "第一页内容" = 5 chars
+        assert_eq!(blocks[1].source_start, Some(6)); // 5 + 1(换行符)
+        assert_eq!(blocks[1].source_end, Some(11)); // 6 + 5
     }
 
     #[test]

@@ -137,8 +137,63 @@ fn validate_params(tool_name: &str, arguments: &Value) -> Option<String> {
             spec!("summary", "string", STRING),
         ]],
         "sync_brain" => &[&[spec!("repo_path", "string", STRING)]],
-        "kb_create_library" => &[&[spec!("name", "string", STRING)]],
-        "kb_update_library" => &[&[spec!("library_id", "integer", INTEGER)]],
+        "kb_create_library" => &[&[
+            spec!("name", "string", STRING),
+            spec!("semantic_segmentation_enabled", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("raptor_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("raptor_llm_base_url", "string", STRING),
+            spec!("raptor_llm_secret_ref", "string", STRING),
+            spec!("raptor_llm_model", "string", STRING),
+            spec!("chunk_size", "integer", INTEGER),
+            spec!("chunk_overlap", "integer", INTEGER),
+            spec!("batch_max_documents", "integer", INTEGER),
+            spec!("batch_max_chunks", "integer", INTEGER),
+            spec!("embedding_provider", "string", STRING),
+            spec!("embedding_model", "string", STRING),
+            spec!("embedding_dimensions", "integer", INTEGER),
+            spec!("search_profile", "string", STRING),
+            spec!("rerank_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("rerank_provider", "string", STRING),
+            spec!("summary_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("external_embedding_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_rerank_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_summary_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_ocr_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("redaction_enabled", "boolean", |v: &Value| v.is_boolean()),
+        ]],
+        "kb_update_library" => &[&[
+            spec!("library_id", "integer", INTEGER),
+            spec!("name", "string", STRING),
+            spec!("semantic_segmentation_enabled", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("raptor_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("raptor_llm_base_url", "string", STRING),
+            spec!("raptor_llm_secret_ref", "string", STRING),
+            spec!("raptor_llm_model", "string", STRING),
+            spec!("chunk_size", "integer", INTEGER),
+            spec!("chunk_overlap", "integer", INTEGER),
+            spec!("embedding_provider", "string", STRING),
+            spec!("embedding_model", "string", STRING),
+            spec!("embedding_dimensions", "integer", INTEGER),
+            spec!("search_profile", "string", STRING),
+            spec!("rerank_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("rerank_provider", "string", STRING),
+            spec!("summary_enabled", "boolean", |v: &Value| v.is_boolean()),
+            spec!("external_embedding_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_rerank_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_summary_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("external_ocr_allowed", "boolean", |v: &Value| v
+                .is_boolean()),
+            spec!("redaction_enabled", "boolean", |v: &Value| v.is_boolean()),
+        ]],
         "kb_delete_library" => &[&[
             spec!("library_id", "integer", INTEGER),
             spec!("confirm", "boolean", |v: &Value| v.is_boolean()),

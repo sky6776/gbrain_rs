@@ -34,6 +34,12 @@ pub struct ParserRegistry {
     fallback: text::TextParser,
 }
 
+impl Default for ParserRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParserRegistry {
     pub fn new() -> Self {
         let mut registry = Self {

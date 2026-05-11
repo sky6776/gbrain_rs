@@ -1632,21 +1632,137 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     path
                 )));
             }
+            let kb = engine.kb_engine()?;
+            let source_id = kb.create_source(
+                library_id,
+                "local_directory",
+                &path,
+                source_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("source"),
+                "soft_delete",
+            )?;
             let files = gbrain_core::kb::sync::scan_directory(
                 source_path,
                 &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"],
             )?;
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            let mut inserted = 0u32;
+            for file in &files {
+                let hash = gbrain_core::kb::sync::compute_file_hash(file)?;
+                let file_size = std::fs::metadata(file).map(|m| m.len() as i64).unwrap_or(0);
+                let item_path = file.to_string_lossy().to_string();
+                kb.insert_source_item(source_id, &item_path, &hash, file_size, &now)?;
+                inserted += 1;
+            }
             println!(
-                "Source added: {} files found for library {}",
-                files.len(),
-                library_id
+                "Source added: id={}, {} files registered for library {}",
+                source_id, inserted, library_id
             );
             return Ok(());
         }
         Commands::KbSyncSource { source_id } => {
-            let files =
-                gbrain_core::kb::sync::scan_directory(std::path::Path::new("."), &["md", "txt"])?;
-            println!("Sync source {}: {} files scanned", source_id, files.len());
+            let kb = engine.kb_engine()?;
+            let source = kb.get_source(source_id)?.ok_or_else(|| {
+                GBrainError::InvalidInput(format!("Source {} not found", source_id))
+            })?;
+            let (
+                _id,
+                library_id,
+                _source_type,
+                source_uri,
+                _display_name,
+                delete_policy,
+                _sync_status,
+            ) = source;
+            let source_dir = std::path::Path::new(&source_uri);
+            if !source_dir.is_dir() {
+                return Err(GBrainError::InvalidInput(format!(
+                    "Source directory does not exist: {}",
+                    source_uri
+                )));
+            }
+            let files = gbrain_core::kb::sync::scan_directory(
+                source_dir,
+                &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"],
+            )?;
+            let conn = engine.connection()?;
+            let scan_results = gbrain_core::kb::sync::incremental_scan(conn, source_id, &files)?;
+            let summary = gbrain_core::kb::sync::summarize_scan(&scan_results);
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+            for (file_path, action, new_hash) in &scan_results {
+                let item_path = file_path.to_string_lossy().to_string();
+                match action {
+                    gbrain_core::kb::sync::SyncAction::New => {
+                        let hash = new_hash.as_deref().unwrap_or("");
+                        let file_size = std::fs::metadata(file_path)
+                            .map(|m| m.len() as i64)
+                            .unwrap_or(0);
+                        kb.insert_source_item(source_id, &item_path, hash, file_size, &now)?;
+                        let ext = file_path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let doc = gbrain_core::kb::types::Document {
+                            library_id,
+                            original_name: file_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            content_hash: hash.to_string(),
+                            file_size,
+                            extension: ext.clone(),
+                            source_type: "source_sync".to_string(),
+                            storage_path: item_path.clone(),
+                            original_path: item_path.clone(),
+                            ..Default::default()
+                        };
+                        let doc_id = kb.create_document(&doc)?;
+                        kb.update_source_item(
+                            source_id,
+                            &item_path,
+                            None,
+                            Some("synced"),
+                            None,
+                            Some(doc_id),
+                            Some(&now),
+                        )?;
+                    }
+                    gbrain_core::kb::sync::SyncAction::Changed => {
+                        if let Some(hash) = new_hash {
+                            kb.update_source_item(
+                                source_id,
+                                &item_path,
+                                Some(hash),
+                                Some("changed"),
+                                None,
+                                None,
+                                Some(&now),
+                            )?;
+                        }
+                    }
+                    gbrain_core::kb::sync::SyncAction::Missing => {
+                        gbrain_core::kb::sync::apply_delete_policy(
+                            conn,
+                            &item_path,
+                            &delete_policy,
+                        )?;
+                    }
+                    gbrain_core::kb::sync::SyncAction::Unchanged => {}
+                }
+            }
+            println!(
+                "Sync source {}: new={}, changed={}, missing={}, unchanged={}",
+                source_id,
+                summary.new_count,
+                summary.changed_count,
+                summary.missing_count,
+                summary.unchanged_count
+            );
             return Ok(());
         }
 

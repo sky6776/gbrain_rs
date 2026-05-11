@@ -39,7 +39,7 @@ impl QueryType {
 }
 
 /// Retriever 类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetrieverType {
     TitleName,
     NodeFts,

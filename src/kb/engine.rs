@@ -144,8 +144,12 @@ impl<'a> KbEngine<'a> {
                 "INSERT INTO kb_libraries \
                  (name, semantic_segmentation_enabled, raptor_enabled, \
                   raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
-                  chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, sort_order) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, sort_order, \
+                  embedding_provider, embedding_model, embedding_dimensions, \
+                  search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                  external_embedding_allowed, external_rerank_allowed, \
+                  external_summary_allowed, external_ocr_allowed, redaction_enabled) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                 params![
                     input.name,
                     semantic,
@@ -158,6 +162,18 @@ impl<'a> KbEngine<'a> {
                     batch_max_docs,
                     batch_max_chunks,
                     max_sort + 1,
+                    input.embedding_provider.as_deref().unwrap_or("openai"),
+                    input.embedding_model.as_deref().unwrap_or("text-embedding-3-large"),
+                    input.embedding_dimensions.unwrap_or(1536),
+                    input.search_profile.as_deref().unwrap_or("balanced"),
+                    input.rerank_enabled.unwrap_or(true) as i32,
+                    input.rerank_provider.as_deref().unwrap_or(""),
+                    input.summary_enabled.unwrap_or(false) as i32,
+                    input.external_embedding_allowed.unwrap_or(true) as i32,
+                    input.external_rerank_allowed.unwrap_or(true) as i32,
+                    input.external_summary_allowed.unwrap_or(true) as i32,
+                    input.external_ocr_allowed.unwrap_or(true) as i32,
+                    input.redaction_enabled.unwrap_or(false) as i32,
                 ],
             )?;
             let lib_id = conn.last_insert_rowid();
@@ -185,7 +201,11 @@ impl<'a> KbEngine<'a> {
                         semantic_segmentation_enabled, raptor_enabled, \
                         raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
                         chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, \
-                        sort_order \
+                        sort_order, \
+                        embedding_provider, embedding_model, embedding_dimensions, \
+                        search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                        external_embedding_allowed, external_rerank_allowed, \
+                        external_summary_allowed, external_ocr_allowed, redaction_enabled \
                  FROM kb_libraries WHERE id = ?1",
                 [id],
                 |row| {
@@ -204,19 +224,19 @@ impl<'a> KbEngine<'a> {
                         batch_max_documents: row.get::<_, i32>(11)? as usize,
                         batch_max_chunks: row.get::<_, i32>(12)? as usize,
                         sort_order: row.get(13)?,
-                        // P0-016: new governance fields with defaults
-                        embedding_provider: String::new(),
-                        embedding_model: String::new(),
-                        embedding_dimensions: None,
-                        search_profile: String::new(),
-                        rerank_enabled: true,
-                        rerank_provider: String::new(),
-                        summary_enabled: false,
-                        external_embedding_allowed: true,
-                        external_rerank_allowed: true,
-                        external_summary_allowed: true,
-                        external_ocr_allowed: true,
-                        redaction_enabled: false,
+                        // P0-016: 从数据库真实读取治理字段
+                        embedding_provider: row.get(14)?,
+                        embedding_model: row.get(15)?,
+                        embedding_dimensions: row.get(16)?,
+                        search_profile: row.get(17)?,
+                        rerank_enabled: row.get::<_, i32>(18)? != 0,
+                        rerank_provider: row.get(19)?,
+                        summary_enabled: row.get::<_, i32>(20)? != 0,
+                        external_embedding_allowed: row.get::<_, i32>(21)? != 0,
+                        external_rerank_allowed: row.get::<_, i32>(22)? != 0,
+                        external_summary_allowed: row.get::<_, i32>(23)? != 0,
+                        external_ocr_allowed: row.get::<_, i32>(24)? != 0,
+                        redaction_enabled: row.get::<_, i32>(25)? != 0,
                     })
                 },
             )
@@ -260,6 +280,55 @@ impl<'a> KbEngine<'a> {
             if let Some(chunk_overlap) = input.chunk_overlap {
                 sets.push("chunk_overlap = ?".to_string());
                 param_values.push(Box::new(chunk_overlap.clamp(0, 1000) as i32));
+            }
+            // P0-016: 库级治理字段更新
+            if let Some(ref v) = input.embedding_provider {
+                sets.push("embedding_provider = ?".to_string());
+                param_values.push(Box::new(v.clone()));
+            }
+            if let Some(ref v) = input.embedding_model {
+                sets.push("embedding_model = ?".to_string());
+                param_values.push(Box::new(v.clone()));
+            }
+            if let Some(v) = input.embedding_dimensions {
+                sets.push("embedding_dimensions = ?".to_string());
+                param_values.push(Box::new(v));
+            }
+            if let Some(ref v) = input.search_profile {
+                sets.push("search_profile = ?".to_string());
+                param_values.push(Box::new(v.clone()));
+            }
+            if let Some(v) = input.rerank_enabled {
+                sets.push("rerank_enabled = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(ref v) = input.rerank_provider {
+                sets.push("rerank_provider = ?".to_string());
+                param_values.push(Box::new(v.clone()));
+            }
+            if let Some(v) = input.summary_enabled {
+                sets.push("summary_enabled = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(v) = input.external_embedding_allowed {
+                sets.push("external_embedding_allowed = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(v) = input.external_rerank_allowed {
+                sets.push("external_rerank_allowed = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(v) = input.external_summary_allowed {
+                sets.push("external_summary_allowed = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(v) = input.external_ocr_allowed {
+                sets.push("external_ocr_allowed = ?".to_string());
+                param_values.push(Box::new(v as i32));
+            }
+            if let Some(v) = input.redaction_enabled {
+                sets.push("redaction_enabled = ?".to_string());
+                param_values.push(Box::new(v as i32));
             }
 
             if sets.is_empty() {
@@ -553,6 +622,7 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_document_status(
         &self,
         id: i64,
@@ -630,15 +700,57 @@ impl<'a> KbEngine<'a> {
         })
     }
 
-    pub fn update_document_stats(&self, id: i64, word_total: i32, split_total: i32) -> Result<()> {
+    pub fn update_document_stats(
+        &self,
+        id: i64,
+        word_total: i32,
+        split_total: i32,
+        embedding_status: Option<i32>,
+    ) -> Result<()> {
+        let emb_st = embedding_status.unwrap_or(STATUS_COMPLETED);
+        let (doc_status, idx_status, set_last_indexed) = if emb_st == STATUS_COMPLETED {
+            ("ready", "ready", true)
+        } else if emb_st == STATUS_FAILED {
+            ("failed", "failed", false)
+        } else {
+            ("processing", "pending", false)
+        };
         self.transaction(|conn| {
-            conn.execute(
-                "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
-                 parsing_status = ?3, embedding_status = ?3, \
-                 updated_at = datetime('now') \
-                 WHERE id = ?4",
-                params![word_total, split_total, STATUS_COMPLETED, id],
-            )?;
+            if set_last_indexed {
+                conn.execute(
+                    "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
+                     parsing_status = ?3, embedding_status = ?4, \
+                     document_status = ?5, index_status = ?6, \
+                     last_indexed_at = datetime('now'), updated_at = datetime('now') \
+                     WHERE id = ?7",
+                    params![
+                        word_total,
+                        split_total,
+                        STATUS_COMPLETED,
+                        emb_st,
+                        doc_status,
+                        idx_status,
+                        id
+                    ],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
+                     parsing_status = ?3, embedding_status = ?4, \
+                     document_status = ?5, index_status = ?6, \
+                     updated_at = datetime('now') \
+                     WHERE id = ?7",
+                    params![
+                        word_total,
+                        split_total,
+                        STATUS_COMPLETED,
+                        emb_st,
+                        doc_status,
+                        idx_status,
+                        id
+                    ],
+                )?;
+            }
             Ok(())
         })
     }
@@ -1080,6 +1192,7 @@ impl<'a> KbEngine<'a> {
     // --- Section CRUD (P1-008) ---
 
     /// 写入文档章节
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_section(
         &self,
         document_id: i64,
@@ -1205,6 +1318,27 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// 获取单个导入源
+    #[allow(clippy::type_complexity)]
+    pub fn get_source(
+        &self,
+        source_id: i64,
+    ) -> Result<Option<(i64, i64, String, String, String, String, String)>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, library_id, source_type, source_uri, display_name, delete_policy, sync_status \
+                 FROM kb_sources WHERE id=?1"
+            )?;
+            let mut rows = stmt.query_map(params![source_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+            })?;
+            match rows.next() {
+                Some(Ok(r)) => Ok(Some(r)),
+                _ => Ok(None),
+            }
+        })
+    }
+
     /// 列出库的导入源
     pub fn list_sources(&self, library_id: i64) -> Result<Vec<(i64, String, String, String)>> {
         self.query(|conn| {
@@ -1253,6 +1387,7 @@ impl<'a> KbEngine<'a> {
     }
 
     /// 更新 source item（hash 变化或同步状态更新）
+    #[allow(clippy::too_many_arguments)]
     pub fn update_source_item(
         &self,
         source_id: i64,
@@ -1299,6 +1434,7 @@ impl<'a> KbEngine<'a> {
     }
 
     /// 列出 source 的所有 items
+    #[allow(clippy::type_complexity)]
     pub fn list_source_items(
         &self,
         source_id: i64,

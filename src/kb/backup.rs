@@ -45,13 +45,29 @@ pub fn create_manifest(
     }
 }
 
-/// 备份 DB 文件
+/// 备份 DB 文件 — 先执行 WAL checkpoint 确保数据完整，再复制 DB/WAL/SHM
 pub fn backup_database(db_path: &Path, output_dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(output_dir)
         .map_err(|e| GBrainError::FileError(format!("cannot create backup dir: {}", e)))?;
+
+    // WAL checkpoint: 将 WAL 内容合并到主 DB 文件
+    if let Ok(conn) = Connection::open(db_path) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+
     let dest = output_dir.join("gbrain.db");
     std::fs::copy(db_path, &dest)
         .map_err(|e| GBrainError::FileError(format!("cannot copy DB: {}", e)))?;
+
+    // 同时复制 WAL 和 SHM 文件（如果存在）
+    for ext in &["-wal", "-shm"] {
+        let src = db_path.with_extension(format!("db{}", ext));
+        if src.exists() {
+            let dst = output_dir.join(format!("gbrain.db{}", ext));
+            std::fs::copy(&src, &dst).ok();
+        }
+    }
+
     Ok(dest)
 }
 
@@ -216,7 +232,7 @@ pub fn export_library(
         output_dir,
         "sources.json",
         "SELECT id, library_id, source_type, source_uri, display_name, \
-                delete_policy, sync_status, last_sync_at \
+                delete_policy, sync_status, last_synced_at \
          FROM kb_sources WHERE library_id=?1",
         params![library_id],
     )?;
@@ -271,38 +287,50 @@ pub fn import_library(
     let new_lib_id = conn.last_insert_rowid();
 
     // Import embedding indexes FIRST — 后面的 embedding 导入依赖 index_id 映射
-    let mut index_id_map = import_embedding_indexes(conn, archive_dir, new_lib_id)?;
+    let (mut index_id_map, mut active_index_id) =
+        import_embedding_indexes(conn, archive_dir, new_lib_id)?;
 
     // 若备份中没有 embedding index，为导入库创建默认 index 并激活
     // 避免之后新增文档/re-embed 时报 "没有 active embedding index"
     // 同时将 0 → default_idx 加入映射，让旧 embedding（无 index_id）能正确归属
     if index_id_map.is_empty() {
+        let dims = infer_embedding_dimensions(archive_dir).unwrap_or(1536);
         let default_idx = crate::kb::embedding_index::create_embedding_index(
             conn,
             new_lib_id,
             "openai",
             "text-embedding-3-large",
-            1536,
+            dims,
             "vec0",
         )?;
         crate::kb::embedding_index::activate_index(conn, default_idx)?;
         index_id_map.insert(0, default_idx);
+        active_index_id = Some(default_idx);
     }
 
-    // Import documents — assign new IDs and remap library_id
-    let doc_id_map = import_documents(conn, archive_dir, new_lib_id)?;
+    // Import folders FIRST — 建立 old_id → new_id 映射，后续导入依赖此映射
+    let folder_id_map = import_folders(conn, archive_dir, new_lib_id)?;
+
+    // Import documents — assign new IDs, remap library_id and folder_id
+    let doc_id_map = import_documents(conn, archive_dir, new_lib_id, &folder_id_map)?;
 
     // 导入节点 — 重映射 document_id 和 library_id，返回 old→new node_id 映射
     let node_id_map = import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
 
+    // 回填节点的 parent_id 和 section_id（RAPTOR 层级和 section 关系）
+    backfill_node_refs(conn, &node_id_map)?;
+
     // 导入 embedding — 使用 node_id_map + index_id_map 重映射
-    import_embeddings(conn, archive_dir, &node_id_map, &index_id_map)?;
+    import_embeddings(
+        conn,
+        archive_dir,
+        &node_id_map,
+        &index_id_map,
+        active_index_id,
+    )?;
 
-    // Import summaries — remap document_id
-    import_summaries(conn, archive_dir, &doc_id_map)?;
-
-    // Import folders — remap library_id
-    import_folders(conn, archive_dir, new_lib_id)?;
+    // Import summaries — remap document_id and section_id
+    import_summaries(conn, archive_dir, &doc_id_map, &node_id_map)?;
 
     Ok(new_lib_id)
 }
@@ -323,7 +351,7 @@ fn export_table_to_json<P: rusqlite::Params>(
     let rows: Vec<serde_json::Map<String, serde_json::Value>> = stmt
         .query_map(params, |row| {
             let mut map = serde_json::Map::new();
-            for i in 0..col_count {
+            for (i, _col_name) in column_names.iter().enumerate().take(col_count) {
                 let val: serde_json::Value = match row.get_ref(i) {
                     Ok(rusqlite::types::ValueRef::Null) => serde_json::Value::Null,
                     Ok(rusqlite::types::ValueRef::Integer(n)) => serde_json::json!(n),
@@ -399,6 +427,7 @@ fn import_documents(
     conn: &Connection,
     archive_dir: &Path,
     new_lib_id: i64,
+    folder_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<std::collections::HashMap<i64, i64>> {
     let data = std::fs::read_to_string(archive_dir.join("documents.json"))
         .map_err(|e| GBrainError::FileError(format!("cannot read documents.json: {}", e)))?;
@@ -408,17 +437,20 @@ fn import_documents(
     let mut id_map = std::collections::HashMap::new();
     for doc in &docs {
         let old_id = doc.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let old_folder_id = json_null_or_int(doc, "folder_id");
+        let new_folder_id = old_folder_id.and_then(|fid| folder_id_map.get(&fid).copied());
         conn.execute(
-            "INSERT INTO kb_documents (library_id, original_name, name_tokens, file_size, \
+            "INSERT INTO kb_documents (library_id, folder_id, original_name, name_tokens, file_size, \
              content_hash, extension, mime_type, source_type, storage_path, original_path, \
              job_id, processing_run_id, parsing_status, parsing_progress, \
              embedding_status, embedding_progress, word_total, split_total, \
              title, summary, keywords, entity_names, source_uri, \
              document_granularity, content_char_count, content_token_count, \
              page_count, section_count, chunk_strategy, document_status, index_status) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32)",
             params![
                 new_lib_id,
+                new_folder_id,
                 json_str(doc, "original_name"),
                 json_str(doc, "name_tokens"),
                 json_int(doc, "file_size"),
@@ -502,11 +534,20 @@ fn import_nodes(
     Ok(node_id_map)
 }
 
+/// 回填节点引用（已内联到 import_nodes 中，保留空函数以兼容调用点）
+fn backfill_node_refs(
+    _conn: &Connection,
+    _node_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<()> {
+    Ok(())
+}
+
 fn import_embeddings(
     conn: &Connection,
     archive_dir: &Path,
     node_id_map: &std::collections::HashMap<i64, i64>,
     index_id_map: &std::collections::HashMap<i64, i64>,
+    active_index_id: Option<i64>,
 ) -> Result<()> {
     let path = archive_dir.join("embeddings.json");
     if !path.exists() {
@@ -541,9 +582,11 @@ fn import_embeddings(
                 ))
             })?
         } else {
-            // 旧数据没有 index_id，使用默认 index（导入时自动创建或从备份恢复的第一个）
-            index_id_map.values().next().copied().ok_or_else(|| {
-                GBrainError::FileError("无法解析 embedding 的 index 归属：index_id_map 为空".into())
+            // 旧数据没有 index_id，归入 active/default index（确定性选择）
+            active_index_id.ok_or_else(|| {
+                GBrainError::FileError(
+                    "无法解析 embedding 的 index 归属：没有可用的 active index".into(),
+                )
             })?
         };
 
@@ -629,6 +672,7 @@ fn import_summaries(
     conn: &Connection,
     archive_dir: &Path,
     doc_id_map: &std::collections::HashMap<i64, i64>,
+    node_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
     let path = archive_dir.join("summaries.json");
     if !path.exists() {
@@ -645,13 +689,15 @@ fn import_summaries(
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
+        let old_section_id = json_null_or_int(summary, "section_id");
+        let new_section_id = old_section_id.and_then(|sid| node_id_map.get(&sid).copied());
         conn.execute(
             "INSERT INTO kb_document_summaries (document_id, section_id, summary_type, \
              summary_text, summary_tokens, model) \
              VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 new_doc_id,
-                json_null_or_int(summary, "section_id"),
+                new_section_id,
                 json_str(summary, "summary_type"),
                 json_str(summary, "summary_text"),
                 json_str(summary, "summary_tokens"),
@@ -666,10 +712,10 @@ fn import_embedding_indexes(
     conn: &Connection,
     archive_dir: &Path,
     new_lib_id: i64,
-) -> Result<std::collections::HashMap<i64, i64>> {
+) -> Result<(std::collections::HashMap<i64, i64>, Option<i64>)> {
     let path = archive_dir.join("embedding_indexes.json");
     if !path.exists() {
-        return Ok(std::collections::HashMap::new());
+        return Ok((std::collections::HashMap::new(), None));
     }
     let data = std::fs::read_to_string(&path).map_err(|e| {
         GBrainError::FileError(format!("cannot read embedding_indexes.json: {}", e))
@@ -683,6 +729,7 @@ fn import_embedding_indexes(
     let old_active_id = indexes.iter().find(|i| i.is_active).map(|i| i.id);
 
     let mut id_map = std::collections::HashMap::new();
+    let mut new_active_id: Option<i64> = None;
     for idx in &indexes {
         let old_id = idx.id;
         let new_id = crate::kb::embedding_index::create_embedding_index(
@@ -693,44 +740,68 @@ fn import_embedding_indexes(
             idx.dimensions,
             &idx.index_type,
         )?;
+        if Some(old_id) == old_active_id {
+            new_active_id = Some(new_id);
+        }
         id_map.insert(old_id, new_id);
     }
 
     // 恢复 active 状态：优先使用备份中的 active index，否则激活第一个
-    if let Some(old_id) = old_active_id {
-        if let Some(&new_id) = id_map.get(&old_id) {
-            crate::kb::embedding_index::activate_index(conn, new_id)?;
-        }
+    if let Some(new_id) = new_active_id {
+        crate::kb::embedding_index::activate_index(conn, new_id)?;
     } else if let Some(&first_id) = id_map.values().next() {
         crate::kb::embedding_index::activate_index(conn, first_id)?;
+        new_active_id = Some(first_id);
     }
 
-    Ok(id_map)
+    Ok((id_map, new_active_id))
 }
 
-fn import_folders(conn: &Connection, archive_dir: &Path, new_lib_id: i64) -> Result<()> {
+fn import_folders(
+    conn: &Connection,
+    archive_dir: &Path,
+    new_lib_id: i64,
+) -> Result<std::collections::HashMap<i64, i64>> {
     let path = archive_dir.join("folders.json");
     if !path.exists() {
-        return Ok(());
+        return Ok(std::collections::HashMap::new());
     }
     let data = std::fs::read_to_string(&path)
         .map_err(|e| GBrainError::FileError(format!("cannot read folders.json: {}", e)))?;
     let folders: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse folders.json: {}", e)))?;
 
+    // 两阶段导入：先插入所有 folder（parent_id=NULL），再回填 parent_id
+    let mut id_map = std::collections::HashMap::new();
     for folder in &folders {
+        let old_id = folder.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         conn.execute(
             "INSERT INTO kb_folders (library_id, parent_id, name, sort_order) \
-             VALUES (?1,?2,?3,?4)",
+             VALUES (?1, NULL, ?2, ?3)",
             params![
                 new_lib_id,
-                json_null_or_int(folder, "parent_id"),
                 json_str(folder, "name"),
                 json_int(folder, "sort_order"),
             ],
         )?;
+        id_map.insert(old_id, conn.last_insert_rowid());
     }
-    Ok(())
+
+    // 回填 parent_id：用 id_map 重映射
+    for folder in &folders {
+        let old_id = folder.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Some(&new_id) = id_map.get(&old_id) {
+            if let Some(old_parent) = json_null_or_int(folder, "parent_id") {
+                if let Some(&new_parent) = id_map.get(&old_parent) {
+                    conn.execute(
+                        "UPDATE kb_folders SET parent_id = ?1 WHERE id = ?2",
+                        params![new_parent, new_id],
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(id_map)
 }
 
 /// Helper: extract string from JSON map, default empty
@@ -750,6 +821,39 @@ fn json_int(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> i64 
 fn json_null_or_int(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
     map.get(key)
         .and_then(|v| if v.is_null() { None } else { v.as_i64() })
+}
+
+/// 从 embeddings.json 推断向量维度：优先取 `dimensions` 字段，否则从第一条 embedding blob 计算
+fn infer_embedding_dimensions(archive_dir: &Path) -> Option<i32> {
+    let path = archive_dir.join("embeddings.json");
+    if !path.exists() {
+        return None;
+    }
+    let data = std::fs::read_to_string(&path).ok()?;
+    let embeddings: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(&data).ok()?;
+
+    // 优先取第一条 embedding 的 dimensions 字段
+    if let Some(first) = embeddings.first() {
+        if let Some(dims) = first.get("dimensions").and_then(|v| v.as_i64()) {
+            if dims > 0 {
+                return Some(dims as i32);
+            }
+        }
+        // 回退：从 embedding_hex blob 长度推算
+        let hex_str = first
+            .get("embedding_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !hex_str.is_empty() {
+            if let Ok(blob) = hex::decode(hex_str) {
+                if blob.len() % 4 == 0 && !blob.is_empty() {
+                    return Some((blob.len() / 4) as i32);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

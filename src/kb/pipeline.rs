@@ -87,7 +87,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         GBrainError::FileError(format!("无法读取 {}: {}", storage_path, e))
     })?;
 
-    let parsed = registry.parse(ext, &file_data).map_err(|e| {
+    let parsed = registry.parse(ext, &file_data).inspect_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
             Some(STATUS_FAILED),
@@ -97,7 +97,6 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             None,
             None,
         );
-        e
     })?;
 
     let word_total: i32 = count_words(&parsed.content) as i32;
@@ -120,7 +119,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     };
 
     let splitter = create_splitter(&splitter_config);
-    let chunks = splitter.split(&parsed.content).map_err(|e| {
+    let chunks = splitter.split(&parsed.content).inspect_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
             Some(STATUS_FAILED),
@@ -130,7 +129,6 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             None,
             None,
         );
-        e
     })?;
 
     let split_total: i32 = chunks.len() as i32;
@@ -178,7 +176,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     // --- 阶段 5: 持久化 ---
     persist_nodes_and_vectors(conn, doc_id, lib_id, &raptor_nodes)?;
 
-    kb.update_document_stats(doc_id, word_total, split_total)?;
+    kb.update_document_stats(doc_id, word_total, split_total, None)?;
 
     Ok(ProcessResult {
         word_total,
@@ -198,6 +196,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
 /// 3. **嵌入** — 为每个节点生成嵌入向量
 /// 4. **RAPTOR** — 构建层次化摘要树 (可选)
 /// 5. **持久化** — 将所有节点写入数据库
+#[allow(clippy::too_many_arguments)]
 pub async fn process_document_async(
     conn: &Connection,
     payload: &KbProcessPayload,
@@ -249,7 +248,7 @@ pub async fn process_document_async(
         GBrainError::FileError(format!("无法读取 {}: {}", storage_path, e))
     })?;
 
-    let parsed = registry.parse(ext, &file_data).map_err(|e| {
+    let parsed = registry.parse(ext, &file_data).inspect_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
             Some(STATUS_FAILED),
@@ -259,7 +258,6 @@ pub async fn process_document_async(
             None,
             None,
         );
-        e
     })?;
 
     let word_total: i32 = count_words(&parsed.content) as i32;
@@ -316,7 +314,7 @@ pub async fn process_document_async(
     )?;
 
     // --- 阶段 2: 分割 ---
-    report_progress(on_progress, "splitting", &format!("分割为节点"));
+    report_progress(on_progress, "splitting", "分割为节点");
     let splitter_config = SplitterConfig {
         file_path: storage_path.to_string(),
         chunk_size: library.chunk_size,
@@ -324,7 +322,7 @@ pub async fn process_document_async(
         semantic_enabled: library.semantic_segmentation_enabled,
     };
 
-    let splitter = create_async_splitter(&splitter_config, embedder.clone()).map_err(|e| {
+    let splitter = create_async_splitter(&splitter_config, embedder.clone()).inspect_err(|e| {
         let _ = kb.update_document_status(
             doc_id,
             Some(STATUS_FAILED),
@@ -334,25 +332,27 @@ pub async fn process_document_async(
             None,
             None,
         );
-        e
     })?;
-    let chunks = splitter.split_async(&parsed.content).await.map_err(|e| {
-        let _ = kb.update_document_status(
-            doc_id,
-            Some(STATUS_FAILED),
-            None,
-            Some(&e.to_string()),
-            None,
-            None,
-            None,
-        );
-        e
-    })?;
+    let chunks = splitter
+        .split_async(&parsed.content)
+        .await
+        .inspect_err(|e| {
+            let _ = kb.update_document_status(
+                doc_id,
+                Some(STATUS_FAILED),
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+                None,
+            );
+        })?;
 
     let split_total: i32 = chunks.len() as i32;
 
-    // P1-010: 从 parser blocks 中提取每块的元数据
-    let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed
+    // P1-010: 从 parser blocks 中提取每块的元数据，用 span 匹配而非下标硬匹配
+    #[allow(clippy::type_complexity)]
+    let block_spans: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed
         .blocks
         .as_ref()
         .map(|blocks| {
@@ -370,14 +370,51 @@ pub async fn process_document_async(
         })
         .unwrap_or_default();
 
+    // 计算每个 chunk 在 full_text 中的字符偏移 [start, end)
+    let mut chunk_offsets: Vec<(usize, usize)> = Vec::with_capacity(chunks.len());
+    let mut offset = 0usize;
+    for chunk in &chunks {
+        let len = chunk.chars().count();
+        chunk_offsets.push((offset, offset + len));
+        offset += len;
+    }
+
+    // 对每个 chunk，找与其 span 重叠最多的 block
+    #[allow(clippy::type_complexity)]
+    fn find_best_block(
+        chunk_start: usize,
+        chunk_end: usize,
+        spans: &[(String, Option<i32>, Option<i32>, Option<i32>)],
+    ) -> (String, Option<i32>, Option<i32>, Option<i32>) {
+        let mut best: (usize, (String, Option<i32>, Option<i32>, Option<i32>)) =
+            (0, spans.first().cloned().unwrap_or_default());
+        for (idx, (_title, _page, s_start, s_end)) in spans.iter().enumerate() {
+            let bs = s_start.unwrap_or(0) as usize;
+            let be = s_end.unwrap_or(i32::MAX) as usize;
+            let overlap = if chunk_start < be && chunk_end > bs {
+                chunk_end.min(be) - chunk_start.max(bs)
+            } else {
+                0
+            };
+            if overlap > best.0 {
+                best = (overlap, spans[idx].clone());
+            }
+        }
+        best.1
+    }
+
     // P1-006/P1-007: 根据粒度应用节点策略 + P1-011: 生成 contextual embedding 文本
     let doc_title = doc_meta.title.as_deref().unwrap_or("");
     let mut nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
-            let (title_path, page_num, src_start, src_end) =
-                block_meta_vec.get(i).cloned().unwrap_or_default();
+            let (c_start, c_end) = chunk_offsets[i];
+            let (title_path, page_num, src_start, src_end) = if block_spans.is_empty() {
+                (String::new(), None, None, None)
+            } else {
+                find_best_block(c_start, c_end, &block_spans)
+            };
             let embedding_text =
                 crate::kb::context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {
@@ -430,8 +467,7 @@ pub async fn process_document_async(
                                     for (ri, row) in rows.iter().enumerate() {
                                         let row_text = headers
                                             .iter()
-                                            .enumerate()
-                                            .filter_map(|(hi, h)| {
+                                            .filter_map(|h| {
                                                 row.get(h)
                                                     .and_then(|v| v.as_str())
                                                     .map(|s| format!("{}: {}", h, s))
@@ -454,32 +490,30 @@ pub async fn process_document_async(
     }
 
     // P1-006: micro 文档策略 — 仅保留一个 whole-document node
-    if granularity == crate::kb::granularity::DocumentGranularity::Micro {
-        if !chunks.is_empty() {
-            let full_text = parsed.content.clone();
-            let embedding_text =
-                crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
-            nodes = vec![RaptorNode {
-                id: -1,
-                library_id: lib_id,
-                document_id: doc_id,
-                content: full_text,
-                level: 0,
-                parent_id: None,
-                chunk_order: 0,
-                vector: None,
-                title_path: String::new(),
-                page_number: None,
-                source_start: None,
-                source_end: None,
-                node_metadata: "{\"node_type\":\"whole_document\"}".to_string(),
-                embedding_text,
-            }];
-        }
+    if granularity == crate::kb::granularity::DocumentGranularity::Micro && !chunks.is_empty() {
+        let full_text = parsed.content.clone();
+        let embedding_text = crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
+        nodes = vec![RaptorNode {
+            id: -1,
+            library_id: lib_id,
+            document_id: doc_id,
+            content: full_text,
+            level: 0,
+            parent_id: None,
+            chunk_order: 0,
+            vector: None,
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            node_metadata: "{\"node_type\":\"whole_document\"}".to_string(),
+            embedding_text,
+        }];
     }
 
     // --- 阶段 3: 嵌入 ---
-    if let Some(ref emb) = embedder {
+    let mut embedding_failed = false;
+    if let Some(emb) = embedder.as_ref() {
         report_progress(
             on_progress,
             "embedding",
@@ -495,47 +529,73 @@ pub async fn process_document_async(
             None,
         )?;
 
-        // P1-012: embedding 使用 embedding_text，为空时 fallback 到 content
-        let texts: Vec<&str> = nodes
-            .iter()
-            .map(|n| {
-                if n.embedding_text.is_empty() {
-                    n.content.as_str()
-                } else {
-                    n.embedding_text.as_str()
-                }
-            })
-            .collect();
-        match emb.embed_batch(&texts).await {
-            Ok(vectors) => {
-                for (i, node) in nodes.iter_mut().enumerate() {
-                    if i < vectors.len() {
-                        node.vector = Some(vectors[i].clone());
+        // P0-016: 检查库级隐私策略 — 禁止外部 embedding 时跳过
+        if !library.external_embedding_allowed {
+            report_progress(
+                on_progress,
+                "embedding",
+                "库级策略禁止外部 embedding，跳过嵌入阶段",
+            );
+        } else {
+            // P1-012: embedding 使用 embedding_text，为空时 fallback 到 content
+            let texts: Vec<&str> = nodes
+                .iter()
+                .map(|n| {
+                    if n.embedding_text.is_empty() {
+                        n.content.as_str()
+                    } else {
+                        n.embedding_text.as_str()
                     }
+                })
+                .collect();
+            match emb.embed_batch(&texts).await {
+                Ok(vectors) => {
+                    for (i, node) in nodes.iter_mut().enumerate() {
+                        if i < vectors.len() {
+                            node.vector = Some(vectors[i].clone());
+                        }
+                    }
+                    kb.update_document_status(
+                        doc_id,
+                        None,
+                        None,
+                        None,
+                        Some(STATUS_PROCESSING),
+                        Some(80),
+                        None,
+                    )?;
                 }
-                kb.update_document_status(
-                    doc_id,
-                    None,
-                    None,
-                    None,
-                    Some(STATUS_PROCESSING),
-                    Some(80),
-                    None,
-                )?;
-            }
-            Err(e) => {
-                report_progress(
-                    on_progress,
-                    "embedding",
-                    &format!("嵌入失败: {}, 继续无向量", e),
-                );
+                Err(e) => {
+                    embedding_failed = true;
+                    report_progress(
+                        on_progress,
+                        "embedding",
+                        &format!("嵌入失败: {}, 标记为 embedding_failed", e),
+                    );
+                    kb.update_document_status(
+                        doc_id,
+                        None,
+                        None,
+                        None,
+                        Some(STATUS_FAILED),
+                        Some(80),
+                        Some(&format!("embedding failed: {}", e)),
+                    )?;
+                }
             }
         }
     }
 
     // --- 阶段 4: RAPTOR ---
+    // P0-016: 检查库级隐私策略 — 禁止外部摘要时跳过 RAPTOR
     if library.raptor_enabled && nodes.len() >= 3 {
-        if let Some(rc) = raptor_config {
+        if !library.external_summary_allowed {
+            report_progress(
+                on_progress,
+                "raptor",
+                "库级策略禁止外部摘要，跳过 RAPTOR 阶段",
+            );
+        } else if let Some(rc) = raptor_config {
             report_progress(on_progress, "raptor", "构建 RAPTOR 树");
 
             match raptor::resolve_raptor_llm_config(
@@ -620,7 +680,16 @@ pub async fn process_document_async(
     );
     persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes)?;
 
-    kb.update_document_stats(doc_id, word_total, split_total)?;
+    kb.update_document_stats(
+        doc_id,
+        word_total,
+        split_total,
+        if embedding_failed {
+            Some(STATUS_FAILED)
+        } else {
+            None
+        },
+    )?;
 
     report_progress(
         on_progress,

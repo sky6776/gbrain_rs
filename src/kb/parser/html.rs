@@ -9,6 +9,12 @@ use std::collections::HashMap;
 
 pub struct HtmlParser;
 
+impl Default for HtmlParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HtmlParser {
     pub fn new() -> Self {
         Self

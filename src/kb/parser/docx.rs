@@ -10,6 +10,12 @@ use std::io::Read;
 
 pub struct DocxParser;
 
+impl Default for DocxParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DocxParser {
     pub fn new() -> Self {
         Self

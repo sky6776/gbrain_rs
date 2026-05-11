@@ -102,6 +102,7 @@ fn bank_card_regex() -> Result<&'static Regex, regex::Error> {
 }
 
 /// 记录外部模型调用（写入 kb_external_model_calls）
+#[allow(clippy::too_many_arguments)]
 pub fn log_external_model_call(
     conn: &rusqlite::Connection,
     library_id: Option<i64>,

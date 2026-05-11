@@ -122,6 +122,7 @@ pub fn compute_eval_summary(queries: &[(Vec<i64>, Vec<i64>, u64)]) -> EvalResult
 }
 
 /// 记录搜索日志
+#[allow(clippy::too_many_arguments)]
 pub fn log_search(
     conn: &Connection,
     query_normalized: &str,
@@ -131,10 +132,13 @@ pub fn log_search(
     result_count: usize,
     latency_ms: u64,
     cache_hit: bool,
+    embedding_index_id: Option<i64>,
+    result_document_ids: &[i64],
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO kb_search_logs (query_normalized, library_ids, profile, planner_type, \
-         result_count, latency_ms, cache_hit) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         result_count, latency_ms, cache_hit, embedding_index_id, result_document_ids) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             query_normalized,
             serde_json::to_string(library_ids).unwrap_or_default(),
@@ -143,6 +147,8 @@ pub fn log_search(
             result_count as i32,
             latency_ms as i32,
             cache_hit as i32,
+            embedding_index_id,
+            serde_json::to_string(result_document_ids).unwrap_or_default(),
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -330,10 +336,11 @@ pub fn compare_embedding_indexes(
 }
 
 /// 从搜索日志获取某 index 的历史搜索结果（document_id 列表）
-fn get_search_results_for_index(conn: &Connection, _index_id: i64, query: &str) -> Vec<i64> {
-    // 简化实现：从搜索日志中查找匹配查询的结果
-    let sql = "SELECT result_document_ids FROM kb_search_logs WHERE query_normalized=?1 LIMIT 1";
-    conn.query_row(sql, params![query], |row| {
+fn get_search_results_for_index(conn: &Connection, index_id: i64, query: &str) -> Vec<i64> {
+    // 按 embedding_index_id + query 从搜索日志中查找匹配的结果
+    let sql = "SELECT result_document_ids FROM kb_search_logs \
+               WHERE embedding_index_id=?1 AND query_normalized=?2 LIMIT 1";
+    conn.query_row(sql, params![index_id, query], |row| {
         let ids_str: String = row.get(0)?;
         Ok(serde_json::from_str(&ids_str).unwrap_or_default())
     })
