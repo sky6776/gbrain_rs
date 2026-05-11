@@ -30,8 +30,10 @@ impl Default for PrivacyPolicy {
 impl PrivacyPolicy {
     /// 是否允许任何外部模型调用
     pub fn any_external_allowed(&self) -> bool {
-        self.external_embedding_allowed || self.external_rerank_allowed
-            || self.external_summary_allowed || self.external_ocr_allowed
+        self.external_embedding_allowed
+            || self.external_rerank_allowed
+            || self.external_summary_allowed
+            || self.external_ocr_allowed
     }
 }
 
@@ -87,7 +89,9 @@ fn id_card_regex() -> Result<&'static Regex, regex::Error> {
 
 fn api_key_regex() -> Result<&'static Regex, regex::Error> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b(sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|[a-zA-Z0-9]{32,})\b").unwrap());
+    RE.get_or_init(|| {
+        Regex::new(r"\b(sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|[a-zA-Z0-9]{32,})\b").unwrap()
+    });
     Ok(RE.get().unwrap())
 }
 

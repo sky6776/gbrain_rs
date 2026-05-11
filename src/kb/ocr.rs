@@ -6,9 +6,9 @@
 use crate::error::{GBrainError, Result};
 use crate::kb::context;
 use crate::kb::engine::KbEngine;
-use crate::nlp::chinese;
 use crate::kb::pipeline::persist_nodes_and_vectors;
 use crate::kb::types::*;
+use crate::nlp::chinese;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -121,7 +121,11 @@ pub fn writeback_ocr_results(
     let blocks = ocr_to_parsed_blocks(ocr_pages);
 
     // 2. 拼接全文并分割
-    let full_text: String = blocks.iter().map(|b| b.text.as_str()).collect::<Vec<_>>().join("\n");
+    let full_text: String = blocks
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if full_text.trim().is_empty() {
         return Ok(WritebackResult {
             blocks_created: blocks.len(),
@@ -137,14 +141,21 @@ pub fn writeback_ocr_results(
         semantic_enabled: false,
     };
     let splitter = crate::kb::splitter::create_splitter(&splitter_config);
-    let chunks = splitter.split(&full_text).map_err(|e| {
-        GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e))
-    })?;
+    let chunks = splitter
+        .split(&full_text)
+        .map_err(|e| GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e)))?;
 
     // 3. 为每个 chunk 找到对应的 block 元数据（page_number, source offsets）
     let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = blocks
         .iter()
-        .map(|b| (b.title_path.clone(), b.page_number, b.source_start, b.source_end))
+        .map(|b| {
+            (
+                b.title_path.clone(),
+                b.page_number,
+                b.source_start,
+                b.source_end,
+            )
+        })
         .collect();
 
     // 4. 构建 RaptorNode 列表
@@ -152,11 +163,10 @@ pub fn writeback_ocr_results(
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
-            let (title_path, page_num, src_start, src_end) = block_meta_vec
-                .get(i)
-                .cloned()
-                .unwrap_or_default();
-            let embedding_text = context::build_embedding_text(doc_title, &title_path, page_num, chunk);
+            let (title_path, page_num, src_start, src_end) =
+                block_meta_vec.get(i).cloned().unwrap_or_default();
+            let embedding_text =
+                context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -182,7 +192,10 @@ pub fn writeback_ocr_results(
     persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes)?;
 
     // 6. 计算 ocr_text_coverage
-    let ocr_pages_with_text = ocr_pages.iter().filter(|p| !p.text.trim().is_empty()).count() as i32;
+    let ocr_pages_with_text = ocr_pages
+        .iter()
+        .filter(|p| !p.text.trim().is_empty())
+        .count() as i32;
     let coverage = if total_page_count > 0 {
         ocr_pages_with_text as f64 / total_page_count as f64
     } else {

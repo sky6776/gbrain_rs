@@ -90,7 +90,11 @@ pub fn extract_markdown_metadata(content: &str, _raw_data: &[u8]) -> DocumentMet
         for line in frontmatter.lines() {
             if let Some((key, value)) = line.split_once(':') {
                 let key = key.trim().to_lowercase();
-                let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                let value = value
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
                 if value.is_empty() {
                     continue;
                 }
@@ -148,13 +152,11 @@ pub fn extract_pdf_metadata(_content: &str, raw_data: &[u8]) -> DocumentMetadata
 }
 
 fn get_pdf_str(dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
-    dict.get(key)
-        .ok()
-        .and_then(|obj| match obj {
-            lopdf::Object::String(s, _) => String::from_utf8(s.clone()).ok(),
-            lopdf::Object::Name(name) => String::from_utf8(name.clone()).ok(),
-            _ => None,
-        })
+    dict.get(key).ok().and_then(|obj| match obj {
+        lopdf::Object::String(s, _) => String::from_utf8(s.clone()).ok(),
+        lopdf::Object::Name(name) => String::from_utf8(name.clone()).ok(),
+        _ => None,
+    })
 }
 
 /// 从 DOCX 原始数据提取元数据（core.xml properties）
@@ -243,14 +245,13 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
 
     // 停用词
     let stopwords: &[&str] = &[
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-        "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-        "没有", "看", "好", "自己", "这", "他", "她", "它", "们", "那", "些",
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "can", "shall", "to", "of", "in", "for",
-        "on", "with", "at", "by", "from", "as", "into", "through", "during",
-        "and", "but", "or", "nor", "not", "so", "yet", "both", "either",
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也",
+        "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "他",
+        "她", "它", "们", "那", "些", "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "being", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
+        "may", "might", "can", "shall", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "as", "into", "through", "during", "and", "but", "or", "nor", "not", "so", "yet", "both",
+        "either",
     ];
     let stopwords_set: std::collections::HashSet<&str> = stopwords.iter().copied().collect();
 
@@ -267,11 +268,7 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
     // 取前 10 高频词
     let mut sorted: Vec<(&str, usize)> = freq.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
-    let keywords: Vec<String> = sorted
-        .iter()
-        .take(10)
-        .map(|(w, _)| w.to_string())
-        .collect();
+    let keywords: Vec<String> = sorted.iter().take(10).map(|(w, _)| w.to_string()).collect();
 
     // 实体初版：规则匹配（邮箱、日期、金额等模式）
     let mut entities: Vec<String> = Vec::new();
@@ -382,7 +379,8 @@ mod tests {
 
     #[test]
     fn test_extract_html_meta() {
-        let html = r#"<html><head><meta name="description" content="A great article"></head></html>"#;
+        let html =
+            r#"<html><head><meta name="description" content="A great article"></head></html>"#;
         let meta = extract_html_metadata(html, &[]);
         assert_eq!(meta.keywords.as_deref(), Some("A great article"));
     }
@@ -402,7 +400,9 @@ mod tests {
         // 关键词不应为空
         assert!(!keywords.is_empty(), "keywords should not be empty");
         // 应包含高频词（jieba 分词可能将"机器学习"拆分为多个 token）
-        assert!(keywords.contains("学习") || keywords.contains("机器") || keywords.contains("人工智能"));
+        assert!(
+            keywords.contains("学习") || keywords.contains("机器") || keywords.contains("人工智能")
+        );
         // 无邮箱时 entities 应为空
         assert!(!entities.contains("EMAIL:"));
     }

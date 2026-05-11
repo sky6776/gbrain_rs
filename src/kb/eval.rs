@@ -32,7 +32,10 @@ pub fn recall_at_k(expected: &[i64], retrieved: &[i64], k: usize) -> f64 {
         return 1.0;
     }
     let retrieved_set: std::collections::HashSet<_> = retrieved.iter().take(k).copied().collect();
-    let hits = expected.iter().filter(|id| retrieved_set.contains(id)).count();
+    let hits = expected
+        .iter()
+        .filter(|id| retrieved_set.contains(id))
+        .count();
     hits as f64 / expected.len() as f64
 }
 
@@ -76,9 +79,7 @@ pub fn ndcg_at_k(expected: &[i64], retrieved: &[i64], k: usize) -> f64 {
 }
 
 /// 计算汇总评测指标
-pub fn compute_eval_summary(
-    queries: &[(Vec<i64>, Vec<i64>, u64)],
-) -> EvalResult {
+pub fn compute_eval_summary(queries: &[(Vec<i64>, Vec<i64>, u64)]) -> EvalResult {
     let total = queries.len();
     if total == 0 {
         return EvalResult {
@@ -159,7 +160,13 @@ pub fn add_search_feedback(
     conn.execute(
         "INSERT INTO kb_search_feedback (search_log_id, document_id, node_id, rating, comment) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![search_log_id, document_id, node_id, rating.clamp(0, 5), comment],
+        params![
+            search_log_id,
+            document_id,
+            node_id,
+            rating.clamp(0, 5),
+            comment
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -185,7 +192,7 @@ pub fn add_eval_query(
 pub fn list_eval_queries(conn: &Connection, library_id: i64) -> Result<Vec<EvalQuery>> {
     let mut stmt = conn.prepare(
         "SELECT id, query_text, query_type, expected_document_ids \
-         FROM kb_search_eval_queries WHERE library_id = ?1"
+         FROM kb_search_eval_queries WHERE library_id = ?1",
     )?;
     let rows = stmt.query_map(params![library_id], |row| {
         let ids_str: String = row.get(3)?;
@@ -233,7 +240,8 @@ pub fn compare_embedding_indexes(
             "SELECT model FROM kb_embedding_indexes WHERE id=?1",
             params![idx_id],
             |row| row.get::<_, String>(0),
-        ).unwrap_or_default()
+        )
+        .unwrap_or_default()
     };
     let model_1 = get_model(index_id_1);
     let model_2 = get_model(index_id_2);
@@ -241,13 +249,21 @@ pub fn compare_embedding_indexes(
     // 读取所有评测查询
     let mut stmt = conn.prepare(
         "SELECT id, library_id, query_text, query_type, expected_document_ids \
-         FROM kb_search_eval_queries LIMIT 100"
+         FROM kb_search_eval_queries LIMIT 100",
     )?;
-    let queries: Vec<(i64, i64, String, String, Vec<i64>)> = stmt.query_map([], |row| {
-        let ids_str: String = row.get(4)?;
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            serde_json::from_str(&ids_str).unwrap_or_default()))
-    })?.filter_map(|r| r.ok()).collect();
+    let queries: Vec<(i64, i64, String, String, Vec<i64>)> = stmt
+        .query_map([], |row| {
+            let ids_str: String = row.get(4)?;
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                serde_json::from_str(&ids_str).unwrap_or_default(),
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     if queries.is_empty() {
         return Ok(format!(
@@ -296,9 +312,19 @@ pub fn compare_embedding_indexes(
          \n  index {} (model: {})\n    Recall@20: {:.4}  MRR@10: {:.4}  NDCG@10: {:.4}\n\
          \n  差异 (index2 - index1):\n    Recall@20: {:+.4}  MRR@10: {:+.4}  NDCG@10: {:+.4}\n\
          \n  评测查询数: {}",
-        index_id_1, model_1, report.result_1.recall_at_20, report.result_1.mrr_at_10, report.result_1.ndcg_at_10,
-        index_id_2, model_2, report.result_2.recall_at_20, report.result_2.mrr_at_10, report.result_2.ndcg_at_10,
-        recall_delta, mrr_delta, ndcg_delta,
+        index_id_1,
+        model_1,
+        report.result_1.recall_at_20,
+        report.result_1.mrr_at_10,
+        report.result_1.ndcg_at_10,
+        index_id_2,
+        model_2,
+        report.result_2.recall_at_20,
+        report.result_2.mrr_at_10,
+        report.result_2.ndcg_at_10,
+        recall_delta,
+        mrr_delta,
+        ndcg_delta,
         queries.len(),
     ))
 }
@@ -310,7 +336,8 @@ fn get_search_results_for_index(conn: &Connection, _index_id: i64, query: &str) 
     conn.query_row(sql, params![query], |row| {
         let ids_str: String = row.get(0)?;
         Ok(serde_json::from_str(&ids_str).unwrap_or_default())
-    }).unwrap_or_default()
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(test)]

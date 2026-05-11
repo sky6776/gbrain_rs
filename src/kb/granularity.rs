@@ -54,7 +54,11 @@ impl DocumentGranularity {
 /// - `extension`: 文件扩展名（小写），用于检测表格格式
 /// - `char_count`: 文本字符数
 /// - `page_count`: PDF 等格式的页数（非页面型格式传 0）
-pub fn classify_granularity(extension: &str, char_count: usize, page_count: usize) -> DocumentGranularity {
+pub fn classify_granularity(
+    extension: &str,
+    char_count: usize,
+    page_count: usize,
+) -> DocumentGranularity {
     // 表格检测（按扩展名）
     if matches!(extension, "xlsx" | "csv") {
         return DocumentGranularity::Table;
@@ -97,51 +101,94 @@ mod tests {
 
     #[test]
     fn test_classify_micro() {
-        assert_eq!(classify_granularity("txt", 100, 1), DocumentGranularity::Micro);
-        assert_eq!(classify_granularity("md", 800, 1), DocumentGranularity::Micro);
+        assert_eq!(
+            classify_granularity("txt", 100, 1),
+            DocumentGranularity::Micro
+        );
+        assert_eq!(
+            classify_granularity("md", 800, 1),
+            DocumentGranularity::Micro
+        );
     }
 
     #[test]
     fn test_classify_small() {
-        assert_eq!(classify_granularity("txt", 2000, 1), DocumentGranularity::Small);
-        assert_eq!(classify_granularity("md", 3000, 5), DocumentGranularity::Small);
+        assert_eq!(
+            classify_granularity("txt", 2000, 1),
+            DocumentGranularity::Small
+        );
+        assert_eq!(
+            classify_granularity("md", 3000, 5),
+            DocumentGranularity::Small
+        );
     }
 
     #[test]
     fn test_classify_medium() {
-        assert_eq!(classify_granularity("pdf", 5000, 10), DocumentGranularity::Medium);
+        assert_eq!(
+            classify_granularity("pdf", 5000, 10),
+            DocumentGranularity::Medium
+        );
     }
 
     #[test]
     fn test_classify_large_by_chars() {
-        assert_eq!(classify_granularity("md", 100000, 1), DocumentGranularity::Large);
+        assert_eq!(
+            classify_granularity("md", 100000, 1),
+            DocumentGranularity::Large
+        );
     }
 
     #[test]
     fn test_classify_large_by_pages() {
-        assert_eq!(classify_granularity("pdf", 5000, 40), DocumentGranularity::Large);
+        assert_eq!(
+            classify_granularity("pdf", 5000, 40),
+            DocumentGranularity::Large
+        );
     }
 
     #[test]
     fn test_classify_table() {
-        assert_eq!(classify_granularity("xlsx", 0, 0), DocumentGranularity::Table);
-        assert_eq!(classify_granularity("csv", 10000, 0), DocumentGranularity::Table);
+        assert_eq!(
+            classify_granularity("xlsx", 0, 0),
+            DocumentGranularity::Table
+        );
+        assert_eq!(
+            classify_granularity("csv", 10000, 0),
+            DocumentGranularity::Table
+        );
     }
 
     #[test]
     fn test_chunk_strategies() {
-        assert_eq!(chunk_strategy_for(DocumentGranularity::Micro), "whole_document");
-        assert_eq!(chunk_strategy_for(DocumentGranularity::Small), "whole_document_plus_paragraphs");
-        assert_eq!(chunk_strategy_for(DocumentGranularity::Medium), "recursive_semantic");
-        assert_eq!(chunk_strategy_for(DocumentGranularity::Large), "structured_sections");
+        assert_eq!(
+            chunk_strategy_for(DocumentGranularity::Micro),
+            "whole_document"
+        );
+        assert_eq!(
+            chunk_strategy_for(DocumentGranularity::Small),
+            "whole_document_plus_paragraphs"
+        );
+        assert_eq!(
+            chunk_strategy_for(DocumentGranularity::Medium),
+            "recursive_semantic"
+        );
+        assert_eq!(
+            chunk_strategy_for(DocumentGranularity::Large),
+            "structured_sections"
+        );
         assert_eq!(chunk_strategy_for(DocumentGranularity::Table), "table");
     }
 
     #[test]
     fn test_roundtrip() {
-        for g in [DocumentGranularity::Table, DocumentGranularity::Micro,
-                   DocumentGranularity::Small, DocumentGranularity::Medium,
-                   DocumentGranularity::Large] {
+        for g in [
+            DocumentGranularity::Table,
+            DocumentGranularity::Micro,
+            DocumentGranularity::Small,
+            DocumentGranularity::Medium,
+            DocumentGranularity::Large,
+        ] {
             assert_eq!(DocumentGranularity::from_str(g.as_str()), g);
         }
     }

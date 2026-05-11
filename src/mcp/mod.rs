@@ -1003,9 +1003,13 @@ impl McpServer {
                         .map(|v| v as usize),
                     batch_max_chunks: arguments["batch_max_chunks"].as_u64().map(|v| v as usize),
                     // P0-016: 库级治理和模型配置
-                    embedding_provider: arguments["embedding_provider"].as_str().map(|s| s.to_string()),
+                    embedding_provider: arguments["embedding_provider"]
+                        .as_str()
+                        .map(|s| s.to_string()),
                     embedding_model: arguments["embedding_model"].as_str().map(|s| s.to_string()),
-                    embedding_dimensions: arguments["embedding_dimensions"].as_i64().map(|v| v as i32),
+                    embedding_dimensions: arguments["embedding_dimensions"]
+                        .as_i64()
+                        .map(|v| v as i32),
                     search_profile: arguments["search_profile"].as_str().map(|s| s.to_string()),
                     rerank_enabled: arguments["rerank_enabled"].as_bool(),
                     rerank_provider: arguments["rerank_provider"].as_str().map(|s| s.to_string()),
@@ -1040,9 +1044,13 @@ impl McpServer {
                     chunk_size: arguments["chunk_size"].as_u64().map(|v| v as usize),
                     chunk_overlap: arguments["chunk_overlap"].as_u64().map(|v| v as usize),
                     // P0-016: 库级治理和模型配置
-                    embedding_provider: arguments["embedding_provider"].as_str().map(|s| s.to_string()),
+                    embedding_provider: arguments["embedding_provider"]
+                        .as_str()
+                        .map(|s| s.to_string()),
                     embedding_model: arguments["embedding_model"].as_str().map(|s| s.to_string()),
-                    embedding_dimensions: arguments["embedding_dimensions"].as_i64().map(|v| v as i32),
+                    embedding_dimensions: arguments["embedding_dimensions"]
+                        .as_i64()
+                        .map(|v| v as i32),
                     search_profile: arguments["search_profile"].as_str().map(|s| s.to_string()),
                     rerank_enabled: arguments["rerank_enabled"].as_bool(),
                     rerank_provider: arguments["rerank_provider"].as_str().map(|s| s.to_string()),
@@ -1308,7 +1316,10 @@ impl McpServer {
                     .as_u64()
                     .map(|v| v as usize)
                     .unwrap_or(50);
-                let offset = arguments["offset"].as_u64().map(|v| v as usize).unwrap_or(0);
+                let offset = arguments["offset"]
+                    .as_u64()
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
                 let docs = kb.list_documents(library_id, folder_id, limit, offset)?;
                 Ok(serde_json::to_value(docs)?)
             }
@@ -1339,8 +1350,14 @@ impl McpServer {
                     debug,
                     folder_id,
                     include_context: arguments["include_context"].as_bool().unwrap_or(false),
-                    context_before: arguments["context_before"].as_u64().map(|v| v as usize).unwrap_or(200),
-                    context_after: arguments["context_after"].as_u64().map(|v| v as usize).unwrap_or(200),
+                    context_before: arguments["context_before"]
+                        .as_u64()
+                        .map(|v| v as usize)
+                        .unwrap_or(200),
+                    context_after: arguments["context_after"]
+                        .as_u64()
+                        .map(|v| v as usize)
+                        .unwrap_or(200),
                     include_highlights: arguments["include_highlights"].as_bool().unwrap_or(false),
                     group_by_document: arguments["group_by_document"].as_bool().unwrap_or(false),
                     rerank_api_key: self.config.openai_api_key.clone(),
@@ -1416,7 +1433,10 @@ impl McpServer {
                     return Err(GBrainError::InvalidInput("input path required".into()));
                 }
                 let db_path = self.config.db_path();
-                crate::kb::backup::restore_database(std::path::Path::new(input).join("gbrain.db").as_path(), &db_path)?;
+                crate::kb::backup::restore_database(
+                    std::path::Path::new(input).join("gbrain.db").as_path(),
+                    &db_path,
+                )?;
                 Ok(serde_json::json!({"ok": true}))
             }
             "kb_add_eval_query" => {
@@ -1426,9 +1446,19 @@ impl McpServer {
                 let query_type = arguments["query_type"].as_str().unwrap_or("manual");
                 let expected_ids: Vec<i64> = arguments["expected_document_ids"]
                     .as_str()
-                    .map(|s| s.split(',').filter_map(|id| id.trim().parse().ok()).collect())
+                    .map(|s| {
+                        s.split(',')
+                            .filter_map(|id| id.trim().parse().ok())
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let id = crate::kb::eval::add_eval_query(conn, library_id, query_text, query_type, &expected_ids)?;
+                let id = crate::kb::eval::add_eval_query(
+                    conn,
+                    library_id,
+                    query_text,
+                    query_type,
+                    &expected_ids,
+                )?;
                 Ok(serde_json::json!({"id": id}))
             }
             "kb_add_search_feedback" => {
@@ -1438,7 +1468,14 @@ impl McpServer {
                 let node_id = arguments["node_id"].as_i64();
                 let rating = arguments["rating"].as_i64().map(|v| v as i32).unwrap_or(0);
                 let comment = arguments["comment"].as_str().unwrap_or("");
-                let id = crate::kb::eval::add_search_feedback(conn, search_log_id, document_id, node_id, rating, comment)?;
+                let id = crate::kb::eval::add_search_feedback(
+                    conn,
+                    search_log_id,
+                    document_id,
+                    node_id,
+                    rating,
+                    comment,
+                )?;
                 Ok(serde_json::json!({"id": id}))
             }
 

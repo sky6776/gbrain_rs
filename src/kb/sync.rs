@@ -44,7 +44,11 @@ pub fn scan_directory(dir: &Path, allowed_extensions: &[&str]) -> Result<Vec<std
             }
             files.extend(scan_directory(&path, allowed_extensions)?);
         } else if path.is_file() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             if allowed_extensions.contains(&ext.as_str()) {
                 files.push(path);
             }
@@ -79,10 +83,14 @@ pub fn incremental_scan(
     let mut existing: std::collections::HashMap<String, (String, Option<i64>)> =
         std::collections::HashMap::new();
     let mut stmt = conn.prepare(
-        "SELECT item_path, content_hash, document_id FROM kb_source_items WHERE source_id = ?1"
+        "SELECT item_path, content_hash, document_id FROM kb_source_items WHERE source_id = ?1",
     )?;
     let rows = stmt.query_map(params![source_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     })?;
     for row in rows {
         if let Ok((path, hash, doc_id)) = row {
@@ -177,7 +185,12 @@ pub fn summarize_scan(results: &[(std::path::PathBuf, SyncAction, Option<String>
             SyncAction::Unchanged => unchanged_count += 1,
         }
     }
-    SyncSummary { new_count, changed_count, missing_count, unchanged_count }
+    SyncSummary {
+        new_count,
+        changed_count,
+        missing_count,
+        unchanged_count,
+    }
 }
 
 #[cfg(test)]
@@ -197,7 +210,11 @@ mod tests {
     fn test_summarize() {
         let results = vec![
             (Path::new("a.txt").to_path_buf(), SyncAction::New, None),
-            (Path::new("b.txt").to_path_buf(), SyncAction::Unchanged, None),
+            (
+                Path::new("b.txt").to_path_buf(),
+                SyncAction::Unchanged,
+                None,
+            ),
             (Path::new("c.txt").to_path_buf(), SyncAction::Changed, None),
             (Path::new("d.txt").to_path_buf(), SyncAction::Missing, None),
         ];

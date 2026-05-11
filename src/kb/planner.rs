@@ -61,20 +61,31 @@ pub fn classify_query(query: &str) -> QueryType {
     let q = query.trim().to_lowercase();
 
     // 表格查询模式
-    if q.contains("表") || q.contains("sheet") || q.contains("清单")
-        || q.contains("xlsx") || q.contains("csv") || q.contains("汇总")
+    if q.contains("表")
+        || q.contains("sheet")
+        || q.contains("清单")
+        || q.contains("xlsx")
+        || q.contains("csv")
+        || q.contains("汇总")
     {
         return QueryType::TableLookup;
     }
 
     // 流程/操作指南
-    if q.contains("怎么") || q.contains("如何") || q.contains("流程") || q.contains("步骤") {
+    if q.contains("怎么") || q.contains("如何") || q.contains("流程") || q.contains("步骤")
+    {
         return QueryType::HowTo;
     }
 
     // 时间范围
-    if q.contains("年") || q.contains("月") || q.contains("日") || q.contains("最近")
-        || q.contains("去年") || q.contains("上季度") || q.contains("q1") || q.contains("q2")
+    if q.contains("年")
+        || q.contains("月")
+        || q.contains("日")
+        || q.contains("最近")
+        || q.contains("去年")
+        || q.contains("上季度")
+        || q.contains("q1")
+        || q.contains("q2")
     {
         return QueryType::RecentOrTimebound;
     }
@@ -133,7 +144,10 @@ pub fn plan(query_type: QueryType) -> PlannerOutput {
         ],
     };
 
-    PlannerOutput { query_type, retrievers }
+    PlannerOutput {
+        query_type,
+        retrievers,
+    }
 }
 
 #[cfg(test)]
@@ -159,7 +173,10 @@ mod tests {
 
     #[test]
     fn test_classify_conceptual() {
-        assert_eq!(classify_query("机器学习在自然语言处理中的应用"), QueryType::Conceptual);
+        assert_eq!(
+            classify_query("机器学习在自然语言处理中的应用"),
+            QueryType::Conceptual
+        );
     }
 
     #[test]

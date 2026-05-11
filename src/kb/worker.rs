@@ -15,8 +15,8 @@ use crate::kb::raptor::RaptorConfig;
 use crate::sqlite_engine::SqliteEngine;
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// 运行一次 KB 作业处理循环：认领一个待处理作业并执行。
@@ -64,7 +64,11 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
         Some(&raptor_config),
         config.kb_raptor_secret_ref.as_deref(),
         config.kb_raptor_base_url.as_deref(),
-        if config.kb_raptor_model.is_empty() { None } else { Some(config.kb_raptor_model.as_str()) },
+        if config.kb_raptor_model.is_empty() {
+            None
+        } else {
+            Some(config.kb_raptor_model.as_str())
+        },
         None,
     ));
 
@@ -123,7 +127,8 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
     });
 
     let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all().build()
+        .enable_all()
+        .build()
         .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
 
     let result = match job_type.as_str() {
@@ -131,19 +136,31 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
             // 单节点修复：读取 node_id，嵌入内容，写入 kb_node_embeddings
             let node_id: i64 = payload.get("node_id").and_then(|v| v.as_i64()).unwrap_or(0);
             if node_id == 0 {
-                fail_kb_job(conn, job_db_id, "missing node_id in kb_reembed_node payload")?;
+                fail_kb_job(
+                    conn,
+                    job_db_id,
+                    "missing node_id in kb_reembed_node payload",
+                )?;
                 return Ok(true);
             }
             reembed_single_node(conn, &embedder, &rt, node_id, None)
         }
         "kb_reembed" => {
             // 文档级重嵌入：读取所有无 embedding 的节点，逐个嵌入
-            let doc_id: i64 = payload.get("document_id").and_then(|v| v.as_i64()).unwrap_or(0);
-            let target_index_id: i64 = payload.get("target_embedding_index_id")
-                .and_then(|v| v.as_i64()).unwrap_or(0);
+            let doc_id: i64 = payload
+                .get("document_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let target_index_id: i64 = payload
+                .get("target_embedding_index_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             reembed_document_nodes(conn, &embedder, &rt, doc_id, target_index_id)
         }
-        _ => Err(GBrainError::InvalidInput(format!("未知 re-embed 作业类型: {}", job_type))),
+        _ => Err(GBrainError::InvalidInput(format!(
+            "未知 re-embed 作业类型: {}",
+            job_type
+        ))),
     };
 
     match result {
@@ -173,22 +190,36 @@ fn reembed_single_node(
     // 解析 target_index_id：0 → active index
     let resolved_index_id = resolve_target_index(conn, node_id, target_index_id.unwrap_or(0))?;
 
-    let (content, embedding_text): (String, String) = conn.query_row(
-        "SELECT content, embedding_text FROM kb_document_nodes WHERE id=?1",
-        rusqlite::params![node_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ).map_err(|e| GBrainError::Database(format!("节点 {} 不存在: {}", node_id, e)))?;
+    let (content, embedding_text): (String, String) = conn
+        .query_row(
+            "SELECT content, embedding_text FROM kb_document_nodes WHERE id=?1",
+            rusqlite::params![node_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|e| GBrainError::Database(format!("节点 {} 不存在: {}", node_id, e)))?;
 
-    let text_to_embed = if embedding_text.is_empty() { &content } else { &embedding_text };
-    let embedder = embedder.as_ref()
+    let text_to_embed = if embedding_text.is_empty() {
+        &content
+    } else {
+        &embedding_text
+    };
+    let embedder = embedder
+        .as_ref()
         .ok_or_else(|| GBrainError::InvalidInput("未配置 embedding API key".into()))?;
     let vectors = rt.block_on(embedder.embed_batch(&[text_to_embed]))?;
-    let vec = vectors.into_iter().next()
+    let vec = vectors
+        .into_iter()
+        .next()
         .ok_or_else(|| GBrainError::InvalidInput("embedding 返回空结果".into()))?;
     let dims = vec.len();
 
     crate::kb::embedding_index::upsert_node_embedding_for_index(
-        conn, node_id, resolved_index_id, &vec, dims as i32, "text-embedding-3-large",
+        conn,
+        node_id,
+        resolved_index_id,
+        &vec,
+        dims as i32,
+        "text-embedding-3-large",
     )?;
     Ok(dims)
 }
@@ -213,9 +244,13 @@ fn reembed_document_nodes(
              WHERE n.document_id = ?1 AND ei.is_active = 1 LIMIT 1",
             rusqlite::params![document_id],
             |row| row.get::<_, i64>(0),
-        ).map_err(|_| GBrainError::InvalidInput(
-            format!("文档 {} 所属 library 没有 active embedding index", document_id)
-        ))?
+        )
+        .map_err(|_| {
+            GBrainError::InvalidInput(format!(
+                "文档 {} 所属 library 没有 active embedding index",
+                document_id
+            ))
+        })?
     };
 
     // 查找文档中无目标 index embedding 的节点
@@ -224,10 +259,14 @@ fn reembed_document_nodes(
             "SELECT n.id, n.content, n.embedding_text FROM kb_document_nodes n \
              WHERE n.document_id = ?1 \
              AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings \
-                              WHERE embedding_index_id = ?2)"
+                              WHERE embedding_index_id = ?2)",
         )?;
         let rows = stmt.query_map(rusqlite::params![document_id, resolved_index_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         rows.filter_map(|r: rusqlite::Result<_>| r.ok()).collect()
     };
@@ -236,19 +275,32 @@ fn reembed_document_nodes(
         return Ok(0);
     }
 
-    let embedder = embedder.as_ref()
+    let embedder = embedder
+        .as_ref()
         .ok_or_else(|| GBrainError::InvalidInput("未配置 embedding API key".into()))?;
 
     // 批量嵌入（每批最多 20 个节点），始终写入 embedding_index_id
     for chunk in node_ids.chunks(20) {
-        let texts: Vec<&str> = chunk.iter().map(|(_, c, et)| {
-            if et.is_empty() { c.as_str() } else { et.as_str() }
-        }).collect();
+        let texts: Vec<&str> = chunk
+            .iter()
+            .map(|(_, c, et)| {
+                if et.is_empty() {
+                    c.as_str()
+                } else {
+                    et.as_str()
+                }
+            })
+            .collect();
         let vectors = rt.block_on(embedder.embed_batch(&texts))?;
         for ((node_id, _, _), vec) in chunk.iter().zip(vectors.iter()) {
             let dims = vec.len() as i32;
             crate::kb::embedding_index::upsert_node_embedding_for_index(
-                conn, *node_id, resolved_index_id, vec, dims, "text-embedding-3-large",
+                conn,
+                *node_id,
+                resolved_index_id,
+                vec,
+                dims,
+                "text-embedding-3-large",
             )?;
         }
     }
@@ -267,9 +319,13 @@ fn resolve_target_index(conn: &Connection, node_id: i64, target_index_id: i64) -
          WHERE n.id = ?1 AND ei.is_active = 1 LIMIT 1",
         rusqlite::params![node_id],
         |row| row.get(0),
-    ).map_err(|_| GBrainError::InvalidInput(
-        format!("节点 {} 所属 library 没有 active embedding index", node_id)
-    ))
+    )
+    .map_err(|_| {
+        GBrainError::InvalidInput(format!(
+            "节点 {} 所属 library 没有 active embedding index",
+            node_id
+        ))
+    })
 }
 
 /// 以守护进程模式运行 KB worker：持续轮询并处理所有类型的 KB 作业。
@@ -355,7 +411,10 @@ pub fn spawn_kb_worker_pool(
         info!("KB worker pool: worker_count=0, nothing to spawn");
         return;
     }
-    info!(worker_count, "KB worker pool: 启动 {} 个 worker", worker_count);
+    info!(
+        worker_count,
+        "KB worker pool: 启动 {} 个 worker", worker_count
+    );
 
     for i in 0..worker_count {
         let db_path = db_path.clone();

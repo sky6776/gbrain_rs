@@ -58,16 +58,23 @@ impl DocumentParser for PdfParser {
         let mut metadata = HashMap::new();
         metadata.insert("total_pages".to_string(), total_pages.to_string());
         // P2-004: 每页文本以 JSON 数组记录（含 page_number）
-        metadata.insert("page_texts".to_string(),
-            serde_json::to_string(&page_texts).unwrap_or_default());
+        metadata.insert(
+            "page_texts".to_string(),
+            serde_json::to_string(&page_texts).unwrap_or_default(),
+        );
         // P2-006: 文本密度标记
         let needs_ocr = low_density_pages as f64 / total_pages.max(1) as f64 > 0.5;
         metadata.insert("needs_ocr".to_string(), needs_ocr.to_string());
-        metadata.insert("low_density_pages".to_string(), low_density_pages.to_string());
+        metadata.insert(
+            "low_density_pages".to_string(),
+            low_density_pages.to_string(),
+        );
 
         // P1-010/P2-004: 构建结构化 blocks（每页一个 block，带 page_number）
-        let blocks: Vec<crate::kb::types::ParsedBlock> = page_texts.iter().enumerate().map(|(i, text)| {
-            crate::kb::types::ParsedBlock {
+        let blocks: Vec<crate::kb::types::ParsedBlock> = page_texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| crate::kb::types::ParsedBlock {
                 text: text.clone(),
                 title_path: String::new(),
                 page_number: Some((i + 1) as i32),
@@ -75,10 +82,14 @@ impl DocumentParser for PdfParser {
                 source_end: None,
                 block_type: "page".to_string(),
                 metadata: String::new(),
-            }
-        }).collect();
+            })
+            .collect();
 
-        Ok(ParsedDocument { content, metadata, blocks: Some(blocks) })
+        Ok(ParsedDocument {
+            content,
+            metadata,
+            blocks: Some(blocks),
+        })
     }
 
     fn extensions(&self) -> &[&str] {

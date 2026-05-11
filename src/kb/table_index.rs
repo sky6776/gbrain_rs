@@ -20,7 +20,13 @@ pub fn insert_table(
     conn.execute(
         "INSERT INTO kb_tables (document_id, sheet_name, headers, column_count, row_count) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![document_id, sheet_name, headers_json, headers.len() as i32, row_count],
+        params![
+            document_id,
+            sheet_name,
+            headers_json,
+            headers.len() as i32,
+            row_count
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }

@@ -43,7 +43,7 @@ pub fn create_embedding_index(
 pub fn list_embedding_indexes(conn: &Connection, library_id: i64) -> Result<Vec<EmbeddingIndex>> {
     let mut stmt = conn.prepare(
         "SELECT id, library_id, provider, model, dimensions, index_type, is_active \
-         FROM kb_embedding_indexes WHERE library_id = ?1 ORDER BY id"
+         FROM kb_embedding_indexes WHERE library_id = ?1 ORDER BY id",
     )?;
     let rows = stmt.query_map(params![library_id], |row| {
         Ok(EmbeddingIndex {
@@ -63,13 +63,13 @@ pub fn list_embedding_indexes(conn: &Connection, library_id: i64) -> Result<Vec<
 /// 激活某个 embedding index（只影响同一 library 下的其他 index）
 pub fn activate_index(conn: &Connection, index_id: i64) -> Result<()> {
     // 先查目标 index 所属的 library_id，限定 UPDATE 作用域
-    let library_id: i64 = conn.query_row(
-        "SELECT library_id FROM kb_embedding_indexes WHERE id = ?1",
-        params![index_id],
-        |row| row.get(0),
-    ).map_err(|_| GBrainError::InvalidInput(
-        format!("embedding index {} 不存在", index_id)
-    ))?;
+    let library_id: i64 = conn
+        .query_row(
+            "SELECT library_id FROM kb_embedding_indexes WHERE id = ?1",
+            params![index_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| GBrainError::InvalidInput(format!("embedding index {} 不存在", index_id)))?;
     conn.execute(
         "UPDATE kb_embedding_indexes \
          SET is_active = CASE WHEN id = ?1 THEN 1 ELSE 0 END \
@@ -136,9 +136,12 @@ pub fn queue_reembed_jobs(
         target_index_id
     } else {
         get_active_index_for_library(conn, library_id)?
-            .ok_or_else(|| GBrainError::InvalidInput(
-                format!("library {} 没有 active embedding index", library_id)
-            ))?
+            .ok_or_else(|| {
+                GBrainError::InvalidInput(format!(
+                    "library {} 没有 active embedding index",
+                    library_id
+                ))
+            })?
             .id
     };
 
@@ -169,7 +172,8 @@ pub fn queue_reembed_jobs(
             "INSERT INTO jobs (job_type, payload, status, priority, max_attempts) \
              VALUES ('kb_reembed', ?1, 'pending', 0, 3)",
             params![payload.to_string()],
-        ).map_err(|e| GBrainError::Database(e.to_string()))?;
+        )
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
         queued += 1;
     }
     Ok(queued)
@@ -212,7 +216,10 @@ pub fn upsert_node_embedding_for_index(
         rusqlite::params![node_id],
     );
     let _ = conn.execute(
-        &format!("INSERT INTO {} (node_id, embedding) VALUES (?1, ?2)", vec_table),
+        &format!(
+            "INSERT INTO {} (node_id, embedding) VALUES (?1, ?2)",
+            vec_table
+        ),
         rusqlite::params![node_id, blob],
     );
 
@@ -229,11 +236,7 @@ pub fn vec_table_name_for_index(index_id: i64) -> String {
 }
 
 /// Create a dedicated sqlite-vec virtual table for an embedding index.
-pub fn create_vec_table_for_index(
-    conn: &Connection,
-    index_id: i64,
-    dimensions: i32,
-) -> Result<()> {
+pub fn create_vec_table_for_index(conn: &Connection, index_id: i64, dimensions: i32) -> Result<()> {
     let table_name = vec_table_name_for_index(index_id);
     let sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(\
@@ -246,10 +249,7 @@ pub fn create_vec_table_for_index(
 }
 
 /// Drop the sqlite-vec virtual table for an embedding index.
-pub fn drop_vec_table_for_index(
-    conn: &Connection,
-    index_id: i64,
-) -> Result<()> {
+pub fn drop_vec_table_for_index(conn: &Connection, index_id: i64) -> Result<()> {
     let table_name = vec_table_name_for_index(index_id);
     let sql = format!("DROP TABLE IF EXISTS {}", table_name);
     conn.execute_batch(&sql)
@@ -259,7 +259,10 @@ pub fn drop_vec_table_for_index(
 
 /// Get the active embedding index for a library.
 /// Returns None if no active index exists.
-pub fn get_active_index_for_library(conn: &Connection, library_id: i64) -> Result<Option<EmbeddingIndex>> {
+pub fn get_active_index_for_library(
+    conn: &Connection,
+    library_id: i64,
+) -> Result<Option<EmbeddingIndex>> {
     let result = conn.query_row(
         "SELECT id, library_id, provider, model, dimensions, index_type, is_active \
          FROM kb_embedding_indexes WHERE library_id = ?1 AND is_active = 1 LIMIT 1",
@@ -290,9 +293,13 @@ mod tests {
     #[test]
     fn test_embedding_index_struct() {
         let idx = EmbeddingIndex {
-            id: 1, library_id: 1, provider: "openai".into(),
-            model: "text-embedding-3-large".into(), dimensions: 1536,
-            index_type: "vec0".into(), is_active: false,
+            id: 1,
+            library_id: 1,
+            provider: "openai".into(),
+            model: "text-embedding-3-large".into(),
+            dimensions: 1536,
+            index_type: "vec0".into(),
+            is_active: false,
         };
         assert_eq!(idx.dimensions, 1536);
         assert!(!idx.is_active);

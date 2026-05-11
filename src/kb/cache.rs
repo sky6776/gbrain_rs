@@ -57,11 +57,14 @@ impl<T: Clone> SearchCache<T> {
                     entries.remove(&oldest_key);
                 }
             }
-            entries.insert(key, CacheEntry {
-                value,
-                created_at: Instant::now(),
-                ttl: self.default_ttl,
-            });
+            entries.insert(
+                key,
+                CacheEntry {
+                    value,
+                    created_at: Instant::now(),
+                    ttl: self.default_ttl,
+                },
+            );
         }
     }
 
@@ -90,8 +93,15 @@ pub fn make_cache_key(
     index_version: i64,
     cache_type: &str,
 ) -> String {
-    let libs = library_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-    format!("{}:{}:v{}:{}", cache_type, query_normalized, index_version, libs)
+    let libs = library_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}:{}:v{}:{}",
+        cache_type, query_normalized, index_version, libs
+    )
 }
 
 #[cfg(test)]
@@ -112,9 +122,15 @@ mod tests {
         cache.set("a".into(), 1);
         cache.set("b".into(), 2);
         cache.set("c".into(), 3); // 触发淘汰
-        // 淘汰最旧的条目
-        let count = [cache.get("a").is_some(), cache.get("b").is_some(), cache.get("c").is_some()]
-            .iter().filter(|x| **x).count();
+                                  // 淘汰最旧的条目
+        let count = [
+            cache.get("a").is_some(),
+            cache.get("b").is_some(),
+            cache.get("c").is_some(),
+        ]
+        .iter()
+        .filter(|x| **x)
+        .count();
         assert!(count <= 2);
     }
 

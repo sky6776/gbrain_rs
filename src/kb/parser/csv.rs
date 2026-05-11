@@ -33,10 +33,13 @@ impl DocumentParser for CsvParser {
                         headers = fields.clone();
                     }
                     let row_json = serde_json::to_string(
-                        &headers.iter().enumerate().map(|(i, h)| {
-                            (h.clone(), fields.get(i).cloned().unwrap_or_default())
-                        }).collect::<HashMap<_, _>>()
-                    ).unwrap_or_default();
+                        &headers
+                            .iter()
+                            .enumerate()
+                            .map(|(i, h)| (h.clone(), fields.get(i).cloned().unwrap_or_default()))
+                            .collect::<HashMap<_, _>>(),
+                    )
+                    .unwrap_or_default();
                     rows.push(fields.join("\t"));
                     row_records.push(row_json);
                 }
@@ -50,11 +53,17 @@ impl DocumentParser for CsvParser {
         metadata.insert("column_count".to_string(), headers.len().to_string());
         if !headers.is_empty() {
             metadata.insert("headers".to_string(), headers.join(", "));
-            metadata.insert("row_json_list".to_string(),
-                serde_json::to_string(&row_records).unwrap_or_default());
+            metadata.insert(
+                "row_json_list".to_string(),
+                serde_json::to_string(&row_records).unwrap_or_default(),
+            );
         }
 
-        Ok(ParsedDocument { content, metadata, blocks: None })
+        Ok(ParsedDocument {
+            content,
+            metadata,
+            blocks: None,
+        })
     }
 
     fn extensions(&self) -> &[&str] {

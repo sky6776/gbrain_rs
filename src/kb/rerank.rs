@@ -107,10 +107,7 @@ impl Default for LocalRankSignals {
 }
 
 /// 使用本地信号加权排序
-pub fn local_rerank(
-    candidates: &[(i64, LocalRankSignals)],
-    weights: &[f64],
-) -> Vec<(i64, f64)> {
+pub fn local_rerank(candidates: &[(i64, LocalRankSignals)], weights: &[f64]) -> Vec<(i64, f64)> {
     let mut scored: Vec<(i64, f64)> = candidates
         .iter()
         .map(|(doc_id, signals)| {
@@ -191,7 +188,8 @@ fn parse_score(raw: &str) -> Option<f64> {
     // Try to find the first number in the response
     for token in raw.split_whitespace() {
         // Strip trailing punctuation that LLMs sometimes add (e.g. "85.", "90,")
-        let cleaned = token.trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':');
+        let cleaned =
+            token.trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':');
         if let Ok(score) = cleaned.parse::<f64>() {
             // Clamp to 0-100 range
             if (0.0..=100.0).contains(&score) {
@@ -253,13 +251,13 @@ pub async fn chat_completions_rerank(
     }
 
     // Limit candidates to max_candidates
-    let limited: Vec<&RerankCandidate> = candidates
-        .iter()
-        .take(reranker.max_candidates)
-        .collect();
+    let limited: Vec<&RerankCandidate> = candidates.iter().take(reranker.max_candidates).collect();
 
     let client = get_http_client();
-    let url = format!("{}/chat/completions", reranker.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        reranker.base_url.trim_end_matches('/')
+    );
 
     let mut scored: Vec<(i64, f64)> = Vec::with_capacity(limited.len());
 
@@ -470,7 +468,11 @@ pub async fn try_model_rerank(
     budget: Option<&crate::kb::cost::TokenBudget>,
     // Dedicated rerank API caller — returns None if not configured or failed
     dedicated_rerank_fn: Option<
-        Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<(i64, f64)>>> + Send>> + Send>,
+        Box<
+            dyn FnOnce() -> std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Option<Vec<(i64, f64)>>> + Send>,
+                > + Send,
+        >,
     >,
 ) -> (Vec<(i64, f64)>, RerankResult) {
     // Tier 0: Not enabled or no candidates — skip everything
@@ -549,7 +551,7 @@ pub async fn try_model_rerank(
     let reranker = ChatCompletionsReranker::from_config(
         config,
         &config.rerank_provider, // reuse provider field as base_url hint
-        "",                       // API key must be supplied separately
+        "",                      // API key must be supplied separately
     );
 
     // Only attempt chat/completions if we have both a base URL and API key
@@ -707,8 +709,21 @@ mod tests {
     #[test]
     fn test_local_rerank() {
         let candidates = vec![
-            (1, LocalRankSignals { fts_score: 0.9, ..Default::default() }),
-            (2, LocalRankSignals { title_score: 0.8, vector_score: 0.3, ..Default::default() }),
+            (
+                1,
+                LocalRankSignals {
+                    fts_score: 0.9,
+                    ..Default::default()
+                },
+            ),
+            (
+                2,
+                LocalRankSignals {
+                    title_score: 0.8,
+                    vector_score: 0.3,
+                    ..Default::default()
+                },
+            ),
         ];
         let weights = vec![0.4, 0.3, 0.2, 0.1, 0.0, 0.0];
         let ranked = local_rerank(&candidates, &weights);
@@ -839,12 +854,7 @@ mod tests {
             max_candidates: 50,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(chat_completions_rerank(
-            &reranker,
-            "test query",
-            &[],
-            None,
-        ));
+        let result = rt.block_on(chat_completions_rerank(&reranker, "test query", &[], None));
         assert_eq!(result, None);
     }
 
@@ -854,14 +864,28 @@ mod tests {
             model_rerank_enabled: false,
             ..Default::default()
         };
-        let candidates = vec![
-            (1, LocalRankSignals { fts_score: 0.9, ..Default::default() }),
-        ];
-        let candidate_texts = vec![RerankCandidate { doc_id: 1, text: "test".into() }];
+        let candidates = vec![(
+            1,
+            LocalRankSignals {
+                fts_score: 0.9,
+                ..Default::default()
+            },
+        )];
+        let candidate_texts = vec![RerankCandidate {
+            doc_id: 1,
+            text: "test".into(),
+        }];
         let (scored, result) = try_model_rerank_simple(
-            &config, "query", &candidates, &candidate_texts, &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
-            None, "", "",
-        ).await;
+            &config,
+            "query",
+            &candidates,
+            &candidate_texts,
+            &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
+            None,
+            "",
+            "",
+        )
+        .await;
         assert!(!result.model_rerank_attempted);
         assert_eq!(scored.len(), 1);
     }
@@ -873,14 +897,28 @@ mod tests {
             external_rerank_allowed: false,
             ..Default::default()
         };
-        let candidates = vec![
-            (1, LocalRankSignals { fts_score: 0.9, ..Default::default() }),
-        ];
-        let candidate_texts = vec![RerankCandidate { doc_id: 1, text: "test".into() }];
+        let candidates = vec![(
+            1,
+            LocalRankSignals {
+                fts_score: 0.9,
+                ..Default::default()
+            },
+        )];
+        let candidate_texts = vec![RerankCandidate {
+            doc_id: 1,
+            text: "test".into(),
+        }];
         let (_, result) = try_model_rerank_simple(
-            &config, "query", &candidates, &candidate_texts, &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
-            None, "https://api.openai.com/v1", "sk-key",
-        ).await;
+            &config,
+            "query",
+            &candidates,
+            &candidate_texts,
+            &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
+            None,
+            "https://api.openai.com/v1",
+            "sk-key",
+        )
+        .await;
         assert!(result.fallback_used);
         assert_eq!(result.fallback_reason, Some(FallbackReason::PrivacyBlocked));
     }
@@ -893,21 +931,36 @@ mod tests {
             ..Default::default()
         };
         let budget = crate::kb::cost::TokenBudget::new(0); // zero budget
-        let candidates = vec![
-            (1, LocalRankSignals { fts_score: 0.9, ..Default::default() }),
-        ];
-        let candidate_texts = vec![RerankCandidate { doc_id: 1, text: "test".into() }];
+        let candidates = vec![(
+            1,
+            LocalRankSignals {
+                fts_score: 0.9,
+                ..Default::default()
+            },
+        )];
+        let candidate_texts = vec![RerankCandidate {
+            doc_id: 1,
+            text: "test".into(),
+        }];
         let (_, result) = try_model_rerank_simple(
-            &config, "query", &candidates, &candidate_texts, &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
-            Some(&budget), "https://api.openai.com/v1", "sk-key",
-        ).await;
+            &config,
+            "query",
+            &candidates,
+            &candidate_texts,
+            &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
+            Some(&budget),
+            "https://api.openai.com/v1",
+            "sk-key",
+        )
+        .await;
         assert!(result.fallback_used);
         assert_eq!(result.fallback_reason, Some(FallbackReason::BudgetExceeded));
     }
 
     #[test]
     fn test_build_rerank_prompt() {
-        let prompt = build_rerank_prompt("distributed systems", "A paper about consensus algorithms");
+        let prompt =
+            build_rerank_prompt("distributed systems", "A paper about consensus algorithms");
         assert!(prompt.contains("distributed systems"));
         assert!(prompt.contains("consensus algorithms"));
         assert!(prompt.contains("0-100"));

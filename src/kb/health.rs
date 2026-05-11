@@ -30,15 +30,19 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     let mut issues = 0usize;
 
     // P5-002: 检查 orphan nodes（document 已删除但 node 仍在）
-    let orphan_nodes: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM kb_document_nodes n \
+    let orphan_nodes: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_document_nodes n \
          LEFT JOIN kb_documents d ON n.document_id = d.id \
          WHERE d.id IS NULL",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     let status = if orphan_nodes > 0 { "error" } else { "ok" };
-    if orphan_nodes > 0 { issues += 1; }
+    if orphan_nodes > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "orphan_nodes".into(),
         status: status.into(),
@@ -47,14 +51,18 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     // P5-002: 检查 orphan embeddings
-    let orphan_embeddings: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM kb_node_embeddings e \
+    let orphan_embeddings: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_node_embeddings e \
          LEFT JOIN kb_document_nodes n ON e.node_id = n.id \
          WHERE n.id IS NULL",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-    if orphan_embeddings > 0 { issues += 1; }
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if orphan_embeddings > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "orphan_embeddings".into(),
         status: if orphan_embeddings > 0 { "error" } else { "ok" }.into(),
@@ -63,14 +71,18 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     // P5-002: 检查 orphan summaries
-    let orphan_summaries: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM kb_document_summaries s \
+    let orphan_summaries: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_document_summaries s \
          LEFT JOIN kb_documents d ON s.document_id = d.id \
          WHERE d.id IS NULL",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-    if orphan_summaries > 0 { issues += 1; }
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if orphan_summaries > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "orphan_summaries".into(),
         status: if orphan_summaries > 0 { "error" } else { "ok" }.into(),
@@ -79,13 +91,17 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     // P5-003: 检查 FTS 缺失
-    let missing_fts: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM kb_document_nodes n \
+    let missing_fts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_document_nodes n \
          WHERE n.id NOT IN (SELECT rowid FROM kb_doc_fts)",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-    if missing_fts > 0 { issues += 1; }
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if missing_fts > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "missing_fts".into(),
         status: if missing_fts > 0 { "error" } else { "ok" }.into(),
@@ -94,14 +110,18 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     // P5-002: 检查 orphan table rows
-    let orphan_table_rows: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM kb_table_rows r \
+    let orphan_table_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_table_rows r \
          LEFT JOIN kb_tables t ON r.table_id = t.id \
          WHERE t.id IS NULL",
-        [],
-        |row| row.get(0),
-    ).unwrap_or(0);
-    if orphan_table_rows > 0 { issues += 1; }
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if orphan_table_rows > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "orphan_table_rows".into(),
         status: if orphan_table_rows > 0 { "error" } else { "ok" }.into(),
@@ -116,7 +136,9 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
         [],
         |row| row.get(0),
     ).unwrap_or(0);
-    if split_mismatch > 0 { issues += 1; }
+    if split_mismatch > 0 {
+        issues += 1;
+    }
     checks.push(HealthCheckItem {
         check_name: "split_total_mismatch".into(),
         status: if split_mismatch > 0 { "warning" } else { "ok" }.into(),
@@ -125,7 +147,11 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
     });
 
     Ok(HealthSummary {
-        overall_status: if issues == 0 { "healthy".into() } else { "issues_found".into() },
+        overall_status: if issues == 0 {
+            "healthy".into()
+        } else {
+            "issues_found".into()
+        },
         checks,
         issues_count: issues,
     })
@@ -136,11 +162,20 @@ pub fn repair_fts(conn: &Connection) -> Result<i64> {
     let mut repaired = 0i64;
     let mut stmt = conn.prepare(
         "SELECT n.id, n.content_tokens, n.library_id, n.document_id, n.level \
-         FROM kb_document_nodes n WHERE n.id NOT IN (SELECT rowid FROM kb_doc_fts)"
+         FROM kb_document_nodes n WHERE n.id NOT IN (SELECT rowid FROM kb_doc_fts)",
     )?;
-    let rows: Vec<(i64, String, i64, i64, i32)> = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
-    })?.filter_map(|r| r.ok()).collect();
+    let rows: Vec<(i64, String, i64, i64, i32)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     for (id, tokens, lib_id, doc_id, level) in &rows {
         conn.execute(
@@ -167,7 +202,7 @@ pub fn repair_embeddings(conn: &Connection) -> Result<i64> {
     let missing_ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT n.id FROM kb_document_nodes n \
-             WHERE n.id NOT IN (SELECT node_id FROM kb_node_embeddings)"
+             WHERE n.id NOT IN (SELECT node_id FROM kb_node_embeddings)",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
         rows.filter_map(|r| r.ok()).collect()
@@ -214,9 +249,10 @@ pub fn rebuild_document_index(conn: &Connection, document_id: i64) -> Result<()>
              FROM kb_documents WHERE id = ?1",
             rusqlite::params![document_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).map_err(|e| crate::error::GBrainError::Database(
-            format!("document not found for rebuild: {}", e)
-        ))?;
+        )
+        .map_err(|e| {
+            crate::error::GBrainError::Database(format!("document not found for rebuild: {}", e))
+        })?;
 
     if deleted_at.is_some() {
         return Err(crate::error::GBrainError::InvalidInput(
@@ -268,7 +304,7 @@ pub fn rebuild_library_index(conn: &Connection, library_id: i64) -> Result<Rebui
     let doc_ids: Vec<i64> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM kb_documents \
-             WHERE library_id = ?1 AND deleted_at IS NULL"
+             WHERE library_id = ?1 AND deleted_at IS NULL",
         )?;
         let rows = stmt.query_map(rusqlite::params![library_id], |row| row.get::<_, i64>(0))?;
         rows.filter_map(|r| r.ok()).collect()
@@ -313,15 +349,25 @@ pub fn purge_deleted(conn: &Connection, older_than_days: i32) -> Result<i64> {
     let mut purged = 0i64;
     let mut stmt = conn.prepare(
         "SELECT id FROM kb_documents WHERE deleted_at IS NOT NULL \
-         AND deleted_at < datetime('now', ?1)"
+         AND deleted_at < datetime('now', ?1)",
     )?;
-    let ids: Vec<i64> = stmt.query_map(params![format!("-{} days", older_than_days)], |row| row.get(0))?
-        .filter_map(|r| r.ok()).collect();
+    let ids: Vec<i64> = stmt
+        .query_map(params![format!("-{} days", older_than_days)], |row| {
+            row.get(0)
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     purged = ids.len() as i64;
 
     for id in ids {
-        conn.execute("DELETE FROM kb_document_nodes WHERE document_id = ?1", params![id])?;
-        conn.execute("UPDATE kb_documents SET purged_at = datetime('now') WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM kb_document_nodes WHERE document_id = ?1",
+            params![id],
+        )?;
+        conn.execute(
+            "UPDATE kb_documents SET purged_at = datetime('now') WHERE id = ?1",
+            params![id],
+        )?;
     }
     Ok(purged)
 }

@@ -1600,7 +1600,11 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbEval { library_id } => {
             let conn = engine.connection()?;
             let queries = gbrain_core::kb::eval::list_eval_queries(conn, library_id)?;
-            println!("Eval queries for library {}: {} found", library_id, queries.len());
+            println!(
+                "Eval queries for library {}: {} found",
+                library_id,
+                queries.len()
+            );
             for q in &queries {
                 println!("  [{}] {}: {}", q.query_type, q.query_text, q.id);
             }
@@ -1616,29 +1620,32 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbRestore { input } => {
             let input_dir = std::path::Path::new(&input);
             let db_path = config.db_path();
-            gbrain_core::kb::backup::restore_database(
-                &input_dir.join("gbrain.db"), &db_path,
-            )?;
+            gbrain_core::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
             println!("Restore complete");
             return Ok(());
         }
         Commands::KbSourceAdd { library_id, path } => {
             let source_path = std::path::Path::new(&path);
             if !source_path.is_dir() {
-                return Err(GBrainError::InvalidInput(format!("Path is not a directory: {}", path)));
+                return Err(GBrainError::InvalidInput(format!(
+                    "Path is not a directory: {}",
+                    path
+                )));
             }
             let files = gbrain_core::kb::sync::scan_directory(
                 source_path,
                 &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"],
             )?;
-            println!("Source added: {} files found for library {}", files.len(), library_id);
+            println!(
+                "Source added: {} files found for library {}",
+                files.len(),
+                library_id
+            );
             return Ok(());
         }
         Commands::KbSyncSource { source_id } => {
-            let files = gbrain_core::kb::sync::scan_directory(
-                std::path::Path::new("."),
-                &["md", "txt"],
-            )?;
+            let files =
+                gbrain_core::kb::sync::scan_directory(std::path::Path::new("."), &["md", "txt"])?;
             println!("Sync source {}: {} files scanned", source_id, files.len());
             return Ok(());
         }
@@ -1669,32 +1676,43 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             let conn = engine.connection()?;
             let output_dir = std::path::Path::new(&output);
             let manifest = gbrain_core::kb::backup::export_library(conn, library_id, output_dir)?;
-            println!("Exported library '{}' ({} docs, {} nodes) to {}",
-                manifest.source_library_name, manifest.document_count, manifest.node_count, output);
+            println!(
+                "Exported library '{}' ({} docs, {} nodes) to {}",
+                manifest.source_library_name, manifest.document_count, manifest.node_count, output
+            );
             return Ok(());
         }
 
         Commands::KbImportLibrary { archive, new_name } => {
             let conn = engine.connection()?;
             let archive_dir = std::path::Path::new(&archive);
-            let new_lib_id = gbrain_core::kb::backup::import_library(
-                conn, archive_dir, new_name.as_deref(),
-            )?;
+            let new_lib_id =
+                gbrain_core::kb::backup::import_library(conn, archive_dir, new_name.as_deref())?;
             println!("Imported library, new library_id={}", new_lib_id);
             return Ok(());
         }
 
-        Commands::KbReembed { library_id, embedding_index_id } => {
+        Commands::KbReembed {
+            library_id,
+            embedding_index_id,
+        } => {
             let conn = engine.connection()?;
             let index_id = embedding_index_id.unwrap_or(0);
             gbrain_core::kb::embedding_index::queue_reembed_jobs(conn, library_id, index_id)?;
-            println!("Queued re-embed jobs for library {} (index_id={})", library_id, index_id);
+            println!(
+                "Queued re-embed jobs for library {} (index_id={})",
+                library_id, index_id
+            );
             return Ok(());
         }
 
-        Commands::KbEvalCompare { index_id_1, index_id_2 } => {
+        Commands::KbEvalCompare {
+            index_id_1,
+            index_id_2,
+        } => {
             let conn = engine.connection()?;
-            let report = gbrain_core::kb::eval::compare_embedding_indexes(conn, index_id_1, index_id_2)?;
+            let report =
+                gbrain_core::kb::eval::compare_embedding_indexes(conn, index_id_1, index_id_2)?;
             println!("Embedding index comparison:\n{}", report);
             return Ok(());
         }
@@ -1702,9 +1720,15 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbHealthCheck { library_id, repair } => {
             let conn = engine.connection()?;
             let summary = gbrain_core::kb::health::check_index_health(conn)?;
-            println!("Health: {} ({} issues)", summary.overall_status, summary.issues_count);
+            println!(
+                "Health: {} ({} issues)",
+                summary.overall_status, summary.issues_count
+            );
             for check in &summary.checks {
-                println!("  {} [{}]: {} (affected: {})", check.check_name, check.status, check.detail, check.affected_count);
+                println!(
+                    "  {} [{}]: {} (affected: {})",
+                    check.check_name, check.status, check.detail, check.affected_count
+                );
             }
             if repair && summary.issues_count > 0 {
                 let repaired = gbrain_core::kb::health::repair_fts(conn)?;
@@ -1728,10 +1752,16 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             return Ok(());
         }
 
-        Commands::KbPurgeDeleted { library_id, older_than_days } => {
+        Commands::KbPurgeDeleted {
+            library_id,
+            older_than_days,
+        } => {
             let conn = engine.connection()?;
             let purged = gbrain_core::kb::health::purge_deleted(conn, older_than_days)?;
-            println!("Purged {} deleted documents older than {} days", purged, older_than_days);
+            println!(
+                "Purged {} deleted documents older than {} days",
+                purged, older_than_days
+            );
             let _ = library_id;
             return Ok(());
         }

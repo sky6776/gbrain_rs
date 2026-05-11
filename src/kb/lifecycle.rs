@@ -121,7 +121,9 @@ pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
                 params![document_id],
                 |row| row.get(0),
             )
-            .map_err(|_| GBrainError::InvalidInput("document not found or not deleted".to_string()))?;
+            .map_err(|_| {
+                GBrainError::InvalidInput("document not found or not deleted".to_string())
+            })?;
 
         if deleted_at.is_none() {
             return Err(GBrainError::InvalidInput(
@@ -135,7 +137,10 @@ pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
              (SELECT id FROM kb_tables WHERE document_id = ?1)",
             params![document_id],
         )?;
-        conn.execute("DELETE FROM kb_tables WHERE document_id = ?1", params![document_id])?;
+        conn.execute(
+            "DELETE FROM kb_tables WHERE document_id = ?1",
+            params![document_id],
+        )?;
 
         // 清理摘要
         conn.execute(
@@ -217,7 +222,13 @@ pub fn create_document_version(
         "INSERT INTO kb_document_versions \
          (document_id, version_label, processing_run_id, char_count, node_count, index_status) \
          VALUES (?1, ?2, ?3, ?4, ?5, 'archived')",
-        params![document_id, version_label, processing_run_id, char_count, node_count],
+        params![
+            document_id,
+            version_label,
+            processing_run_id,
+            char_count,
+            node_count
+        ],
     )?;
     let version_id = conn.last_insert_rowid();
 

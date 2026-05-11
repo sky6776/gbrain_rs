@@ -297,7 +297,13 @@ pub async fn process_document_async(
     let page_count = 0; // 将在 P2 PDF/DOCX parser 中填充
     let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
     let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
-    kb.update_document_granularity(doc_id, granularity.as_str(), chunk_strategy, char_count as i32, page_count as i32)?;
+    kb.update_document_granularity(
+        doc_id,
+        granularity.as_str(),
+        chunk_strategy,
+        char_count as i32,
+        page_count as i32,
+    )?;
 
     kb.update_document_status(
         doc_id,
@@ -346,10 +352,22 @@ pub async fn process_document_async(
     let split_total: i32 = chunks.len() as i32;
 
     // P1-010: 从 parser blocks 中提取每块的元数据
-    let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed.blocks.as_ref()
-        .map(|blocks| blocks.iter().map(|b| {
-            (b.title_path.clone(), b.page_number, b.source_start, b.source_end)
-        }).collect())
+    let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed
+        .blocks
+        .as_ref()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|b| {
+                    (
+                        b.title_path.clone(),
+                        b.page_number,
+                        b.source_start,
+                        b.source_end,
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // P1-006/P1-007: 根据粒度应用节点策略 + P1-011: 生成 contextual embedding 文本
@@ -358,12 +376,10 @@ pub async fn process_document_async(
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
-            let (title_path, page_num, src_start, src_end) = block_meta_vec.get(i)
-                .cloned()
-                .unwrap_or_default();
-            let embedding_text = crate::kb::context::build_embedding_text(
-                doc_title, &title_path, page_num, chunk,
-            );
+            let (title_path, page_num, src_start, src_end) =
+                block_meta_vec.get(i).cloned().unwrap_or_default();
+            let embedding_text =
+                crate::kb::context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -388,22 +404,42 @@ pub async fn process_document_async(
         if let Some(ref blocks) = parsed.blocks {
             for block in blocks {
                 if block.block_type == "table" && !block.metadata.is_empty() {
-                    if let Ok(sheet_data) = serde_json::from_str::<serde_json::Value>(&block.metadata) {
+                    if let Ok(sheet_data) =
+                        serde_json::from_str::<serde_json::Value>(&block.metadata)
+                    {
                         if let Some(name) = sheet_data.get("name").and_then(|v| v.as_str()) {
-                            let headers: Vec<String> = sheet_data.get("headers")
+                            let headers: Vec<String> = sheet_data
+                                .get("headers")
                                 .and_then(|v| v.as_array())
-                                .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
                                 .unwrap_or_default();
-                            let row_count = sheet_data.get("row_count").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let row_count = sheet_data
+                                .get("row_count")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0) as i32;
                             if let Ok(table_id) = crate::kb::table_index::insert_table(
                                 conn, doc_id, name, &headers, row_count,
                             ) {
-                                if let Some(rows) = sheet_data.get("rows").and_then(|v| v.as_array()) {
+                                if let Some(rows) =
+                                    sheet_data.get("rows").and_then(|v| v.as_array())
+                                {
                                     for (ri, row) in rows.iter().enumerate() {
-                                        let row_text = headers.iter().enumerate()
-                                            .filter_map(|(hi, h)| row.get(h).and_then(|v| v.as_str()).map(|s| format!("{}: {}", h, s)))
-                                            .collect::<Vec<_>>().join(" ");
-                                        let row_json = serde_json::to_string(row).unwrap_or_default();
+                                        let row_text = headers
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(hi, h)| {
+                                                row.get(h)
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| format!("{}: {}", h, s))
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(" ");
+                                        let row_json =
+                                            serde_json::to_string(row).unwrap_or_default();
                                         let _ = crate::kb::table_index::insert_table_row(
                                             conn, table_id, ri as i32, &row_text, &row_json,
                                         );
@@ -421,7 +457,8 @@ pub async fn process_document_async(
     if granularity == crate::kb::granularity::DocumentGranularity::Micro {
         if !chunks.is_empty() {
             let full_text = parsed.content.clone();
-            let embedding_text = crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
+            let embedding_text =
+                crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
             nodes = vec![RaptorNode {
                 id: -1,
                 library_id: lib_id,
@@ -501,7 +538,12 @@ pub async fn process_document_async(
         if let Some(rc) = raptor_config {
             report_progress(on_progress, "raptor", "构建 RAPTOR 树");
 
-            match raptor::resolve_raptor_llm_config(Some(&library), kb_raptor_secret_ref, kb_raptor_base_url, kb_raptor_model) {
+            match raptor::resolve_raptor_llm_config(
+                Some(&library),
+                kb_raptor_secret_ref,
+                kb_raptor_base_url,
+                kb_raptor_model,
+            ) {
                 Ok(llm_config) => {
                     let max_tokens = rc.max_tokens_per_summary;
                     let llm_cfg = llm_config.clone();
@@ -709,8 +751,17 @@ pub async fn ingest_directory(
             extension: ext,
         };
 
-        match process_document_async(conn, &payload, embedder.clone(), raptor_config, None, None, None, on_progress)
-            .await
+        match process_document_async(
+            conn,
+            &payload,
+            embedder.clone(),
+            raptor_config,
+            None,
+            None,
+            None,
+            on_progress,
+        )
+        .await
         {
             Ok(_) => success_count += 1,
             Err(e) => {
@@ -789,9 +840,10 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
             );
             // 清理 per-index vec 表（通过 kb_node_embeddings 反查 index_id）
             if let Ok(mut stmt) = conn.prepare(
-                "SELECT DISTINCT embedding_index_id FROM kb_node_embeddings WHERE node_id = ?1"
+                "SELECT DISTINCT embedding_index_id FROM kb_node_embeddings WHERE node_id = ?1",
             ) {
-                let index_ids: Vec<i64> = stmt.query_map(rusqlite::params![node_id], |row| row.get(0))
+                let index_ids: Vec<i64> = stmt
+                    .query_map(rusqlite::params![node_id], |row| row.get(0))
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default();
                 for idx_id in index_ids {
@@ -878,20 +930,29 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
             })?;
 
             // 解析该节点所属 library 的 active embedding index
-            let active_index_id: i64 = conn.query_row(
-                "SELECT ei.id FROM kb_embedding_indexes ei \
+            let active_index_id: i64 = conn
+                .query_row(
+                    "SELECT ei.id FROM kb_embedding_indexes ei \
                  INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
                  WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
-                rusqlite::params![db_id],
-                |row| row.get(0),
-            ).map_err(|_| GBrainError::InvalidInput(
-                format!("节点 {} 所属 library 没有 active embedding index", db_id)
-            ))?;
+                    rusqlite::params![db_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| {
+                    GBrainError::InvalidInput(format!(
+                        "节点 {} 所属 library 没有 active embedding index",
+                        db_id
+                    ))
+                })?;
 
             // 统一写入（BLOB 表 + per-index vec 表）
             crate::kb::embedding_index::upsert_node_embedding_for_index(
-                conn, db_id, active_index_id, vector,
-                vector.len() as i32, "text-embedding-3-large",
+                conn,
+                db_id,
+                active_index_id,
+                vector,
+                vector.len() as i32,
+                "text-embedding-3-large",
             )?;
 
             // 向后兼容：同步写入 legacy vec_kb_nodes

@@ -23,7 +23,11 @@ impl DocumentParser for DocxParser {
         if !headings.is_empty() {
             metadata.insert("headings".to_string(), headings.join(" > "));
         }
-        Ok(ParsedDocument { content, metadata, blocks: None })
+        Ok(ParsedDocument {
+            content,
+            metadata,
+            blocks: None,
+        })
     }
 
     fn extensions(&self) -> &[&str] {
@@ -52,7 +56,8 @@ fn extract_docx_text_structured(data: &[u8]) -> Result<(String, Vec<String>), GB
         .map_err(|e| GBrainError::FileError(format!("DOCX open failed: {}", e)))?;
 
     let mut xml_content = String::new();
-    let mut file = archive.by_name("word/document.xml")
+    let mut file = archive
+        .by_name("word/document.xml")
         .map_err(|_| GBrainError::FileError("DOCX missing word/document.xml".to_string()))?;
     file.read_to_string(&mut xml_content)
         .map_err(|e| GBrainError::FileError(format!("DOCX read failed: {}", e)))?;
@@ -125,7 +130,12 @@ fn extract_docx_text_structured(data: &[u8]) -> Result<(String, Vec<String>), GB
                 }
             }
             Ok(quick_xml::events::Event::Eof) => break,
-            Err(e) => return Err(GBrainError::FileError(format!("DOCX XML parse error: {}", e))),
+            Err(e) => {
+                return Err(GBrainError::FileError(format!(
+                    "DOCX XML parse error: {}",
+                    e
+                )))
+            }
             _ => {}
         }
         buf.clear();

@@ -22,8 +22,9 @@ static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<
 static TOKENS_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(5000, 14400)));
 /// P4-008: 召回结果缓存（短 TTL）
-static RETRIEVAL_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 30)));
+static RETRIEVAL_CACHE: std::sync::LazyLock<
+    Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 30)));
 /// P4-009: rerank 结果缓存（按 provider/model/profile 隔离）
 static RERANK_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
     std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 60)));
@@ -59,58 +60,92 @@ pub fn kb_search(
 
     // Title/name retriever
     let title_results = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k)?;
-    if !title_results.is_empty() { all_candidates.push(title_results); }
+    if !title_results.is_empty() {
+        all_candidates.push(title_results);
+    }
 
     // P4-001: profile routing
     let profile = input.profile.as_deref().unwrap_or("balanced");
-    let use_summary = matches!(profile, "balanced" | "accurate") && matches!(planner_type,
-        crate::kb::planner::QueryType::HowTo | crate::kb::planner::QueryType::Conceptual);
+    let use_summary = matches!(profile, "balanced" | "accurate")
+        && matches!(
+            planner_type,
+            crate::kb::planner::QueryType::HowTo | crate::kb::planner::QueryType::Conceptual
+        );
     let use_table = matches!(profile, "table" | "balanced" | "accurate");
     let use_metadata = matches!(profile, "balanced" | "accurate" | "file_lookup");
 
     // Node FTS retriever (P3-009)
-    let fts_results = kb_fts_search(conn, &query_normalized, &input.library_ids, input.level, fetch_k)?;
-    if !fts_results.is_empty() { all_candidates.push(fts_results); }
+    let fts_results = kb_fts_search(
+        conn,
+        &query_normalized,
+        &input.library_ids,
+        input.level,
+        fetch_k,
+    )?;
+    if !fts_results.is_empty() {
+        all_candidates.push(fts_results);
+    }
 
     // Vector retriever (P3-010)
     if let Some(vec) = query_vector {
         let vec_results = kb_vector_search(
-            conn, vec, &input.library_ids, input.level, fetch_k,
+            conn,
+            vec,
+            &input.library_ids,
+            input.level,
+            fetch_k,
             input.embedding_index_id,
         )?;
-        if !vec_results.is_empty() { all_candidates.push(vec_results); }
+        if !vec_results.is_empty() {
+            all_candidates.push(vec_results);
+        }
     }
 
     // P3-011: Summary retriever
     if use_summary {
         if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
-            if !sr.is_empty() { all_candidates.push(sr); }
+            if !sr.is_empty() {
+                all_candidates.push(sr);
+            }
         }
     }
 
     // P3-012: Table retriever
     if use_table {
         if let Ok(tr) = table_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
-            if !tr.is_empty() { all_candidates.push(tr); }
+            if !tr.is_empty() {
+                all_candidates.push(tr);
+            }
         }
     }
 
     // P3-013: Metadata retriever
     if use_metadata {
         if let Ok(mr) = metadata_retriever(conn, &query_normalized, &input.library_ids, fetch_k) {
-            if !mr.is_empty() { all_candidates.push(mr); }
+            if !mr.is_empty() {
+                all_candidates.push(mr);
+            }
         }
     }
 
     // P4-006~009: 缓存查询 — RRF merge 前检查 cache
-    let index_version: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(index_version), 1) FROM kb_index_state WHERE index_type='vector'",
-        [], |row| row.get(0),
-    ).unwrap_or(1);
+    let index_version: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(index_version), 1) FROM kb_index_state WHERE index_type='vector'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
     let merge_cache_key = crate::kb::cache::make_cache_key(
-        &query_normalized, &input.library_ids, index_version, "merge"
+        &query_normalized,
+        &input.library_ids,
+        index_version,
+        "merge",
     );
-    let cached_merged = RETRIEVAL_CACHE.lock().ok().and_then(|c| c.get(&merge_cache_key));
+    let cached_merged = RETRIEVAL_CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&merge_cache_key));
     let merged = if let Some(cached) = cached_merged {
         cached
     } else {
@@ -129,48 +164,88 @@ pub fn kb_search(
     if merged.is_empty() {
         // Level 1: strict → synonym + alias expand
         let mut variants = crate::nlp::chinese::expand_query_with_synonyms(&query_normalized);
-        variants.extend(crate::nlp::chinese::expand_query_with_aliases(&query_normalized));
+        variants.extend(crate::nlp::chinese::expand_query_with_aliases(
+            &query_normalized,
+        ));
         for variant in variants.iter().skip(1).take(3) {
-            if let Ok(fr) = kb_fts_search(conn, variant, &input.library_ids, input.level, fetch_k * 2) {
-                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("synonym_alias_expand"); break; }
+            if let Ok(fr) =
+                kb_fts_search(conn, variant, &input.library_ids, input.level, fetch_k * 2)
+            {
+                if !fr.is_empty() {
+                    merged.extend(fr);
+                    fallbacks_used.push("synonym_alias_expand");
+                    break;
+                }
             }
         }
     }
     if merged.is_empty() {
         // Level 2: broaden_or — AND → OR
-        let broad_query = query_normalized.split_whitespace().collect::<Vec<_>>().join(" OR ");
+        let broad_query = query_normalized
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" OR ");
         if broad_query != query_normalized {
-            if let Ok(fr) = kb_fts_search(conn, &broad_query, &input.library_ids, input.level, fetch_k * 2) {
-                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("broaden_or"); }
+            if let Ok(fr) = kb_fts_search(
+                conn,
+                &broad_query,
+                &input.library_ids,
+                input.level,
+                fetch_k * 2,
+            ) {
+                if !fr.is_empty() {
+                    merged.extend(fr);
+                    fallbacks_used.push("broaden_or");
+                }
             }
         }
     }
     if merged.is_empty() && crate::nlp::chinese::detect_pinyin_query(&query_normalized) {
         // Level 3: pinyin — 对中文字段做拼音匹配
-        if let Ok(fr) = kb_fts_search(conn, &input.query, &input.library_ids, input.level, fetch_k * 3) {
-            if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("pinyin"); }
+        if let Ok(fr) = kb_fts_search(
+            conn,
+            &input.query,
+            &input.library_ids,
+            input.level,
+            fetch_k * 3,
+        ) {
+            if !fr.is_empty() {
+                merged.extend(fr);
+                fallbacks_used.push("pinyin");
+            }
         }
     }
     if merged.is_empty() {
         // Level 4: title_name_expand — 扩展到文件名/标题检索
-        if let Ok(fr) = title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3) {
-            if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("title_name_expand"); }
+        if let Ok(fr) =
+            title_name_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3)
+        {
+            if !fr.is_empty() {
+                merged.extend(fr);
+                fallbacks_used.push("title_name_expand");
+            }
         }
     }
     if merged.is_empty() {
         // Level 5: summary_search — 搜索摘要
-        if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3) {
-            if !sr.is_empty() { merged.extend(sr); fallbacks_used.push("summary_search"); }
+        if let Ok(sr) = summary_retriever(conn, &query_normalized, &input.library_ids, fetch_k * 3)
+        {
+            if !sr.is_empty() {
+                merged.extend(sr);
+                fallbacks_used.push("summary_search");
+            }
         }
     }
     if merged.is_empty() {
         // Level 6: low_threshold_vector — 降低向量阈值扩大召回
         if let Some(vec) = query_vector {
-            if let Ok(fr) = kb_vector_search(
-            conn, vec, &[], None, fetch_k * 5,
-            input.embedding_index_id,
-        ) {
-                if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("low_threshold_vector"); }
+            if let Ok(fr) =
+                kb_vector_search(conn, vec, &[], None, fetch_k * 5, input.embedding_index_id)
+            {
+                if !fr.is_empty() {
+                    merged.extend(fr);
+                    fallbacks_used.push("low_threshold_vector");
+                }
             }
         }
     }
@@ -197,10 +272,10 @@ pub fn kb_search(
                 "SELECT rerank_enabled, rerank_provider FROM kb_libraries WHERE id=?1",
                 [lib_id],
                 |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)),
-            ).ok()
+            )
+            .ok()
         });
-        let (rerank_enabled, rerank_provider) = lib_rerank_config
-            .unwrap_or((1, String::new()));
+        let (rerank_enabled, rerank_provider) = lib_rerank_config.unwrap_or((1, String::new()));
 
         // 构建 RerankConfig
         let rerank_cfg = crate::kb::rerank::RerankConfig {
@@ -213,21 +288,30 @@ pub fn kb_search(
         };
 
         // 构建 LocalRankSignals（使用 RRF 分数作为主信号）
-        let candidates: Vec<(i64, crate::kb::rerank::LocalRankSignals)> = merged.iter().map(|r| {
-            (r.node_id, crate::kb::rerank::LocalRankSignals {
-                fts_score: r.score,
-                ..Default::default()
+        let candidates: Vec<(i64, crate::kb::rerank::LocalRankSignals)> = merged
+            .iter()
+            .map(|r| {
+                (
+                    r.node_id,
+                    crate::kb::rerank::LocalRankSignals {
+                        fts_score: r.score,
+                        ..Default::default()
+                    },
+                )
             })
-        }).collect();
+            .collect();
 
         // 获取候选节点内容用于模型 rerank（开启脱敏时先 redact）
-        let candidate_texts: Vec<crate::kb::rerank::RerankCandidate> = merged.iter()
+        let candidate_texts: Vec<crate::kb::rerank::RerankCandidate> = merged
+            .iter()
             .filter_map(|r| {
                 conn.query_row(
                     "SELECT content FROM kb_document_nodes WHERE id=?1",
                     [r.node_id],
                     |row| row.get::<_, String>(0),
-                ).ok().map(|text| {
+                )
+                .ok()
+                .map(|text| {
                     let safe_text = if redaction_enabled && external_rerank_allowed {
                         crate::kb::privacy::redact_content(&text)
                     } else {
@@ -238,48 +322,70 @@ pub fn kb_search(
                         text: safe_text,
                     }
                 })
-            }).collect();
+            })
+            .collect();
 
         let weights = vec![0.4, 0.3, 0.2, 0.1, 0.0, 0.0];
 
         // 尝试模型 rerank（通过 mini tokio runtime）
         // base_url 缺省为 OpenAI 默认端点，确保只配了 API key 的用户也能使用模型 rerank
-        let has_api_key = input.rerank_api_key.as_deref().map_or(false, |k| !k.is_empty());
+        let has_api_key = input
+            .rerank_api_key
+            .as_deref()
+            .map_or(false, |k| !k.is_empty());
         let (scored, rerank_result) = if external_rerank_allowed
             && rerank_cfg.model_rerank_enabled
             && has_api_key
         {
             let api_key = input.rerank_api_key.as_deref().unwrap_or("");
-            let base_url = input.rerank_base_url.as_deref()
+            let base_url = input
+                .rerank_base_url
+                .as_deref()
                 .filter(|u| !u.is_empty())
                 .unwrap_or("https://api.openai.com/v1");
             // P4-004: 审计外部模型调用
             let _ = crate::kb::privacy::log_external_model_call(
-                conn, input.library_ids.first().copied(), None,
-                "rerank", &rerank_provider, &rerank_cfg.rerank_model,
-                query_normalized.len() as i32, merged.len() as i32, 0, 0.0, true, "",
+                conn,
+                input.library_ids.first().copied(),
+                None,
+                "rerank",
+                &rerank_provider,
+                &rerank_cfg.rerank_model,
+                query_normalized.len() as i32,
+                merged.len() as i32,
+                0,
+                0.0,
+                true,
+                "",
             );
             match tokio::runtime::Builder::new_current_thread()
-                .enable_all().build()
+                .enable_all()
+                .build()
             {
-                Ok(rt) => rt.block_on(
-                    crate::kb::rerank::try_model_rerank_simple(
-                        &rerank_cfg, &query_normalized,
-                        &candidates, &candidate_texts, &weights,
-                        None, base_url, api_key,
-                    )
-                ),
+                Ok(rt) => rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+                    &rerank_cfg,
+                    &query_normalized,
+                    &candidates,
+                    &candidate_texts,
+                    &weights,
+                    None,
+                    base_url,
+                    api_key,
+                )),
                 Err(_) => {
                     // 无法创建 runtime，直接使用本地 rerank
                     let local = crate::kb::rerank::local_rerank(&candidates, &weights);
-                    (local, crate::kb::rerank::RerankResult {
-                        model_rerank_attempted: false,
-                        model_rerank_succeeded: false,
-                        fallback_used: true,
-                        fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
-                        provider: "local".into(),
-                        candidates_reranked: merged.len(),
-                    })
+                    (
+                        local,
+                        crate::kb::rerank::RerankResult {
+                            model_rerank_attempted: false,
+                            model_rerank_succeeded: false,
+                            fallback_used: true,
+                            fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
+                            provider: "local".into(),
+                            candidates_reranked: merged.len(),
+                        },
+                    )
                 }
             }
         } else {
@@ -290,14 +396,17 @@ pub fn kb_search(
             } else {
                 crate::kb::rerank::FallbackReason::NotConfigured
             };
-            (local, crate::kb::rerank::RerankResult {
-                model_rerank_attempted: false,
-                model_rerank_succeeded: false,
-                fallback_used: true,
-                fallback_reason: Some(reason),
-                provider: "local".into(),
-                candidates_reranked: merged.len(),
-            })
+            (
+                local,
+                crate::kb::rerank::RerankResult {
+                    model_rerank_attempted: false,
+                    model_rerank_succeeded: false,
+                    fallback_used: true,
+                    fallback_reason: Some(reason),
+                    provider: "local".into(),
+                    candidates_reranked: merged.len(),
+                },
+            )
         };
 
         // 按 rerank 分数重排 merged
@@ -307,15 +416,24 @@ pub fn kb_search(
                 r.score = new_score;
             }
         }
-        merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, r) in merged.iter_mut().enumerate() { r.rank = i + 1; }
+        merged.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (i, r) in merged.iter_mut().enumerate() {
+            r.rank = i + 1;
+        }
 
         rerank_result
     } else {
         crate::kb::rerank::RerankResult {
-            model_rerank_attempted: false, model_rerank_succeeded: false,
-            fallback_used: false, fallback_reason: None,
-            provider: String::new(), candidates_reranked: 0,
+            model_rerank_attempted: false,
+            model_rerank_succeeded: false,
+            fallback_used: false,
+            fallback_reason: None,
+            provider: String::new(),
+            candidates_reranked: 0,
         }
     };
 
@@ -334,8 +452,14 @@ pub fn kb_search(
 
     // P4-020: search logging (异步，不阻塞返回)
     let _ = crate::kb::eval::log_search(
-        conn, &query_normalized, &input.library_ids,
-        profile, planner_type.as_str(), results.len(), 0, false,
+        conn,
+        &query_normalized,
+        &input.library_ids,
+        profile,
+        planner_type.as_str(),
+        results.len(),
+        0,
+        false,
     );
 
     // P3-021: debug signals
@@ -363,9 +487,15 @@ fn normalize_query(query: &str) -> String {
     // P3-002: 繁体→简体
     q = crate::nlp::chinese::traditional_to_simplified(&q);
     // 全角→半角标点
-    q = q.replace('，', ",").replace('。', ".").replace('！', "!")
-        .replace('？', "?").replace('：', ":").replace('；', ";")
-        .replace('（', "(").replace('）', ")");
+    q = q
+        .replace('，', ",")
+        .replace('。', ".")
+        .replace('！', "!")
+        .replace('？', "?")
+        .replace('：', ":")
+        .replace('；', ";")
+        .replace('（', "(")
+        .replace('）', ")");
     // 多余空白清理
     let parts: Vec<&str> = q.split_whitespace().collect();
     parts.join(" ")
@@ -382,7 +512,9 @@ fn title_name_retriever(
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
-    if token_query.is_empty() { return Ok(Vec::new()); }
+    if token_query.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let mut sql = String::from(
         "SELECT MIN(n.id) FROM kb_doc_name_fts f \
@@ -394,23 +526,38 @@ fn title_name_retriever(
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids.iter().enumerate()
-            .map(|(i, _)| format!("?{}", start + i)).collect();
-        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
-        for &id in library_ids { param_values.push(Box::new(id)); }
+        let placeholders: Vec<String> = library_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", start + i))
+            .collect();
+        sql.push_str(&format!(
+            " AND d.library_id IN ({})",
+            placeholders.join(",")
+        ));
+        for &id in library_ids {
+            param_values.push(Box::new(id));
+        }
     }
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY f.rowid LIMIT ?{}", limit_idx));
     param_values.push(Box::new(top_k as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+        Ok(RankedResult {
+            node_id: row.get::<_, i64>(0)?,
+            rank: 0,
+            score: 0.0,
+        })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
-    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    for (i, r) in results.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
     Ok(results)
 }
 
@@ -435,13 +582,20 @@ fn enrich_results(
         }
         // P3-023/P3-024: context expansion — 从相邻 nodes 获取前后文
         if input.include_context {
-            if let Ok((before, after)) = get_node_context(conn, r.document_id, r.node_id, input.context_before, input.context_after) {
+            if let Ok((before, after)) = get_node_context(
+                conn,
+                r.document_id,
+                r.node_id,
+                input.context_before,
+                input.context_after,
+            ) {
                 r.context_before = before;
                 r.context_after = after;
             }
         }
         // P3-027: open_target URI
-        r.open_target = build_open_target(conn, r.document_id, r.page_number, r.title_path.as_deref());
+        r.open_target =
+            build_open_target(conn, r.document_id, r.page_number, r.title_path.as_deref());
     }
 }
 
@@ -465,22 +619,29 @@ fn get_node_context(
             "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
             rusqlite::params![document_id, chunk_order - 1],
             |row| row.get::<_, String>(0),
-        ).ok().map(|s| {
+        )
+        .ok()
+        .map(|s| {
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(context_before_chars);
             chars[start..].iter().collect()
         })
-    } else { None };
+    } else {
+        None
+    };
     // 后一个 node
-    let after = conn.query_row(
-        "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
-        rusqlite::params![document_id, chunk_order + 1],
-        |row| row.get::<_, String>(0),
-    ).ok().map(|s| {
-        let chars: Vec<char> = s.chars().collect();
-        let end = context_after_chars.min(chars.len());
-        chars[..end].iter().collect()
-    });
+    let after = conn
+        .query_row(
+            "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
+            rusqlite::params![document_id, chunk_order + 1],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            let end = context_after_chars.min(chars.len());
+            chars[..end].iter().collect()
+        });
     Ok((before, after))
 }
 
@@ -490,7 +651,9 @@ fn compute_highlights(content: &str, query: &str) -> Vec<(usize, usize)> {
     let content_lower = content.to_lowercase();
     let query_terms: Vec<&str> = query.split_whitespace().collect();
     for term in query_terms {
-        if term.len() < 2 { continue; }
+        if term.len() < 2 {
+            continue;
+        }
         let mut start = 0;
         while let Some(pos) = content_lower[start..].find(&term.to_lowercase()) {
             ranges.push((start + pos, start + pos + term.len()));
@@ -540,23 +703,38 @@ fn summary_retriever(
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids.iter().enumerate()
-            .map(|(i, _)| format!("?{}", start + i)).collect();
-        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
-        for &id in library_ids { param_values.push(Box::new(id)); }
+        let placeholders: Vec<String> = library_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", start + i))
+            .collect();
+        sql.push_str(&format!(
+            " AND d.library_id IN ({})",
+            placeholders.join(",")
+        ));
+        for &id in library_ids {
+            param_values.push(Box::new(id));
+        }
     }
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY s.document_id LIMIT ?{}", limit_idx));
     param_values.push(Box::new(top_k as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+        Ok(RankedResult {
+            node_id: row.get::<_, i64>(0)?,
+            rank: 0,
+            score: 0.0,
+        })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
-    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    for (i, r) in results.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
     Ok(results)
 }
 
@@ -582,23 +760,38 @@ fn table_retriever(
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids.iter().enumerate()
-            .map(|(i, _)| format!("?{}", start + i)).collect();
-        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
-        for &id in library_ids { param_values.push(Box::new(id)); }
+        let placeholders: Vec<String> = library_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", start + i))
+            .collect();
+        sql.push_str(&format!(
+            " AND d.library_id IN ({})",
+            placeholders.join(",")
+        ));
+        for &id in library_ids {
+            param_values.push(Box::new(id));
+        }
     }
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY r.table_id LIMIT ?{}", limit_idx));
     param_values.push(Box::new(top_k as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+        Ok(RankedResult {
+            node_id: row.get::<_, i64>(0)?,
+            rank: 0,
+            score: 0.0,
+        })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
-    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    for (i, r) in results.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
     Ok(results)
 }
 
@@ -623,43 +816,71 @@ fn metadata_retriever(
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids.iter().enumerate()
-            .map(|(i, _)| format!("?{}", start + i)).collect();
-        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
-        for &id in library_ids { param_values.push(Box::new(id)); }
+        let placeholders: Vec<String> = library_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", start + i))
+            .collect();
+        sql.push_str(&format!(
+            " AND d.library_id IN ({})",
+            placeholders.join(",")
+        ));
+        for &id in library_ids {
+            param_values.push(Box::new(id));
+        }
     }
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY d.id LIMIT ?{}", limit_idx));
     param_values.push(Box::new(top_k as i64));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
+        Ok(RankedResult {
+            node_id: row.get::<_, i64>(0)?,
+            rank: 0,
+            score: 0.0,
+        })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
-    for (i, r) in results.iter_mut().enumerate() { r.rank = i + 1; }
+    for (i, r) in results.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
     Ok(results)
 }
 
 /// P1-004: 过滤掉已删除文档的结果
 fn filter_deleted_docs(conn: &Connection, merged: Vec<RankedResult>) -> Vec<RankedResult> {
-    if merged.is_empty() { return merged; }
-    let placeholders: Vec<String> = merged.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    if merged.is_empty() {
+        return merged;
+    }
+    let placeholders: Vec<String> = merged
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT n.id FROM kb_document_nodes n \
          INNER JOIN kb_documents d ON d.id = n.document_id \
          WHERE n.id IN ({}) AND d.deleted_at IS NULL",
         placeholders.join(",")
     );
-    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
-        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged
+        .iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     if let Ok(mut stmt) = conn.prepare(&sql) {
         if let Ok(valid_ids) = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0)) {
-            let valid_set: std::collections::HashSet<i64> = valid_ids.filter_map(|r| r.ok()).collect();
-            return merged.into_iter().filter(|r| valid_set.contains(&r.node_id)).collect();
+            let valid_set: std::collections::HashSet<i64> =
+                valid_ids.filter_map(|r| r.ok()).collect();
+            return merged
+                .into_iter()
+                .filter(|r| valid_set.contains(&r.node_id))
+                .collect();
         }
     }
     merged
@@ -687,7 +908,11 @@ fn group_by_document(results: Vec<KbSearchResult>) -> Vec<KbSearchResult> {
 
     // 2. Sort hits within each group by descending score
     for hits in groups.values_mut() {
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     // 3. Build DocumentGroup list sorted by best_score descending
@@ -696,7 +921,10 @@ fn group_by_document(results: Vec<KbSearchResult>) -> Vec<KbSearchResult> {
         .map(|(doc_id, hits)| {
             // hits already sorted descending by score
             let best_score = hits.first().map(|h| h.score).unwrap_or(0.0);
-            let document_title = hits.first().map(|h| h.document_name.clone()).unwrap_or_default();
+            let document_title = hits
+                .first()
+                .map(|h| h.document_name.clone())
+                .unwrap_or_default();
             DocumentGroup {
                 document_id: doc_id,
                 document_title,
@@ -705,7 +933,11 @@ fn group_by_document(results: Vec<KbSearchResult>) -> Vec<KbSearchResult> {
             }
         })
         .collect();
-    doc_groups.sort_by(|a, b| b.best_score.partial_cmp(&a.best_score).unwrap_or(std::cmp::Ordering::Equal));
+    doc_groups.sort_by(|a, b| {
+        b.best_score
+            .partial_cmp(&a.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // 4. Interleave: emit the best hit from each group first, then remaining hits.
     //    Each emitted hit gets group_hits populated with the other hits from its group.
@@ -762,12 +994,26 @@ pub fn kb_vector_search(
     // P5-012: 指定 index 时只查 per-index vec 表，失败则 fallback 到同 index 的 BLOB 表
     if let Some(index_id) = embedding_index_id {
         let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
-        let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, &per_index_table);
+        let result = try_vec_knn(
+            conn,
+            &query_blob,
+            library_ids,
+            level,
+            top_k,
+            &per_index_table,
+        );
         match result {
             Ok(results) if !results.is_empty() => return Ok(results),
             _ => {
                 // 不 fallback 到 legacy vec_kb_nodes，只 fallback 到同 index 的 BLOB 表
-                return vector_search_fallback(conn, embedding, library_ids, level, top_k, embedding_index_id);
+                return vector_search_fallback(
+                    conn,
+                    embedding,
+                    library_ids,
+                    level,
+                    top_k,
+                    embedding_index_id,
+                );
             }
         }
     }
@@ -776,9 +1022,14 @@ pub fn kb_vector_search(
     let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, "vec_kb_nodes");
     match result {
         Ok(results) if !results.is_empty() => Ok(results),
-        _ => {
-            vector_search_fallback(conn, embedding, library_ids, level, top_k, embedding_index_id)
-        }
+        _ => vector_search_fallback(
+            conn,
+            embedding,
+            library_ids,
+            level,
+            top_k,
+            embedding_index_id,
+        ),
     }
 }
 
@@ -859,19 +1110,34 @@ pub fn kb_fts_search(
 
 /// RRF merge of multiple retriever outputs into a single ranked list
 fn compute_rrf_merge(all_candidates: Vec<Vec<RankedResult>>) -> Vec<RankedResult> {
-    if all_candidates.is_empty() { return Vec::new(); }
-    if all_candidates.len() == 1 { return all_candidates.into_iter().flatten().collect(); }
+    if all_candidates.is_empty() {
+        return Vec::new();
+    }
+    if all_candidates.len() == 1 {
+        return all_candidates.into_iter().flatten().collect();
+    }
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for candidates in &all_candidates {
         for r in candidates {
             *scores.entry(r.node_id).or_insert(0.0) += 1.0 / (RRF_K + r.rank) as f64;
         }
     }
-    let mut m: Vec<RankedResult> = scores.into_iter().map(|(node_id, score)| {
-        RankedResult { node_id, rank: 0, score }
-    }).collect();
-    m.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    for (i, r) in m.iter_mut().enumerate() { r.rank = i + 1; }
+    let mut m: Vec<RankedResult> = scores
+        .into_iter()
+        .map(|(node_id, score)| RankedResult {
+            node_id,
+            rank: 0,
+            score,
+        })
+        .collect();
+    m.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, r) in m.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
     m
 }
 
@@ -1087,8 +1353,11 @@ fn resolve_rerank_policy_for_candidate_nodes(
     conn: &Connection,
     merged: &[RankedResult],
 ) -> Result<(bool, bool)> {
-    let placeholders: Vec<String> = merged.iter().enumerate()
-        .map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = merged
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     // 查询所有候选节点所属 library 的隐私策略（DISTINCT 去重）
     let sql = format!(
         "SELECT DISTINCT l.external_rerank_allowed, l.redaction_enabled \
@@ -1097,9 +1366,12 @@ fn resolve_rerank_policy_for_candidate_nodes(
          WHERE n.id IN ({})",
         placeholders.join(",")
     );
-    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
-        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged
+        .iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
@@ -1110,17 +1382,30 @@ fn resolve_rerank_policy_for_candidate_nodes(
     let mut any_redaction = false;
     for r in rows {
         let (allowed, redact) = r?;
-        if allowed == 0 { all_allowed = false; }
-        if redact != 0 { any_redaction = true; }
+        if allowed == 0 {
+            all_allowed = false;
+        }
+        if redact != 0 {
+            any_redaction = true;
+        }
     }
     Ok((all_allowed, any_redaction))
 }
 
 /// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
-fn filter_by_folder(conn: &Connection, merged: Vec<RankedResult>, folder_id: i64) -> Vec<RankedResult> {
-    if merged.is_empty() { return merged; }
-    let placeholders: Vec<String> = merged.iter().enumerate()
-        .map(|(i, _)| format!("?{}", i + 1)).collect();
+fn filter_by_folder(
+    conn: &Connection,
+    merged: Vec<RankedResult>,
+    folder_id: i64,
+) -> Vec<RankedResult> {
+    if merged.is_empty() {
+        return merged;
+    }
+    let placeholders: Vec<String> = merged
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT DISTINCT n.id FROM kb_document_nodes n \
          JOIN kb_documents d ON d.id = n.document_id \
@@ -1128,14 +1413,21 @@ fn filter_by_folder(conn: &Connection, merged: Vec<RankedResult>, folder_id: i64
         placeholders.join(","),
         placeholders.len() + 1,
     );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
-        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged
+        .iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
     param_values.push(Box::new(folder_id));
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     if let Ok(mut stmt) = conn.prepare(&sql) {
         if let Ok(valid_ids) = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0)) {
-            let valid_set: std::collections::HashSet<i64> = valid_ids.filter_map(|r| r.ok()).collect();
-            return merged.into_iter().filter(|r| valid_set.contains(&r.node_id)).collect();
+            let valid_set: std::collections::HashSet<i64> =
+                valid_ids.filter_map(|r| r.ok()).collect();
+            return merged
+                .into_iter()
+                .filter(|r| valid_set.contains(&r.node_id))
+                .collect();
         }
     }
     merged
@@ -1375,7 +1667,12 @@ mod tests {
         assert!((sim - 0.0).abs() < 1e-6);
     }
 
-    fn make_result(node_id: i64, document_id: i64, document_name: &str, score: f64) -> KbSearchResult {
+    fn make_result(
+        node_id: i64,
+        document_id: i64,
+        document_name: &str,
+        score: f64,
+    ) -> KbSearchResult {
         KbSearchResult {
             node_id,
             document_id,
@@ -1427,7 +1724,10 @@ mod tests {
         assert_eq!(grouped[1].group_hits.as_ref().unwrap()[0].score, 0.3);
 
         // matched_by should be set
-        assert_eq!(grouped[0].matched_by.as_deref(), Some("grouped_by_document"));
+        assert_eq!(
+            grouped[0].matched_by.as_deref(),
+            Some("grouped_by_document")
+        );
     }
 
     #[test]

@@ -449,7 +449,11 @@ impl Config {
                     "gpt-4o-mini".to_string()
                 }
             });
-        ResolvedRaptorConfig { api_key, base_url, model }
+        ResolvedRaptorConfig {
+            api_key,
+            base_url,
+            model,
+        }
     }
 
     /// Save configuration to config.json with restrictive permissions (0o600 on Unix).
@@ -548,7 +552,11 @@ impl Config {
         }
         self.kb_worker_enabled = other.kb_worker_enabled;
         self.kb_worker_poll_interval_secs = other.kb_worker_poll_interval_secs;
-        if other.kb_synonyms_file.is_some() { self.kb_synonyms_file = other.kb_synonyms_file.clone(); }
-        if other.kb_aliases_file.is_some() { self.kb_aliases_file = other.kb_aliases_file.clone(); }
+        if other.kb_synonyms_file.is_some() {
+            self.kb_synonyms_file = other.kb_synonyms_file.clone();
+        }
+        if other.kb_aliases_file.is_some() {
+            self.kb_aliases_file = other.kb_aliases_file.clone();
+        }
     }
 }

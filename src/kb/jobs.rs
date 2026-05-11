@@ -115,7 +115,9 @@ pub fn claim_next_kb_job(conn: &Connection) -> Result<Option<(i64, KbProcessPayl
 ///
 /// 优先认领 kb_reembed_node（单节点修复），再认领 kb_reembed（文档级重嵌入）。
 /// 返回 (job_db_id, job_type, payload_json) 供 worker 处理。
-pub fn claim_next_reembed_job(conn: &Connection) -> Result<Option<(i64, String, serde_json::Value)>> {
+pub fn claim_next_reembed_job(
+    conn: &Connection,
+) -> Result<Option<(i64, String, serde_json::Value)>> {
     let queue = JobQueue::new(conn);
     // 优先处理单节点修复
     if let Ok(Some(job)) = queue.dequeue_by_type("kb_reembed_node") {
@@ -147,10 +149,7 @@ use rusqlite::params;
 
 /// 列出 KB 作业，可选按 library 过滤。
 /// 返回 (job_id, status, document_id) 元组列表。
-pub fn list_kb_jobs(
-    conn: &Connection,
-    library_id: Option<i64>,
-) -> Result<Vec<(i64, String, i64)>> {
+pub fn list_kb_jobs(conn: &Connection, library_id: Option<i64>) -> Result<Vec<(i64, String, i64)>> {
     let sql = if library_id.is_some() {
         "SELECT j.id, j.status, j.payload FROM jobs j \
          WHERE j.job_type='kb_process_document' \
@@ -168,8 +167,10 @@ pub fn list_kb_jobs(
         let id: i64 = row.get(0)?;
         let status: String = row.get(1)?;
         let payload_str: String = row.get(2)?;
-        let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
-        let doc_id: i64 = payload.get("document_id")
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+        let doc_id: i64 = payload
+            .get("document_id")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         Ok((id, status, doc_id))
@@ -177,10 +178,12 @@ pub fn list_kb_jobs(
 
     let results: Vec<(i64, String, i64)> = if let Some(lib_id) = library_id {
         stmt.query_map(params![lib_id], parse_row)?
-            .filter_map(|r| r.ok()).collect()
+            .filter_map(|r| r.ok())
+            .collect()
     } else {
         stmt.query_map([], parse_row)?
-            .filter_map(|r| r.ok()).collect()
+            .filter_map(|r| r.ok())
+            .collect()
     };
     Ok(results)
 }

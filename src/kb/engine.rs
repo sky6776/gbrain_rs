@@ -165,7 +165,10 @@ impl<'a> KbEngine<'a> {
             // 自动创建默认 embedding index 并设为 active
             let dims = input.embedding_dimensions.unwrap_or(1536);
             let provider = input.embedding_provider.as_deref().unwrap_or("openai");
-            let model = input.embedding_model.as_deref().unwrap_or("text-embedding-3-large");
+            let model = input
+                .embedding_model
+                .as_deref()
+                .unwrap_or("text-embedding-3-large");
             let index_id = crate::kb::embedding_index::create_embedding_index(
                 conn, lib_id, provider, model, dims, "vec0",
             )?;
@@ -454,9 +457,12 @@ impl<'a> KbEngine<'a> {
                 };
 
             let rows: Vec<DocumentListItem> = if let Some(fid) = folder_id {
-                stmt.query_map(params![library_id, fid, limit as i64, offset as i64], map_row)?
-                    .filter_map(|r| r.ok())
-                    .collect()
+                stmt.query_map(
+                    params![library_id, fid, limit as i64, offset as i64],
+                    map_row,
+                )?
+                .filter_map(|r| r.ok())
+                .collect()
             } else {
                 stmt.query_map(params![library_id, limit as i64, offset as i64], map_row)?
                     .filter_map(|r| r.ok())
@@ -779,9 +785,7 @@ impl<'a> KbEngine<'a> {
 
     /// 软删除文档：设置 deleted_at 并将 document_status 设为 deleted
     pub fn soft_delete_document(&self, id: i64) -> Result<()> {
-        self.transaction(|conn| {
-            crate::kb::lifecycle::soft_delete_document(conn, id)
-        })
+        self.transaction(|conn| crate::kb::lifecycle::soft_delete_document(conn, id))
     }
 
     /// 彻底清理已软删除的文档及其所有关联数据
@@ -798,7 +802,13 @@ impl<'a> KbEngine<'a> {
         error_message: Option<&str>,
     ) -> Result<()> {
         self.query(|conn| {
-            crate::kb::lifecycle::transition_document_status(conn, id, new_status, run_id, error_message)
+            crate::kb::lifecycle::transition_document_status(
+                conn,
+                id,
+                new_status,
+                run_id,
+                error_message,
+            )
         })
     }
 
@@ -813,7 +823,12 @@ impl<'a> KbEngine<'a> {
     ) -> Result<i64> {
         self.transaction(|conn| {
             crate::kb::lifecycle::create_document_version(
-                conn, document_id, version_label, processing_run_id, char_count, node_count,
+                conn,
+                document_id,
+                version_label,
+                processing_run_id,
+                char_count,
+                node_count,
             )
         })
     }
@@ -1065,28 +1080,48 @@ impl<'a> KbEngine<'a> {
     // --- Section CRUD (P1-008) ---
 
     /// 写入文档章节
-    pub fn insert_section(&self, document_id: i64, parent_section_id: Option<i64>,
-        title: &str, title_path: &str, heading_level: i32, section_order: i32,
-        page_number: Option<i32>, source_start: Option<i32>, source_end: Option<i32>,
+    pub fn insert_section(
+        &self,
+        document_id: i64,
+        parent_section_id: Option<i64>,
+        title: &str,
+        title_path: &str,
+        heading_level: i32,
+        section_order: i32,
+        page_number: Option<i32>,
+        source_start: Option<i32>,
+        source_end: Option<i32>,
     ) -> Result<i64> {
         self.transaction(|conn| {
             conn.execute(
                 "INSERT INTO kb_document_sections (document_id, parent_section_id, title, \
                  title_path, heading_level, section_order, page_number, source_start, source_end) \
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![document_id, parent_section_id, title, title_path, heading_level,
-                    section_order, page_number, source_start, source_end],
+                params![
+                    document_id,
+                    parent_section_id,
+                    title,
+                    title_path,
+                    heading_level,
+                    section_order,
+                    page_number,
+                    source_start,
+                    source_end
+                ],
             )?;
             Ok(conn.last_insert_rowid())
         })
     }
 
     /// 获取文档的所有章节
-    pub fn get_sections_for_document(&self, document_id: i64) -> Result<Vec<(i64, String, String, i32)>> {
+    pub fn get_sections_for_document(
+        &self,
+        document_id: i64,
+    ) -> Result<Vec<(i64, String, String, i32)>> {
         self.query(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, title, title_path, heading_level FROM kb_document_sections \
-                 WHERE document_id = ?1 ORDER BY section_order"
+                 WHERE document_id = ?1 ORDER BY section_order",
             )?;
             let rows = stmt.query_map(params![document_id], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -1099,26 +1134,41 @@ impl<'a> KbEngine<'a> {
     // --- Summary CRUD (P4-011) ---
 
     /// 写入文档/章节/表格摘要
-    pub fn insert_summary(&self, document_id: i64, section_id: Option<i64>,
-        summary_type: &str, summary_text: &str, model: &str,
+    pub fn insert_summary(
+        &self,
+        document_id: i64,
+        section_id: Option<i64>,
+        summary_type: &str,
+        summary_text: &str,
+        model: &str,
     ) -> Result<i64> {
         self.transaction(|conn| {
             let tokens = crate::nlp::chinese::tokenize_content(summary_text);
             conn.execute(
                 "INSERT INTO kb_document_summaries (document_id, section_id, summary_type, \
                  summary_text, summary_tokens, model) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![document_id, section_id, summary_type, summary_text, tokens, model],
+                params![
+                    document_id,
+                    section_id,
+                    summary_type,
+                    summary_text,
+                    tokens,
+                    model
+                ],
             )?;
             Ok(conn.last_insert_rowid())
         })
     }
 
     /// 获取文档摘要
-    pub fn get_summaries_for_document(&self, document_id: i64) -> Result<Vec<(i64, String, String)>> {
+    pub fn get_summaries_for_document(
+        &self,
+        document_id: i64,
+    ) -> Result<Vec<(i64, String, String)>> {
         self.query(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, summary_type, summary_text FROM kb_document_summaries \
-                 WHERE document_id = ?1"
+                 WHERE document_id = ?1",
             )?;
             let rows = stmt.query_map(params![document_id], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -1131,14 +1181,25 @@ impl<'a> KbEngine<'a> {
     // --- Source CRUD (P6-001/002) ---
 
     /// 创建导入源
-    pub fn create_source(&self, library_id: i64, source_type: &str, source_uri: &str,
-        display_name: &str, delete_policy: &str,
+    pub fn create_source(
+        &self,
+        library_id: i64,
+        source_type: &str,
+        source_uri: &str,
+        display_name: &str,
+        delete_policy: &str,
     ) -> Result<i64> {
         self.transaction(|conn| {
             conn.execute(
                 "INSERT INTO kb_sources (library_id, source_type, source_uri, display_name, \
                  delete_policy, sync_status) VALUES (?1,?2,?3,?4,?5,'idle')",
-                params![library_id, source_type, source_uri, display_name, delete_policy],
+                params![
+                    library_id,
+                    source_type,
+                    source_uri,
+                    display_name,
+                    delete_policy
+                ],
             )?;
             Ok(conn.last_insert_rowid())
         })
@@ -1161,7 +1222,10 @@ impl<'a> KbEngine<'a> {
     /// 删除导入源
     pub fn delete_source(&self, source_id: i64) -> Result<()> {
         self.transaction(|conn| {
-            conn.execute("DELETE FROM kb_source_items WHERE source_id=?1", params![source_id])?;
+            conn.execute(
+                "DELETE FROM kb_source_items WHERE source_id=?1",
+                params![source_id],
+            )?;
             conn.execute("DELETE FROM kb_sources WHERE id=?1", params![source_id])?;
             Ok(())
         })
@@ -1235,16 +1299,26 @@ impl<'a> KbEngine<'a> {
     }
 
     /// 列出 source 的所有 items
-    pub fn list_source_items(&self, source_id: i64) -> Result<Vec<(i64, String, String, Option<i64>, String)>> {
+    pub fn list_source_items(
+        &self,
+        source_id: i64,
+    ) -> Result<Vec<(i64, String, String, Option<i64>, String)>> {
         self.query(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, item_path, content_hash, document_id, sync_status \
-                 FROM kb_source_items WHERE source_id=?1 ORDER BY item_path"
+                 FROM kb_source_items WHERE source_id=?1 ORDER BY item_path",
             )?;
             let rows = stmt.query_map(params![source_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?;
-            let results: Vec<(i64, String, String, Option<i64>, String)> = rows.filter_map(|r| r.ok()).collect();
+            let results: Vec<(i64, String, String, Option<i64>, String)> =
+                rows.filter_map(|r| r.ok()).collect();
             Ok(results)
         })
     }
@@ -1252,7 +1326,10 @@ impl<'a> KbEngine<'a> {
     /// 按 source_id 批量删除 source items
     pub fn delete_source_items_by_source(&self, source_id: i64) -> Result<i64> {
         self.transaction(|conn| {
-            let count = conn.execute("DELETE FROM kb_source_items WHERE source_id=?1", params![source_id])?;
+            let count = conn.execute(
+                "DELETE FROM kb_source_items WHERE source_id=?1",
+                params![source_id],
+            )?;
             Ok(count as i64)
         })
     }
