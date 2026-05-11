@@ -388,6 +388,8 @@ impl<'a> KbEngine<'a> {
                         purged_at: None,
                         last_indexed_at: None,
                         last_seen_at: None,
+                        ocr_status: "not_needed".to_string(),
+                        ocr_text_coverage: 0.0,
                     })
                 },
             )
@@ -522,6 +524,8 @@ impl<'a> KbEngine<'a> {
                         purged_at: None,
                         last_indexed_at: None,
                         last_seen_at: None,
+                        ocr_status: "not_needed".to_string(),
+                        ocr_text_coverage: 0.0,
                     })
                 },
             );
@@ -860,6 +864,23 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// P2-019: 更新文档 OCR 状态和文本覆盖率
+    pub fn update_document_ocr(
+        &self,
+        id: i64,
+        ocr_status: &str,
+        ocr_text_coverage: f64,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET ocr_status = ?1, ocr_text_coverage = ?2, \
+                 updated_at = datetime('now') WHERE id = ?3",
+                params![ocr_status, ocr_text_coverage, id],
+            )?;
+            Ok(())
+        })
+    }
+
     // --- Run guard ---
 
     pub fn ensure_document_run_current(
@@ -1133,6 +1154,96 @@ impl<'a> KbEngine<'a> {
             conn.execute("DELETE FROM kb_source_items WHERE source_id=?1", params![source_id])?;
             conn.execute("DELETE FROM kb_sources WHERE id=?1", params![source_id])?;
             Ok(())
+        })
+    }
+
+    // --- Source Items CRUD (P6-002) ---
+
+    /// 插入 source item（扫描后的文件条目）
+    pub fn insert_source_item(
+        &self,
+        source_id: i64,
+        item_path: &str,
+        content_hash: &str,
+        file_size: i64,
+        last_seen_at: &str,
+    ) -> Result<i64> {
+        self.transaction(|conn| {
+            conn.execute(
+                "INSERT INTO kb_source_items (source_id, item_path, content_hash, file_size, \
+                 last_seen_at, sync_status) VALUES (?1,?2,?3,?4,?5,'pending')",
+                params![source_id, item_path, content_hash, file_size, last_seen_at],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// 更新 source item（hash 变化或同步状态更新）
+    pub fn update_source_item(
+        &self,
+        source_id: i64,
+        item_path: &str,
+        content_hash: Option<&str>,
+        sync_status: Option<&str>,
+        sync_error: Option<&str>,
+        document_id: Option<i64>,
+        last_seen_at: Option<&str>,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            if let Some(hash) = content_hash {
+                conn.execute(
+                    "UPDATE kb_source_items SET content_hash=?1 WHERE source_id=?2 AND item_path=?3",
+                    params![hash, source_id, item_path],
+                )?;
+            }
+            if let Some(status) = sync_status {
+                conn.execute(
+                    "UPDATE kb_source_items SET sync_status=?1 WHERE source_id=?2 AND item_path=?3",
+                    params![status, source_id, item_path],
+                )?;
+            }
+            if let Some(error) = sync_error {
+                conn.execute(
+                    "UPDATE kb_source_items SET sync_error=?1 WHERE source_id=?2 AND item_path=?3",
+                    params![error, source_id, item_path],
+                )?;
+            }
+            if let Some(doc_id) = document_id {
+                conn.execute(
+                    "UPDATE kb_source_items SET document_id=?1 WHERE source_id=?2 AND item_path=?3",
+                    params![doc_id, source_id, item_path],
+                )?;
+            }
+            if let Some(seen) = last_seen_at {
+                conn.execute(
+                    "UPDATE kb_source_items SET last_seen_at=?1 WHERE source_id=?2 AND item_path=?3",
+                    params![seen, source_id, item_path],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// 列出 source 的所有 items
+    pub fn list_source_items(&self, source_id: i64) -> Result<Vec<(i64, String, String, Option<i64>, String)>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, item_path, content_hash, document_id, sync_status \
+                 FROM kb_source_items WHERE source_id=?1 ORDER BY item_path"
+            )?;
+            let rows = stmt.query_map(params![source_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })?;
+            let results: Vec<(i64, String, String, Option<i64>, String)> = rows.filter_map(|r| r.ok()).collect();
+            Ok(results)
+        })
+    }
+
+    /// 按 source_id 批量删除 source items
+    pub fn delete_source_items_by_source(&self, source_id: i64) -> Result<i64> {
+        self.transaction(|conn| {
+            let count = conn.execute("DELETE FROM kb_source_items WHERE source_id=?1", params![source_id])?;
+            Ok(count as i64)
         })
     }
 }

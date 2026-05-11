@@ -2,6 +2,7 @@
 //!
 //! 轮询 `claim_next_kb_job`，调用 `process_document_async`，
 //! 然后标记作业完成或失败。可通过 CLI 子命令或 MCP 内置后台线程运行。
+//! 支持多 worker 并发处理 (P5-023)。
 
 use crate::config::Config;
 use crate::embedding::Embedder;
@@ -14,6 +15,7 @@ use crate::kb::raptor::RaptorConfig;
 use crate::sqlite_engine::SqliteEngine;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info, warn};
 
 /// 运行一次 KB 作业处理循环：认领一个待处理作业并执行。
@@ -147,4 +149,80 @@ pub fn spawn_kb_worker_thread(db_path: PathBuf, config: Config, interval_secs: u
             run_kb_worker_loop(&engine, &config, interval_secs);
         })
         .expect("无法创建 KB worker 线程");
+}
+
+// ---------------------------------------------------------------------------
+// P5-023: 多 worker 并发处理
+// ---------------------------------------------------------------------------
+
+/// 启动多个并发 KB worker 线程。
+///
+/// 每个 worker 拥有独立的数据库连接。`claim_next_kb_job` 的原子认领
+/// 保证同一作业不会被两个 worker 同时处理。
+///
+/// `worker_count` 为并发 worker 数量（建议不超过 CPU 核心数）。
+/// `shutdown` 信号用于优雅停止所有 worker。
+pub fn spawn_kb_worker_pool(
+    db_path: PathBuf,
+    config: Config,
+    interval_secs: u64,
+    worker_count: usize,
+    shutdown: Arc<AtomicBool>,
+) {
+    if !config.kb_enabled {
+        info!("KB subsystem is disabled, worker pool not spawned");
+        return;
+    }
+    if worker_count == 0 {
+        info!("KB worker pool: worker_count=0, nothing to spawn");
+        return;
+    }
+    info!(worker_count, "KB worker pool: 启动 {} 个 worker", worker_count);
+
+    for i in 0..worker_count {
+        let db_path = db_path.clone();
+        let config = config.clone();
+        let shutdown = shutdown.clone();
+        let thread_name = format!("kb-worker-{}", i);
+
+        std::thread::Builder::new()
+            .name(thread_name.clone())
+            .spawn(move || {
+                let mut engine = SqliteEngine::with_config(&db_path, config.clone());
+                if let Err(e) = engine.connect() {
+                    warn!(worker = i, error = %e, "KB worker: 数据库连接失败");
+                    return;
+                }
+                if let Err(e) = engine.init_schema() {
+                    warn!(worker = i, error = %e, "KB worker: 初始化 schema 失败");
+                    return;
+                }
+                info!(worker = i, "KB worker: 后台线程已启动");
+
+                loop {
+                    if shutdown.load(Ordering::Relaxed) {
+                        info!(worker = i, "KB worker: 收到停止信号，退出");
+                        break;
+                    }
+                    match run_kb_worker_once(&engine, &config) {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            // 无作业时短暂等待，但提前检查 shutdown
+                            for _ in 0..interval_secs {
+                                if shutdown.load(Ordering::Relaxed) {
+                                    info!(worker = i, "KB worker: 收到停止信号，退出");
+                                    return;
+                                }
+                                std::thread::sleep(std::time::Duration::from_secs(1));
+                            }
+                        }
+                        Err(e) => {
+                            warn!(worker = i, error = %e, "KB worker: 处理循环出错");
+                            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+                        }
+                    }
+                }
+            })
+            .expect(&format!("无法创建 {} 线程", thread_name));
+    }
 }

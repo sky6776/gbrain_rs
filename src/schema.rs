@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 19;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -1147,6 +1147,43 @@ CREATE TABLE IF NOT EXISTS kb_source_items (
 CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
 "#;
 
+/// 数据库迁移 V18：KB P2-019 — OCR 回写字段
+///
+/// 为 kb_documents 增加 OCR 状态和文本覆盖率字段，支持 OCR 结果回写后更新文档状态。
+pub const MIGRATION_V18_DDL: &str = r#"
+ALTER TABLE kb_documents ADD COLUMN ocr_status TEXT NOT NULL DEFAULT 'not_needed';
+ALTER TABLE kb_documents ADD COLUMN ocr_text_coverage REAL NOT NULL DEFAULT 0.0;
+"#;
+
+/// 数据库迁移 V19：KB P5-011~014 — embedding_index_id + per-index vec tables + reembed job + eval comparison
+///
+/// 1. Add embedding_index_id column to kb_node_embeddings (NULL for backward compat)
+/// 2. Add index on embedding_index_id for search filtering
+/// 3. Migrate existing rows: assign NULL rows to the default (first active) index per library
+pub const MIGRATION_V19_DDL: &str = r#"
+-- P5-011: Add embedding_index_id to kb_node_embeddings
+ALTER TABLE kb_node_embeddings ADD COLUMN embedding_index_id INTEGER REFERENCES kb_embedding_indexes(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
+
+-- Backfill: assign existing NULL rows to the active index of their library (if one exists)
+-- For rows whose library has no active index yet, leave NULL (backward compat)
+UPDATE kb_node_embeddings
+SET embedding_index_id = (
+    SELECT ei.id FROM kb_embedding_indexes ei
+    INNER JOIN kb_document_nodes dn ON dn.id = kb_node_embeddings.node_id
+    INNER JOIN kb_documents d ON d.id = dn.document_id
+    WHERE ei.library_id = d.library_id AND ei.is_active = 1
+    LIMIT 1
+)
+WHERE embedding_index_id IS NULL
+AND EXISTS (
+    SELECT 1 FROM kb_embedding_indexes ei
+    INNER JOIN kb_document_nodes dn ON dn.id = kb_node_embeddings.node_id
+    INNER JOIN kb_documents d ON d.id = dn.document_id
+    WHERE ei.library_id = d.library_id AND ei.is_active = 1
+);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1166,5 +1203,7 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (15, MIGRATION_V15_DDL),
         (16, MIGRATION_V16_DDL),
         (17, MIGRATION_V17_DDL),
+        (18, MIGRATION_V18_DDL),
+        (19, MIGRATION_V19_DDL),
     ]
 }

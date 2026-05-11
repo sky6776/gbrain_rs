@@ -154,22 +154,158 @@ pub fn repair_fts(conn: &Connection) -> Result<i64> {
 }
 
 /// P5-006: 修复缺失的 embedding（缺失的 vector 重新生成）
-pub fn repair_embeddings(_conn: &Connection) -> Result<i64> {
-    // 扫描 node 存在但 embedding 缺失的记录，标记为需要重新嵌入
-    // 实际重新嵌入需要调用 Embedder，由 worker 异步处理
-    Ok(0)
+///
+/// 扫描 kb_document_nodes 中存在但 kb_node_embeddings 中缺失的节点，
+/// 为每个缺失节点创建一个 re-embed job（job_type = "kb_reembed_node"）。
+/// 实际重新嵌入由 worker 异步处理。
+///
+/// Returns the count of nodes marked for re-embedding.
+pub fn repair_embeddings(conn: &Connection) -> Result<i64> {
+    // Find nodes that exist but have no embedding in the fallback BLOB table.
+    // We check kb_node_embeddings (portable fallback) rather than vec_kb_nodes
+    // (sqlite-vec) because vec_kb_nodes may not be available in all builds.
+    let missing_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id FROM kb_document_nodes n \
+             WHERE n.id NOT IN (SELECT node_id FROM kb_node_embeddings)"
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let count = missing_ids.len() as i64;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    // For each missing embedding node, insert a re-embed job into the jobs table.
+    // The worker will pick these up and call the embedder to generate vectors.
+    for node_id in &missing_ids {
+        let payload = serde_json::json!({
+            "node_id": node_id,
+        });
+        let payload_str = payload.to_string();
+        conn.execute(
+            "INSERT INTO jobs (job_type, payload, status, priority, max_attempts) \
+             VALUES ('kb_reembed_node', ?1, 'pending', 0, 3)",
+            rusqlite::params![payload_str],
+        )?;
+    }
+
+    Ok(count)
 }
 
 /// P5-007: 重建单文档索引
-pub fn rebuild_document_index(_conn: &Connection, _document_id: i64) -> Result<()> {
-    // 删除旧索引 → 重新走 pipeline
-    // 完整实现需要访问 Embedder 和文件系统
+///
+/// Marks the document for re-processing by setting index_status = 'rebuilding'
+/// and document_status = 'queued', assigns a new processing_run_id, and enqueues
+/// a kb_process_document job. The actual pipeline execution happens asynchronously
+/// via the worker.
+///
+/// The old index data (nodes, FTS, embeddings, summaries, table_rows) is NOT
+/// deleted upfront. The pipeline's persist_nodes_and_vectors function handles
+/// deletion of old data inside a transaction, so if rebuild fails, the old
+/// index remains intact.
+pub fn rebuild_document_index(conn: &Connection, document_id: i64) -> Result<()> {
+    // Verify the document exists and is not soft-deleted
+    let (library_id, storage_path, extension, deleted_at): (i64, String, String, Option<String>) =
+        conn.query_row(
+            "SELECT library_id, storage_path, extension, deleted_at \
+             FROM kb_documents WHERE id = ?1",
+            rusqlite::params![document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).map_err(|e| crate::error::GBrainError::Database(
+            format!("document not found for rebuild: {}", e)
+        ))?;
+
+    if deleted_at.is_some() {
+        return Err(crate::error::GBrainError::InvalidInput(
+            "cannot rebuild index for a soft-deleted document".to_string(),
+        ));
+    }
+
+    // Assign a new processing_run_id so stale jobs are rejected
+    let run_id = crate::kb::jobs::new_run_id();
+
+    // Mark document for re-processing: index_status = 'rebuilding', document_status = 'queued'
+    conn.execute(
+        "UPDATE kb_documents SET \
+         document_status = 'queued', \
+         index_status = 'rebuilding', \
+         processing_run_id = ?1, \
+         parsing_status = 0, \
+         parsing_progress = 0, \
+         parsing_error = '', \
+         embedding_status = 0, \
+         embedding_progress = 0, \
+         embedding_error = '', \
+         updated_at = datetime('now') \
+         WHERE id = ?2",
+        rusqlite::params![run_id, document_id],
+    )?;
+
+    // Enqueue a kb_process_document job for the worker to pick up
+    let payload = crate::kb::jobs::KbProcessPayload {
+        kind: "kb_process_document".to_string(),
+        document_id,
+        library_id,
+        processing_run_id: run_id,
+        storage_path,
+        extension,
+    };
+    crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
+
     Ok(())
 }
 
 /// P5-008: 重建库级索引
-pub fn rebuild_library_index(_conn: &Connection, _library_id: i64) -> Result<()> {
-    Ok(())
+///
+/// Iterate all non-deleted documents in the library and call
+/// rebuild_document_index for each. Track completed/failed counts
+/// and return a summary.
+pub fn rebuild_library_index(conn: &Connection, library_id: i64) -> Result<RebuildLibrarySummary> {
+    // Collect all non-deleted document IDs in the library
+    let doc_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM kb_documents \
+             WHERE library_id = ?1 AND deleted_at IS NULL"
+        )?;
+        let rows = stmt.query_map(rusqlite::params![library_id], |row| row.get::<_, i64>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut completed = 0i64;
+    let mut failed = 0i64;
+    let mut errors: Vec<String> = Vec::new();
+
+    for doc_id in &doc_ids {
+        match rebuild_document_index(conn, *doc_id) {
+            Ok(_) => completed += 1,
+            Err(e) => {
+                failed += 1;
+                let msg = format!("document_id={}: {}", doc_id, e);
+                errors.push(msg);
+            }
+        }
+    }
+
+    Ok(RebuildLibrarySummary {
+        library_id,
+        total: doc_ids.len() as i64,
+        completed,
+        failed,
+        errors,
+    })
+}
+
+/// Summary result for rebuild_library_index
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebuildLibrarySummary {
+    pub library_id: i64,
+    pub total: i64,
+    pub completed: i64,
+    pub failed: i64,
+    pub errors: Vec<String>,
 }
 
 /// P5-009: 清理已软删除且超过保留期的文档

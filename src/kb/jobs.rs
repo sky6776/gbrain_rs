@@ -19,6 +19,20 @@ pub struct KbProcessPayload {
     pub extension: String,
 }
 
+/// P5-013: Reembed job payload — re-embed documents into a new embedding index
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbReembedPayload {
+    pub kind: String, // "kb_reembed"
+    /// Scope: "document" or "library"
+    pub scope: String,
+    /// Document ID (when scope is "document")
+    pub document_id: Option<i64>,
+    /// Library ID (required for both scopes)
+    pub library_id: i64,
+    /// Target embedding index ID to write embeddings into
+    pub target_embedding_index_id: i64,
+}
+
 /// Generate a new processing run ID
 pub fn new_run_id() -> String {
     let mut hasher = Sha256::new();
@@ -107,4 +121,72 @@ pub fn complete_kb_job(conn: &Connection, job_db_id: i64) -> Result<()> {
 pub fn fail_kb_job(conn: &Connection, job_db_id: i64, error: &str) -> Result<()> {
     let queue = JobQueue::new(conn);
     queue.fail(job_db_id, error)
+}
+
+// ---------------------------------------------------------------------------
+// P5-026/P6-010: Job management helpers (list/pause/resume)
+// ---------------------------------------------------------------------------
+
+use rusqlite::params;
+
+/// 列出 KB 作业，可选按 library 过滤。
+/// 返回 (job_id, status, document_id) 元组列表。
+pub fn list_kb_jobs(
+    conn: &Connection,
+    library_id: Option<i64>,
+) -> Result<Vec<(i64, String, i64)>> {
+    let sql = if library_id.is_some() {
+        "SELECT j.id, j.status, j.payload FROM jobs j \
+         WHERE j.job_type='kb_process_document' \
+         AND j.payload->>'$.library_id' = ?1 \
+         ORDER BY j.id DESC LIMIT 100"
+    } else {
+        "SELECT j.id, j.status, j.payload FROM jobs j \
+         WHERE j.job_type='kb_process_document' \
+         ORDER BY j.id DESC LIMIT 100"
+    };
+    let mut stmt = conn.prepare(sql)?;
+
+    // 统一闭包：解析 payload 中的 document_id
+    let parse_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, String, i64)> {
+        let id: i64 = row.get(0)?;
+        let status: String = row.get(1)?;
+        let payload_str: String = row.get(2)?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+        let doc_id: i64 = payload.get("document_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        Ok((id, status, doc_id))
+    };
+
+    let results: Vec<(i64, String, i64)> = if let Some(lib_id) = library_id {
+        stmt.query_map(params![lib_id], parse_row)?
+            .filter_map(|r| r.ok()).collect()
+    } else {
+        stmt.query_map([], parse_row)?
+            .filter_map(|r| r.ok()).collect()
+    };
+    Ok(results)
+}
+
+/// Pause KB job processing for a library by cancelling pending jobs.
+pub fn pause_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET status='cancelled' \
+         WHERE job_type='kb_process_document' AND status='pending' \
+         AND payload->>'$.library_id' = ?1",
+        params![library_id],
+    )?;
+    Ok(())
+}
+
+/// Resume KB job processing for a library by re-queuing cancelled jobs.
+pub fn resume_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE jobs SET status='pending' \
+         WHERE job_type='kb_process_document' AND status='cancelled' \
+         AND payload->>'$.library_id' = ?1",
+        params![library_id],
+    )?;
+    Ok(())
 }

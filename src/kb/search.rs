@@ -74,7 +74,10 @@ pub fn kb_search(
 
     // Vector retriever (P3-010)
     if let Some(vec) = query_vector {
-        let vec_results = kb_vector_search(conn, vec, &input.library_ids, input.level, fetch_k)?;
+        let vec_results = kb_vector_search(
+            conn, vec, &input.library_ids, input.level, fetch_k,
+            input.embedding_index_id,
+        )?;
         if !vec_results.is_empty() { all_candidates.push(vec_results); }
     }
 
@@ -163,7 +166,10 @@ pub fn kb_search(
     if merged.is_empty() {
         // Level 6: low_threshold_vector — 降低向量阈值扩大召回
         if let Some(vec) = query_vector {
-            if let Ok(fr) = kb_vector_search(conn, vec, &[], None, fetch_k * 5) {
+            if let Ok(fr) = kb_vector_search(
+            conn, vec, &[], None, fetch_k * 5,
+            input.embedding_index_id,
+        ) {
                 if !fr.is_empty() { merged.extend(fr); fallbacks_used.push("low_threshold_vector"); }
             }
         }
@@ -488,27 +494,87 @@ fn filter_deleted_docs(conn: &Connection, merged: Vec<RankedResult>) -> Vec<Rank
 }
 
 /// P3-025: 按文档分组结果
+///
+/// Groups search results by document_id. Within each group, hits are sorted by
+/// descending score. Between groups, groups are sorted by best_score descending.
+/// Returns a flat list where the best hit of each group appears first (interleaved),
+/// followed by remaining hits from each group in score order.
+///
+/// Each top-level result carries a `group_hits` field with the other hits from
+/// the same document, and `matched_by` is set to "grouped_by_document".
 fn group_by_document(results: Vec<KbSearchResult>) -> Vec<KbSearchResult> {
-    let mut groups: std::collections::HashMap<i64, Vec<KbSearchResult>> = std::collections::HashMap::new();
+    if results.is_empty() {
+        return results;
+    }
+
+    // 1. Group by document_id
+    let mut groups: HashMap<i64, Vec<KbSearchResult>> = HashMap::new();
     for r in results {
         groups.entry(r.document_id).or_default().push(r);
     }
-    let mut grouped: Vec<KbSearchResult> = Vec::new();
-    for (_, mut items) in groups {
-        items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some(mut first) = items.into_iter().next() {
-            first.matched_by = Some("grouped_by_document".into());
-            grouped.push(first);
+
+    // 2. Sort hits within each group by descending score
+    for hits in groups.values_mut() {
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    // 3. Build DocumentGroup list sorted by best_score descending
+    let mut doc_groups: Vec<DocumentGroup> = groups
+        .into_iter()
+        .map(|(doc_id, hits)| {
+            // hits already sorted descending by score
+            let best_score = hits.first().map(|h| h.score).unwrap_or(0.0);
+            let document_title = hits.first().map(|h| h.document_name.clone()).unwrap_or_default();
+            DocumentGroup {
+                document_id: doc_id,
+                document_title,
+                best_score,
+                hits,
+            }
+        })
+        .collect();
+    doc_groups.sort_by(|a, b| b.best_score.partial_cmp(&a.best_score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 4. Interleave: emit the best hit from each group first, then remaining hits.
+    //    Each emitted hit gets group_hits populated with the other hits from its group.
+    let mut output: Vec<KbSearchResult> = Vec::new();
+
+    // First pass: emit the top hit from each group (best group first)
+    let mut remaining: Vec<Vec<KbSearchResult>> = Vec::new();
+    for group in doc_groups {
+        let mut hits = group.hits;
+        if let Some(mut best) = hits.first().cloned() {
+            // Collect the rest as group_hits
+            let rest: Vec<KbSearchResult> = hits.iter().skip(1).cloned().collect();
+            best.matched_by = Some("grouped_by_document".into());
+            if !rest.is_empty() {
+                best.group_hits = Some(rest);
+            }
+            output.push(best);
+            // Keep remaining hits (skip first) for second pass
+            remaining.push(hits.split_off(1));
+        } else {
+            remaining.push(Vec::new());
         }
     }
-    grouped.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    grouped
+
+    // Second pass: emit remaining hits from each group in order
+    for group_remaining in remaining {
+        for mut hit in group_remaining {
+            hit.matched_by = Some("grouped_by_document".into());
+            output.push(hit);
+        }
+    }
+
+    output
 }
 
 /// Vector similarity search using sqlite-vec KNN.
 ///
-/// Falls back to brute-force cosine similarity over `kb_node_embeddings`
-/// BLOB storage if sqlite-vec is unavailable or returns no results.
+/// When `embedding_index_id` is provided, tries the per-index vec table
+/// (`vec_kb_{index_id}`) first. Falls back to the legacy `vec_kb_nodes` table.
+/// If sqlite-vec is unavailable or returns no results, falls back to brute-force
+/// cosine similarity over `kb_node_embeddings` BLOB storage.
 ///
 /// Returns results ordered by rank (position in the result list).
 pub fn kb_vector_search(
@@ -517,17 +583,29 @@ pub fn kb_vector_search(
     library_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
+    embedding_index_id: Option<i64>,
 ) -> Result<Vec<RankedResult>> {
     let query_blob = embedding_to_blob(embedding);
 
-    // Try sqlite-vec first
-    let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k);
+    // P5-012: Try per-index vec table first if embedding_index_id is specified
+    if let Some(index_id) = embedding_index_id {
+        let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
+        let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, &per_index_table);
+        if let Ok(results) = result {
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+    }
+
+    // Try legacy sqlite-vec table
+    let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, "vec_kb_nodes");
 
     match result {
         Ok(results) if !results.is_empty() => Ok(results),
         _ => {
             // Fallback to brute-force cosine similarity on BLOB table
-            vector_search_fallback(conn, embedding, library_ids, level, top_k)
+            vector_search_fallback(conn, embedding, library_ids, level, top_k, embedding_index_id)
         }
     }
 }
@@ -679,12 +757,14 @@ fn try_vec_knn(
     library_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
+    table_name: &str,
 ) -> Result<Vec<RankedResult>> {
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT v.node_id \
-         FROM vec_kb_nodes v \
+         FROM {} v \
          INNER JOIN kb_document_nodes n ON n.id = v.node_id \
          WHERE v.embedding MATCH ?1 AND k = ?2",
+        table_name,
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
@@ -749,6 +829,7 @@ fn vector_search_fallback(
     library_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
+    embedding_index_id: Option<i64>,
 ) -> Result<Vec<RankedResult>> {
     let mut sql = String::from(
         "SELECT ne.node_id, ne.embedding \
@@ -758,6 +839,13 @@ fn vector_search_fallback(
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    // P5-011: Filter by embedding_index_id if specified
+    if let Some(index_id) = embedding_index_id {
+        let idx = param_values.len() + 1;
+        sql.push_str(&format!(" AND ne.embedding_index_id = ?{}", idx));
+        param_values.push(Box::new(index_id));
+    }
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
@@ -878,6 +966,7 @@ fn fetch_node_details(
             open_target: None,
             matched_by: None,
             debug_signals: None,
+            group_hits: None,
         })
     })?;
 
@@ -1049,5 +1138,103 @@ mod tests {
         let b = vec![0.0, 0.0];
         let sim = cosine_similarity_f64(&a, &b);
         assert!((sim - 0.0).abs() < 1e-6);
+    }
+
+    fn make_result(node_id: i64, document_id: i64, document_name: &str, score: f64) -> KbSearchResult {
+        KbSearchResult {
+            node_id,
+            document_id,
+            document_name: document_name.to_string(),
+            content: String::new(),
+            level: 0,
+            score,
+            library_id: 1,
+            library_name: "test".to_string(),
+            title_path: None,
+            page_number: None,
+            context_before: None,
+            context_after: None,
+            highlight_ranges: None,
+            open_target: None,
+            matched_by: None,
+            debug_signals: None,
+            group_hits: None,
+        }
+    }
+
+    #[test]
+    fn test_group_by_document_basic() {
+        // Doc A: scores 0.9, 0.5 ; Doc B: scores 0.8, 0.3
+        let results = vec![
+            make_result(1, 100, "DocA", 0.9),
+            make_result(2, 100, "DocA", 0.5),
+            make_result(3, 200, "DocB", 0.8),
+            make_result(4, 200, "DocB", 0.3),
+        ];
+        let grouped = group_by_document(results);
+
+        // Should have 4 results total (all hits preserved)
+        assert_eq!(grouped.len(), 4);
+
+        // First two should be the best hit from each group, interleaved by best_score
+        assert_eq!(grouped[0].document_id, 100); // DocA best=0.9
+        assert_eq!(grouped[0].score, 0.9);
+        assert_eq!(grouped[1].document_id, 200); // DocB best=0.8
+        assert_eq!(grouped[1].score, 0.8);
+
+        // Best hits carry group_hits with the remaining hits
+        assert!(grouped[0].group_hits.is_some());
+        assert_eq!(grouped[0].group_hits.as_ref().unwrap().len(), 1);
+        assert_eq!(grouped[0].group_hits.as_ref().unwrap()[0].score, 0.5);
+
+        assert!(grouped[1].group_hits.is_some());
+        assert_eq!(grouped[1].group_hits.as_ref().unwrap().len(), 1);
+        assert_eq!(grouped[1].group_hits.as_ref().unwrap()[0].score, 0.3);
+
+        // matched_by should be set
+        assert_eq!(grouped[0].matched_by.as_deref(), Some("grouped_by_document"));
+    }
+
+    #[test]
+    fn test_group_by_document_single_doc() {
+        let results = vec![
+            make_result(1, 100, "DocA", 0.9),
+            make_result(2, 100, "DocA", 0.5),
+        ];
+        let grouped = group_by_document(results);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].score, 0.9);
+        assert_eq!(grouped[1].score, 0.5);
+    }
+
+    #[test]
+    fn test_group_by_document_empty() {
+        let results: Vec<KbSearchResult> = vec![];
+        let grouped = group_by_document(results);
+        assert!(grouped.is_empty());
+    }
+
+    #[test]
+    fn test_group_by_document_three_docs() {
+        // Doc A: 0.95, 0.7 ; Doc B: 0.85 ; Doc C: 0.6, 0.4, 0.2
+        let results = vec![
+            make_result(1, 100, "DocA", 0.95),
+            make_result(2, 100, "DocA", 0.7),
+            make_result(3, 200, "DocB", 0.85),
+            make_result(4, 300, "DocC", 0.6),
+            make_result(5, 300, "DocC", 0.4),
+            make_result(6, 300, "DocC", 0.2),
+        ];
+        let grouped = group_by_document(results);
+
+        assert_eq!(grouped.len(), 6);
+
+        // First pass: best of each group, ordered by best_score desc
+        assert_eq!(grouped[0].document_id, 100); // 0.95
+        assert_eq!(grouped[1].document_id, 200); // 0.85
+        assert_eq!(grouped[2].document_id, 300); // 0.6
+
+        // DocC has 3 hits, so group_hits has 2 entries
+        assert_eq!(grouped[2].group_hits.as_ref().unwrap().len(), 2);
     }
 }

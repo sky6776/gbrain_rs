@@ -363,6 +363,106 @@ enum Commands {
         #[arg(long)]
         source_id: i64,
     },
+
+    /// KB jobs management (list/pause/resume)
+    KbJobs {
+        #[command(subcommand)]
+        command: KbJobsCommand,
+    },
+
+    /// Export a KB library to a directory archive
+    KbExportLibrary {
+        /// Library ID to export
+        #[arg(long)]
+        library_id: i64,
+        /// Output directory for export
+        #[arg(long)]
+        output: String,
+    },
+
+    /// Import a KB library from an export archive
+    KbImportLibrary {
+        /// Input directory containing the export archive
+        #[arg(long)]
+        archive: String,
+        /// New library name (optional, defaults to original name from manifest)
+        #[arg(long)]
+        new_name: Option<String>,
+    },
+
+    /// Re-embed documents with a new embedding model/index
+    KbReembed {
+        /// Library ID to re-embed
+        #[arg(long)]
+        library_id: i64,
+        /// Target embedding index ID
+        #[arg(long)]
+        embedding_index_id: Option<i64>,
+    },
+
+    /// Compare two embedding indexes using eval queries
+    KbEvalCompare {
+        /// First embedding index ID
+        #[arg(long)]
+        index_id_1: i64,
+        /// Second embedding index ID to compare
+        #[arg(long)]
+        index_id_2: i64,
+    },
+
+    /// Check KB index health and optionally repair
+    KbHealthCheck {
+        /// Library ID to check
+        #[arg(long)]
+        library_id: Option<i64>,
+        /// Repair issues found
+        #[arg(long)]
+        repair: bool,
+    },
+
+    /// Rebuild a single document's index
+    KbRebuildDocument {
+        /// Document ID to rebuild
+        #[arg(long)]
+        document_id: i64,
+    },
+
+    /// Rebuild an entire library's index
+    KbRebuildLibrary {
+        /// Library ID to rebuild
+        #[arg(long)]
+        library_id: i64,
+    },
+
+    /// Purge deleted KB documents older than retention period
+    KbPurgeDeleted {
+        /// Library ID (optional, purges all if not specified)
+        #[arg(long)]
+        library_id: Option<i64>,
+        /// Older than N days
+        #[arg(long, default_value = "30")]
+        older_than_days: i32,
+    },
+}
+
+#[derive(Subcommand)]
+enum KbJobsCommand {
+    /// List pending/processing KB jobs
+    List {
+        /// Filter by library ID
+        #[arg(long)]
+        library_id: Option<i64>,
+    },
+    /// Pause processing for a library
+    Pause {
+        #[arg(long)]
+        library_id: i64,
+    },
+    /// Resume processing for a library
+    Resume {
+        #[arg(long)]
+        library_id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1525,7 +1625,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbSourceAdd { library_id, path } => {
             let source_path = std::path::Path::new(&path);
             if !source_path.is_dir() {
-                anyhow::bail!("Path is not a directory: {}", path);
+                return Err(GBrainError::InvalidInput(format!("Path is not a directory: {}", path)));
             }
             let files = gbrain_core::kb::sync::scan_directory(
                 source_path,
@@ -1540,6 +1640,99 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 &["md", "txt"],
             )?;
             println!("Sync source {}: {} files scanned", source_id, files.len());
+            return Ok(());
+        }
+
+        Commands::KbJobs { command } => {
+            let conn = engine.connection()?;
+            match command {
+                KbJobsCommand::List { library_id } => {
+                    let jobs = gbrain_core::kb::jobs::list_kb_jobs(conn, library_id)?;
+                    println!("KB jobs: {} found", jobs.len());
+                    for job in &jobs {
+                        println!("  id={} status={} document_id={}", job.0, job.1, job.2);
+                    }
+                }
+                KbJobsCommand::Pause { library_id } => {
+                    gbrain_core::kb::jobs::pause_library_jobs(conn, library_id)?;
+                    println!("Paused KB jobs for library {}", library_id);
+                }
+                KbJobsCommand::Resume { library_id } => {
+                    gbrain_core::kb::jobs::resume_library_jobs(conn, library_id)?;
+                    println!("Resumed KB jobs for library {}", library_id);
+                }
+            }
+            return Ok(());
+        }
+
+        Commands::KbExportLibrary { library_id, output } => {
+            let conn = engine.connection()?;
+            let output_dir = std::path::Path::new(&output);
+            let manifest = gbrain_core::kb::backup::export_library(conn, library_id, output_dir)?;
+            println!("Exported library '{}' ({} docs, {} nodes) to {}",
+                manifest.source_library_name, manifest.document_count, manifest.node_count, output);
+            return Ok(());
+        }
+
+        Commands::KbImportLibrary { archive, new_name } => {
+            let conn = engine.connection()?;
+            let archive_dir = std::path::Path::new(&archive);
+            let new_lib_id = gbrain_core::kb::backup::import_library(
+                conn, archive_dir, new_name.as_deref(),
+            )?;
+            println!("Imported library, new library_id={}", new_lib_id);
+            return Ok(());
+        }
+
+        Commands::KbReembed { library_id, embedding_index_id } => {
+            let conn = engine.connection()?;
+            let index_id = embedding_index_id.unwrap_or(0);
+            gbrain_core::kb::embedding_index::queue_reembed_jobs(conn, library_id, index_id)?;
+            println!("Queued re-embed jobs for library {} (index_id={})", library_id, index_id);
+            return Ok(());
+        }
+
+        Commands::KbEvalCompare { index_id_1, index_id_2 } => {
+            let conn = engine.connection()?;
+            let report = gbrain_core::kb::eval::compare_embedding_indexes(conn, index_id_1, index_id_2)?;
+            println!("Embedding index comparison:\n{}", report);
+            return Ok(());
+        }
+
+        Commands::KbHealthCheck { library_id, repair } => {
+            let conn = engine.connection()?;
+            let summary = gbrain_core::kb::health::check_index_health(conn)?;
+            println!("Health: {} ({} issues)", summary.overall_status, summary.issues_count);
+            for check in &summary.checks {
+                println!("  {} [{}]: {} (affected: {})", check.check_name, check.status, check.detail, check.affected_count);
+            }
+            if repair && summary.issues_count > 0 {
+                let repaired = gbrain_core::kb::health::repair_fts(conn)?;
+                println!("Repaired {} FTS entries", repaired);
+            }
+            let _ = library_id;
+            return Ok(());
+        }
+
+        Commands::KbRebuildDocument { document_id } => {
+            let conn = engine.connection()?;
+            gbrain_core::kb::health::rebuild_document_index(conn, document_id)?;
+            println!("Rebuild queued for document {}", document_id);
+            return Ok(());
+        }
+
+        Commands::KbRebuildLibrary { library_id } => {
+            let conn = engine.connection()?;
+            gbrain_core::kb::health::rebuild_library_index(conn, library_id)?;
+            println!("Rebuild queued for library {}", library_id);
+            return Ok(());
+        }
+
+        Commands::KbPurgeDeleted { library_id, older_than_days } => {
+            let conn = engine.connection()?;
+            let purged = gbrain_core::kb::health::purge_deleted(conn, older_than_days)?;
+            println!("Purged {} deleted documents older than {} days", purged, older_than_days);
+            let _ = library_id;
             return Ok(());
         }
 

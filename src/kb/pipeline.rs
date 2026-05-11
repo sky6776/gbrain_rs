@@ -753,7 +753,7 @@ fn collect_supported_files(dir: &Path, extensions: &[&str], files: &mut Vec<std:
 // ---------------------------------------------------------------------------
 
 /// 在单个逻辑事务中持久化文档节点及其向量
-fn persist_nodes_and_vectors(
+pub fn persist_nodes_and_vectors(
     conn: &Connection,
     doc_id: i64,
     _lib_id: i64,
@@ -862,15 +862,32 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
             })?;
             let blob = embedding_to_blob(vector);
 
-            // BLOB 回退 (始终成功)
+            // BLOB 回退 (始终成功) — P5-011: include embedding_index_id
+            // Resolve the active embedding index for this library
+            let active_index_id: Option<i64> = conn.query_row(
+                "SELECT ei.id FROM kb_embedding_indexes ei \
+                 INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
+                 WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
+                rusqlite::params![db_id],
+                |row| row.get(0),
+            ).ok();
             conn.execute(
                 "INSERT OR REPLACE INTO kb_node_embeddings \
-                 (node_id, embedding, dimensions, model) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![db_id, &blob, vector.len() as i32, "text-embedding-3-large"],
+                 (node_id, embedding, dimensions, model, embedding_index_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![db_id, &blob, vector.len() as i32, "text-embedding-3-large", active_index_id],
             )?;
 
-            // sqlite-vec (尽力而为)
+            // sqlite-vec: write to per-index table if available, fallback to vec_kb_nodes
+            if let Some(index_id) = active_index_id {
+                let vec_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
+                let insert_sql = format!(
+                    "INSERT OR REPLACE INTO {} (node_id, embedding) VALUES (?1, ?2)",
+                    vec_table
+                );
+                let _ = conn.execute(&insert_sql, rusqlite::params![db_id, &blob]);
+            }
+            // Also write to legacy vec_kb_nodes for backward compat
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
                 rusqlite::params![db_id, &blob],

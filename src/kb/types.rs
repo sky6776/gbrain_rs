@@ -225,6 +225,9 @@ pub struct Document {
     pub purged_at: Option<String>,
     pub last_indexed_at: Option<String>,
     pub last_seen_at: Option<String>,
+    // P2-019: OCR 回写状态
+    pub ocr_status: String,
+    pub ocr_text_coverage: f64,
 }
 
 impl Default for Document {
@@ -279,6 +282,8 @@ impl Default for Document {
             purged_at: None,
             last_indexed_at: None,
             last_seen_at: None,
+            ocr_status: "not_needed".to_string(),
+            ocr_text_coverage: 0.0,
         }
     }
 }
@@ -388,6 +393,8 @@ pub struct KbSearchInput {
     pub include_highlights: bool,
     pub group_by_document: bool,
     pub folder_id: Option<i64>,
+    // P5-011: filter by specific embedding index
+    pub embedding_index_id: Option<i64>,
 }
 
 impl Default for KbSearchInput {
@@ -406,6 +413,7 @@ impl Default for KbSearchInput {
             include_highlights: false,
             group_by_document: false,
             folder_id: None,
+            embedding_index_id: None,
         }
     }
 }
@@ -437,6 +445,19 @@ pub struct KbSearchResult {
     pub matched_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_signals: Option<serde_json::Value>,
+    // P3-025: group_by_document metadata
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_hits: Option<Vec<KbSearchResult>>,
+}
+
+/// P3-025: Document group for group_by_document search.
+/// Represents a cluster of search results from the same document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentGroup {
+    pub document_id: i64,
+    pub document_title: String,
+    pub best_score: f64,
+    pub hits: Vec<KbSearchResult>,
 }
 
 #[derive(Debug, Clone)]
