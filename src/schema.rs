@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -1184,6 +1184,33 @@ AND EXISTS (
 );
 "#;
 
+/// 数据库迁移 V20：kb_node_embeddings 复合主键 (node_id, embedding_index_id)
+///
+/// V19 新增了 embedding_index_id 列但 PK 仍是 node_id，导致 INSERT OR REPLACE
+/// 对同一 node 的不同 index 会互相覆盖。改为复合主键后，同一 node 可以拥有
+/// 多条 embedding 记录（每条对应不同的 embedding_index_id）。
+pub const MIGRATION_V20_DDL: &str = r#"
+-- 将剩余 NULL embedding_index_id 回填为 0（语义：默认 index）
+UPDATE kb_node_embeddings SET embedding_index_id = 0 WHERE embedding_index_id IS NULL;
+
+-- 重建表：复合主键 (node_id, embedding_index_id)
+CREATE TABLE kb_node_embeddings_v20 (
+    node_id INTEGER NOT NULL REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    embedding_index_id INTEGER NOT NULL DEFAULT 0 REFERENCES kb_embedding_indexes(id) ON DELETE SET DEFAULT,
+    PRIMARY KEY (node_id, embedding_index_id)
+);
+
+INSERT INTO kb_node_embeddings_v20 SELECT * FROM kb_node_embeddings;
+DROP TABLE kb_node_embeddings;
+ALTER TABLE kb_node_embeddings_v20 RENAME TO kb_node_embeddings;
+
+CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1205,5 +1232,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (17, MIGRATION_V17_DDL),
         (18, MIGRATION_V18_DDL),
         (19, MIGRATION_V19_DDL),
+        (20, MIGRATION_V20_DDL),
     ]
 }

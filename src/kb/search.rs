@@ -181,19 +181,33 @@ pub fn kb_search(
         merged = filter_by_folder(conn, merged, folder_id);
     }
 
-    // P4-003: 读取 library 隐私策略
-    let external_rerank_allowed = input.library_ids.first().and_then(|&lib_id| {
-        conn.query_row(
-            "SELECT external_rerank_allowed FROM kb_libraries WHERE id=?1",
-            [lib_id], |row| row.get::<_, i32>(0),
-        ).ok().map(|v| v != 0)
-    }).unwrap_or(true);
-    let redaction_enabled = input.library_ids.first().and_then(|&lib_id| {
-        conn.query_row(
-            "SELECT redaction_enabled FROM kb_libraries WHERE id=?1",
-            [lib_id], |row| row.get::<_, i32>(0),
-        ).ok().map(|v| v != 0)
-    }).unwrap_or(false);
+    // P4-003: 读取所有参与库的隐私策略，取最严格约束
+    // 任一库禁止外部 rerank → 全局 fallback 本地；任一库需脱敏 → 对所有内容 redact
+    let (external_rerank_allowed, redaction_enabled) = if input.library_ids.is_empty() {
+        (true, false)
+    } else {
+        let placeholders: Vec<String> = input.library_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT external_rerank_allowed, redaction_enabled FROM kb_libraries WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = input.library_ids.iter()
+            .map(|&id| Box::new(id) as Box<dyn rusqlite::types::ToSql>).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        conn.prepare(&sql).ok().and_then(|mut stmt| {
+            let rows = stmt.query_map(param_refs.as_slice(), |row| {
+                Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
+            }).ok()?;
+            let mut all_allowed = true;
+            let mut any_redaction = false;
+            for r in rows.filter_map(|r| r.ok()) {
+                if r.0 == 0 { all_allowed = false; }
+                if r.1 != 0 { any_redaction = true; }
+            }
+            Some((all_allowed, any_redaction))
+        }).unwrap_or((true, false))
+    };
 
     // P3-016/P3-020/P4-003~005: 模型 rerank 优先，失败 fallback 本地 rerank
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {

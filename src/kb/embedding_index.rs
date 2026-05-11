@@ -115,33 +115,29 @@ use crate::error::GBrainError;
 ///
 /// Creates a "kb_reembed" job for each document that has nodes but
 /// no embeddings in the target index. If `target_index_id` is 0,
-/// uses the library's default (active) index.
+/// resolves to the library's active index.
 pub fn queue_reembed_jobs(
     conn: &Connection,
     library_id: i64,
     target_index_id: i64,
 ) -> Result<usize> {
-    // 查找需要重新嵌入的文档：节点在目标 index 中没有 embedding
-    // 当 target_index_id > 0 时，排除已存在该 index embedding 的节点；
-    // 当 target_index_id = 0 时，使用默认逻辑（完全没有 embedding 的节点）
-    let sql = if target_index_id > 0 {
-        "SELECT DISTINCT d.id FROM kb_documents d \
-         JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
-         AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings WHERE embedding_index_id = ?2)"
+    // 解析 target_index_id：0 → active index
+    let resolved_index_id = if target_index_id > 0 {
+        target_index_id
+    } else if let Ok(Some(idx)) = get_active_index_for_library(conn, library_id) {
+        idx.id
     } else {
-        "SELECT DISTINCT d.id FROM kb_documents d \
-         JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
-         AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings)"
+        0 // 没有 active index，使用 0 作为默认 index
     };
+
+    // 查找需要重新嵌入的文档：节点在目标 index 中没有 embedding
+    let sql = "SELECT DISTINCT d.id FROM kb_documents d \
+               JOIN kb_document_nodes n ON n.document_id = d.id \
+               WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
+               AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings WHERE embedding_index_id = ?2)";
     let doc_ids: Vec<i64> = {
         let mut stmt = conn.prepare(sql)?;
-        let mut rows = if target_index_id > 0 {
-            stmt.query(params![library_id, target_index_id])?
-        } else {
-            stmt.query(params![library_id])?
-        };
+        let mut rows = stmt.query(params![library_id, resolved_index_id])?;
         let mut ids = Vec::new();
         while let Ok(Some(row)) = rows.next() {
             ids.push(row.get::<_, i64>(0).unwrap_or(0));
@@ -155,7 +151,7 @@ pub fn queue_reembed_jobs(
             "kind": "kb_reembed",
             "document_id": doc_id,
             "library_id": library_id,
-            "target_embedding_index_id": target_index_id,
+            "target_embedding_index_id": resolved_index_id,
         });
         conn.execute(
             "INSERT INTO jobs (job_type, payload, status, priority, max_attempts) \
