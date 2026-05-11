@@ -254,7 +254,18 @@ pub fn import_library(
     let new_lib_id = conn.last_insert_rowid();
 
     // Import embedding indexes FIRST — 后面的 embedding 导入依赖 index_id 映射
-    let index_id_map = import_embedding_indexes(conn, archive_dir, new_lib_id)?;
+    let mut index_id_map = import_embedding_indexes(conn, archive_dir, new_lib_id)?;
+
+    // 若备份中没有 embedding index，为导入库创建默认 index 并激活
+    // 避免之后新增文档/re-embed 时报 "没有 active embedding index"
+    // 同时将 0 → default_idx 加入映射，让旧 embedding（无 index_id）能正确归属
+    if index_id_map.is_empty() {
+        let default_idx = crate::kb::embedding_index::create_embedding_index(
+            conn, new_lib_id, "openai", "text-embedding-3-large", 1536, "vec0",
+        )?;
+        crate::kb::embedding_index::activate_index(conn, default_idx)?;
+        index_id_map.insert(0, default_idx);
+    }
 
     // Import documents — assign new IDs and remap library_id
     let doc_id_map = import_documents(conn, archive_dir, new_lib_id)?;
@@ -488,8 +499,12 @@ fn import_embeddings(
                 ))
             })?
         } else {
-            // 旧数据没有 index_id，使用第一个导入的 index
-            index_id_map.values().next().copied().unwrap_or(0)
+            // 旧数据没有 index_id，使用默认 index（导入时自动创建或从备份恢复的第一个）
+            index_id_map.values().next().copied().ok_or_else(|| {
+                GBrainError::FileError(
+                    "无法解析 embedding 的 index 归属：index_id_map 为空".into()
+                )
+            })?
         };
 
         let hex_str = emb.get("embedding_hex").and_then(|v| v.as_str()).unwrap_or("");
@@ -499,15 +514,57 @@ fn import_embeddings(
         let blob = hex::decode(hex_str).map_err(|e| {
             GBrainError::FileError(format!("embedding hex 解码失败: {}", e))
         })?;
-        let dimensions = emb.get("dimensions").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+        // 校验 blob 长度必须是 4 的倍数（每个 f32 占 4 字节）
+        if blob.len() % 4 != 0 {
+            return Err(GBrainError::FileError(format!(
+                "embedding blob 长度 {} 不是 4 的倍数，数据可能损坏", blob.len()
+            )));
+        }
+
+        // blob → f32 向量（用于统一写入函数）
+        let embedding_vec: Vec<f32> = blob
+            .chunks_exact(4)
+            .map(|chunk| {
+                let bytes: [u8; 4] = chunk.try_into()
+                    .expect("chunks_exact(4) 保证 4 字节");
+                f32::from_le_bytes(bytes)
+            })
+            .collect();
+        if embedding_vec.is_empty() {
+            return Err(GBrainError::FileError("embedding blob 解码后为空".into()));
+        }
+
+        // 校验备份中的 dimensions 与实际解码长度一致
+        let backup_dims = emb.get("dimensions").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+        if backup_dims > 0 && backup_dims != embedding_vec.len() {
+            return Err(GBrainError::FileError(format!(
+                "embedding 维度不一致：备份声明 dimensions={}，实际解码长度={}",
+                backup_dims, embedding_vec.len()
+            )));
+        }
+
+        // 校验目标 index 的维度与向量维度一致
+        let index_dims: i32 = conn.query_row(
+            "SELECT dimensions FROM kb_embedding_indexes WHERE id = ?1",
+            rusqlite::params![new_index_id],
+            |row| row.get(0),
+        ).map_err(|_| GBrainError::FileError(format!(
+            "目标 embedding index {} 不存在", new_index_id
+        )))?;
+        if index_dims as usize != embedding_vec.len() {
+            return Err(GBrainError::FileError(format!(
+                "embedding 维度与目标 index 不匹配：向量={}，index {} dimensions={}",
+                embedding_vec.len(), new_index_id, index_dims
+            )));
+        }
+
+        let dimensions = embedding_vec.len() as i32;
         let model = emb.get("model").and_then(|v| v.as_str()).unwrap_or("text-embedding-3-large");
 
-        // 写入完整字段（含 embedding_index_id）
-        conn.execute(
-            "INSERT OR REPLACE INTO kb_node_embeddings \
-             (node_id, embedding_index_id, embedding, dimensions, model, embedded_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
-            params![new_node_id, new_index_id, blob, dimensions, model],
+        // 使用统一函数写入：BLOB 表 + per-index vec 表同步更新
+        crate::kb::embedding_index::upsert_node_embedding_for_index(
+            conn, new_node_id, new_index_id, &embedding_vec, dimensions, model,
         )?;
     }
     Ok(())
@@ -557,14 +614,27 @@ fn import_embedding_indexes(
     let indexes: Vec<crate::kb::embedding_index::EmbeddingIndex> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse embedding_indexes.json: {}", e)))?;
 
+    // 记住备份中哪个 index 是 active
+    let old_active_id = indexes.iter().find(|i| i.is_active).map(|i| i.id);
+
     let mut id_map = std::collections::HashMap::new();
     for idx in &indexes {
         let old_id = idx.id;
-        crate::kb::embedding_index::create_embedding_index(
+        let new_id = crate::kb::embedding_index::create_embedding_index(
             conn, new_lib_id, &idx.provider, &idx.model, idx.dimensions, &idx.index_type,
         )?;
-        id_map.insert(old_id, conn.last_insert_rowid());
+        id_map.insert(old_id, new_id);
     }
+
+    // 恢复 active 状态：优先使用备份中的 active index，否则激活第一个
+    if let Some(old_id) = old_active_id {
+        if let Some(&new_id) = id_map.get(&old_id) {
+            crate::kb::embedding_index::activate_index(conn, new_id)?;
+        }
+    } else if let Some(&first_id) = id_map.values().next() {
+        crate::kb::embedding_index::activate_index(conn, first_id)?;
+    }
+
     Ok(id_map)
 }
 

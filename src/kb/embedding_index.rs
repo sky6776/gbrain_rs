@@ -60,11 +60,21 @@ pub fn list_embedding_indexes(conn: &Connection, library_id: i64) -> Result<Vec<
     Ok(results)
 }
 
-/// 激活某个 embedding index（deactivate 其他）
+/// 激活某个 embedding index（只影响同一 library 下的其他 index）
 pub fn activate_index(conn: &Connection, index_id: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE kb_embedding_indexes SET is_active = CASE WHEN id = ?1 THEN 1 ELSE 0 END",
+    // 先查目标 index 所属的 library_id，限定 UPDATE 作用域
+    let library_id: i64 = conn.query_row(
+        "SELECT library_id FROM kb_embedding_indexes WHERE id = ?1",
         params![index_id],
+        |row| row.get(0),
+    ).map_err(|_| GBrainError::InvalidInput(
+        format!("embedding index {} 不存在", index_id)
+    ))?;
+    conn.execute(
+        "UPDATE kb_embedding_indexes \
+         SET is_active = CASE WHEN id = ?1 THEN 1 ELSE 0 END \
+         WHERE library_id = ?2",
+        params![index_id, library_id],
     )?;
     Ok(())
 }
@@ -194,13 +204,15 @@ pub fn upsert_node_embedding_for_index(
     // 2. 确保 per-index vec 虚表存在
     let _ = create_vec_table_for_index(conn, embedding_index_id, dimensions);
 
-    // 3. 写入 per-index vec 虚表（sqlite-vec 不可用时静默跳过）
+    // 3. 写入 per-index vec 虚表：先 DELETE 旧行再 INSERT
+    //    vec0 表无主键/唯一约束，INSERT OR REPLACE 不会替换重复行，必须先删后插
     let vec_table = vec_table_name_for_index(embedding_index_id);
     let _ = conn.execute(
-        &format!(
-            "INSERT OR REPLACE INTO {} (node_id, embedding) VALUES (?1, ?2)",
-            vec_table,
-        ),
+        &format!("DELETE FROM {} WHERE node_id = ?1", vec_table),
+        rusqlite::params![node_id],
+    );
+    let _ = conn.execute(
+        &format!("INSERT INTO {} (node_id, embedding) VALUES (?1, ?2)", vec_table),
         rusqlite::params![node_id, blob],
     );
 

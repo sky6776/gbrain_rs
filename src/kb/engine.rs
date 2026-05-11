@@ -166,11 +166,9 @@ impl<'a> KbEngine<'a> {
             let dims = input.embedding_dimensions.unwrap_or(1536);
             let provider = input.embedding_provider.as_deref().unwrap_or("openai");
             let model = input.embedding_model.as_deref().unwrap_or("text-embedding-3-large");
-            crate::kb::embedding_index::create_embedding_index(
+            let index_id = crate::kb::embedding_index::create_embedding_index(
                 conn, lib_id, provider, model, dims, "vec0",
             )?;
-            // 将新 index 设为 active
-            let index_id = conn.last_insert_rowid();
             crate::kb::embedding_index::activate_index(conn, index_id)?;
 
             Ok(lib_id)

@@ -782,10 +782,26 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
         };
 
         for &node_id in &node_ids {
+            // 清理所有 index 的 vec 表（用 LIKE 匹配）
             let _ = conn.execute(
                 "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
                 rusqlite::params![node_id],
             );
+            // 清理 per-index vec 表（通过 kb_node_embeddings 反查 index_id）
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT DISTINCT embedding_index_id FROM kb_node_embeddings WHERE node_id = ?1"
+            ) {
+                let index_ids: Vec<i64> = stmt.query_map(rusqlite::params![node_id], |row| row.get(0))
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default();
+                for idx_id in index_ids {
+                    let vec_table = crate::kb::embedding_index::vec_table_name_for_index(idx_id);
+                    let _ = conn.execute(
+                        &format!("DELETE FROM {} WHERE node_id = ?1", vec_table),
+                        rusqlite::params![node_id],
+                    );
+                }
+            }
             let _ = conn.execute(
                 "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
                 rusqlite::params![node_id],
@@ -851,7 +867,7 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
         }
     }
 
-    // 将向量插入 BLOB 回退表和 sqlite-vec 虚拟表
+    // 将向量写入 BLOB 回退表和 per-index vec 虚表（使用统一函数）
     for node in &sorted_nodes {
         if let Some(ref vector) = node.vector {
             let &db_id = id_map.get(&node.id).ok_or_else(|| {
@@ -860,91 +876,38 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
                     node.id
                 ))
             })?;
-            let blob = embedding_to_blob(vector);
 
-            // BLOB 回退 (始终成功) — P5-011: include embedding_index_id
-            // Resolve the active embedding index for this library
-            let active_index_id: Option<i64> = conn.query_row(
+            // 解析该节点所属 library 的 active embedding index
+            let active_index_id: i64 = conn.query_row(
                 "SELECT ei.id FROM kb_embedding_indexes ei \
                  INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
                  WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
                 rusqlite::params![db_id],
                 |row| row.get(0),
-            ).ok();
-            conn.execute(
-                "INSERT OR REPLACE INTO kb_node_embeddings \
-                 (node_id, embedding, dimensions, model, embedding_index_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![db_id, &blob, vector.len() as i32, "text-embedding-3-large", active_index_id],
+            ).map_err(|_| GBrainError::InvalidInput(
+                format!("节点 {} 所属 library 没有 active embedding index", db_id)
+            ))?;
+
+            // 统一写入（BLOB 表 + per-index vec 表）
+            crate::kb::embedding_index::upsert_node_embedding_for_index(
+                conn, db_id, active_index_id, vector,
+                vector.len() as i32, "text-embedding-3-large",
             )?;
 
-            // sqlite-vec: write to per-index table if available, fallback to vec_kb_nodes
-            if let Some(index_id) = active_index_id {
-                let vec_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
-                let insert_sql = format!(
-                    "INSERT OR REPLACE INTO {} (node_id, embedding) VALUES (?1, ?2)",
-                    vec_table
-                );
-                let _ = conn.execute(&insert_sql, rusqlite::params![db_id, &blob]);
-            }
-            // Also write to legacy vec_kb_nodes for backward compat
+            // 向后兼容：同步写入 legacy vec_kb_nodes
+            let blob = embedding_to_blob(vector);
             let _ = conn.execute(
-                "INSERT OR REPLACE INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
+                "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
+                rusqlite::params![db_id],
+            );
+            let _ = conn.execute(
+                "INSERT INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
                 rusqlite::params![db_id, &blob],
             );
         }
     }
 
     Ok(())
-}
-
-/// 重新嵌入文档的所有节点
-///
-/// 接受预计算的嵌入向量列表 (按 chunk_order 排序, 每个节点一个),
-/// 写入 BLOB 回退表和 sqlite-vec。
-/// 返回实际更新的节点数。
-pub fn reembed_document_nodes(
-    conn: &Connection,
-    doc_id: i64,
-    embeddings: &[Vec<f32>],
-) -> Result<usize> {
-    let kb = KbEngine::new(conn);
-    let nodes = kb.get_document_nodes(doc_id)?;
-
-    if nodes.is_empty() || embeddings.is_empty() {
-        return Ok(0);
-    }
-
-    let mut updated = 0;
-    for (i, node) in nodes.iter().enumerate() {
-        if i >= embeddings.len() {
-            break;
-        }
-        let blob = embedding_to_blob(&embeddings[i]);
-
-        // BLOB 回退 (始终成功)
-        conn.execute(
-            "INSERT OR REPLACE INTO kb_node_embeddings \
-             (node_id, embedding, dimensions, model) \
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                node.id,
-                &blob,
-                embeddings[i].len() as i32,
-                "text-embedding-3-large"
-            ],
-        )?;
-
-        // sqlite-vec (尽力而为)
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
-            rusqlite::params![node.id, &blob],
-        );
-
-        updated += 1;
-    }
-
-    Ok(updated)
 }
 
 /// 将 f32 嵌入向量转换为小端序 BLOB 用于 SQLite 存储
