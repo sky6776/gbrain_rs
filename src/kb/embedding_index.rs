@@ -121,14 +121,33 @@ pub fn queue_reembed_jobs(
     library_id: i64,
     target_index_id: i64,
 ) -> Result<usize> {
-    // Find documents needing re-embedding
-    let sql = "SELECT DISTINCT d.id FROM kb_documents d \
-               JOIN kb_document_nodes n ON n.document_id = d.id \
-               WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
-               AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings)";
-    let mut stmt = conn.prepare(sql)?;
-    let doc_ids: Vec<i64> = stmt.query_map(params![library_id], |row| row.get(0))?
-        .filter_map(|r| r.ok()).collect();
+    // 查找需要重新嵌入的文档：节点在目标 index 中没有 embedding
+    // 当 target_index_id > 0 时，排除已存在该 index embedding 的节点；
+    // 当 target_index_id = 0 时，使用默认逻辑（完全没有 embedding 的节点）
+    let sql = if target_index_id > 0 {
+        "SELECT DISTINCT d.id FROM kb_documents d \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
+         AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings WHERE embedding_index_id = ?2)"
+    } else {
+        "SELECT DISTINCT d.id FROM kb_documents d \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE d.library_id = ?1 AND d.deleted_at IS NULL \
+         AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings)"
+    };
+    let doc_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = if target_index_id > 0 {
+            stmt.query(params![library_id, target_index_id])?
+        } else {
+            stmt.query(params![library_id])?
+        };
+        let mut ids = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            ids.push(row.get::<_, i64>(0).unwrap_or(0));
+        }
+        ids
+    };
 
     let mut queued = 0;
     for doc_id in &doc_ids {

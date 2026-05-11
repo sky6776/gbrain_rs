@@ -294,8 +294,14 @@ fn export_table_to_json<P: rusqlite::Params>(
                 Ok(rusqlite::types::ValueRef::Null) => serde_json::Value::Null,
                 Ok(rusqlite::types::ValueRef::Integer(n)) => serde_json::json!(n),
                 Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::json!(f),
-                Ok(rusqlite::types::ValueRef::Text(s)) => serde_json::json!(s),
-                Ok(rusqlite::types::ValueRef::Blob(_)) => serde_json::Value::Null, // skip blobs in JSON
+                Ok(rusqlite::types::ValueRef::Text(s)) => {
+                    // rusqlite 的 ValueRef::Text 返回 &[u8]，必须转为 UTF-8 字符串
+                    // 否则 serde_json 会将其序列化为字节数组
+                    std::str::from_utf8(s)
+                        .map(|s| serde_json::json!(s))
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                Ok(rusqlite::types::ValueRef::Blob(_)) => serde_json::Value::Null,
                 Err(_) => serde_json::Value::Null,
             };
             map.insert(column_names[i].clone(), val);

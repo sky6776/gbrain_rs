@@ -188,6 +188,12 @@ pub fn kb_search(
             [lib_id], |row| row.get::<_, i32>(0),
         ).ok().map(|v| v != 0)
     }).unwrap_or(true);
+    let redaction_enabled = input.library_ids.first().and_then(|&lib_id| {
+        conn.query_row(
+            "SELECT redaction_enabled FROM kb_libraries WHERE id=?1",
+            [lib_id], |row| row.get::<_, i32>(0),
+        ).ok().map(|v| v != 0)
+    }).unwrap_or(false);
 
     // P3-016/P3-020/P4-003~005: 模型 rerank 优先，失败 fallback 本地 rerank
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
@@ -220,29 +226,39 @@ pub fn kb_search(
             })
         }).collect();
 
-        // 获取候选节点内容用于模型 rerank
+        // 获取候选节点内容用于模型 rerank（开启脱敏时先 redact）
         let candidate_texts: Vec<crate::kb::rerank::RerankCandidate> = merged.iter()
             .filter_map(|r| {
                 conn.query_row(
                     "SELECT content FROM kb_document_nodes WHERE id=?1",
                     [r.node_id],
                     |row| row.get::<_, String>(0),
-                ).ok().map(|text| crate::kb::rerank::RerankCandidate {
-                    doc_id: r.node_id,
-                    text,
+                ).ok().map(|text| {
+                    let safe_text = if redaction_enabled && external_rerank_allowed {
+                        crate::kb::privacy::redact_content(&text)
+                    } else {
+                        text
+                    };
+                    crate::kb::rerank::RerankCandidate {
+                        doc_id: r.node_id,
+                        text: safe_text,
+                    }
                 })
             }).collect();
 
         let weights = vec![0.4, 0.3, 0.2, 0.1, 0.0, 0.0];
 
         // 尝试模型 rerank（通过 mini tokio runtime）
+        // base_url 缺省为 OpenAI 默认端点，确保只配了 API key 的用户也能使用模型 rerank
+        let has_api_key = input.rerank_api_key.as_deref().map_or(false, |k| !k.is_empty());
         let (scored, rerank_result) = if external_rerank_allowed
             && rerank_cfg.model_rerank_enabled
-            && input.rerank_api_key.is_some()
-            && input.rerank_base_url.is_some()
+            && has_api_key
         {
             let api_key = input.rerank_api_key.as_deref().unwrap_or("");
-            let base_url = input.rerank_base_url.as_deref().unwrap_or("");
+            let base_url = input.rerank_base_url.as_deref()
+                .filter(|u| !u.is_empty())
+                .unwrap_or("https://api.openai.com/v1");
             // P4-004: 审计外部模型调用
             let _ = crate::kb::privacy::log_external_model_call(
                 conn, input.library_ids.first().copied(), None,
