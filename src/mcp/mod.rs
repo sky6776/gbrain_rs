@@ -1329,6 +1329,7 @@ impl McpServer {
 
                 let debug = arguments["debug"].as_bool().unwrap_or(false);
                 let profile = arguments["profile"].as_str().map(|s| s.to_string());
+                let folder_id = arguments["folder_id"].as_i64();
                 let input = crate::kb::types::KbSearchInput {
                     query: query.to_string(),
                     library_ids,
@@ -1336,11 +1337,14 @@ impl McpServer {
                     top_k,
                     profile,
                     debug,
+                    folder_id,
                     include_context: arguments["include_context"].as_bool().unwrap_or(false),
                     context_before: arguments["context_before"].as_u64().map(|v| v as usize).unwrap_or(200),
                     context_after: arguments["context_after"].as_u64().map(|v| v as usize).unwrap_or(200),
                     include_highlights: arguments["include_highlights"].as_bool().unwrap_or(false),
                     group_by_document: arguments["group_by_document"].as_bool().unwrap_or(false),
+                    rerank_api_key: self.config.openai_api_key.clone(),
+                    rerank_base_url: self.config.openai_base_url.clone(),
                     ..Default::default()
                 };
 

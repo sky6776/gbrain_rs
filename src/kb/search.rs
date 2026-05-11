@@ -174,55 +174,133 @@ pub fn kb_search(
             }
         }
     }
-    merged = dedup_by_document(merged);
+    merged = dedup_by_node(merged);
 
-    // P4-003: 读取 library 隐私策略，判断外部 rerank 是否允许
+    // P3-028: 按 folder_id 过滤
+    if let Some(folder_id) = input.folder_id {
+        merged = filter_by_folder(conn, merged, folder_id);
+    }
+
+    // P4-003: 读取 library 隐私策略
     let external_rerank_allowed = input.library_ids.first().and_then(|&lib_id| {
         conn.query_row(
             "SELECT external_rerank_allowed FROM kb_libraries WHERE id=?1",
             [lib_id], |row| row.get::<_, i32>(0),
         ).ok().map(|v| v != 0)
     }).unwrap_or(true);
-    let redaction_enabled = input.library_ids.first().and_then(|&lib_id| {
-        conn.query_row(
-            "SELECT redaction_enabled FROM kb_libraries WHERE id=?1",
-            [lib_id], |row| row.get::<_, i32>(0),
-        ).ok().map(|v| v != 0)
-    }).unwrap_or(false);
 
-    // P3-016/P3-020/P4-003~005: rerank with governance
+    // P3-016/P3-020/P4-003~005: 模型 rerank 优先，失败 fallback 本地 rerank
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
-        // P4-005: 发送前对文档 content 脱敏（外部 API 调用时对所有候选内容执行）
-        if redaction_enabled {
-            for r in &merged {
-                // rerank 阶段无 content，脱敏在 fetch_node_details 后的 enrich_results 中执行
-                let _ = r;
-            }
-        }
-        // P4-004: 审计外部模型调用
-        let rerank_provider = "local".to_string();
-        let rerank_model = "local-rerank".to_string();
-        let _ = crate::kb::privacy::log_external_model_call(
-            conn, input.library_ids.first().copied(), None,
-            "rerank", &rerank_provider, &rerank_model,
-            query_normalized.len() as i32, merged.len() as i32, 0, 0.0, true, "",
-        );
-        if external_rerank_allowed {
-            crate::kb::rerank::RerankResult {
-                model_rerank_attempted: false, model_rerank_succeeded: false,
-                fallback_used: true,
-                fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
-                provider: rerank_provider, candidates_reranked: merged.len(),
+        // 读取库级 rerank 配置
+        let lib_rerank_config = input.library_ids.first().and_then(|&lib_id| {
+            conn.query_row(
+                "SELECT rerank_enabled, rerank_provider FROM kb_libraries WHERE id=?1",
+                [lib_id],
+                |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)),
+            ).ok()
+        });
+        let (rerank_enabled, rerank_provider) = lib_rerank_config
+            .unwrap_or((1, String::new()));
+
+        // 构建 RerankConfig
+        let rerank_cfg = crate::kb::rerank::RerankConfig {
+            model_rerank_enabled: rerank_enabled != 0,
+            rerank_provider: rerank_provider.clone(),
+            rerank_model: "gpt-4o-mini".into(),
+            rerank_timeout_ms: 5000,
+            rerank_max_candidates: 50,
+            external_rerank_allowed,
+        };
+
+        // 构建 LocalRankSignals（使用 RRF 分数作为主信号）
+        let candidates: Vec<(i64, crate::kb::rerank::LocalRankSignals)> = merged.iter().map(|r| {
+            (r.node_id, crate::kb::rerank::LocalRankSignals {
+                fts_score: r.score,
+                ..Default::default()
+            })
+        }).collect();
+
+        // 获取候选节点内容用于模型 rerank
+        let candidate_texts: Vec<crate::kb::rerank::RerankCandidate> = merged.iter()
+            .filter_map(|r| {
+                conn.query_row(
+                    "SELECT content FROM kb_document_nodes WHERE id=?1",
+                    [r.node_id],
+                    |row| row.get::<_, String>(0),
+                ).ok().map(|text| crate::kb::rerank::RerankCandidate {
+                    doc_id: r.node_id,
+                    text,
+                })
+            }).collect();
+
+        let weights = vec![0.4, 0.3, 0.2, 0.1, 0.0, 0.0];
+
+        // 尝试模型 rerank（通过 mini tokio runtime）
+        let (scored, rerank_result) = if external_rerank_allowed
+            && rerank_cfg.model_rerank_enabled
+            && input.rerank_api_key.is_some()
+            && input.rerank_base_url.is_some()
+        {
+            let api_key = input.rerank_api_key.as_deref().unwrap_or("");
+            let base_url = input.rerank_base_url.as_deref().unwrap_or("");
+            // P4-004: 审计外部模型调用
+            let _ = crate::kb::privacy::log_external_model_call(
+                conn, input.library_ids.first().copied(), None,
+                "rerank", &rerank_provider, &rerank_cfg.rerank_model,
+                query_normalized.len() as i32, merged.len() as i32, 0, 0.0, true, "",
+            );
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all().build()
+            {
+                Ok(rt) => rt.block_on(
+                    crate::kb::rerank::try_model_rerank_simple(
+                        &rerank_cfg, &query_normalized,
+                        &candidates, &candidate_texts, &weights,
+                        None, base_url, api_key,
+                    )
+                ),
+                Err(_) => {
+                    // 无法创建 runtime，直接使用本地 rerank
+                    let local = crate::kb::rerank::local_rerank(&candidates, &weights);
+                    (local, crate::kb::rerank::RerankResult {
+                        model_rerank_attempted: false,
+                        model_rerank_succeeded: false,
+                        fallback_used: true,
+                        fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
+                        provider: "local".into(),
+                        candidates_reranked: merged.len(),
+                    })
+                }
             }
         } else {
-            // P4-003: 隐私策略禁止外部 rerank
-            crate::kb::rerank::RerankResult {
-                model_rerank_attempted: false, model_rerank_succeeded: false,
+            // 跳过模型 rerank，直接本地 rerank
+            let local = crate::kb::rerank::local_rerank(&candidates, &weights);
+            let reason = if !external_rerank_allowed {
+                crate::kb::rerank::FallbackReason::PrivacyBlocked
+            } else {
+                crate::kb::rerank::FallbackReason::NotConfigured
+            };
+            (local, crate::kb::rerank::RerankResult {
+                model_rerank_attempted: false,
+                model_rerank_succeeded: false,
                 fallback_used: true,
-                fallback_reason: Some(crate::kb::rerank::FallbackReason::PrivacyBlocked),
-                provider: "local".into(), candidates_reranked: merged.len(),
+                fallback_reason: Some(reason),
+                provider: "local".into(),
+                candidates_reranked: merged.len(),
+            })
+        };
+
+        // 按 rerank 分数重排 merged
+        let score_map: HashMap<i64, f64> = scored.iter().map(|(id, s)| (*id, *s)).collect();
+        for r in &mut merged {
+            if let Some(&new_score) = score_map.get(&r.node_id) {
+                r.score = new_score;
             }
         }
+        merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, r) in merged.iter_mut().enumerate() { r.rank = i + 1; }
+
+        rerank_result
     } else {
         crate::kb::rerank::RerankResult {
             model_rerank_attempted: false, model_rerank_succeeded: false,
@@ -284,6 +362,9 @@ fn normalize_query(query: &str) -> String {
 }
 
 /// P3-008: title/name retriever — FTS on document names
+///
+/// Returns one node_id per matched document (first chunk by chunk_order).
+/// Filters by library_ids and excludes soft-deleted documents.
 fn title_name_retriever(
     conn: &Connection,
     query: &str,
@@ -293,10 +374,29 @@ fn title_name_retriever(
     let token_query = chinese::build_fts_match_query(query);
     if token_query.is_empty() { return Ok(Vec::new()); }
 
-    let sql = "SELECT f.rowid FROM kb_doc_name_fts f \
-               WHERE kb_doc_name_fts MATCH ?1 LIMIT ?2";
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![token_query, top_k as i64], |row| {
+    let mut sql = String::from(
+        "SELECT MIN(n.id) FROM kb_doc_name_fts f \
+         JOIN kb_documents d ON d.id = f.rowid \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE kb_doc_name_fts MATCH ?1 AND d.deleted_at IS NULL",
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
+
+    if !library_ids.is_empty() {
+        let start = param_values.len() + 1;
+        let placeholders: Vec<String> = library_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", start + i)).collect();
+        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
+        for &id in library_ids { param_values.push(Box::new(id)); }
+    }
+
+    let limit_idx = param_values.len() + 1;
+    sql.push_str(&format!(" GROUP BY f.rowid LIMIT ?{}", limit_idx));
+    param_values.push(Box::new(top_k as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
@@ -304,13 +404,10 @@ fn title_name_retriever(
     Ok(results)
 }
 
-/// P3-022: same document dedup
-fn dedup_by_document(mut merged: Vec<RankedResult>) -> Vec<RankedResult> {
-    let mut seen_docs = HashMap::new();
-    merged.retain(|r| {
-        // node_id is actually used as document-level ID for title retriever results
-        seen_docs.insert(r.node_id, ()).is_none()
-    });
+/// P3-022: 按 node_id 去重（回退链可能引入重复节点）
+fn dedup_by_node(mut merged: Vec<RankedResult>) -> Vec<RankedResult> {
+    let mut seen = HashMap::new();
+    merged.retain(|r| seen.insert(r.node_id, ()).is_none());
     merged
 }
 
@@ -413,18 +510,39 @@ fn build_open_target(
 // ---------------------------------------------------------------------------
 
 /// P3-011: 摘要检索器 — 在 kb_document_summaries 中搜索
+///
+/// Returns one node_id per matched document (first chunk by chunk_order).
+/// Filters by library_ids and excludes soft-deleted documents.
 fn summary_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
-    let sql = "SELECT s.document_id FROM kb_document_summaries s \
-               INNER JOIN kb_documents d ON d.id = s.document_id \
-               WHERE s.summary_tokens LIKE ?1 AND d.deleted_at IS NULL LIMIT ?2";
+    let mut sql = String::from(
+        "SELECT MIN(n.id) FROM kb_document_summaries s \
+         JOIN kb_documents d ON d.id = s.document_id \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE s.summary_tokens LIKE ?1 AND d.deleted_at IS NULL",
+    );
     let like_query = format!("%{}%", query);
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
+
+    if !library_ids.is_empty() {
+        let start = param_values.len() + 1;
+        let placeholders: Vec<String> = library_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", start + i)).collect();
+        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
+        for &id in library_ids { param_values.push(Box::new(id)); }
+    }
+
+    let limit_idx = param_values.len() + 1;
+    sql.push_str(&format!(" GROUP BY s.document_id LIMIT ?{}", limit_idx));
+    param_values.push(Box::new(top_k as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
@@ -433,18 +551,40 @@ fn summary_retriever(
 }
 
 /// P3-012: 表格检索器 — 在 kb_table_rows 中搜索
+///
+/// 每个匹配的 table 返回一个 node_id（取 chunk_order 最小的节点）。
+/// 排除已删除文档，按 library_ids 过滤。
 fn table_retriever(
     conn: &Connection,
     query: &str,
-    _library_ids: &[i64],
+    library_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
-    let sql = "SELECT r.table_id FROM kb_table_rows r \
-               INNER JOIN kb_tables t ON t.id = r.table_id \
-               WHERE r.row_text LIKE ?1 LIMIT ?2";
+    let mut sql = String::from(
+        "SELECT MIN(n.id) FROM kb_table_rows r \
+         JOIN kb_tables t ON t.id = r.table_id \
+         JOIN kb_documents d ON d.id = t.document_id \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE r.row_text LIKE ?1 AND d.deleted_at IS NULL",
+    );
     let like_query = format!("%{}%", query);
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
+
+    if !library_ids.is_empty() {
+        let start = param_values.len() + 1;
+        let placeholders: Vec<String> = library_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", start + i)).collect();
+        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
+        for &id in library_ids { param_values.push(Box::new(id)); }
+    }
+
+    let limit_idx = param_values.len() + 1;
+    sql.push_str(&format!(" GROUP BY r.table_id LIMIT ?{}", limit_idx));
+    param_values.push(Box::new(top_k as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
@@ -453,17 +593,39 @@ fn table_retriever(
 }
 
 /// P3-013: 元数据检索器 — 在 kb_documents 的 title/keywords/entity_names 中搜索
+///
+/// 每个匹配的文档返回一个 node_id（取 chunk_order 最小的节点）。
+/// 按 library_ids 过滤，排除已删除文档。
 fn metadata_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
-    let sql = "SELECT id FROM kb_documents WHERE (title LIKE ?1 OR keywords LIKE ?1 \
-               OR entity_names LIKE ?1) AND deleted_at IS NULL LIMIT ?2";
+    let mut sql = String::from(
+        "SELECT MIN(n.id) FROM kb_documents d \
+         JOIN kb_document_nodes n ON n.document_id = d.id \
+         WHERE (d.title LIKE ?1 OR d.keywords LIKE ?1 \
+         OR d.entity_names LIKE ?1) AND d.deleted_at IS NULL",
+    );
     let like_query = format!("%{}%", query);
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![like_query, top_k as i64], |row| {
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
+
+    if !library_ids.is_empty() {
+        let start = param_values.len() + 1;
+        let placeholders: Vec<String> = library_ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", start + i)).collect();
+        sql.push_str(&format!(" AND d.library_id IN ({})", placeholders.join(",")));
+        for &id in library_ids { param_values.push(Box::new(id)); }
+    }
+
+    let limit_idx = param_values.len() + 1;
+    sql.push_str(&format!(" GROUP BY d.id LIMIT ?{}", limit_idx));
+    param_values.push(Box::new(top_k as i64));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(RankedResult { node_id: row.get::<_, i64>(0)?, rank: 0, score: 0.0 })
     })?;
     let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
@@ -904,6 +1066,31 @@ fn vector_search_fallback(
             score: 0.0,
         })
         .collect())
+}
+
+/// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
+fn filter_by_folder(conn: &Connection, merged: Vec<RankedResult>, folder_id: i64) -> Vec<RankedResult> {
+    if merged.is_empty() { return merged; }
+    let placeholders: Vec<String> = merged.iter().enumerate()
+        .map(|(i, _)| format!("?{}", i + 1)).collect();
+    let sql = format!(
+        "SELECT DISTINCT n.id FROM kb_document_nodes n \
+         JOIN kb_documents d ON d.id = n.document_id \
+         WHERE n.id IN ({}) AND d.folder_id = ?{}",
+        placeholders.join(","),
+        placeholders.len() + 1,
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged.iter()
+        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>).collect();
+    param_values.push(Box::new(folder_id));
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(valid_ids) = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0)) {
+            let valid_set: std::collections::HashSet<i64> = valid_ids.filter_map(|r| r.ok()).collect();
+            return merged.into_iter().filter(|r| valid_set.contains(&r.node_id)).collect();
+        }
+    }
+    merged
 }
 
 /// Fetch full details for merged results, joining with document and library

@@ -395,6 +395,9 @@ pub struct KbSearchInput {
     pub folder_id: Option<i64>,
     // P5-011: filter by specific embedding index
     pub embedding_index_id: Option<i64>,
+    // P4-003~005: 模型 rerank 所需的外部 API 凭证
+    pub rerank_api_key: Option<String>,
+    pub rerank_base_url: Option<String>,
 }
 
 impl Default for KbSearchInput {
@@ -414,6 +417,8 @@ impl Default for KbSearchInput {
             group_by_document: false,
             folder_id: None,
             embedding_index_id: None,
+            rerank_api_key: None,
+            rerank_base_url: None,
         }
     }
 }

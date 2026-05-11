@@ -159,27 +159,28 @@ pub fn export_library(
         params![library_id],
     )?;
 
-    // Export document nodes
+    // 导出文档节点（使用当前 schema 的实际列）
     let node_count = export_table_to_json(conn, output_dir, "nodes.json",
-        "SELECT id, created_at, updated_at, library_id, document_id, level, \
-                parent_node_id, title, title_path, content, content_tokens, \
-                token_count, word_count, char_count, page_number, section_path, \
-                source_offset, source_length, granularity, node_type \
+        "SELECT id, created_at, updated_at, library_id, document_id, content, \
+                content_tokens, level, parent_id, chunk_order, \
+                section_id, title_path, page_number, source_start, source_end, \
+                node_metadata, embedding_text \
          FROM kb_document_nodes WHERE library_id=?1",
         params![library_id],
     )?;
 
-    // Export node embeddings
+    // 导出节点 embedding（BLOB 列通过 hex() 编码，避免 JSON null 丢失数据）
     export_table_to_json(conn, output_dir, "embeddings.json",
-        "SELECT node_id, model, dimensions, embedding_blob, created_at \
+        "SELECT node_id, hex(embedding) as embedding_hex, dimensions, model, embedded_at, embedding_index_id \
          FROM kb_node_embeddings WHERE node_id IN \
          (SELECT id FROM kb_document_nodes WHERE library_id=?1)",
         params![library_id],
     )?;
 
-    // Export summaries
+    // 导出摘要（使用当前 schema 的实际列）
     export_table_to_json(conn, output_dir, "summaries.json",
-        "SELECT id, document_id, level, summary_text, model, created_at \
+        "SELECT id, created_at, document_id, section_id, summary_type, \
+                summary_text, summary_tokens, model \
          FROM kb_document_summaries WHERE document_id IN \
          (SELECT id FROM kb_documents WHERE library_id=?1)",
         params![library_id],
@@ -255,11 +256,11 @@ pub fn import_library(
     // Import documents — assign new IDs and remap library_id
     let doc_id_map = import_documents(conn, archive_dir, new_lib_id)?;
 
-    // Import nodes — remap document_id and library_id
-    import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
+    // 导入节点 — 重映射 document_id 和 library_id，返回 old→new node_id 映射
+    let node_id_map = import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
 
-    // Import embeddings — remap node_id
-    import_embeddings(conn, archive_dir, &doc_id_map)?;
+    // 导入 embedding — 使用 node_id_map 重映射
+    import_embeddings(conn, archive_dir, &node_id_map)?;
 
     // Import summaries — remap document_id
     import_summaries(conn, archive_dir, &doc_id_map)?;
@@ -414,59 +415,75 @@ fn import_nodes(
     archive_dir: &Path,
     new_lib_id: i64,
     doc_id_map: &std::collections::HashMap<i64, i64>,
-) -> Result<()> {
+) -> Result<std::collections::HashMap<i64, i64>> {
     let data = std::fs::read_to_string(archive_dir.join("nodes.json"))
         .map_err(|e| GBrainError::FileError(format!("cannot read nodes.json: {}", e)))?;
     let nodes: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse nodes.json: {}", e)))?;
 
+    let mut node_id_map = std::collections::HashMap::new();
     for node in &nodes {
+        let old_node_id = node.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         let old_doc_id = node.get("document_id").and_then(|v| v.as_i64()).unwrap_or(0);
         let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
         conn.execute(
-            "INSERT INTO kb_document_nodes (library_id, document_id, level, title, title_path, \
-             content, content_tokens, token_count, word_count, char_count, page_number, \
-             section_path, source_offset, source_length, granularity, node_type) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            "INSERT INTO kb_document_nodes (library_id, document_id, content, content_tokens, \
+             level, parent_id, chunk_order, section_id, title_path, page_number, \
+             source_start, source_end, node_metadata, embedding_text) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![
                 new_lib_id,
                 new_doc_id,
-                json_int(node, "level"),
-                json_str(node, "title"),
-                json_str(node, "title_path"),
                 json_str(node, "content"),
                 json_str(node, "content_tokens"),
-                json_int(node, "token_count"),
-                json_int(node, "word_count"),
-                json_int(node, "char_count"),
-                json_int(node, "page_number"),
-                json_str(node, "section_path"),
-                json_int(node, "source_offset"),
-                json_int(node, "source_length"),
-                json_str(node, "granularity"),
-                json_str(node, "node_type"),
+                json_int(node, "level"),
+                json_null_or_int(node, "parent_id"),
+                json_int(node, "chunk_order"),
+                json_null_or_int(node, "section_id"),
+                json_str(node, "title_path"),
+                json_null_or_int(node, "page_number"),
+                json_null_or_int(node, "source_start"),
+                json_null_or_int(node, "source_end"),
+                json_str(node, "node_metadata"),
+                json_str(node, "embedding_text"),
             ],
         )?;
+        node_id_map.insert(old_node_id, conn.last_insert_rowid());
     }
-    Ok(())
+    Ok(node_id_map)
 }
 
 fn import_embeddings(
     conn: &Connection,
     archive_dir: &Path,
-    doc_id_map: &std::collections::HashMap<i64, i64>,
+    node_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
-    let data = std::fs::read_to_string(archive_dir.join("embeddings.json"))
+    let path = archive_dir.join("embeddings.json");
+    if !path.exists() { return Ok(()); }
+    let data = std::fs::read_to_string(&path)
         .map_err(|e| GBrainError::FileError(format!("cannot read embeddings.json: {}", e)))?;
     let embeddings: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse embeddings.json: {}", e)))?;
 
-    // Need node_id mapping — query newly imported nodes by document_id
     for emb in &embeddings {
         let old_node_id = emb.get("node_id").and_then(|v| v.as_i64()).unwrap_or(0);
-        // Find the new node by looking up the content (approximate match)
-        // For simplicity, skip embeddings that can't be mapped — they'll be regenerated
-        let _ = old_node_id; // embeddings will be regenerated by worker
+        let new_node_id = match node_id_map.get(&old_node_id).copied() {
+            Some(id) => id,
+            None => continue, // 无法映射的节点跳过，由 worker 重新生成
+        };
+        // 导出时使用 hex(embedding) as embedding_hex
+        let hex_str = emb.get("embedding_hex").and_then(|v| v.as_str()).unwrap_or("");
+        if hex_str.is_empty() { continue; }
+        let blob = hex::decode(hex_str).unwrap_or_default();
+        if !blob.is_empty() {
+            let dimensions = emb.get("dimensions").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let model = emb.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            conn.execute(
+                "INSERT OR IGNORE INTO kb_node_embeddings (node_id, embedding, dimensions, model) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![new_node_id, blob, dimensions, model],
+            ).ok();
+        }
     }
     Ok(())
 }
@@ -487,12 +504,15 @@ fn import_summaries(
         let old_doc_id = summary.get("document_id").and_then(|v| v.as_i64()).unwrap_or(0);
         let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
         conn.execute(
-            "INSERT INTO kb_document_summaries (document_id, level, summary_text, model) \
-             VALUES (?1,?2,?3,?4)",
+            "INSERT INTO kb_document_summaries (document_id, section_id, summary_type, \
+             summary_text, summary_tokens, model) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
             params![
                 new_doc_id,
-                json_int(summary, "level"),
+                json_null_or_int(summary, "section_id"),
+                json_str(summary, "summary_type"),
                 json_str(summary, "summary_text"),
+                json_str(summary, "summary_tokens"),
                 json_str(summary, "model"),
             ],
         )?;

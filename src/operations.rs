@@ -1334,7 +1334,12 @@ impl<'a> Operations<'a> {
                 None
             };
 
-        crate::kb::search::kb_search(conn, input, query_vector.as_deref())
+        // 将 API 凭证注入 input 以支持模型 rerank
+        let mut input_with_rerank = input.clone();
+        input_with_rerank.rerank_api_key = self.config.openai_api_key.clone();
+        input_with_rerank.rerank_base_url = self.config.openai_base_url.clone();
+
+        crate::kb::search::kb_search(conn, &input_with_rerank, query_vector.as_deref())
     }
 
     /// Combined query across both the brain (pages/chunks) and the KB.

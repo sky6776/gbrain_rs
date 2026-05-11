@@ -111,6 +111,22 @@ pub fn claim_next_kb_job(conn: &Connection) -> Result<Option<(i64, KbProcessPayl
     }
 }
 
+/// 认领下一个 re-embed 作业（kb_reembed 或 kb_reembed_node）。
+///
+/// 优先认领 kb_reembed_node（单节点修复），再认领 kb_reembed（文档级重嵌入）。
+/// 返回 (job_db_id, job_type, payload_json) 供 worker 处理。
+pub fn claim_next_reembed_job(conn: &Connection) -> Result<Option<(i64, String, serde_json::Value)>> {
+    let queue = JobQueue::new(conn);
+    // 优先处理单节点修复
+    if let Ok(Some(job)) = queue.dequeue_by_type("kb_reembed_node") {
+        return Ok(Some((job.id, "kb_reembed_node".into(), job.payload)));
+    }
+    if let Ok(Some(job)) = queue.dequeue_by_type("kb_reembed") {
+        return Ok(Some((job.id, "kb_reembed".into(), job.payload)));
+    }
+    Ok(None)
+}
+
 /// Mark a KB job as completed by database row ID
 pub fn complete_kb_job(conn: &Connection, job_db_id: i64) -> Result<()> {
     let queue = JobQueue::new(conn);
