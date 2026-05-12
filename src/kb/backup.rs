@@ -106,11 +106,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
 
 /// 从备份恢复 DB。
 ///
-/// FIX9-11: 安全恢复流程：
+/// FIX10-06: Windows 安全恢复流程：
 /// 1. 复制备份到临时路径
 /// 2. 对临时文件执行 PRAGMA integrity_check 校验完整性
-/// 3. 同时处理 -wal/-shm 侧车文件
-/// 4. 原子 rename 替换目标 DB（在支持 rename 的平台上是原子的）
+/// 3. 三阶段替换：现有DB→.bak, tmp→目标, 成功删.bak/失败回滚
+/// 4. 同步处理 -wal/-shm 侧车文件
 pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()> {
     // 步骤1：复制到临时路径
     let tmp_path = target_db_path.with_extension("db.restoring");
@@ -134,8 +134,10 @@ pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()>
         if integrity != "ok" {
             // 校验失败，删除临时文件
             let _ = std::fs::remove_file(&tmp_path);
-            let _ = std::fs::remove_file(tmp_path.with_extension("db.restoring-wal"));
-            let _ = std::fs::remove_file(tmp_path.with_extension("db.restoring-shm"));
+            let _ =
+                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-wal")));
+            let _ =
+                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-shm")));
             return Err(GBrainError::FileError(format!(
                 "备份文件完整性校验失败: {}",
                 integrity
@@ -143,27 +145,67 @@ pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()>
         }
     }
 
-    // 步骤3：删除旧 DB 的 WAL/SHM 侧车文件
-    for ext in &["-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
-        if sidecar.exists() {
-            let _ = std::fs::remove_file(&sidecar);
+    // 步骤3：三阶段替换流程（兼容 Windows）
+    // 3a: 将现有 DB 重命名为 .bak
+    let bak_path = target_db_path.with_extension("db.bak");
+    let existing_db_exists = target_db_path.exists();
+    if existing_db_exists {
+        // 先删除旧的 .bak（如果存在）
+        let _ = std::fs::remove_file(&bak_path);
+        // 删除旧 DB 的 WAL/SHM 侧车文件
+        for ext in &["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+            if sidecar.exists() {
+                let _ = std::fs::remove_file(&sidecar);
+            }
         }
+        // 将现有 DB 重命名为 .bak
+        std::fs::rename(target_db_path, &bak_path).map_err(|e| {
+            // 重命名失败，清理临时文件
+            let _ = std::fs::remove_file(&tmp_path);
+            GBrainError::FileError(format!("无法将现有数据库重命名为备份: {}", e))
+        })?;
     }
 
-    // 步骤4：原子 rename 替换目标 DB
-    std::fs::rename(&tmp_path, target_db_path).map_err(|e| {
-        // rename 失败时清理临时文件
-        let _ = std::fs::remove_file(&tmp_path);
-        GBrainError::FileError(format!("无法替换目标数据库: {}", e))
-    })?;
-
-    // 同时 rename 侧车文件
-    for ext in &["-wal", "-shm"] {
-        let src = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
-        let dst = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
-        if src.exists() {
-            std::fs::rename(&src, &dst).ok();
+    // 3b: 将临时文件重命名为目标 DB
+    let rename_result = std::fs::rename(&tmp_path, target_db_path);
+    match rename_result {
+        Ok(()) => {
+            // 同时重命名侧车文件
+            for ext in &["-wal", "-shm"] {
+                let src = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
+                let dst = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+                if src.exists() {
+                    std::fs::rename(&src, &dst).ok();
+                }
+            }
+            // 3c: 成功，删除 .bak 文件
+            if existing_db_exists {
+                let _ = std::fs::remove_file(&bak_path);
+                let _ = std::fs::remove_file(PathBuf::from(format!(
+                    "{}{}",
+                    bak_path.display(),
+                    "-wal"
+                )));
+                let _ = std::fs::remove_file(PathBuf::from(format!(
+                    "{}{}",
+                    bak_path.display(),
+                    "-shm"
+                )));
+            }
+        }
+        Err(e) => {
+            // 3b 失败：回滚 — 将 .bak 恢复为原始 DB
+            if existing_db_exists {
+                let _ = std::fs::rename(&bak_path, target_db_path);
+            }
+            // 清理临时文件
+            let _ = std::fs::remove_file(&tmp_path);
+            let _ =
+                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-wal")));
+            let _ =
+                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-shm")));
+            return Err(GBrainError::FileError(format!("无法替换目标数据库: {}", e)));
         }
     }
 
@@ -299,20 +341,26 @@ pub fn export_library(
         params![library_id],
     )?;
 
-    // FIX9-13: 复制受控 storage 中的源文件到 archive 的 files/ 目录
+    // FIX10-07: 复制受控 storage 中的源文件到 archive 的 files/ 目录，
+    // 并在 documents.json 中注入 archive_file_path 字段，记录文件在 archive 内的相对路径。
+    // 导入时根据 archive_file_path 定位文件，而非从旧绝对路径推断。
+    let mut archive_file_paths: std::collections::HashMap<i64, String> =
+        std::collections::HashMap::new();
     if let Some(storage_root) = storage_dir {
         let files_dir = output_dir.join("files");
         if storage_root.exists() {
-            // 查询此库所有文档的 storage_path
+            // 查询此库所有文档的 id 和 storage_path
             let mut stmt = conn.prepare(
-                "SELECT storage_path FROM kb_documents WHERE library_id=?1 AND deleted_at IS NULL",
+                "SELECT id, storage_path FROM kb_documents WHERE library_id=?1 AND deleted_at IS NULL",
             )?;
-            let paths: Vec<String> = stmt
-                .query_map(params![library_id], |row| row.get(0))?
+            let rows: Vec<(i64, String)> = stmt
+                .query_map(params![library_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
                 .filter_map(|r| r.ok())
-                .filter(|s: &String| !s.is_empty())
+                .filter(|(_, s)| !s.is_empty())
                 .collect();
-            for sp in &paths {
+            for (doc_id, sp) in &rows {
                 let src_path = std::path::Path::new(sp);
                 // 只复制位于 KB storage root 内的文件
                 if src_path.starts_with(storage_root) && src_path.exists() {
@@ -322,9 +370,37 @@ pub fn export_library(
                             std::fs::create_dir_all(parent).ok();
                         }
                         std::fs::copy(src_path, &dest).ok();
+                        // 记录文件在 archive 内的相对路径（使用正斜杠，跨平台兼容）
+                        let archive_relative = relative.to_string_lossy().replace('\\', "/");
+                        archive_file_paths.insert(*doc_id, archive_relative);
                     }
                 }
             }
+        }
+    }
+
+    // FIX10-07: 将 archive_file_path 注入到 documents.json 中
+    if !archive_file_paths.is_empty() {
+        let docs_path = output_dir.join("documents.json");
+        if docs_path.exists() {
+            let docs_data = std::fs::read_to_string(&docs_path)?;
+            let docs: Vec<serde_json::Map<String, serde_json::Value>> =
+                serde_json::from_str(&docs_data)?;
+            let updated_docs: Vec<serde_json::Map<String, serde_json::Value>> = docs
+                .into_iter()
+                .map(|mut doc| {
+                    let doc_id = doc.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+                    if let Some(afp) = archive_file_paths.get(&doc_id) {
+                        doc.insert(
+                            "archive_file_path".to_string(),
+                            serde_json::Value::String(afp.clone()),
+                        );
+                    }
+                    doc
+                })
+                .collect();
+            let json = serde_json::to_string_pretty(&updated_docs)?;
+            std::fs::write(&docs_path, json)?;
         }
     }
 
@@ -462,8 +538,14 @@ pub fn import_library(
     let (node_id_map, old_parent_ids, old_section_ids) =
         import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
 
-    // 回填节点的 parent_id 和 section_id（RAPTOR 层级和 section 关系）
-    backfill_node_refs(conn, &node_id_map, &old_parent_ids, &old_section_ids)?;
+    // 回填节点的 parent_id（RAPTOR 层级关系）
+    backfill_node_refs(conn, &node_id_map, &old_parent_ids)?;
+
+    // 导入 sections — 必须在 import_nodes 之后，以便回填 section_id
+    let section_id_map = import_sections(conn, archive_dir, new_lib_id, &doc_id_map)?;
+
+    // 回填节点的 section_id（用 section_id_map + old_section_ids）
+    backfill_section_refs(conn, &old_section_ids, &section_id_map)?;
 
     // 导入 embedding — 使用 node_id_map + index_id_map 重映射
     import_embeddings(
@@ -474,15 +556,12 @@ pub fn import_library(
         active_index_id,
     )?;
 
-    // Import summaries — remap document_id and section_id
-    import_summaries(conn, archive_dir, &doc_id_map, &node_id_map)?;
+    // Import summaries — remap document_id and section_id (using section_id_map)
+    import_summaries(conn, archive_dir, &doc_id_map, &section_id_map)?;
 
-    // FIX9-15: 导入遗漏的关键表 — tables, table_rows, sections, source_items
+    // FIX9-15: 导入遗漏的关键表 — tables, table_rows, source_items
     let table_id_map = import_tables(conn, archive_dir, new_lib_id, &doc_id_map)?;
     import_table_rows(conn, archive_dir, &table_id_map)?;
-    let section_id_map = import_sections(conn, archive_dir, new_lib_id, &doc_id_map)?;
-    // 用 section_id_map 回填节点的 section_id（如果 sections 导入后 section_id 有变化）
-    backfill_section_refs(conn, &node_id_map, &section_id_map)?;
     let source_id_map = import_sources(conn, archive_dir, new_lib_id)?;
     import_source_items(conn, archive_dir, &source_id_map)?;
 
@@ -595,24 +674,27 @@ fn import_documents(
         let old_folder_id = json_null_or_int(doc, "folder_id");
         let new_folder_id = old_folder_id.and_then(|fid| folder_id_map.get(&fid).copied());
 
-        // FIX9-13: 重写 storage_path：将 archive/files/ 中的文件复制到目标 storage，
-        // 并将 storage_path 改写为新路径。外部原始路径保存在 original_path，不作为恢复依赖。
+        // FIX10-07: 重写 storage_path：优先使用 archive_file_path 定位 archive 内的文件，
+        // 复制到目标 storage 并改写为新路径。archive_file_path 由导出阶段注入，
+        // 记录文件在 archive 内的相对路径，避免从旧绝对路径推断（Windows 路径无法 strip_prefix("/")）。
+        // 若无 archive_file_path，回退到旧逻辑（兼容旧版导出）。
+        // 源文件不在受控 storage root 内时，保留 original_path，但 storage_path 不指向旧机器路径。
         let old_storage_path = json_str(doc, "storage_path");
+        let archive_file_path = json_str(doc, "archive_file_path");
         let new_storage_path = if !old_storage_path.is_empty() && target_storage_dir.is_some() {
             let storage_root = target_storage_dir.unwrap();
-            let old_path = std::path::Path::new(&old_storage_path);
-            // 尝试从 archive/files/ 复制文件到目标 storage
-            if let Ok(relative) = old_path.strip_prefix("/") {
-                let archive_file = archive_dir.join("files").join(relative);
+            // 优先使用 archive_file_path（跨平台兼容）
+            if !archive_file_path.is_empty() {
+                let archive_file = archive_dir.join("files").join(&archive_file_path);
                 if archive_file.exists() {
-                    let dest = storage_root.join(relative);
+                    let dest = storage_root.join(&archive_file_path);
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
                     if std::fs::copy(&archive_file, &dest).is_ok() {
                         dest.to_string_lossy().to_string()
                     } else {
-                        // 复制失败，保留旧路径（可能在新机器上不存在）
+                        // 复制失败，保留旧路径
                         old_storage_path.clone()
                     }
                 } else {
@@ -620,8 +702,27 @@ fn import_documents(
                     old_storage_path.clone()
                 }
             } else {
-                // 无法提取相对路径，保留旧路径
-                old_storage_path.clone()
+                // 回退：兼容旧版导出（无 archive_file_path），尝试从旧路径推断
+                let old_path = std::path::Path::new(&old_storage_path);
+                if let Ok(relative) = old_path.strip_prefix("/") {
+                    let archive_file = archive_dir.join("files").join(relative);
+                    if archive_file.exists() {
+                        let dest = storage_root.join(relative);
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        if std::fs::copy(&archive_file, &dest).is_ok() {
+                            dest.to_string_lossy().to_string()
+                        } else {
+                            old_storage_path.clone()
+                        }
+                    } else {
+                        old_storage_path.clone()
+                    }
+                } else {
+                    // 无法提取相对路径，保留旧路径
+                    old_storage_path.clone()
+                }
             }
         } else {
             old_storage_path.clone()
@@ -709,7 +810,7 @@ fn import_nodes(
             "INSERT INTO kb_document_nodes (library_id, document_id, content, content_tokens, \
              level, parent_id, chunk_order, section_id, title_path, page_number, \
              source_start, source_end, node_metadata, embedding_text) \
-             VALUES (?1,?2,?3,?4,?5,NULL,?7,NULL,?9,?10,?11,?12,?13,?14)",
+             VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)",
             params![
                 new_lib_id,
                 new_doc_id,
@@ -738,14 +839,14 @@ fn import_nodes(
     Ok((node_id_map, old_parent_ids, old_section_ids))
 }
 
-/// FIX9-14: 回填节点的 parent_id 和 section_id。
+/// FIX9-14: 回填节点的 parent_id。
 /// import_nodes 第一阶段插入时 parent_id 和 section_id 设为 NULL，
-/// 此函数用 old→new node_id 映射回填正确的新值。
+/// 此函数用 old→new node_id 映射回填 parent_id。
+/// section_id 由 backfill_section_refs 用 section_id_map 单独回填。
 fn backfill_node_refs(
     conn: &Connection,
     node_id_map: &std::collections::HashMap<i64, i64>,
     old_parent_ids: &std::collections::HashMap<i64, i64>,
-    old_section_ids: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
     // 回填 parent_id：用 node_id_map 将旧 parent_id 映射为新 parent_id
     for (&new_node_id, &old_parent_id) in old_parent_ids {
@@ -753,15 +854,6 @@ fn backfill_node_refs(
             conn.execute(
                 "UPDATE kb_document_nodes SET parent_id = ?1 WHERE id = ?2",
                 params![new_parent_id, new_node_id],
-            )?;
-        }
-    }
-    // 回填 section_id：用 node_id_map 将旧 section_id 映射为新 section_id
-    for (&new_node_id, &old_section_id) in old_section_ids {
-        if let Some(&new_section_id) = node_id_map.get(&old_section_id) {
-            conn.execute(
-                "UPDATE kb_document_nodes SET section_id = ?1 WHERE id = ?2",
-                params![new_section_id, new_node_id],
             )?;
         }
     }
@@ -898,7 +990,7 @@ fn import_summaries(
     conn: &Connection,
     archive_dir: &Path,
     doc_id_map: &std::collections::HashMap<i64, i64>,
-    node_id_map: &std::collections::HashMap<i64, i64>,
+    section_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
     let path = archive_dir.join("summaries.json");
     if !path.exists() {
@@ -916,7 +1008,7 @@ fn import_summaries(
             .unwrap_or(0);
         let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
         let old_section_id = json_null_or_int(summary, "section_id");
-        let new_section_id = old_section_id.and_then(|sid| node_id_map.get(&sid).copied());
+        let new_section_id = old_section_id.and_then(|sid| section_id_map.get(&sid).copied());
         conn.execute(
             "INSERT INTO kb_document_summaries (document_id, section_id, summary_type, \
              summary_text, summary_tokens, model) \
@@ -1037,7 +1129,7 @@ fn import_sections(
             "INSERT INTO kb_document_sections \
              (document_id, parent_section_id, title, title_path, heading_level, \
               section_order, page_number, source_start, source_end, content_summary) \
-             VALUES (?1,NULL,?3,?4,?5,?6,?7,?8,?9,?10)",
+             VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 new_doc_id,
                 json_str(section, "title"),
@@ -1071,28 +1163,19 @@ fn import_sections(
 }
 
 /// 用 section_id_map 回填节点的 section_id
+/// old_section_ids 记录了每个新 node_id 对应的旧 section_id，
+/// 用 section_id_map 将旧 section_id 映射为新 section_id
 fn backfill_section_refs(
     conn: &Connection,
-    node_id_map: &std::collections::HashMap<i64, i64>,
+    old_section_ids: &std::collections::HashMap<i64, i64>,
     section_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
-    for (&_old_node_id, &new_node_id) in node_id_map {
-        let old_section_id: Option<i64> = conn
-            .query_row(
-                "SELECT section_id FROM kb_document_nodes WHERE id = ?1",
-                params![new_node_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-
-        if let Some(old_sid) = old_section_id {
-            if let Some(&new_sid) = section_id_map.get(&old_sid) {
-                conn.execute(
-                    "UPDATE kb_document_nodes SET section_id = ?1 WHERE id = ?2",
-                    params![new_sid, new_node_id],
-                )?;
-            }
+    for (&new_node_id, &old_section_id) in old_section_ids {
+        if let Some(&new_section_id) = section_id_map.get(&old_section_id) {
+            conn.execute(
+                "UPDATE kb_document_nodes SET section_id = ?1 WHERE id = ?2",
+                params![new_section_id, new_node_id],
+            )?;
         }
     }
     Ok(())

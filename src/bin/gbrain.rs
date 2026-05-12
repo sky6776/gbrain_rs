@@ -1679,6 +1679,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
+                let run_id = gbrain_core::kb::jobs::new_run_id();
                 let doc = gbrain_core::kb::types::Document {
                     library_id,
                     original_name: file
@@ -1692,6 +1693,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     source_type: "source_sync".to_string(),
                     storage_path: item_path.clone(),
                     original_path: item_path.clone(),
+                    processing_run_id: run_id.clone(),
                     ..Default::default()
                 };
                 let doc_id = kb.create_document(&doc)?;
@@ -1704,17 +1706,18 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     Some(doc_id),
                     Some(&now),
                 )?;
-                gbrain_core::kb::jobs::enqueue_kb_process_job(
+                let job_db_id = gbrain_core::kb::jobs::enqueue_kb_process_job(
                     conn,
                     &gbrain_core::kb::jobs::KbProcessPayload {
                         kind: "kb_process_document".to_string(),
                         document_id: doc_id,
                         library_id,
-                        processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                        processing_run_id: run_id,
                         storage_path: item_path.clone(),
                         extension: ext,
                     },
                 )?;
+                kb.update_document_job_id(doc_id, &job_db_id.to_string())?;
                 inserted += 1;
             }
             println!(
@@ -1767,6 +1770,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             .and_then(|e| e.to_str())
                             .unwrap_or("")
                             .to_lowercase();
+                        let run_id = gbrain_core::kb::jobs::new_run_id();
                         let doc = gbrain_core::kb::types::Document {
                             library_id,
                             original_name: file_path
@@ -1780,6 +1784,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             source_type: "source_sync".to_string(),
                             storage_path: item_path.clone(),
                             original_path: item_path.clone(),
+                            processing_run_id: run_id.clone(),
                             ..Default::default()
                         };
                         let doc_id = kb.create_document(&doc)?;
@@ -1793,17 +1798,18 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             Some(&now),
                         )?;
                         // FIX9-16: 新文档入队处理，否则不会解析/分块/建索引
-                        gbrain_core::kb::jobs::enqueue_kb_process_job(
+                        let job_db_id = gbrain_core::kb::jobs::enqueue_kb_process_job(
                             conn,
                             &gbrain_core::kb::jobs::KbProcessPayload {
                                 kind: "kb_process_document".to_string(),
                                 document_id: doc_id,
                                 library_id,
-                                processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                                processing_run_id: run_id,
                                 storage_path: item_path.clone(),
                                 extension: ext,
                             },
                         )?;
+                        kb.update_document_job_id(doc_id, &job_db_id.to_string())?;
                     }
                     gbrain_core::kb::sync::SyncAction::Changed => {
                         if let Some(hash) = new_hash {
@@ -1828,13 +1834,24 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                                 .ok()
                                 .flatten();
                             if let Some(doc_id) = doc_id_result {
-                                gbrain_core::kb::jobs::enqueue_kb_process_job(
+                                // 同步更新 kb_documents 的 content_hash/file_size/storage_path
+                                let file_size = std::fs::metadata(file_path)
+                                    .map(|m| m.len() as i64)
+                                    .unwrap_or(0);
+                                kb.update_document_source_metadata(
+                                    doc_id, hash, file_size, &item_path,
+                                )?;
+                                let run_id = gbrain_core::kb::jobs::new_run_id();
+                                kb.update_document_run_id(doc_id, &run_id)?;
+                                // 重置文档状态为 queued/pending，避免 UI 状态与实际 job 不一致
+                                kb.reset_document_processing(doc_id)?;
+                                let job_db_id = gbrain_core::kb::jobs::enqueue_kb_process_job(
                                     conn,
                                     &gbrain_core::kb::jobs::KbProcessPayload {
                                         kind: "kb_process_document".to_string(),
                                         document_id: doc_id,
                                         library_id,
-                                        processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                                        processing_run_id: run_id,
                                         storage_path: item_path.clone(),
                                         extension: file_path
                                             .extension()
@@ -1843,6 +1860,7 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                                             .to_lowercase(),
                                     },
                                 )?;
+                                kb.update_document_job_id(doc_id, &job_db_id.to_string())?;
                             }
                         }
                     }

@@ -158,13 +158,14 @@ pub fn writeback_ocr_results(
         for chunk in &chunks {
             if let Some(pos) = full_text[cursor..].find(chunk.as_str()) {
                 let start = cursor + pos;
-                let end = start + chunk.len();
+                // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
+                let end = start + chunk.chars().count();
                 chunk_spans.push((start, end));
                 cursor = start + 1; // 下次从匹配位置后开始查找
             } else {
                 // 无法找到精确位置，用推算偏移
                 let start = cursor;
-                let end = cursor + chunk.len();
+                let end = cursor + chunk.chars().count();
                 chunk_spans.push((start, end));
                 cursor = end;
             }

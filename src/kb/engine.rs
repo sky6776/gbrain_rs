@@ -4,7 +4,62 @@
 
 use crate::error::{GBrainError, Result};
 use crate::kb::types::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Row};
+
+fn row_to_document(row: &Row) -> std::result::Result<Document, rusqlite::Error> {
+    Ok(Document {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        updated_at: row.get(2)?,
+        library_id: row.get(3)?,
+        folder_id: row.get(4)?,
+        original_name: row.get(5)?,
+        name_tokens: row.get(6)?,
+        file_size: row.get(7)?,
+        content_hash: row.get(8)?,
+        extension: row.get(9)?,
+        mime_type: row.get(10)?,
+        source_type: row.get(11)?,
+        storage_path: row.get(12)?,
+        original_path: row.get(13)?,
+        job_id: row.get(14)?,
+        processing_run_id: row.get(15)?,
+        parsing_status: row.get(16)?,
+        parsing_progress: row.get(17)?,
+        parsing_error: row.get(18)?,
+        embedding_status: row.get(19)?,
+        embedding_progress: row.get(20)?,
+        embedding_error: row.get(21)?,
+        word_total: row.get(22)?,
+        split_total: row.get(23)?,
+        title: row.get(24)?,
+        summary: row.get(25)?,
+        keywords: row.get(26)?,
+        entity_names: row.get(27)?,
+        source_uri: row.get(28)?,
+        modified_at: row.get(29)?,
+        document_date: row.get(30)?,
+        normalized_content_hash: row.get(31)?,
+        simhash: row.get(32)?,
+        document_family_id: row.get(33)?,
+        version_label: row.get(34)?,
+        document_granularity: row.get(35)?,
+        content_char_count: row.get(36)?,
+        content_token_count: row.get(37)?,
+        page_count: row.get(38)?,
+        section_count: row.get(39)?,
+        chunk_strategy: row.get(40)?,
+        document_status: row.get(41)?,
+        index_status: row.get(42)?,
+        current_version_id: row.get(43)?,
+        deleted_at: row.get(44)?,
+        purged_at: row.get(45)?,
+        last_indexed_at: row.get(46)?,
+        last_seen_at: row.get(47)?,
+        ocr_status: row.get(48)?,
+        ocr_text_coverage: row.get(49)?,
+    })
+}
 
 pub struct KbEngine<'a> {
     conn: &'a Connection,
@@ -416,64 +471,17 @@ impl<'a> KbEngine<'a> {
                         job_id, processing_run_id, \
                         parsing_status, parsing_progress, parsing_error, \
                         embedding_status, embedding_progress, embedding_error, \
-                        word_total, split_total \
+                        word_total, split_total, \
+                        title, summary, keywords, entity_names, source_uri, \
+                        modified_at, document_date, normalized_content_hash, simhash, \
+                        document_family_id, version_label, document_granularity, \
+                        content_char_count, content_token_count, page_count, section_count, \
+                        chunk_strategy, document_status, index_status, current_version_id, \
+                        deleted_at, purged_at, last_indexed_at, last_seen_at, \
+                        ocr_status, ocr_text_coverage \
                  FROM kb_documents WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok(Document {
-                        id: row.get(0)?,
-                        created_at: row.get(1)?,
-                        updated_at: row.get(2)?,
-                        library_id: row.get(3)?,
-                        folder_id: row.get(4)?,
-                        original_name: row.get(5)?,
-                        name_tokens: row.get(6)?,
-                        file_size: row.get(7)?,
-                        content_hash: row.get(8)?,
-                        extension: row.get(9)?,
-                        mime_type: row.get(10)?,
-                        source_type: row.get(11)?,
-                        storage_path: row.get(12)?,
-                        original_path: row.get(13)?,
-                        job_id: row.get(14)?,
-                        processing_run_id: row.get(15)?,
-                        parsing_status: row.get(16)?,
-                        parsing_progress: row.get(17)?,
-                        parsing_error: row.get(18)?,
-                        embedding_status: row.get(19)?,
-                        embedding_progress: row.get(20)?,
-                        embedding_error: row.get(21)?,
-                        word_total: row.get(22)?,
-                        split_total: row.get(23)?,
-                        // P0-010: new extended fields with defaults
-                        title: String::new(),
-                        summary: String::new(),
-                        keywords: String::new(),
-                        entity_names: String::new(),
-                        source_uri: String::new(),
-                        modified_at: None,
-                        document_date: None,
-                        normalized_content_hash: String::new(),
-                        simhash: String::new(),
-                        document_family_id: None,
-                        version_label: String::new(),
-                        document_granularity: "micro".to_string(),
-                        content_char_count: 0,
-                        content_token_count: 0,
-                        page_count: 0,
-                        section_count: 0,
-                        chunk_strategy: "auto".to_string(),
-                        document_status: "queued".to_string(),
-                        index_status: "pending".to_string(),
-                        current_version_id: None,
-                        deleted_at: None,
-                        purged_at: None,
-                        last_indexed_at: None,
-                        last_seen_at: None,
-                        ocr_status: "not_needed".to_string(),
-                        ocr_text_coverage: 0.0,
-                    })
-                },
+                row_to_document,
             )
             .map_err(|e| GBrainError::Database(format!("Document not found: {}", e)))
         })
@@ -555,65 +563,18 @@ impl<'a> KbEngine<'a> {
                         job_id, processing_run_id, \
                         parsing_status, parsing_progress, parsing_error, \
                         embedding_status, embedding_progress, embedding_error, \
-                        word_total, split_total \
+                        word_total, split_total, \
+                        title, summary, keywords, entity_names, source_uri, \
+                        modified_at, document_date, normalized_content_hash, simhash, \
+                        document_family_id, version_label, document_granularity, \
+                        content_char_count, content_token_count, page_count, section_count, \
+                        chunk_strategy, document_status, index_status, current_version_id, \
+                        deleted_at, purged_at, last_indexed_at, last_seen_at, \
+                        ocr_status, ocr_text_coverage \
                  FROM kb_documents WHERE library_id = ?1 AND content_hash = ?2 \
                  AND deleted_at IS NULL AND purged_at IS NULL",
                 params![library_id, content_hash],
-                |row| {
-                    Ok(Document {
-                        id: row.get(0)?,
-                        created_at: row.get(1)?,
-                        updated_at: row.get(2)?,
-                        library_id: row.get(3)?,
-                        folder_id: row.get(4)?,
-                        original_name: row.get(5)?,
-                        name_tokens: row.get(6)?,
-                        file_size: row.get(7)?,
-                        content_hash: row.get(8)?,
-                        extension: row.get(9)?,
-                        mime_type: row.get(10)?,
-                        source_type: row.get(11)?,
-                        storage_path: row.get(12)?,
-                        original_path: row.get(13)?,
-                        job_id: row.get(14)?,
-                        processing_run_id: row.get(15)?,
-                        parsing_status: row.get(16)?,
-                        parsing_progress: row.get(17)?,
-                        parsing_error: row.get(18)?,
-                        embedding_status: row.get(19)?,
-                        embedding_progress: row.get(20)?,
-                        embedding_error: row.get(21)?,
-                        word_total: row.get(22)?,
-                        split_total: row.get(23)?,
-                        // P0-010: new extended fields with defaults
-                        title: String::new(),
-                        summary: String::new(),
-                        keywords: String::new(),
-                        entity_names: String::new(),
-                        source_uri: String::new(),
-                        modified_at: None,
-                        document_date: None,
-                        normalized_content_hash: String::new(),
-                        simhash: String::new(),
-                        document_family_id: None,
-                        version_label: String::new(),
-                        document_granularity: "micro".to_string(),
-                        content_char_count: 0,
-                        content_token_count: 0,
-                        page_count: 0,
-                        section_count: 0,
-                        chunk_strategy: "auto".to_string(),
-                        document_status: "queued".to_string(),
-                        index_status: "pending".to_string(),
-                        current_version_id: None,
-                        deleted_at: None,
-                        purged_at: None,
-                        last_indexed_at: None,
-                        last_seen_at: None,
-                        ocr_status: "not_needed".to_string(),
-                        ocr_text_coverage: 0.0,
-                    })
-                },
+                row_to_document,
             );
             match result {
                 Ok(doc) => Ok(Some(doc)),
@@ -701,6 +662,38 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// 更新文档的 content_hash/file_size/storage_path，用于 Changed 场景同步源文件元数据
+    pub fn update_document_source_metadata(
+        &self,
+        id: i64,
+        content_hash: &str,
+        file_size: i64,
+        storage_path: &str,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET content_hash = ?1, file_size = ?2, storage_path = ?3, \
+                 updated_at = datetime('now') WHERE id = ?4",
+                params![content_hash, file_size, storage_path, id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// 重置文档处理状态为 queued/pending，用于 Changed 场景重新处理
+    pub fn reset_document_processing(&self, id: i64) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "UPDATE kb_documents SET document_status = 'queued', index_status = 'pending', \
+                 parsing_status = 0, parsing_progress = 0, parsing_error = '', \
+                 embedding_status = 0, embedding_progress = 0, embedding_error = '', \
+                 updated_at = datetime('now') WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn update_document_stats(
         &self,
         id: i64,
@@ -709,10 +702,14 @@ impl<'a> KbEngine<'a> {
         embedding_status: Option<i32>,
     ) -> Result<()> {
         let emb_st = embedding_status.unwrap_or(STATUS_COMPLETED);
+        // FIX10-09: 单独处理 STATUS_SKIPPED — 文档已解析完成，只是因策略跳过 embedding
         let (doc_status, idx_status, set_last_indexed) = if emb_st == STATUS_COMPLETED {
             ("ready", "ready", true)
         } else if emb_st == STATUS_FAILED {
             ("failed", "failed", false)
+        } else if emb_st == STATUS_SKIPPED {
+            // 解析完成但 embedding 被策略跳过：文档可用，仅关键词索引
+            ("ready", "keyword_only", true)
         } else {
             ("processing", "pending", false)
         };

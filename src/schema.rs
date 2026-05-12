@@ -649,7 +649,19 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     chunk_overlap INTEGER NOT NULL DEFAULT 50,
     batch_max_documents INTEGER NOT NULL DEFAULT 3,
     batch_max_chunks INTEGER NOT NULL DEFAULT 10,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    embedding_provider TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    embedding_dimensions INTEGER,
+    search_profile TEXT NOT NULL DEFAULT '',
+    rerank_enabled INTEGER NOT NULL DEFAULT 1,
+    rerank_provider TEXT NOT NULL DEFAULT '',
+    summary_enabled INTEGER NOT NULL DEFAULT 0,
+    external_embedding_allowed INTEGER NOT NULL DEFAULT 1,
+    external_rerank_allowed INTEGER NOT NULL DEFAULT 1,
+    external_summary_allowed INTEGER NOT NULL DEFAULT 1,
+    external_ocr_allowed INTEGER NOT NULL DEFAULT 1,
+    redaction_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_kb_libraries_name ON kb_libraries(name);
@@ -696,13 +708,42 @@ CREATE TABLE IF NOT EXISTS kb_documents (
     embedding_progress INTEGER NOT NULL DEFAULT 0,
     embedding_error TEXT NOT NULL DEFAULT '',
     word_total INTEGER NOT NULL DEFAULT 0,
-    split_total INTEGER NOT NULL DEFAULT 0
+    split_total INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    keywords TEXT NOT NULL DEFAULT '',
+    entity_names TEXT NOT NULL DEFAULT '',
+    source_uri TEXT NOT NULL DEFAULT '',
+    modified_at TEXT,
+    document_date TEXT,
+    normalized_content_hash TEXT NOT NULL DEFAULT '',
+    simhash TEXT NOT NULL DEFAULT '',
+    document_family_id TEXT,
+    version_label TEXT NOT NULL DEFAULT '',
+    document_granularity TEXT NOT NULL DEFAULT 'micro',
+    content_char_count INTEGER NOT NULL DEFAULT 0,
+    content_token_count INTEGER NOT NULL DEFAULT 0,
+    page_count INTEGER NOT NULL DEFAULT 0,
+    section_count INTEGER NOT NULL DEFAULT 0,
+    chunk_strategy TEXT NOT NULL DEFAULT 'auto',
+    document_status TEXT NOT NULL DEFAULT 'queued',
+    index_status TEXT NOT NULL DEFAULT 'pending',
+    current_version_id INTEGER,
+    deleted_at TEXT,
+    purged_at TEXT,
+    last_indexed_at TEXT,
+    last_seen_at TEXT,
+    ocr_status TEXT NOT NULL DEFAULT 'not_needed',
+    ocr_text_coverage REAL NOT NULL DEFAULT 0.0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
     ON kb_documents(library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id ON kb_documents(library_id);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id_id ON kb_documents(library_id, id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_document_status ON kb_documents(document_status);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_deleted_at ON kb_documents(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_granularity ON kb_documents(document_granularity);
 
 CREATE TABLE IF NOT EXISTS kb_document_nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -714,7 +755,14 @@ CREATE TABLE IF NOT EXISTS kb_document_nodes (
     content_tokens TEXT NOT NULL DEFAULT '',
     level INTEGER NOT NULL DEFAULT 0,
     parent_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
-    chunk_order INTEGER NOT NULL DEFAULT 0
+    chunk_order INTEGER NOT NULL DEFAULT 0,
+    section_id INTEGER,
+    title_path TEXT NOT NULL DEFAULT '',
+    page_number INTEGER,
+    source_start INTEGER,
+    source_end INTEGER,
+    node_metadata TEXT NOT NULL DEFAULT '{}',
+    embedding_text TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_kb_nodes_library_id ON kb_document_nodes(library_id);
@@ -723,6 +771,192 @@ CREATE INDEX IF NOT EXISTS idx_kb_nodes_parent_id ON kb_document_nodes(parent_id
 CREATE INDEX IF NOT EXISTS idx_kb_nodes_level ON kb_document_nodes(level);
 CREATE INDEX IF NOT EXISTS idx_kb_nodes_doc_level_order
     ON kb_document_nodes(document_id, level, chunk_order);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_section_id ON kb_document_nodes(section_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_page_number ON kb_document_nodes(page_number);
+
+CREATE TABLE IF NOT EXISTS kb_node_embeddings (
+    node_id INTEGER NOT NULL REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    embedding_index_id INTEGER NOT NULL REFERENCES kb_embedding_indexes(id) ON DELETE CASCADE,
+    PRIMARY KEY (node_id, embedding_index_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
+
+CREATE TABLE IF NOT EXISTS kb_document_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    version_label TEXT NOT NULL DEFAULT '',
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    char_count INTEGER NOT NULL DEFAULT 0,
+    node_count INTEGER NOT NULL DEFAULT 0,
+    index_status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_document_versions(document_id);
+
+CREATE TABLE IF NOT EXISTS kb_document_sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    parent_section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE SET NULL,
+    title TEXT NOT NULL DEFAULT '',
+    title_path TEXT NOT NULL DEFAULT '',
+    heading_level INTEGER NOT NULL DEFAULT 0,
+    section_order INTEGER NOT NULL DEFAULT 0,
+    page_number INTEGER,
+    source_start INTEGER,
+    source_end INTEGER,
+    content_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_doc ON kb_document_sections(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_parent ON kb_document_sections(parent_section_id);
+
+CREATE TABLE IF NOT EXISTS kb_document_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE CASCADE,
+    summary_type TEXT NOT NULL DEFAULT 'document',
+    summary_text TEXT NOT NULL DEFAULT '',
+    summary_tokens TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    UNIQUE(document_id, section_id, summary_type)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_summaries_doc ON kb_document_summaries(document_id);
+
+CREATE TABLE IF NOT EXISTS kb_search_eval_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    query_text TEXT NOT NULL,
+    query_type TEXT NOT NULL DEFAULT 'manual',
+    expected_document_ids TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS kb_index_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    index_name TEXT NOT NULL UNIQUE,
+    index_version INTEGER NOT NULL DEFAULT 1,
+    index_type TEXT NOT NULL DEFAULT 'vector',
+    dimensions INTEGER,
+    model TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'active',
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    last_rebuilt_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS kb_embedding_indexes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    index_type TEXT NOT NULL DEFAULT 'vec0',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_kb_emb_idx_library ON kb_embedding_indexes(library_id);
+
+CREATE TABLE IF NOT EXISTS kb_search_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    query_normalized TEXT NOT NULL DEFAULT '',
+    library_ids TEXT NOT NULL DEFAULT '[]',
+    profile TEXT NOT NULL DEFAULT '',
+    planner_type TEXT NOT NULL DEFAULT '',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    debug_mode INTEGER NOT NULL DEFAULT 0,
+    embedding_index_id INTEGER,
+    result_document_ids TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS kb_search_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    search_log_id INTEGER REFERENCES kb_search_logs(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL DEFAULT 0,
+    comment TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS kb_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    sheet_name TEXT NOT NULL DEFAULT '',
+    headers TEXT NOT NULL DEFAULT '[]',
+    column_count INTEGER NOT NULL DEFAULT 0,
+    row_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_kb_tables_doc ON kb_tables(document_id);
+
+CREATE TABLE IF NOT EXISTS kb_table_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    table_id INTEGER NOT NULL REFERENCES kb_tables(id) ON DELETE CASCADE,
+    row_index INTEGER NOT NULL DEFAULT 0,
+    row_text TEXT NOT NULL DEFAULT '',
+    row_tokens TEXT NOT NULL DEFAULT '',
+    row_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_table_rows_table ON kb_table_rows(table_id);
+
+CREATE TABLE IF NOT EXISTS kb_external_model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    call_type TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cost_estimate REAL NOT NULL DEFAULT 0.0,
+    success INTEGER NOT NULL DEFAULT 1,
+    error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_ext_calls_library ON kb_external_model_calls(library_id);
+
+CREATE TABLE IF NOT EXISTS kb_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL DEFAULT 'local',
+    source_uri TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    connector_config TEXT NOT NULL DEFAULT '{}',
+    delete_policy TEXT NOT NULL DEFAULT 'mark_only',
+    sync_status TEXT NOT NULL DEFAULT 'idle',
+    last_synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sources_library ON kb_sources(library_id);
+
+CREATE TABLE IF NOT EXISTS kb_source_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source_id INTEGER NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    item_path TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    sync_error TEXT NOT NULL DEFAULT '',
+    UNIQUE(source_id, item_path)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
 "#;
 
 /// Migration DDL for schema version 14: KB FTS5 virtual tables + triggers + vec0

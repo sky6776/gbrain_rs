@@ -1280,89 +1280,114 @@ impl McpServer {
                     ..Default::default()
                 };
 
-                // FIX9-19: 根据目标 embedding index 的模型/维度选择 embedder，
-                // 而非总是使用全局 config.embedding_model/embedding_dimensions。
-                // 当指定了 embedding_index_id 时，读取该 index 的 provider/model/dimensions；
-                // 当指定了 library_ids 时，取第一个库的 active index；
-                // 否则回退到全局配置。
+                // FIX10-10: 多 library 搜索时按 (provider, model, dimensions, external_embedding_allowed) 分组，
+                // 每组生成对应 query vector 并分别检索，再做最终融合。
+                // 如果暂时不支持多模型混搜，检测到不一致时禁用 vector retriever 并在 debug 中返回原因。
                 let conn_for_embed = self.engine.connection()?;
-                let (embed_model, embed_dims) = if let Some(eidx_id) = input.embedding_index_id {
-                    // 指定了 embedding_index_id，直接读取该 index 的配置
-                    conn_for_embed
-                        .query_row(
-                            "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
-                            rusqlite::params![eidx_id],
-                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
-                        )
-                        .ok()
-                        .unwrap_or_else(|| {
-                            (
-                                self.config.embedding_model.clone(),
-                                self.config.embedding_dimensions as i32,
-                            )
-                        })
-                } else if let Some(&first_lib) = input.library_ids.first() {
-                    // 指定了 library_ids，取第一个库的 active index
-                    crate::kb::embedding_index::list_embedding_indexes(&conn_for_embed, first_lib)
-                        .ok()
-                        .and_then(|indexes| indexes.into_iter().find(|i| i.is_active))
-                        .map(|idx| (idx.model, idx.dimensions))
-                        .unwrap_or_else(|| {
-                            (
-                                self.config.embedding_model.clone(),
-                                self.config.embedding_dimensions as i32,
-                            )
-                        })
+                let kb = crate::kb::engine::KbEngine::new(&conn_for_embed);
+
+                // 收集每个目标库的 embedding 配置
+                let mut lib_configs: Vec<(i64, String, String, i32, bool)> = Vec::new(); // (lib_id, provider, model, dims, ext_allowed)
+                if input.library_ids.is_empty() {
+                    // 未指定 library_ids，取所有库
+                    if let Ok(libs) = kb.list_libraries() {
+                        for lib in libs {
+                            lib_configs.push((
+                                lib.id,
+                                lib.embedding_provider.clone(),
+                                lib.embedding_model.clone(),
+                                lib.embedding_dimensions.unwrap_or(0),
+                                lib.external_embedding_allowed,
+                            ));
+                        }
+                    }
                 } else {
-                    (
-                        self.config.embedding_model.clone(),
-                        self.config.embedding_dimensions as i32,
-                    )
-                };
+                    for &lib_id in &input.library_ids {
+                        if let Ok(lib) = kb.get_library(lib_id) {
+                            lib_configs.push((
+                                lib.id,
+                                lib.embedding_provider.clone(),
+                                lib.embedding_model.clone(),
+                                lib.embedding_dimensions.unwrap_or(0),
+                                lib.external_embedding_allowed,
+                            ));
+                        }
+                    }
+                }
 
-                // FIX9-03: 允许调用方通过参数覆盖 embedding 维度
-                let embed_dims = arguments["embedding_dimensions"]
-                    .as_i64()
-                    .map(|v| v as i32)
-                    .unwrap_or(embed_dims);
+                // 检查是否所有库的 embedding 配置一致
+                let all_ext_allowed = lib_configs.iter().all(|(_, _, _, _, ext)| *ext);
+                let unique_configs: Vec<(String, String, i32)> = lib_configs
+                    .iter()
+                    .map(|(_, p, m, d, _)| (p.clone(), m.clone(), *d))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
 
-                // FIX9-02: 搜索前根据 library_ids 解析最严格的 embedding policy，
-                // 禁止外部 embedding 时不要创建 query vector
-                let conn_for_policy = self.engine.connection()?;
-                let external_embedding_allowed = if input.library_ids.is_empty() {
-                    // 未指定 library_ids，默认允许（全局搜索无法逐库判断）
-                    true
-                } else {
-                    // 检查所有目标库，只有全部允许时才允许外部 embedding
-                    let kb = crate::kb::engine::KbEngine::new(&conn_for_policy);
-                    input.library_ids.iter().all(|&lib_id| {
-                        kb.get_library(lib_id)
-                            .map(|lib| lib.external_embedding_allowed)
-                            .unwrap_or(true)
-                    })
-                };
+                let mut debug_reason: Option<String> = None;
 
-                // 尝试计算查询向量以启用混合搜索
-                let query_vector: Option<Vec<f32>> = if external_embedding_allowed {
-                    if let Some(api_key) = self.config.openai_api_key.as_deref() {
-                        let embedder = crate::embedding::Embedder::new(
-                            api_key,
-                            self.config.openai_base_url.as_deref(),
-                            Some(&embed_model),
-                            Some(embed_dims as usize),
-                        );
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .ok();
-                        match rt {
-                            Some(rt) => rt
-                                .block_on(embedder.embed_batch(&[query]))
+                let query_vector: Option<Vec<f32>> = if all_ext_allowed {
+                    if unique_configs.len() <= 1 {
+                        // 配置一致（或仅一个库），正常生成 query vector
+                        let (embed_model, embed_dims) = if let Some(eidx_id) =
+                            input.embedding_index_id
+                        {
+                            conn_for_embed
+                                .query_row(
+                                    "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
+                                    rusqlite::params![eidx_id],
+                                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
+                                )
                                 .ok()
-                                .and_then(|v| v.into_iter().next()),
-                            None => None,
+                                .unwrap_or_else(|| {
+                                    lib_configs.first()
+                                        .map(|(_, _, m, d, _)| (m.clone(), *d))
+                                        .unwrap_or_else(|| (self.config.embedding_model.clone(), self.config.embedding_dimensions as i32))
+                                })
+                        } else {
+                            lib_configs
+                                .first()
+                                .map(|(_, _, m, d, _)| (m.clone(), *d))
+                                .unwrap_or_else(|| {
+                                    (
+                                        self.config.embedding_model.clone(),
+                                        self.config.embedding_dimensions as i32,
+                                    )
+                                })
+                        };
+
+                        let embed_dims = arguments["embedding_dimensions"]
+                            .as_i64()
+                            .map(|v| v as i32)
+                            .unwrap_or(embed_dims);
+
+                        if let Some(api_key) = self.config.openai_api_key.as_deref() {
+                            let embedder = crate::embedding::Embedder::new(
+                                api_key,
+                                self.config.openai_base_url.as_deref(),
+                                Some(&embed_model),
+                                Some(embed_dims as usize),
+                            );
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .ok();
+                            match rt {
+                                Some(rt) => rt
+                                    .block_on(embedder.embed_batch(&[query]))
+                                    .ok()
+                                    .and_then(|v| v.into_iter().next()),
+                                None => None,
+                            }
+                        } else {
+                            None
                         }
                     } else {
+                        // FIX10-10: 多模型混搜暂不支持，禁用 vector retriever
+                        debug_reason = Some(format!(
+                            "多 library 的 embedding 配置不一致（发现 {} 种），暂不支持多模型混搜，已禁用向量检索",
+                            unique_configs.len()
+                        ));
                         None
                     }
                 } else {
@@ -1371,7 +1396,20 @@ impl McpServer {
                 };
 
                 let conn = self.engine.connection()?;
-                let results = crate::kb::search::kb_search(conn, &input, query_vector.as_deref())?;
+                let mut results =
+                    crate::kb::search::kb_search(conn, &input, query_vector.as_deref())?;
+                // FIX10-10: 当多模型混搜被禁用时，在 debug 信息中返回原因
+                if let Some(reason) = debug_reason {
+                    if input.debug {
+                        for r in &mut results {
+                            let mut signals =
+                                r.debug_signals.clone().unwrap_or(serde_json::json!({}));
+                            signals["vector_disabled_reason"] =
+                                serde_json::Value::String(reason.clone());
+                            r.debug_signals = Some(signals);
+                        }
+                    }
+                }
                 Ok(serde_json::to_value(results)?)
             }
 

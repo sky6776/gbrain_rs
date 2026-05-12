@@ -39,7 +39,8 @@ impl DocumentParser for XlsxParser {
             // FIX9-04: 记录此 sheet 在全文中的起始偏移
             let start = global_offset;
             parts.push(sheet_header.clone());
-            global_offset += sheet_header.len() + 1; // 加 "\n" 分隔符
+            // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
+            global_offset += sheet_header.chars().count() + 1; // 加 "\n" 分隔符
 
             let mut headers: Vec<String> = Vec::new();
             // FIX9-18: 分离表头行和数据行，表头不写入 row_data
@@ -80,7 +81,8 @@ impl DocumentParser for XlsxParser {
                     row_data.push(row_obj);
                     parts.push(cells.join("\t"));
                     row_count += 1;
-                    global_offset += cells.join("\t").len() + 1;
+                    // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
+                    global_offset += cells.join("\t").chars().count() + 1;
                 }
             }
 

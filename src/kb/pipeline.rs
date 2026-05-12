@@ -370,13 +370,27 @@ pub async fn process_document_async(
         })
         .unwrap_or_default();
 
-    // 计算每个 chunk 在 full_text 中的字符偏移 [start, end)
+    // FIX10-08: 使用 cursor 在原文中定位 chunk，正确处理 overlap/semantic splitter 等路径
+    // 不再假设 chunks 无重叠地拼接为原文，而是用 find 定位每个 chunk 的真实位置
+    let full_text = &parsed.content;
     let mut chunk_offsets: Vec<(usize, usize)> = Vec::with_capacity(chunks.len());
-    let mut offset = 0usize;
-    for chunk in &chunks {
-        let len = chunk.chars().count();
-        chunk_offsets.push((offset, offset + len));
-        offset += len;
+    {
+        let mut cursor: usize = 0;
+        for chunk in &chunks {
+            let chunk_char_len = chunk.chars().count();
+            if let Some(pos) = full_text[cursor..].find(chunk.as_str()) {
+                let start = cursor + pos;
+                let end = start + chunk_char_len;
+                chunk_offsets.push((start, end));
+                cursor = start + 1; // 下次从匹配位置后开始查找
+            } else {
+                // 无法找到精确位置，用推算偏移
+                let start = cursor;
+                let end = cursor + chunk_char_len;
+                chunk_offsets.push((start, end));
+                cursor = end;
+            }
+        }
     }
 
     // 对每个 chunk，找与其 span 重叠最多的 block

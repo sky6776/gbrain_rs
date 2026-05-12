@@ -181,7 +181,8 @@ fn build_html_blocks(text: &str, headings: &[String]) -> Vec<crate::kb::types::P
         .iter()
         .map(|p| {
             let start = offset as i32;
-            offset += p.len() + 2; // +2 for \n\n separator
+            // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
+            offset += p.chars().count() + 2; // +2 for \n\n separator
             crate::kb::types::ParsedBlock {
                 text: p.to_string(),
                 title_path: heading_str.clone(),

@@ -53,7 +53,8 @@ impl DocumentParser for PdfParser {
                     let page_block = format!("[PAGE:{}]\n{}", page_num, deduped);
                     // FIX9-04: 记录此页在全文中的起止偏移
                     let start = global_offset;
-                    let block_len = page_block.len();
+                    // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
+                    let block_len = page_block.chars().count();
                     global_offset += block_len + 2; // 加上 "\n\n" 分隔符长度
                     let end = start + block_len;
                     page_spans.push((start, end));
