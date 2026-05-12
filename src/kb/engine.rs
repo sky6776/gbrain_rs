@@ -556,7 +556,8 @@ impl<'a> KbEngine<'a> {
                         parsing_status, parsing_progress, parsing_error, \
                         embedding_status, embedding_progress, embedding_error, \
                         word_total, split_total \
-                 FROM kb_documents WHERE library_id = ?1 AND content_hash = ?2",
+                 FROM kb_documents WHERE library_id = ?1 AND content_hash = ?2 \
+                 AND deleted_at IS NULL AND purged_at IS NULL",
                 params![library_id, content_hash],
                 |row| {
                     Ok(Document {

@@ -112,6 +112,12 @@ pub fn soft_delete_document(conn: &Connection, document_id: i64) -> Result<()> {
 }
 
 /// 彻底清理文档及其所有关联数据（purge）。
+///
+/// FIX9-08: 清理完所有关联数据后，直接删除 kb_documents 行，
+/// 而非仅设置 purged_at，避免已 purge 行继续占用唯一哈希索引。
+///
+/// FIX9-09: 仅对 source_type == "upload" 且 storage_path 位于 KB 存储根目录内的文件
+/// 才执行物理删除；ingest/source_sync 类型的 storage_path 是用户原始文件，不应删除。
 pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
     kb.transaction(|conn| {
         // 验证文档存在且已软删除
@@ -130,6 +136,19 @@ pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
                 "document must be soft-deleted before purge".to_string(),
             ));
         }
+
+        // 读取 source_type 和 storage_path，用于后续判断是否删除物理文件
+        let (source_type, storage_path): (String, Option<String>) = conn
+            .query_row(
+                "SELECT source_type, storage_path FROM kb_documents WHERE id = ?1",
+                params![document_id],
+                |row| {
+                    let st: String = row.get(0)?;
+                    let sp: String = row.get(1)?;
+                    Ok((st, if sp.is_empty() { None } else { Some(sp) }))
+                },
+            )
+            .map_err(|e| GBrainError::Database(format!("读取文档信息失败: {}", e)))?;
 
         // 清理表格行
         conn.execute(
@@ -185,25 +204,46 @@ pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
             params![document_id],
         )?;
 
-        // 删除存储文件（如果有 storage_path）
-        let storage_path: Option<String> = conn
-            .query_row(
-                "SELECT storage_path FROM kb_documents WHERE id = ?1",
-                params![document_id],
-                |row| row.get(0),
-            )
-            .ok()
-            .filter(|s: &String| !s.is_empty());
-        if let Some(path) = storage_path {
-            let _ = std::fs::remove_file(&path);
-        }
-
-        // 标记为已 purge
+        // FIX9-08: 删除 kb_documents 行，而非仅设置 purged_at。
+        // 这样已 purge 的行不会继续占用唯一哈希索引，不会阻止新上传。
         conn.execute(
-            "UPDATE kb_documents SET purged_at = datetime('now'), \
-             storage_path = '', updated_at = datetime('now') WHERE id = ?1",
+            "DELETE FROM kb_documents WHERE id = ?1",
             params![document_id],
         )?;
+
+        // FIX9-09: 仅对 upload 类型且路径位于 KB 存储根目录内的文件执行物理删除。
+        // ingest/source_sync 类型的 storage_path 是用户原始文件，不应删除。
+        if let Some(path) = storage_path {
+            if source_type == "upload" {
+                // 计算所有可能的 KB 存储根目录，用于验证路径安全性
+                let default_base = crate::config::Config::base_dir().join("kb_files");
+                let mut kb_roots = vec![default_base.join("kb").join("files")];
+                // 如果配置了自定义 kb_storage_dir，也加入检查范围
+                if let Ok(custom_dir) = std::env::var("GBRAIN_KB_STORAGE_DIR") {
+                    kb_roots.push(
+                        std::path::PathBuf::from(custom_dir)
+                            .join("kb")
+                            .join("files"),
+                    );
+                }
+                let canonical = std::fs::canonicalize(&path).ok();
+                let safe_to_delete = kb_roots.iter().any(|root| {
+                    if let Some(ref c) = canonical {
+                        if let Ok(root_c) = std::fs::canonicalize(root) {
+                            return c.starts_with(&root_c);
+                        }
+                    }
+                    // 无法规范化路径时，回退到字符串前缀匹配
+                    path.starts_with(root.to_string_lossy().as_ref())
+                });
+                if safe_to_delete {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("purge 删除存储文件失败 {}: {}", path, e);
+                    }
+                }
+            }
+            // ingest/source_sync 类型仅清除数据库引用（已通过 DELETE 行完成），不删物理文件
+        }
 
         Ok(())
     })

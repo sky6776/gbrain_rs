@@ -10,7 +10,8 @@ pub mod tool_defs;
 use crate::config::Config;
 use crate::engine::BrainEngine;
 use crate::error::{GBrainError, OperationError, Result};
-use crate::operations::{OpContext, Operations};
+use crate::mcp::tool_defs::get_operation_def;
+use crate::operations::{OpContext, Operations, ParamType};
 use crate::sqlite_engine::SqliteEngine;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
@@ -53,187 +54,46 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-/// Validate that required parameters exist and have the correct type.
-/// Returns an error message if validation fails, or None if OK.
+/// 校验参数：仅校验 OperationDef 中 required=true 的参数是否必填，
+/// 可选参数仅在传入时校验类型。复用 tool_defs 的 OperationDef/ParamDef，
+/// 避免手写校验规则与 schema 漂移。
 fn validate_params(tool_name: &str, arguments: &Value) -> Option<String> {
-    /// Specification for a required parameter: (name, expected JSON type)
-    struct ParamSpec {
-        name: &'static str,
-        type_name: &'static str,
-        check: fn(&Value) -> bool,
-    }
-
-    const STRING: fn(&Value) -> bool = |v| v.is_string();
-    const INTEGER: fn(&Value) -> bool = |v| v.is_u64() || v.is_i64();
-    const ARRAY: fn(&Value) -> bool = |v| v.is_array();
-    const OBJECT: fn(&Value) -> bool = |v| v.is_object();
-
-    macro_rules! spec {
-        ($name:expr, $type:expr, $check:expr) => {
-            ParamSpec {
-                name: $name,
-                type_name: $type,
-                check: $check,
-            }
-        };
-    }
-
-    let specs: &[&[ParamSpec]] = match tool_name {
-        "query" => &[&[spec!("query", "string", STRING)]],
-        "search" => &[&[spec!("query", "string", STRING)]],
-        "get_page" => &[&[spec!("slug", "string", STRING)]],
-        "put_page" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("content", "string", STRING),
-        ]],
-        "delete_page" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("confirm", "boolean", |v: &Value| v.is_boolean()),
-        ]],
-        "add_tag" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("tag", "string", STRING),
-        ]],
-        "remove_tag" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("tag", "string", STRING),
-        ]],
-        "get_tags" => &[&[spec!("slug", "string", STRING)]],
-        "add_link" => &[&[
-            spec!("from", "string", STRING),
-            spec!("to", "string", STRING),
-        ]],
-        "remove_link" => &[&[
-            spec!("from", "string", STRING),
-            spec!("to", "string", STRING),
-        ]],
-        "get_links" => &[&[spec!("slug", "string", STRING)]],
-        "get_backlinks" => &[&[spec!("slug", "string", STRING)]],
-        "traverse_graph" => &[&[spec!("slug", "string", STRING)]],
-        "add_timeline_entry" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("date", "string", STRING),
-            spec!("summary", "string", STRING),
-        ]],
-        "get_timeline" => &[&[spec!("slug", "string", STRING)]],
-        "get_versions" => &[&[spec!("slug", "string", STRING)]],
-        "revert_version" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("version_id", "integer", INTEGER),
-        ]],
-        "put_raw_data" => &[&[
-            spec!("slug", "string", STRING),
-            spec!("source", "string", STRING),
-            spec!("data", "object", OBJECT),
-        ]],
-        "get_raw_data" => &[&[spec!("slug", "string", STRING)]],
-        "resolve_slugs" => &[&[spec!("partial", "string", STRING)]],
-        "find_by_title_fuzzy" => &[&[spec!("query", "string", STRING)]],
-        "get_chunks" => &[&[spec!("slug", "string", STRING)]],
-        "log_ingest" => &[&[
-            spec!("source_type", "string", STRING),
-            spec!("source_ref", "string", STRING),
-            spec!("pages_updated", "array", ARRAY),
-            spec!("summary", "string", STRING),
-        ]],
-        "sync_brain" => &[&[spec!("repo_path", "string", STRING)]],
-        "kb_create_library" => &[&[
-            spec!("name", "string", STRING),
-            spec!("semantic_segmentation_enabled", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("raptor_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("raptor_llm_base_url", "string", STRING),
-            spec!("raptor_llm_secret_ref", "string", STRING),
-            spec!("raptor_llm_model", "string", STRING),
-            spec!("chunk_size", "integer", INTEGER),
-            spec!("chunk_overlap", "integer", INTEGER),
-            spec!("batch_max_documents", "integer", INTEGER),
-            spec!("batch_max_chunks", "integer", INTEGER),
-            spec!("embedding_provider", "string", STRING),
-            spec!("embedding_model", "string", STRING),
-            spec!("embedding_dimensions", "integer", INTEGER),
-            spec!("search_profile", "string", STRING),
-            spec!("rerank_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("rerank_provider", "string", STRING),
-            spec!("summary_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("external_embedding_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_rerank_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_summary_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_ocr_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("redaction_enabled", "boolean", |v: &Value| v.is_boolean()),
-        ]],
-        "kb_update_library" => &[&[
-            spec!("library_id", "integer", INTEGER),
-            spec!("name", "string", STRING),
-            spec!("semantic_segmentation_enabled", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("raptor_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("raptor_llm_base_url", "string", STRING),
-            spec!("raptor_llm_secret_ref", "string", STRING),
-            spec!("raptor_llm_model", "string", STRING),
-            spec!("chunk_size", "integer", INTEGER),
-            spec!("chunk_overlap", "integer", INTEGER),
-            spec!("embedding_provider", "string", STRING),
-            spec!("embedding_model", "string", STRING),
-            spec!("embedding_dimensions", "integer", INTEGER),
-            spec!("search_profile", "string", STRING),
-            spec!("rerank_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("rerank_provider", "string", STRING),
-            spec!("summary_enabled", "boolean", |v: &Value| v.is_boolean()),
-            spec!("external_embedding_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_rerank_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_summary_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("external_ocr_allowed", "boolean", |v: &Value| v
-                .is_boolean()),
-            spec!("redaction_enabled", "boolean", |v: &Value| v.is_boolean()),
-        ]],
-        "kb_delete_library" => &[&[
-            spec!("library_id", "integer", INTEGER),
-            spec!("confirm", "boolean", |v: &Value| v.is_boolean()),
-        ]],
-        "kb_upload_document" => &[&[
-            spec!("library_id", "integer", INTEGER),
-            spec!("file_path", "string", STRING),
-        ]],
-        "kb_get_document_status" => &[&[spec!("document_id", "integer", INTEGER)]],
-        "kb_retry_document" => &[&[spec!("document_id", "integer", INTEGER)]],
-        "kb_cancel_document_job" => &[&[spec!("document_id", "integer", INTEGER)]],
-        "kb_delete_document" => &[&[
-            spec!("document_id", "integer", INTEGER),
-            spec!("confirm", "boolean", |v: &Value| v.is_boolean()),
-        ]],
-        "kb_list_documents" => &[&[spec!("library_id", "integer", INTEGER)]],
-        "kb_search" => &[&[spec!("query", "string", STRING)]],
-        "kb_create_folder" => &[&[
-            spec!("library_id", "integer", INTEGER),
-            spec!("name", "string", STRING),
-        ]],
-        _ => &[],
+    // 从 OperationDef 查找工具定义
+    let op_def = match get_operation_def(tool_name) {
+        Some(def) => def,
+        None => return None, // 未定义的工具不做校验
     };
 
-    for group in specs {
-        for spec in *group {
-            match arguments.get(spec.name) {
-                None => {
+    for param in op_def.params.iter() {
+        match arguments.get(param.name) {
+            None => {
+                // 仅 required 参数缺失时报错
+                if param.required {
                     return Some(format!(
-                        "Missing required parameter '{}' for tool '{}'",
-                        spec.name, tool_name
+                        "缺少必填参数 '{}' (工具 '{}')",
+                        param.name, tool_name
                     ));
                 }
-                Some(val) if !(spec.check)(val) => {
+            }
+            Some(val) => {
+                // 传入时校验类型是否匹配
+                let type_ok = match param.param_type {
+                    ParamType::String => val.is_string(),
+                    ParamType::Integer => val.is_u64() || val.is_i64(),
+                    ParamType::Boolean => val.is_boolean(),
+                    ParamType::Number => val.is_f64() || val.is_i64() || val.is_u64(),
+                    ParamType::Array => val.is_array(),
+                    ParamType::Object => val.is_object(),
+                };
+                if !type_ok {
                     return Some(format!(
-                        "Parameter '{}' for tool '{}' must be {}, got {}",
-                        spec.name, tool_name, spec.type_name, val
+                        "参数 '{}' (工具 '{}') 应为 {}，实际为 {}",
+                        param.name,
+                        tool_name,
+                        param.param_type.json_type_name(),
+                        val
                     ));
                 }
-                Some(_) => {}
             }
         }
     }
@@ -1420,14 +1280,76 @@ impl McpServer {
                     ..Default::default()
                 };
 
+                // FIX9-19: 根据目标 embedding index 的模型/维度选择 embedder，
+                // 而非总是使用全局 config.embedding_model/embedding_dimensions。
+                // 当指定了 embedding_index_id 时，读取该 index 的 provider/model/dimensions；
+                // 当指定了 library_ids 时，取第一个库的 active index；
+                // 否则回退到全局配置。
+                let conn_for_embed = self.engine.connection()?;
+                let (embed_model, embed_dims) = if let Some(eidx_id) = input.embedding_index_id {
+                    // 指定了 embedding_index_id，直接读取该 index 的配置
+                    conn_for_embed
+                        .query_row(
+                            "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
+                            rusqlite::params![eidx_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
+                        )
+                        .ok()
+                        .unwrap_or_else(|| {
+                            (
+                                self.config.embedding_model.clone(),
+                                self.config.embedding_dimensions as i32,
+                            )
+                        })
+                } else if let Some(&first_lib) = input.library_ids.first() {
+                    // 指定了 library_ids，取第一个库的 active index
+                    crate::kb::embedding_index::list_embedding_indexes(&conn_for_embed, first_lib)
+                        .ok()
+                        .and_then(|indexes| indexes.into_iter().find(|i| i.is_active))
+                        .map(|idx| (idx.model, idx.dimensions))
+                        .unwrap_or_else(|| {
+                            (
+                                self.config.embedding_model.clone(),
+                                self.config.embedding_dimensions as i32,
+                            )
+                        })
+                } else {
+                    (
+                        self.config.embedding_model.clone(),
+                        self.config.embedding_dimensions as i32,
+                    )
+                };
+
+                // FIX9-03: 允许调用方通过参数覆盖 embedding 维度
+                let embed_dims = arguments["embedding_dimensions"]
+                    .as_i64()
+                    .map(|v| v as i32)
+                    .unwrap_or(embed_dims);
+
+                // FIX9-02: 搜索前根据 library_ids 解析最严格的 embedding policy，
+                // 禁止外部 embedding 时不要创建 query vector
+                let conn_for_policy = self.engine.connection()?;
+                let external_embedding_allowed = if input.library_ids.is_empty() {
+                    // 未指定 library_ids，默认允许（全局搜索无法逐库判断）
+                    true
+                } else {
+                    // 检查所有目标库，只有全部允许时才允许外部 embedding
+                    let kb = crate::kb::engine::KbEngine::new(&conn_for_policy);
+                    input.library_ids.iter().all(|&lib_id| {
+                        kb.get_library(lib_id)
+                            .map(|lib| lib.external_embedding_allowed)
+                            .unwrap_or(true)
+                    })
+                };
+
                 // 尝试计算查询向量以启用混合搜索
-                let query_vector: Option<Vec<f32>> =
+                let query_vector: Option<Vec<f32>> = if external_embedding_allowed {
                     if let Some(api_key) = self.config.openai_api_key.as_deref() {
                         let embedder = crate::embedding::Embedder::new(
                             api_key,
                             self.config.openai_base_url.as_deref(),
-                            Some(&self.config.embedding_model),
-                            Some(self.config.embedding_dimensions),
+                            Some(&embed_model),
+                            Some(embed_dims as usize),
                         );
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
@@ -1442,7 +1364,11 @@ impl McpServer {
                         }
                     } else {
                         None
-                    };
+                    }
+                } else {
+                    // 库级策略禁止外部 embedding，跳过 query vector 创建
+                    None
+                };
 
                 let conn = self.engine.connection()?;
                 let results = crate::kb::search::kb_search(conn, &input, query_vector.as_deref())?;
@@ -1479,7 +1405,59 @@ impl McpServer {
                 let output_dir = std::path::Path::new(output);
                 let db_path = self.config.db_path();
                 crate::kb::backup::backup_database(&db_path, output_dir)?;
-                let manifest = crate::kb::backup::create_manifest(17, vec![], vec![], 0, 0);
+
+                // FIX9-10: 同时备份 storage 目录，确保上传文件等进入备份
+                let storage_dir = self
+                    .config
+                    .kb_storage_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::config::Config::base_dir().join("kb_files"));
+                if storage_dir.exists() {
+                    crate::kb::backup::backup_storage(&storage_dir, output_dir)?;
+                }
+
+                // 收集真实数据填充 manifest
+                let kb = self.engine.kb_engine()?;
+                let library_ids: Vec<i64> = kb.list_libraries()?.iter().map(|lib| lib.id).collect();
+
+                // 收集所有库的 embedding index 信息
+                let conn = self.engine.connection()?;
+                let mut embedding_indexes = Vec::new();
+                for &lib_id in &library_ids {
+                    if let Ok(indexes) =
+                        crate::kb::embedding_index::list_embedding_indexes(conn, lib_id)
+                    {
+                        for idx in indexes {
+                            embedding_indexes.push(crate::kb::backup::EmbeddingIndexInfo {
+                                id: idx.id,
+                                library_id: idx.library_id,
+                                model: idx.model,
+                                dimensions: idx.dimensions,
+                            });
+                        }
+                    }
+                }
+
+                // 统计文件数量（kb_files 目录下的文件数）
+                let base_dir = self
+                    .config
+                    .kb_storage_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::config::Config::base_dir().join("kb_files"));
+                let file_count = count_files_in_dir(&base_dir);
+
+                // 获取 DB 文件大小
+                let db_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+
+                let manifest = crate::kb::backup::create_manifest(
+                    crate::schema::SCHEMA_VERSION,
+                    library_ids,
+                    embedding_indexes,
+                    file_count,
+                    db_size_bytes,
+                );
                 Ok(serde_json::to_value(manifest)?)
             }
             "kb_restore" => {
@@ -1487,11 +1465,21 @@ impl McpServer {
                 if input.is_empty() {
                     return Err(GBrainError::InvalidInput("input path required".into()));
                 }
+                let input_dir = std::path::Path::new(input);
                 let db_path = self.config.db_path();
-                crate::kb::backup::restore_database(
-                    std::path::Path::new(input).join("gbrain.db").as_path(),
-                    &db_path,
-                )?;
+                crate::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
+
+                // FIX9-10: 同时恢复 storage 目录
+                let storage_dir = self
+                    .config
+                    .kb_storage_dir
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| crate::config::Config::base_dir().join("kb_files"));
+                if input_dir.join("storage").exists() {
+                    crate::kb::backup::restore_storage(input_dir, &storage_dir)?;
+                }
+
                 Ok(serde_json::json!({"ok": true}))
             }
             "kb_add_eval_query" => {
@@ -1540,4 +1528,23 @@ impl McpServer {
             ))),
         }
     }
+}
+
+/// 递归统计目录下的文件数量（不含子目录本身）
+fn count_files_in_dir(dir: &std::path::Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    let mut count = 0usize;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                count += count_files_in_dir(&path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
 }

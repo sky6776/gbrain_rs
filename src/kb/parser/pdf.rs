@@ -31,31 +31,42 @@ impl DocumentParser for PdfParser {
         let total_pages = pages.len();
         let page_numbers: Vec<u32> = pages.keys().copied().collect();
 
-        // P2-004: 按页提取，记录每页文本
+        // FIX9-04: 在拼接全文时累计字符偏移，为每页 block 写入 source span
         let mut page_texts: Vec<String> = Vec::new();
         let mut all_text = Vec::new();
         let mut low_density_pages = 0u32;
+        // 记录每页 block 在全文中的起止偏移
+        let mut page_spans: Vec<(usize, usize)> = Vec::new();
+        let mut global_offset: usize = 0;
 
         for page_num in &page_numbers {
             match pdf.extract_text(&[*page_num]) {
                 Ok(text) => {
                     let cleaned = clean_text(&text);
-                    // P2-005: 简单页眉/页脚去除（如果文本中出现重复行）
                     let deduped = remove_header_footer(&cleaned, &page_texts);
 
-                    // P2-006: 文本密度检测 (< 50 chars 标记为低密度)
                     let density = deduped.chars().count();
                     if density < 50 {
                         low_density_pages += 1;
                     }
 
                     let page_block = format!("[PAGE:{}]\n{}", page_num, deduped);
+                    // FIX9-04: 记录此页在全文中的起止偏移
+                    let start = global_offset;
+                    let block_len = page_block.len();
+                    global_offset += block_len + 2; // 加上 "\n\n" 分隔符长度
+                    let end = start + block_len;
+                    page_spans.push((start, end));
                     page_texts.push(deduped.clone());
                     if !deduped.is_empty() {
                         all_text.push(page_block);
                     }
                 }
-                Err(_) => continue,
+                Err(_) => {
+                    // 空页也要记录 span 占位
+                    page_spans.push((global_offset, global_offset));
+                    continue;
+                }
             }
         }
 
@@ -76,18 +87,21 @@ impl DocumentParser for PdfParser {
             low_density_pages.to_string(),
         );
 
-        // P1-010/P2-004: 构建结构化 blocks（每页一个 block，带 page_number）
+        // FIX9-04: 为每页 block 写入真实的 source span（基于 page_spans）
         let blocks: Vec<crate::kb::types::ParsedBlock> = page_texts
             .iter()
             .enumerate()
-            .map(|(i, text)| crate::kb::types::ParsedBlock {
-                text: text.clone(),
-                title_path: String::new(),
-                page_number: Some((i + 1) as i32),
-                source_start: None,
-                source_end: None,
-                block_type: "page".to_string(),
-                metadata: String::new(),
+            .map(|(i, text)| {
+                let (start, end) = page_spans.get(i).copied().unwrap_or((0, 0));
+                crate::kb::types::ParsedBlock {
+                    text: text.clone(),
+                    title_path: String::new(),
+                    page_number: Some((i + 1) as i32),
+                    source_start: Some(start as i32),
+                    source_end: Some(end as i32),
+                    block_type: "page".to_string(),
+                    metadata: String::new(),
+                }
             })
             .collect();
 

@@ -60,8 +60,10 @@ pub fn backup_database(db_path: &Path, output_dir: &Path) -> Result<PathBuf> {
         .map_err(|e| GBrainError::FileError(format!("cannot copy DB: {}", e)))?;
 
     // 同时复制 WAL 和 SHM 文件（如果存在）
+    // 注意：使用字符串拼接而非 with_extension，因为 with_extension 会替换扩展名，
+    // 当 DB 文件名为 gbrain.sqlite 或无扩展名时会产生错误路径
     for ext in &["-wal", "-shm"] {
-        let src = db_path.with_extension(format!("db{}", ext));
+        let src = PathBuf::from(format!("{}{}", db_path.display(), ext));
         if src.exists() {
             let dst = output_dir.join(format!("gbrain.db{}", ext));
             std::fs::copy(&src, &dst).ok();
@@ -102,10 +104,69 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
     Ok(count)
 }
 
-/// 从备份恢复 DB
+/// 从备份恢复 DB。
+///
+/// FIX9-11: 安全恢复流程：
+/// 1. 复制备份到临时路径
+/// 2. 对临时文件执行 PRAGMA integrity_check 校验完整性
+/// 3. 同时处理 -wal/-shm 侧车文件
+/// 4. 原子 rename 替换目标 DB（在支持 rename 的平台上是原子的）
 pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()> {
-    std::fs::copy(backup_path, target_db_path)
-        .map_err(|e| GBrainError::FileError(format!("cannot restore DB: {}", e)))?;
+    // 步骤1：复制到临时路径
+    let tmp_path = target_db_path.with_extension("db.restoring");
+    std::fs::copy(backup_path, &tmp_path)
+        .map_err(|e| GBrainError::FileError(format!("无法复制备份到临时路径: {}", e)))?;
+
+    // 同时复制 WAL/SHM 侧车文件（如果存在）
+    for ext in &["-wal", "-shm"] {
+        let src = PathBuf::from(format!("{}{}", backup_path.display(), ext));
+        if src.exists() {
+            let dst = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
+            std::fs::copy(&src, &dst).ok();
+        }
+    }
+
+    // 步骤2：校验临时文件的完整性
+    if let Ok(conn) = Connection::open(&tmp_path) {
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap_or_else(|_| "query_failed".to_string());
+        if integrity != "ok" {
+            // 校验失败，删除临时文件
+            let _ = std::fs::remove_file(&tmp_path);
+            let _ = std::fs::remove_file(tmp_path.with_extension("db.restoring-wal"));
+            let _ = std::fs::remove_file(tmp_path.with_extension("db.restoring-shm"));
+            return Err(GBrainError::FileError(format!(
+                "备份文件完整性校验失败: {}",
+                integrity
+            )));
+        }
+    }
+
+    // 步骤3：删除旧 DB 的 WAL/SHM 侧车文件
+    for ext in &["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+        if sidecar.exists() {
+            let _ = std::fs::remove_file(&sidecar);
+        }
+    }
+
+    // 步骤4：原子 rename 替换目标 DB
+    std::fs::rename(&tmp_path, target_db_path).map_err(|e| {
+        // rename 失败时清理临时文件
+        let _ = std::fs::remove_file(&tmp_path);
+        GBrainError::FileError(format!("无法替换目标数据库: {}", e))
+    })?;
+
+    // 同时 rename 侧车文件
+    for ext in &["-wal", "-shm"] {
+        let src = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
+        let dst = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+        if src.exists() {
+            std::fs::rename(&src, &dst).ok();
+        }
+    }
+
     Ok(())
 }
 
@@ -147,6 +208,7 @@ pub fn export_library(
     conn: &Connection,
     library_id: i64,
     output_dir: &Path,
+    storage_dir: Option<&Path>,
 ) -> Result<LibraryExportManifest> {
     std::fs::create_dir_all(output_dir)
         .map_err(|e| GBrainError::FileError(format!("cannot create export dir: {}", e)))?;
@@ -237,6 +299,80 @@ pub fn export_library(
         params![library_id],
     )?;
 
+    // FIX9-13: 复制受控 storage 中的源文件到 archive 的 files/ 目录
+    if let Some(storage_root) = storage_dir {
+        let files_dir = output_dir.join("files");
+        if storage_root.exists() {
+            // 查询此库所有文档的 storage_path
+            let mut stmt = conn.prepare(
+                "SELECT storage_path FROM kb_documents WHERE library_id=?1 AND deleted_at IS NULL",
+            )?;
+            let paths: Vec<String> = stmt
+                .query_map(params![library_id], |row| row.get(0))?
+                .filter_map(|r| r.ok())
+                .filter(|s: &String| !s.is_empty())
+                .collect();
+            for sp in &paths {
+                let src_path = std::path::Path::new(sp);
+                // 只复制位于 KB storage root 内的文件
+                if src_path.starts_with(storage_root) && src_path.exists() {
+                    if let Ok(relative) = src_path.strip_prefix(storage_root) {
+                        let dest = files_dir.join(relative);
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        std::fs::copy(src_path, &dest).ok();
+                    }
+                }
+            }
+        }
+    }
+
+    // FIX9-15: 导出遗漏的关键表 — tables, table_rows, sections, source_items
+    export_table_to_json(
+        conn,
+        output_dir,
+        "tables.json",
+        "SELECT id, created_at, document_id, sheet_name, headers, column_count, row_count \
+         FROM kb_tables WHERE document_id IN \
+         (SELECT id FROM kb_documents WHERE library_id=?1)",
+        params![library_id],
+    )?;
+
+    export_table_to_json(
+        conn,
+        output_dir,
+        "table_rows.json",
+        "SELECT id, created_at, table_id, row_index, row_text, row_tokens, row_json \
+         FROM kb_table_rows WHERE table_id IN \
+         (SELECT id FROM kb_tables WHERE document_id IN \
+         (SELECT id FROM kb_documents WHERE library_id=?1))",
+        params![library_id],
+    )?;
+
+    export_table_to_json(
+        conn,
+        output_dir,
+        "sections.json",
+        "SELECT id, created_at, updated_at, document_id, parent_section_id, title, \
+                title_path, heading_level, section_order, page_number, \
+                source_start, source_end, content_summary \
+         FROM kb_document_sections WHERE document_id IN \
+         (SELECT id FROM kb_documents WHERE library_id=?1)",
+        params![library_id],
+    )?;
+
+    export_table_to_json(
+        conn,
+        output_dir,
+        "source_items.json",
+        "SELECT id, created_at, source_id, document_id, external_id, item_path, \
+                content_hash, file_size, last_seen_at, sync_status, sync_error \
+         FROM kb_source_items WHERE source_id IN \
+         (SELECT id FROM kb_sources WHERE library_id=?1)",
+        params![library_id],
+    )?;
+
     // Build manifest
     let manifest = LibraryExportManifest {
         export_version: 1,
@@ -266,6 +402,7 @@ pub fn import_library(
     conn: &Connection,
     archive_dir: &Path,
     new_name: Option<&str>,
+    target_storage_dir: Option<&Path>,
 ) -> Result<i64> {
     // Read manifest
     let manifest_data = std::fs::read_to_string(archive_dir.join("manifest.json"))
@@ -312,13 +449,21 @@ pub fn import_library(
     let folder_id_map = import_folders(conn, archive_dir, new_lib_id)?;
 
     // Import documents — assign new IDs, remap library_id and folder_id
-    let doc_id_map = import_documents(conn, archive_dir, new_lib_id, &folder_id_map)?;
+    let doc_id_map = import_documents(
+        conn,
+        archive_dir,
+        new_lib_id,
+        &folder_id_map,
+        target_storage_dir,
+    )?;
 
     // 导入节点 — 重映射 document_id 和 library_id，返回 old→new node_id 映射
-    let node_id_map = import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
+    // FIX9-14: import_nodes 同时返回旧 parent_id/section_id 以便回填
+    let (node_id_map, old_parent_ids, old_section_ids) =
+        import_nodes(conn, archive_dir, new_lib_id, &doc_id_map)?;
 
     // 回填节点的 parent_id 和 section_id（RAPTOR 层级和 section 关系）
-    backfill_node_refs(conn, &node_id_map)?;
+    backfill_node_refs(conn, &node_id_map, &old_parent_ids, &old_section_ids)?;
 
     // 导入 embedding — 使用 node_id_map + index_id_map 重映射
     import_embeddings(
@@ -331,6 +476,15 @@ pub fn import_library(
 
     // Import summaries — remap document_id and section_id
     import_summaries(conn, archive_dir, &doc_id_map, &node_id_map)?;
+
+    // FIX9-15: 导入遗漏的关键表 — tables, table_rows, sections, source_items
+    let table_id_map = import_tables(conn, archive_dir, new_lib_id, &doc_id_map)?;
+    import_table_rows(conn, archive_dir, &table_id_map)?;
+    let section_id_map = import_sections(conn, archive_dir, new_lib_id, &doc_id_map)?;
+    // 用 section_id_map 回填节点的 section_id（如果 sections 导入后 section_id 有变化）
+    backfill_section_refs(conn, &node_id_map, &section_id_map)?;
+    let source_id_map = import_sources(conn, archive_dir, new_lib_id)?;
+    import_source_items(conn, archive_dir, &source_id_map)?;
 
     Ok(new_lib_id)
 }
@@ -428,6 +582,7 @@ fn import_documents(
     archive_dir: &Path,
     new_lib_id: i64,
     folder_id_map: &std::collections::HashMap<i64, i64>,
+    target_storage_dir: Option<&Path>,
 ) -> Result<std::collections::HashMap<i64, i64>> {
     let data = std::fs::read_to_string(archive_dir.join("documents.json"))
         .map_err(|e| GBrainError::FileError(format!("cannot read documents.json: {}", e)))?;
@@ -439,6 +594,39 @@ fn import_documents(
         let old_id = doc.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         let old_folder_id = json_null_or_int(doc, "folder_id");
         let new_folder_id = old_folder_id.and_then(|fid| folder_id_map.get(&fid).copied());
+
+        // FIX9-13: 重写 storage_path：将 archive/files/ 中的文件复制到目标 storage，
+        // 并将 storage_path 改写为新路径。外部原始路径保存在 original_path，不作为恢复依赖。
+        let old_storage_path = json_str(doc, "storage_path");
+        let new_storage_path = if !old_storage_path.is_empty() && target_storage_dir.is_some() {
+            let storage_root = target_storage_dir.unwrap();
+            let old_path = std::path::Path::new(&old_storage_path);
+            // 尝试从 archive/files/ 复制文件到目标 storage
+            if let Ok(relative) = old_path.strip_prefix("/") {
+                let archive_file = archive_dir.join("files").join(relative);
+                if archive_file.exists() {
+                    let dest = storage_root.join(relative);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if std::fs::copy(&archive_file, &dest).is_ok() {
+                        dest.to_string_lossy().to_string()
+                    } else {
+                        // 复制失败，保留旧路径（可能在新机器上不存在）
+                        old_storage_path.clone()
+                    }
+                } else {
+                    // archive 中没有此文件，保留旧路径
+                    old_storage_path.clone()
+                }
+            } else {
+                // 无法提取相对路径，保留旧路径
+                old_storage_path.clone()
+            }
+        } else {
+            old_storage_path.clone()
+        };
+
         conn.execute(
             "INSERT INTO kb_documents (library_id, folder_id, original_name, name_tokens, file_size, \
              content_hash, extension, mime_type, source_type, storage_path, original_path, \
@@ -458,7 +646,7 @@ fn import_documents(
                 json_str(doc, "extension"),
                 json_str(doc, "mime_type"),
                 json_str(doc, "source_type"),
-                json_str(doc, "storage_path"),
+                new_storage_path,
                 json_str(doc, "original_path"),
                 json_str(doc, "job_id"),
                 json_str(doc, "processing_run_id"),
@@ -493,13 +681,21 @@ fn import_nodes(
     archive_dir: &Path,
     new_lib_id: i64,
     doc_id_map: &std::collections::HashMap<i64, i64>,
-) -> Result<std::collections::HashMap<i64, i64>> {
+) -> Result<(
+    std::collections::HashMap<i64, i64>,
+    std::collections::HashMap<i64, i64>,
+    std::collections::HashMap<i64, i64>,
+)> {
     let data = std::fs::read_to_string(archive_dir.join("nodes.json"))
         .map_err(|e| GBrainError::FileError(format!("cannot read nodes.json: {}", e)))?;
     let nodes: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
         .map_err(|e| GBrainError::FileError(format!("cannot parse nodes.json: {}", e)))?;
 
     let mut node_id_map = std::collections::HashMap::new();
+    // FIX9-14: 记录每个新节点对应的旧 parent_id 和旧 section_id，
+    // 以便 backfill_node_refs 用 node_id_map 映射回填
+    let mut old_parent_ids = std::collections::HashMap::new();
+    let mut old_section_ids = std::collections::HashMap::new();
     for node in &nodes {
         let old_node_id = node.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         let old_doc_id = node
@@ -507,20 +703,20 @@ fn import_nodes(
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
         let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
+        // FIX9-14: 第一阶段插入时 parent_id 和 section_id 设为 NULL，
+        // 后续由 backfill_node_refs 用 old→new id 映射回填
         conn.execute(
             "INSERT INTO kb_document_nodes (library_id, document_id, content, content_tokens, \
              level, parent_id, chunk_order, section_id, title_path, page_number, \
              source_start, source_end, node_metadata, embedding_text) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+             VALUES (?1,?2,?3,?4,?5,NULL,?7,NULL,?9,?10,?11,?12,?13,?14)",
             params![
                 new_lib_id,
                 new_doc_id,
                 json_str(node, "content"),
                 json_str(node, "content_tokens"),
                 json_int(node, "level"),
-                json_null_or_int(node, "parent_id"),
                 json_int(node, "chunk_order"),
-                json_null_or_int(node, "section_id"),
                 json_str(node, "title_path"),
                 json_null_or_int(node, "page_number"),
                 json_null_or_int(node, "source_start"),
@@ -529,16 +725,46 @@ fn import_nodes(
                 json_str(node, "embedding_text"),
             ],
         )?;
-        node_id_map.insert(old_node_id, conn.last_insert_rowid());
+        let new_id = conn.last_insert_rowid();
+        node_id_map.insert(old_node_id, new_id);
+        // 记录旧的 parent_id 和 section_id
+        if let Some(old_pid) = json_null_or_int(node, "parent_id") {
+            old_parent_ids.insert(new_id, old_pid);
+        }
+        if let Some(old_sid) = json_null_or_int(node, "section_id") {
+            old_section_ids.insert(new_id, old_sid);
+        }
     }
-    Ok(node_id_map)
+    Ok((node_id_map, old_parent_ids, old_section_ids))
 }
 
-/// 回填节点引用（已内联到 import_nodes 中，保留空函数以兼容调用点）
+/// FIX9-14: 回填节点的 parent_id 和 section_id。
+/// import_nodes 第一阶段插入时 parent_id 和 section_id 设为 NULL，
+/// 此函数用 old→new node_id 映射回填正确的新值。
 fn backfill_node_refs(
-    _conn: &Connection,
-    _node_id_map: &std::collections::HashMap<i64, i64>,
+    conn: &Connection,
+    node_id_map: &std::collections::HashMap<i64, i64>,
+    old_parent_ids: &std::collections::HashMap<i64, i64>,
+    old_section_ids: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
+    // 回填 parent_id：用 node_id_map 将旧 parent_id 映射为新 parent_id
+    for (&new_node_id, &old_parent_id) in old_parent_ids {
+        if let Some(&new_parent_id) = node_id_map.get(&old_parent_id) {
+            conn.execute(
+                "UPDATE kb_document_nodes SET parent_id = ?1 WHERE id = ?2",
+                params![new_parent_id, new_node_id],
+            )?;
+        }
+    }
+    // 回填 section_id：用 node_id_map 将旧 section_id 映射为新 section_id
+    for (&new_node_id, &old_section_id) in old_section_ids {
+        if let Some(&new_section_id) = node_id_map.get(&old_section_id) {
+            conn.execute(
+                "UPDATE kb_document_nodes SET section_id = ?1 WHERE id = ?2",
+                params![new_section_id, new_node_id],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -702,6 +928,244 @@ fn import_summaries(
                 json_str(summary, "summary_text"),
                 json_str(summary, "summary_tokens"),
                 json_str(summary, "model"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+// FIX9-15: 导入遗漏的关键表
+
+/// 导入 kb_tables，返回 old→new table_id 映射
+fn import_tables(
+    conn: &Connection,
+    archive_dir: &Path,
+    _new_lib_id: i64,
+    doc_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<std::collections::HashMap<i64, i64>> {
+    let path = archive_dir.join("tables.json");
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| GBrainError::FileError(format!("cannot read tables.json: {}", e)))?;
+    let tables: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
+        .map_err(|e| GBrainError::FileError(format!("cannot parse tables.json: {}", e)))?;
+
+    let mut id_map = std::collections::HashMap::new();
+    for table in &tables {
+        let old_id = table.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let old_doc_id = table
+            .get("document_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
+        conn.execute(
+            "INSERT INTO kb_tables (document_id, sheet_name, headers, column_count, row_count) \
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                new_doc_id,
+                json_str(table, "sheet_name"),
+                json_str(table, "headers"),
+                json_int(table, "column_count"),
+                json_int(table, "row_count"),
+            ],
+        )?;
+        id_map.insert(old_id, conn.last_insert_rowid());
+    }
+    Ok(id_map)
+}
+
+/// 导入 kb_table_rows，重映射 table_id
+fn import_table_rows(
+    conn: &Connection,
+    archive_dir: &Path,
+    table_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<()> {
+    let path = archive_dir.join("table_rows.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| GBrainError::FileError(format!("cannot read table_rows.json: {}", e)))?;
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
+        .map_err(|e| GBrainError::FileError(format!("cannot parse table_rows.json: {}", e)))?;
+
+    for row in &rows {
+        let old_table_id = row.get("table_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let new_table_id = table_id_map.get(&old_table_id).copied().unwrap_or(0);
+        conn.execute(
+            "INSERT INTO kb_table_rows (table_id, row_index, row_text, row_tokens, row_json) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                new_table_id,
+                json_int(row, "row_index"),
+                json_str(row, "row_text"),
+                json_str(row, "row_tokens"),
+                json_str(row, "row_json"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// 导入 kb_document_sections，返回 old→new section_id 映射
+fn import_sections(
+    conn: &Connection,
+    archive_dir: &Path,
+    _new_lib_id: i64,
+    doc_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<std::collections::HashMap<i64, i64>> {
+    let path = archive_dir.join("sections.json");
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| GBrainError::FileError(format!("cannot read sections.json: {}", e)))?;
+    let sections: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
+        .map_err(|e| GBrainError::FileError(format!("cannot parse sections.json: {}", e)))?;
+
+    // 两阶段导入：先插入（parent_section_id=NULL），再回填
+    let mut id_map = std::collections::HashMap::new();
+    for section in &sections {
+        let old_id = section.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let old_doc_id = section
+            .get("document_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let new_doc_id = doc_id_map.get(&old_doc_id).copied().unwrap_or(0);
+        conn.execute(
+            "INSERT INTO kb_document_sections \
+             (document_id, parent_section_id, title, title_path, heading_level, \
+              section_order, page_number, source_start, source_end, content_summary) \
+             VALUES (?1,NULL,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                new_doc_id,
+                json_str(section, "title"),
+                json_str(section, "title_path"),
+                json_int(section, "heading_level"),
+                json_int(section, "section_order"),
+                json_null_or_int(section, "page_number"),
+                json_null_or_int(section, "source_start"),
+                json_null_or_int(section, "source_end"),
+                json_str(section, "content_summary"),
+            ],
+        )?;
+        id_map.insert(old_id, conn.last_insert_rowid());
+    }
+
+    // 回填 parent_section_id
+    for section in &sections {
+        let old_id = section.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Some(&new_id) = id_map.get(&old_id) {
+            if let Some(old_parent) = json_null_or_int(section, "parent_section_id") {
+                if let Some(&new_parent) = id_map.get(&old_parent) {
+                    conn.execute(
+                        "UPDATE kb_document_sections SET parent_section_id = ?1 WHERE id = ?2",
+                        params![new_parent, new_id],
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(id_map)
+}
+
+/// 用 section_id_map 回填节点的 section_id
+fn backfill_section_refs(
+    conn: &Connection,
+    node_id_map: &std::collections::HashMap<i64, i64>,
+    section_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<()> {
+    for (&_old_node_id, &new_node_id) in node_id_map {
+        let old_section_id: Option<i64> = conn
+            .query_row(
+                "SELECT section_id FROM kb_document_nodes WHERE id = ?1",
+                params![new_node_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        if let Some(old_sid) = old_section_id {
+            if let Some(&new_sid) = section_id_map.get(&old_sid) {
+                conn.execute(
+                    "UPDATE kb_document_nodes SET section_id = ?1 WHERE id = ?2",
+                    params![new_sid, new_node_id],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 导入 kb_sources（已有 sources.json），返回 old→new source_id 映射
+fn import_sources(
+    conn: &Connection,
+    archive_dir: &Path,
+    new_lib_id: i64,
+) -> Result<std::collections::HashMap<i64, i64>> {
+    let path = archive_dir.join("sources.json");
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| GBrainError::FileError(format!("cannot read sources.json: {}", e)))?;
+    let sources: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
+        .map_err(|e| GBrainError::FileError(format!("cannot parse sources.json: {}", e)))?;
+
+    let mut id_map = std::collections::HashMap::new();
+    for source in &sources {
+        let old_id = source.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+        conn.execute(
+            "INSERT INTO kb_sources (library_id, source_type, source_uri, display_name, \
+             delete_policy, sync_status, last_synced_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                new_lib_id,
+                json_str(source, "source_type"),
+                json_str(source, "source_uri"),
+                json_str(source, "display_name"),
+                json_str(source, "delete_policy"),
+                json_str(source, "sync_status"),
+                json_str(source, "last_synced_at"),
+            ],
+        )?;
+        id_map.insert(old_id, conn.last_insert_rowid());
+    }
+    Ok(id_map)
+}
+
+/// 导入 kb_source_items，重映射 source_id
+fn import_source_items(
+    conn: &Connection,
+    archive_dir: &Path,
+    source_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<()> {
+    let path = archive_dir.join("source_items.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| GBrainError::FileError(format!("cannot read source_items.json: {}", e)))?;
+    let items: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(&data)
+        .map_err(|e| GBrainError::FileError(format!("cannot parse source_items.json: {}", e)))?;
+
+    for item in &items {
+        let old_source_id = item.get("source_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let new_source_id = source_id_map.get(&old_source_id).copied().unwrap_or(0);
+        conn.execute(
+            "INSERT INTO kb_source_items (source_id, relative_path, file_name, file_size, content_hash, \
+             sync_status, last_synced_at, item_metadata) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            params![
+                new_source_id,
+                json_str(item, "relative_path"),
+                json_str(item, "file_name"),
+                json_int(item, "file_size"),
+                json_str(item, "content_hash"),
+                json_str(item, "sync_status"),
+                json_str(item, "last_synced_at"),
+                json_str(item, "item_metadata"),
             ],
         )?;
     }

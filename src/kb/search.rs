@@ -490,7 +490,19 @@ pub fn kb_search(
     }
 
     // P4-020: search logging (异步，不阻塞返回)
-    let result_doc_ids: Vec<i64> = results.iter().map(|r| r.document_id).collect();
+    // FIX9-21: 写日志前按结果顺序去重 document_id，保留首次出现顺序，
+    // 避免同一文档多个 node 命中导致重复 document_id 污染评测指标
+    let mut seen_doc_ids = std::collections::HashSet::new();
+    let result_doc_ids: Vec<i64> = results
+        .iter()
+        .filter_map(|r| {
+            if seen_doc_ids.insert(r.document_id) {
+                Some(r.document_id)
+            } else {
+                None
+            }
+        })
+        .collect();
     let _ = crate::kb::eval::log_search(
         conn,
         &query_normalized,

@@ -146,7 +146,31 @@ pub fn writeback_ocr_results(
         .split(&full_text)
         .map_err(|e| GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e)))?;
 
-    // 3. 为每个 chunk 找到对应的 block 元数据（page_number, source offsets）
+    // FIX9-05: 为每个 chunk 通过 span overlap 匹配对应的 block 元数据，
+    // 而非按 chunk 下标直接对应 page index。
+    // 当一个 OCR 页被切成多个 chunk，或多个短页合并成一个 chunk 时，
+    // 按 chunk 在全文中的真实位置与 block 的 source span 重叠度匹配。
+
+    // 计算每个 chunk 在全文中的真实位置（用 cursor 查找）
+    let mut chunk_spans: Vec<(usize, usize)> = Vec::with_capacity(chunks.len());
+    {
+        let mut cursor: usize = 0;
+        for chunk in &chunks {
+            if let Some(pos) = full_text[cursor..].find(chunk.as_str()) {
+                let start = cursor + pos;
+                let end = start + chunk.len();
+                chunk_spans.push((start, end));
+                cursor = start + 1; // 下次从匹配位置后开始查找
+            } else {
+                // 无法找到精确位置，用推算偏移
+                let start = cursor;
+                let end = cursor + chunk.len();
+                chunk_spans.push((start, end));
+                cursor = end;
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = blocks
         .iter()
@@ -165,8 +189,33 @@ pub fn writeback_ocr_results(
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
-            let (title_path, page_num, src_start, src_end) =
-                block_meta_vec.get(i).cloned().unwrap_or_default();
+            // FIX9-05: 用 span overlap 匹配最相关的 block，而非 block_meta_vec.get(i)
+            let (chunk_start, chunk_end) = chunk_spans[i];
+            let best_match = block_meta_vec
+                .iter()
+                .filter_map(|meta| {
+                    let (title_path, page_num, src_start, src_end) = meta;
+                    // 计算重叠长度
+                    let bs = src_start.unwrap_or(0) as usize;
+                    let be = src_end.unwrap_or(i32::MAX / 2) as usize;
+                    let overlap_start = chunk_start.max(bs);
+                    let overlap_end = chunk_end.min(be);
+                    let overlap = if overlap_end > overlap_start {
+                        overlap_end - overlap_start
+                    } else {
+                        0
+                    };
+                    if overlap > 0 {
+                        Some((overlap, title_path, page_num, src_start, src_end))
+                    } else {
+                        None
+                    }
+                })
+                .max_by_key(|(overlap, _, _, _, _)| *overlap);
+
+            let (title_path, page_num, src_start, src_end) = best_match
+                .map(|(_, tp, pn, ss, se)| (tp.clone(), *pn, *ss, *se))
+                .unwrap_or_default();
             let embedding_text =
                 context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {

@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -700,7 +700,7 @@ CREATE TABLE IF NOT EXISTS kb_documents (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
-    ON kb_documents(library_id, content_hash);
+    ON kb_documents(library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id ON kb_documents(library_id);
 CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id_id ON kb_documents(library_id, id);
 
@@ -1233,6 +1233,16 @@ ALTER TABLE kb_search_logs ADD COLUMN embedding_index_id INTEGER;
 ALTER TABLE kb_search_logs ADD COLUMN result_document_ids TEXT NOT NULL DEFAULT '[]';
 "#;
 
+/// V22: 将 idx_kb_docs_library_hash 从全量唯一索引改为部分唯一索引，
+/// 仅对未软删除且未清除的记录生效，允许相同内容在软删除/清除后重新上传
+pub const MIGRATION_V22_DDL: &str = r#"
+-- 删除旧的全量唯一索引
+DROP INDEX IF EXISTS idx_kb_docs_library_hash;
+-- 创建部分唯一索引：仅对未删除且未清除的记录强制唯一性
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
+    ON kb_documents(library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL;
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1256,5 +1266,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (19, MIGRATION_V19_DDL),
         (20, MIGRATION_V20_DDL),
         (21, MIGRATION_V21_DDL),
+        (22, MIGRATION_V22_DDL),
     ]
 }

@@ -512,7 +512,9 @@ pub async fn process_document_async(
     }
 
     // --- 阶段 3: 嵌入 ---
+    // FIX9-02: 区分 embedding_failed 和 embedding_skipped（因隐私策略跳过）
     let mut embedding_failed = false;
+    let mut embedding_skipped = false;
     if let Some(emb) = embedder.as_ref() {
         report_progress(
             on_progress,
@@ -531,6 +533,7 @@ pub async fn process_document_async(
 
         // P0-016: 检查库级隐私策略 — 禁止外部 embedding 时跳过
         if !library.external_embedding_allowed {
+            embedding_skipped = true;
             report_progress(
                 on_progress,
                 "embedding",
@@ -680,12 +683,15 @@ pub async fn process_document_async(
     );
     persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes)?;
 
+    // FIX9-06: embedding 跳过时写入 STATUS_SKIPPED，而非默认 STATUS_COMPLETED
     kb.update_document_stats(
         doc_id,
         word_total,
         split_total,
         if embedding_failed {
             Some(STATUS_FAILED)
+        } else if embedding_skipped {
+            Some(STATUS_SKIPPED)
         } else {
             None
         },

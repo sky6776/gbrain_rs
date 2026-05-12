@@ -1,4 +1,6 @@
 //! XLSX parser using calamine with structured sheet/row output (P2-012)
+//! FIX9-04: 为每个 sheet block 写入 source span
+//! FIX9-18: 表头行不写入数据行
 
 use super::{DocumentParser, ParsedDocument};
 use crate::error::GBrainError;
@@ -28,14 +30,22 @@ impl DocumentParser for XlsxParser {
         let sheets = workbook.sheet_names().to_vec();
         let mut parts = Vec::new();
         let mut blocks: Vec<crate::kb::types::ParsedBlock> = Vec::new();
+        // FIX9-04: 记录每个 sheet block 在全文中的起止偏移
+        let mut sheet_spans: Vec<(usize, usize)> = Vec::new();
+        let mut global_offset: usize = 0;
 
         for sheet_name in &sheets {
             let sheet_header = format!("=== {} ===", sheet_name);
+            // FIX9-04: 记录此 sheet 在全文中的起始偏移
+            let start = global_offset;
             parts.push(sheet_header.clone());
+            global_offset += sheet_header.len() + 1; // 加 "\n" 分隔符
 
             let mut headers: Vec<String> = Vec::new();
+            // FIX9-18: 分离表头行和数据行，表头不写入 row_data
             let mut row_data: Vec<serde_json::Value> = Vec::new();
             let mut row_count: usize = 0;
+            let mut is_header_row = true;
 
             if let Ok(range) = workbook.worksheet_range(sheet_name) {
                 for row in range.rows() {
@@ -51,9 +61,11 @@ impl DocumentParser for XlsxParser {
                         })
                         .collect();
 
-                    // 第一行作为表头（仅在 headers 为空时）
-                    if headers.is_empty() && !cells.is_empty() && row_count == 0 {
+                    // FIX9-18: 第一行作为表头，不写入 row_data
+                    if is_header_row && !cells.is_empty() {
                         headers = cells.clone();
+                        is_header_row = false;
+                        continue; // 表头行不参与数据行计数
                     }
 
                     // 存储为 JSON object 而非 JSON string
@@ -68,22 +80,30 @@ impl DocumentParser for XlsxParser {
                     row_data.push(row_obj);
                     parts.push(cells.join("\t"));
                     row_count += 1;
+                    global_offset += cells.join("\t").len() + 1;
                 }
             }
 
+            // FIX9-04: 记录此 sheet 在全文中的结束偏移
+            let end = global_offset;
+            sheet_spans.push((start, end));
+
             // 每个 sheet 一个 ParsedBlock，metadata 包含完整 sheet 数据
+            // FIX9-18: row_count 已不含表头行，不再需要 saturating_sub(1)
             let sheet_meta = serde_json::json!({
                 "name": sheet_name,
                 "headers": headers,
-                "row_count": row_count.saturating_sub(1) as i32,
+                "row_count": row_count as i32,
                 "rows": row_data,
             });
+            // FIX9-04: 写入真实的 source span
+            let (s_start, s_end) = sheet_spans.last().copied().unwrap_or((0, 0));
             blocks.push(crate::kb::types::ParsedBlock {
                 text: parts[parts.len() - row_count - 1..].join("\n"),
                 title_path: sheet_name.clone(),
                 page_number: None,
-                source_start: None,
-                source_end: None,
+                source_start: Some(s_start as i32),
+                source_end: Some(s_end as i32),
                 block_type: "table".to_string(),
                 metadata: serde_json::to_string(&sheet_meta).unwrap_or_default(),
             });

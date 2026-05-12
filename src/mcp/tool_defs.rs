@@ -27,7 +27,7 @@ impl From<&OperationDef> for ToolDef {
 }
 
 /// All operation definitions — single source of truth for the brain API surface
-static OPERATION_DEFS: &[OperationDef] = &[
+pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
     OperationDef {
         name: "query",
         description: "Hybrid search with vector + keyword + multi-query expansion",
@@ -486,6 +486,8 @@ static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "include_highlights", description: "Return highlight character ranges", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "group_by_document", description: "Group results by document", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "folder_id", description: "Filter to folder", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            // FIX9-03: 允许调用方指定 embedding 维度，覆盖全局配置
+            ParamDef { name: "embedding_dimensions", description: "Override embedding dimensions for query vector", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {

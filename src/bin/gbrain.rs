@@ -1614,6 +1614,15 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             let output_dir = std::path::Path::new(&output);
             let db_path = config.db_path();
             let dest = gbrain_core::kb::backup::backup_database(&db_path, output_dir)?;
+            // FIX9-10: 同时备份 storage 目录
+            let storage_dir = config
+                .kb_storage_dir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| gbrain_core::config::Config::base_dir().join("kb_files"));
+            if storage_dir.exists() {
+                gbrain_core::kb::backup::backup_storage(&storage_dir, output_dir)?;
+            }
             println!("Backup complete: {}", dest.display());
             return Ok(());
         }
@@ -1621,6 +1630,15 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             let input_dir = std::path::Path::new(&input);
             let db_path = config.db_path();
             gbrain_core::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
+            // FIX9-10: 同时恢复 storage 目录
+            let storage_dir = config
+                .kb_storage_dir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| gbrain_core::config::Config::base_dir().join("kb_files"));
+            if input_dir.join("storage").exists() {
+                gbrain_core::kb::backup::restore_storage(input_dir, &storage_dir)?;
+            }
             println!("Restore complete");
             return Ok(());
         }
@@ -1648,16 +1666,59 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                 &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"],
             )?;
             let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+            let conn = engine.connection()?;
             let mut inserted = 0u32;
             for file in &files {
                 let hash = gbrain_core::kb::sync::compute_file_hash(file)?;
                 let file_size = std::fs::metadata(file).map(|m| m.len() as i64).unwrap_or(0);
                 let item_path = file.to_string_lossy().to_string();
                 kb.insert_source_item(source_id, &item_path, &hash, file_size, &now)?;
+                // FIX9-17: 自动创建 document 并入队处理，否则添加 source 后不会得到可搜索文档
+                let ext = file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let doc = gbrain_core::kb::types::Document {
+                    library_id,
+                    original_name: file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    content_hash: hash.to_string(),
+                    file_size,
+                    extension: ext.clone(),
+                    source_type: "source_sync".to_string(),
+                    storage_path: item_path.clone(),
+                    original_path: item_path.clone(),
+                    ..Default::default()
+                };
+                let doc_id = kb.create_document(&doc)?;
+                kb.update_source_item(
+                    source_id,
+                    &item_path,
+                    None,
+                    Some("synced"),
+                    None,
+                    Some(doc_id),
+                    Some(&now),
+                )?;
+                gbrain_core::kb::jobs::enqueue_kb_process_job(
+                    conn,
+                    &gbrain_core::kb::jobs::KbProcessPayload {
+                        kind: "kb_process_document".to_string(),
+                        document_id: doc_id,
+                        library_id,
+                        processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                        storage_path: item_path.clone(),
+                        extension: ext,
+                    },
+                )?;
                 inserted += 1;
             }
             println!(
-                "Source added: id={}, {} files registered for library {}",
+                "Source added: id={}, {} files registered and queued for library {}",
                 source_id, inserted, library_id
             );
             return Ok(());
@@ -1731,6 +1792,18 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                             Some(doc_id),
                             Some(&now),
                         )?;
+                        // FIX9-16: 新文档入队处理，否则不会解析/分块/建索引
+                        gbrain_core::kb::jobs::enqueue_kb_process_job(
+                            conn,
+                            &gbrain_core::kb::jobs::KbProcessPayload {
+                                kind: "kb_process_document".to_string(),
+                                document_id: doc_id,
+                                library_id,
+                                processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                                storage_path: item_path.clone(),
+                                extension: ext,
+                            },
+                        )?;
                     }
                     gbrain_core::kb::sync::SyncAction::Changed => {
                         if let Some(hash) = new_hash {
@@ -1743,6 +1816,34 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                                 None,
                                 Some(&now),
                             )?;
+                            // FIX9-16: 变更文档入队重新处理
+                            // 查找此 source item 关联的 document_id
+                            let doc_id_result: Option<i64> = conn
+                                .query_row(
+                                    "SELECT document_id FROM kb_source_items \
+                                     WHERE source_id = ?1 AND item_path = ?2 AND document_id IS NOT NULL",
+                                    rusqlite::params![source_id, &item_path],
+                                    |row| row.get(0),
+                                )
+                                .ok()
+                                .flatten();
+                            if let Some(doc_id) = doc_id_result {
+                                gbrain_core::kb::jobs::enqueue_kb_process_job(
+                                    conn,
+                                    &gbrain_core::kb::jobs::KbProcessPayload {
+                                        kind: "kb_process_document".to_string(),
+                                        document_id: doc_id,
+                                        library_id,
+                                        processing_run_id: gbrain_core::kb::jobs::new_run_id(),
+                                        storage_path: item_path.clone(),
+                                        extension: file_path
+                                            .extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("")
+                                            .to_lowercase(),
+                                    },
+                                )?;
+                            }
                         }
                     }
                     gbrain_core::kb::sync::SyncAction::Missing => {
@@ -1791,7 +1892,19 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbExportLibrary { library_id, output } => {
             let conn = engine.connection()?;
             let output_dir = std::path::Path::new(&output);
-            let manifest = gbrain_core::kb::backup::export_library(conn, library_id, output_dir)?;
+            // FIX9-13: 传入 storage_dir 以复制源文件
+            let storage_dir = config
+                .kb_storage_dir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| gbrain_core::config::Config::base_dir().join("kb_files"));
+            let storage_ref: Option<&std::path::Path> = if storage_dir.exists() {
+                Some(&storage_dir)
+            } else {
+                None
+            };
+            let manifest =
+                gbrain_core::kb::backup::export_library(conn, library_id, output_dir, storage_ref)?;
             println!(
                 "Exported library '{}' ({} docs, {} nodes) to {}",
                 manifest.source_library_name, manifest.document_count, manifest.node_count, output
@@ -1802,8 +1915,23 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbImportLibrary { archive, new_name } => {
             let conn = engine.connection()?;
             let archive_dir = std::path::Path::new(&archive);
-            let new_lib_id =
-                gbrain_core::kb::backup::import_library(conn, archive_dir, new_name.as_deref())?;
+            // FIX9-13: 传入 target_storage_dir 以重写 storage_path
+            let storage_dir = config
+                .kb_storage_dir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| gbrain_core::config::Config::base_dir().join("kb_files"));
+            let storage_ref: Option<&std::path::Path> = if storage_dir.exists() {
+                Some(&storage_dir)
+            } else {
+                None
+            };
+            let new_lib_id = gbrain_core::kb::backup::import_library(
+                conn,
+                archive_dir,
+                new_name.as_deref(),
+                storage_ref,
+            )?;
             println!("Imported library, new library_id={}", new_lib_id);
             return Ok(());
         }
