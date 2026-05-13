@@ -378,7 +378,7 @@ pub struct RaptorNode {
 
 // --- Search model ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct KbSearchInput {
     pub library_ids: Vec<i64>,
     pub query: String,
@@ -396,7 +396,8 @@ pub struct KbSearchInput {
     pub folder_id: Option<i64>,
     // P5-011: filter by specific embedding index
     pub embedding_index_id: Option<i64>,
-    // P4-003~005: 模型 rerank 所需的外部 API 凭证
+    // FIX11-07: API key 不应序列化到 JSON 日志/响应中，防止泄露
+    #[serde(skip_serializing)]
     pub rerank_api_key: Option<String>,
     pub rerank_base_url: Option<String>,
 }

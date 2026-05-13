@@ -187,11 +187,10 @@ pub fn purge_document(kb: &KbEngine, document_id: i64) -> Result<()> {
             rows.filter_map(|r| r.ok()).collect()
         };
 
-        for node_id in &node_ids {
-            conn.execute(
-                "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
-                params![node_id],
-            )?;
+        // FIX12-04: 复用 engine 的 cleanup_node_vectors，统一清理 vec_kb_nodes、
+        // per-index vec_kb_{id} 虚表及 kb_node_embeddings，避免 purge 后向量行残留。
+        for &node_id in &node_ids {
+            crate::kb::engine::cleanup_node_vectors(conn, node_id);
         }
         conn.execute(
             "DELETE FROM kb_document_nodes WHERE document_id = ?1",

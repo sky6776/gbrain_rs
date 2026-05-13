@@ -1391,13 +1391,15 @@ fn vector_search_fallback(
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     candidates.truncate(top_k);
 
+    // FIX11-06: 保留实际 cosine similarity 分数，而非丢弃为 0.0
+    // 丢弃分数导致 RRF merge 和 rerank 无法区分向量检索结果的质量
     Ok(candidates
         .iter()
         .enumerate()
-        .map(|(i, (node_id, _))| RankedResult {
+        .map(|(i, (node_id, sim))| RankedResult {
             node_id: *node_id,
             rank: i + 1,
-            score: 0.0,
+            score: *sim,
         })
         .collect())
 }

@@ -21,14 +21,25 @@ impl TokenBudget {
     }
 
     /// 尝试消费 tokens，返回是否允许
+    /// FIX11-08: 使用 compare_exchange 循环替代 load+check+fetch_add，
+    /// 避免两个线程同时通过检查后都消费导致预算超支（TOCTOU 竞态）
     pub fn try_consume(&self, tokens: u64) -> bool {
         self.check_reset();
-        let used = self.used_today.load(Ordering::Relaxed);
-        if used + tokens > self.daily_limit {
-            false
-        } else {
-            self.used_today.fetch_add(tokens, Ordering::Relaxed);
-            true
+        let mut current = self.used_today.load(Ordering::Acquire);
+        loop {
+            if current + tokens > self.daily_limit {
+                return false;
+            }
+            let new_val = current + tokens;
+            match self.used_today.compare_exchange(
+                current,
+                new_val,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual, // 其他线程已修改，重试
+            }
         }
     }
 

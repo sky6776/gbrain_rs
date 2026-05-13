@@ -61,6 +61,49 @@ fn row_to_document(row: &Row) -> std::result::Result<Document, rusqlite::Error> 
     })
 }
 
+/// FIX11-02: 清理节点的向量数据（包括 per-index vec 表）
+/// delete_library/delete_document/delete_document_nodes/purge_document 均需调用此函数，
+/// 否则 vec_kb_nodes 和 vec_kb_{index_id} 虚表中的向量数据会残留，随时间累积影响搜索结果和磁盘空间。
+pub(crate) fn cleanup_node_vectors(conn: &Connection, node_id: i64) {
+    // 清理 per-index vec 表（通过 kb_node_embeddings 反查 index_id）
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT DISTINCT embedding_index_id FROM kb_node_embeddings WHERE node_id = ?1")
+    {
+        let index_ids: Vec<i64> = stmt
+            .query_map(rusqlite::params![node_id], |row| row.get(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+        for idx_id in index_ids {
+            let vec_table = crate::kb::embedding_index::vec_table_name_for_index(idx_id);
+            // FIX11-03: 验证表名格式防止 SQL 注入 — 表名必须匹配 vec_kb_{数字} 模式
+            if vec_table.starts_with("vec_kb_")
+                && vec_table[7..].chars().all(|c| c.is_ascii_digit())
+            {
+                if let Err(e) = conn.execute(
+                    &format!("DELETE FROM {} WHERE node_id = ?1", vec_table),
+                    rusqlite::params![node_id],
+                ) {
+                    tracing::warn!("删除 {} node_id={} 失败: {}", vec_table, node_id, e);
+                }
+            }
+        }
+    }
+    // 清理 legacy vec 表
+    if let Err(e) = conn.execute(
+        "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
+        params![node_id],
+    ) {
+        tracing::warn!("删除 vec_kb_nodes node_id={} 失败: {}", node_id, e);
+    }
+    // 清理 kb_node_embeddings
+    if let Err(e) = conn.execute(
+        "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
+        params![node_id],
+    ) {
+        tracing::warn!("删除 kb_node_embeddings node_id={} 失败: {}", node_id, e);
+    }
+}
+
 pub struct KbEngine<'a> {
     conn: &'a Connection,
 }
@@ -404,7 +447,7 @@ impl<'a> KbEngine<'a> {
 
     pub fn delete_library(&self, id: i64) -> Result<()> {
         self.transaction(|conn| {
-            // Get node IDs for vector cleanup
+            // FIX11-02: 获取节点 ID 用于向量清理（包括 per-index vec 表）
             let node_ids: Vec<i64> = {
                 let mut stmt =
                     conn.prepare("SELECT id FROM kb_document_nodes WHERE library_id = ?1")?;
@@ -412,21 +455,28 @@ impl<'a> KbEngine<'a> {
                 rows.filter_map(|r| r.ok()).collect()
             };
 
-            // Delete vectors for specific node IDs (no FK cascade on vec_kb_nodes)
-            if !node_ids.is_empty() {
-                for &node_id in &node_ids {
-                    let _ = conn.execute(
-                        "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
-                        params![node_id],
-                    );
-                    let _ = conn.execute(
-                        "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
-                        params![node_id],
-                    );
+            // FIX12-01: 先清理节点向量数据（DELETE 行），再 drop 整个 vec 虚表。
+            // 如果先 drop 再 cleanup，cleanup 会尝试 DELETE FROM 已 drop 的表，产生 "no such table" warn。
+            for &node_id in &node_ids {
+                cleanup_node_vectors(conn, node_id);
+            }
+
+            // 收集该 library 的 embedding index ids 并 drop 对应的 vec 虚表。
+            // FK cascade 删除 kb_embedding_indexes 后就失去 index_id 信息，
+            // vec_kb_{index_id} 虚表会成为孤立表，所以必须在 cascade 前先 drop。
+            let index_ids: Vec<i64> = {
+                let mut stmt =
+                    conn.prepare("SELECT id FROM kb_embedding_indexes WHERE library_id = ?1")?;
+                let rows = stmt.query_map([id], |row| row.get(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            for &idx_id in &index_ids {
+                if let Err(e) = crate::kb::embedding_index::drop_vec_table_for_index(conn, idx_id) {
+                    tracing::warn!("drop vec_kb_{} 虚表失败: {}", idx_id, e);
                 }
             }
 
-            // Delete library (CASCADE handles folders, documents, document_nodes)
+            // Delete library (CASCADE handles folders, documents, document_nodes, embedding_indexes)
             conn.execute("DELETE FROM kb_libraries WHERE id = ?1", [id])?;
             Ok(())
         })
@@ -759,7 +809,7 @@ impl<'a> KbEngine<'a> {
         let source_type = doc.source_type;
 
         self.transaction(|conn| {
-            // Get node IDs for vector cleanup
+            // FIX11-02: 获取节点 ID 用于向量清理（包括 per-index vec 表）
             let node_ids: Vec<i64> = {
                 let mut stmt =
                     conn.prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")?;
@@ -767,18 +817,9 @@ impl<'a> KbEngine<'a> {
                 rows.filter_map(|r| r.ok()).collect()
             };
 
-            // Delete vectors for specific node IDs (no FK cascade on vec_kb_nodes)
-            if !node_ids.is_empty() {
-                for &node_id in &node_ids {
-                    let _ = conn.execute(
-                        "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
-                        params![node_id],
-                    );
-                    let _ = conn.execute(
-                        "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
-                        params![node_id],
-                    );
-                }
+            // 清理所有节点的向量数据（vec_kb_nodes + per-index vec 表 + kb_node_embeddings）
+            for &node_id in &node_ids {
+                cleanup_node_vectors(conn, node_id);
             }
 
             // Delete document (CASCADE handles document_nodes)
@@ -840,7 +881,7 @@ impl<'a> KbEngine<'a> {
 
     pub fn delete_document_nodes(&self, document_id: i64) -> Result<()> {
         self.transaction(|conn| {
-            // Get node IDs for vector cleanup (no FK cascade on vec_kb_nodes)
+            // FIX11-02: 获取节点 ID 用于向量清理（包括 per-index vec 表）
             let node_ids: Vec<i64> = {
                 let mut stmt =
                     conn.prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")?;
@@ -848,19 +889,12 @@ impl<'a> KbEngine<'a> {
                 rows.filter_map(|r| r.ok()).collect()
             };
 
-            // Delete vectors first (no FK cascade on vec_kb_nodes / kb_node_embeddings)
+            // 清理所有节点的向量数据（vec_kb_nodes + per-index vec 表 + kb_node_embeddings）
             for &node_id in &node_ids {
-                let _ = conn.execute(
-                    "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
-                    params![node_id],
-                );
-                let _ = conn.execute(
-                    "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
-                    params![node_id],
-                );
+                cleanup_node_vectors(conn, node_id);
             }
 
-            // Delete nodes (kb_doc_fts is auto-synced via triggers)
+            // Delete nodes
             conn.execute(
                 "DELETE FROM kb_document_nodes WHERE document_id = ?1",
                 [document_id],
@@ -904,6 +938,7 @@ impl<'a> KbEngine<'a> {
     }
 
     /// 转换文档处理状态，带状态机合法性检查和可选的 run_id 守卫
+    /// FIX11-01: 写操作必须用 transaction，不能用 query（query 是只读语义）
     pub fn transition_document_status(
         &self,
         id: i64,
@@ -911,7 +946,7 @@ impl<'a> KbEngine<'a> {
         run_id: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<()> {
-        self.query(|conn| {
+        self.transaction(|conn| {
             crate::kb::lifecycle::transition_document_status(
                 conn,
                 id,

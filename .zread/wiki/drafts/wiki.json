@@ -1,0 +1,260 @@
+{
+  "id": "2026-05-13-200127",
+  "generated_at": "2026-05-13T12:01:27.2965109Z",
+  "language": "zh",
+  "pages": [
+    {
+      "slug": "1-xiang-mu-gai-lan-ge-ren-zhi-shi-da-nao-yin-qing",
+      "title": "项目概览：个人知识大脑引擎",
+      "file": "1-xiang-mu-gai-lan-ge-ren-zhi-shi-da-nao-yin-qing.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "2-kuai-su-gou-jian-yu-an-zhuang",
+      "title": "快速构建与安装",
+      "file": "2-kuai-su-gou-jian-yu-an-zhuang.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "3-cli-ming-ling-su-cha-shou-ce",
+      "title": "CLI 命令速查手册",
+      "file": "3-cli-ming-ling-su-cha-shou-ce.md",
+      "section": "快速入门",
+      "level": "Beginner"
+    },
+    {
+      "slug": "4-zheng-ti-jia-gou-she-ji-brainengine-trait-yu-sqliteengine-shi-xian",
+      "title": "整体架构设计：BrainEngine trait 与 SqliteEngine 实现",
+      "file": "4-zheng-ti-jia-gou-she-ji-brainengine-trait-yu-sqliteengine-shi-xian.md",
+      "section": "深入解析",
+      "group": "核心架构与引擎",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "5-operations-ceng-tong-de-ye-wu-cao-zuo-qi-yue",
+      "title": "Operations 层：统一的业务操作契约",
+      "file": "5-operations-ceng-tong-de-ye-wu-cao-zuo-qi-yue.md",
+      "section": "深入解析",
+      "group": "核心架构与引擎",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "6-sqlite-cun-chu-yin-qing-schema-yan-jin-yu-qian-yi-ji-zhi",
+      "title": "SQLite 存储引擎：Schema 演进与迁移机制",
+      "file": "6-sqlite-cun-chu-yin-qing-schema-yan-jin-yu-qian-yi-ji-zhi.md",
+      "section": "深入解析",
+      "group": "核心架构与引擎",
+      "level": "Advanced"
+    },
+    {
+      "slug": "7-pei-zhi-ti-xi-duo-ji-huan-jing-bian-liang-yu-provider-mo-shi",
+      "title": "配置体系：多级环境变量与 Provider 模式",
+      "file": "7-pei-zhi-ti-xi-duo-ji-huan-jing-bian-liang-yu-provider-mo-shi.md",
+      "section": "深入解析",
+      "group": "核心架构与引擎",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "8-hun-he-sou-suo-guan-xian-bm25-xiang-liang-yu-xian-rrf-rong-he",
+      "title": "混合搜索管线：BM25 + 向量余弦 + RRF 融合",
+      "file": "8-hun-he-sou-suo-guan-xian-bm25-xiang-liang-yu-xian-rrf-rong-he.md",
+      "section": "深入解析",
+      "group": "搜索与检索",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "9-cha-xun-yi-tu-fen-lei-yu-xiang-qing-ji-bie-zi-dong-tui-duan",
+      "title": "查询意图分类与详情级别自动推断",
+      "file": "9-cha-xun-yi-tu-fen-lei-yu-xiang-qing-ji-bie-zi-dong-tui-duan.md",
+      "section": "深入解析",
+      "group": "搜索与检索",
+      "level": "Advanced"
+    },
+    {
+      "slug": "10-cathedral-ii-liang-jie-duan-dai-ma-tu-jian-suo",
+      "title": "Cathedral II 两阶段代码图检索",
+      "file": "10-cathedral-ii-liang-jie-duan-dai-ma-tu-jian-suo.md",
+      "section": "深入解析",
+      "group": "搜索与检索",
+      "level": "Advanced"
+    },
+    {
+      "slug": "11-mo-hu-sou-suo-san-yuan-zu-xiang-si-du-yu-slug-jie-xi",
+      "title": "模糊搜索：三元组相似度与 Slug 解析",
+      "file": "11-mo-hu-sou-suo-san-yuan-zu-xiang-si-du-yu-slug-jie-xi.md",
+      "section": "深入解析",
+      "group": "搜索与检索",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "12-cha-xun-kuo-zhan-yu-qu-zhong-ce-lue",
+      "title": "查询扩展与去重策略",
+      "file": "12-cha-xun-kuo-zhan-yu-qu-zhong-ce-lue.md",
+      "section": "深入解析",
+      "group": "搜索与检索",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "13-kb-zi-xi-tong-jia-gou-wu-jie-duan-yi-bu-wen-dang-chu-li-guan-xian",
+      "title": "KB 子系统架构：五阶段异步文档处理管线",
+      "file": "13-kb-zi-xi-tong-jia-gou-wu-jie-duan-yi-bu-wen-dang-chu-li-guan-xian.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "14-raptor-di-gui-zhai-yao-shu-kmeans-ju-lei-yu-llm-zhai-yao",
+      "title": "RAPTOR 递归摘要树：KMeans 聚类与 LLM 摘要",
+      "file": "14-raptor-di-gui-zhai-yao-shu-kmeans-ju-lei-yu-llm-zhai-yao.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Advanced"
+    },
+    {
+      "slug": "15-wen-dang-jie-xi-qi-zhu-ce-biao-duo-ge-shi-jie-xi-pdf-docx-xlsx-csv-html-markdown",
+      "title": "文档解析器注册表：多格式解析（PDF/DOCX/XLSX/CSV/HTML/Markdown）",
+      "file": "15-wen-dang-jie-xi-qi-zhu-ce-biao-duo-ge-shi-jie-xi-pdf-docx-xlsx-csv-html-markdown.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "16-wen-dang-fen-ge-ce-lue-markdown-biao-ti-di-gui-zi-fu-yu-yi-fen-ge",
+      "title": "文档分割策略：Markdown 标题 / 递归字符 / 语义分割",
+      "file": "16-wen-dang-fen-ge-ce-lue-markdown-biao-ti-di-gui-zi-fu-yu-yi-fen-ge.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "17-kb-hun-he-sou-suo-cha-xun-gui-hua-qi-duo-jian-suo-qi-rerank",
+      "title": "KB 混合搜索：查询规划器 + 多检索器 + Rerank",
+      "file": "17-kb-hun-he-sou-suo-cha-xun-gui-hua-qi-duo-jian-suo-qi-rerank.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Advanced"
+    },
+    {
+      "slug": "18-wen-dang-sheng-ming-zhou-qi-guan-li-zhuang-tai-ji-yu-ruan-shan-chu",
+      "title": "文档生命周期管理：状态机与软删除",
+      "file": "18-wen-dang-sheng-ming-zhou-qi-guan-li-zhuang-tai-ji-yu-ruan-shan-chu.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "19-embedding-duo-suo-yin-guan-li-yu-mo-xing-sheng-ji",
+      "title": "Embedding 多索引管理与模型升级",
+      "file": "19-embedding-duo-suo-yin-guan-li-yu-mo-xing-sheng-ji.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Advanced"
+    },
+    {
+      "slug": "20-shang-xia-wen-zeng-qiang-qian-ru-contextual-embedding-wen-ben-sheng-cheng",
+      "title": "上下文增强嵌入：Contextual Embedding 文本生成",
+      "file": "20-shang-xia-wen-zeng-qiang-qian-ru-contextual-embedding-wen-ben-sheng-cheng.md",
+      "section": "深入解析",
+      "group": "KB 子系统",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "21-zhong-wen-nlp-quan-lian-lu-jieba-fen-ci-pin-yin-fts5-cha-xun-zhong-gou",
+      "title": "中文 NLP 全链路：jieba 分词 + 拼音 + FTS5 查询重构",
+      "file": "21-zhong-wen-nlp-quan-lian-lu-jieba-fen-ci-pin-yin-fts5-cha-xun-zhong-gou.md",
+      "section": "深入解析",
+      "group": "中文 NLP",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "22-zhi-shi-tu-pu-wiki-lian-jie-ti-qu-yu-tu-bian-li",
+      "title": "知识图谱：Wiki 链接提取与图遍历",
+      "file": "22-zhi-shi-tu-pu-wiki-lian-jie-ti-qu-yu-tu-bian-li.md",
+      "section": "深入解析",
+      "group": "知识图谱与链接",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "23-shi-ti-feng-fu-hua-zi-dong-jian-ce-cun-gen-chuang-jian-yu-fen-ceng-sheng-ji",
+      "title": "实体丰富化：自动检测、存根创建与分层升级",
+      "file": "23-shi-ti-feng-fu-hua-zi-dong-jian-ce-cun-gen-chuang-jian-yu-fen-ceng-sheng-ji.md",
+      "section": "深入解析",
+      "group": "知识图谱与链接",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "24-dai-ma-suo-yin-duo-yu-yan-fu-hao-sheng-ming-jie-xi-yu-diao-yong-tu-gou-jian",
+      "title": "代码索引：多语言符号声明解析与调用图构建",
+      "file": "24-dai-ma-suo-yin-duo-yu-yan-fu-hao-sheng-ming-jie-xi-yu-diao-yong-tu-gou-jian.md",
+      "section": "深入解析",
+      "group": "代码索引",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "25-tree-sitter-ast-dai-ma-fen-kuai",
+      "title": "Tree-sitter AST 代码分块",
+      "file": "25-tree-sitter-ast-dai-ma-fen-kuai.md",
+      "section": "深入解析",
+      "group": "代码索引",
+      "level": "Advanced"
+    },
+    {
+      "slug": "26-mcp-fu-wu-qi-json-rpc-2-0-xie-yi-yu-51-ge-gong-ju-ding-yi",
+      "title": "MCP 服务器：JSON-RPC 2.0 协议与 51 个工具定义",
+      "file": "26-mcp-fu-wu-qi-json-rpc-2-0-xie-yi-yu-51-ge-gong-ju-ding-yi.md",
+      "section": "深入解析",
+      "group": "MCP 服务器",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "27-an-quan-fang-hu-lu-jing-bian-li-slug-yan-zheng-yu-sql-zhu-ru-fang-yu",
+      "title": "安全防护：路径遍历、Slug 验证与 SQL 注入防御",
+      "file": "27-an-quan-fang-hu-lu-jing-bian-li-slug-yan-zheng-yu-sql-zhu-ru-fang-yu.md",
+      "section": "深入解析",
+      "group": "安全与治理",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "28-yin-si-zhi-li-wai-bu-mo-xing-diao-yong-kong-zhi-yu-nei-rong-tuo-min",
+      "title": "隐私治理：外部模型调用控制与内容脱敏",
+      "file": "28-yin-si-zhi-li-wai-bu-mo-xing-diao-yong-kong-zhi-yu-nei-rong-tuo-min.md",
+      "section": "深入解析",
+      "group": "安全与治理",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "29-cheng-ben-yu-dui-lie-zhi-li-token-yu-suan-zhui-zong-yu-qps-xian-liu",
+      "title": "成本与队列治理：Token 预算追踪与 QPS 限流",
+      "file": "29-cheng-ben-yu-dui-lie-zhi-li-token-yu-suan-zhui-zong-yu-qps-xian-liu.md",
+      "section": "深入解析",
+      "group": "安全与治理",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "30-zi-dong-jia-shi-shou-hu-jin-cheng-zi-dong-qian-ru-yu-wan-zheng-xing-jian-cha",
+      "title": "自动驾驶守护进程：自动嵌入与完整性检查",
+      "file": "30-zi-dong-jia-shi-shou-hu-jin-cheng-zi-dong-qian-ru-yu-wan-zheng-xing-jian-cha.md",
+      "section": "深入解析",
+      "group": "运维与质量",
+      "level": "Intermediate"
+    },
+    {
+      "slug": "31-zhi-liang-jian-cha-ling-llm-lint-gui-ze-yu-shu-chu-yan-zheng-qi",
+      "title": "质量检查：零 LLM Lint 规则与输出验证器",
+      "file": "31-zhi-liang-jian-cha-ling-llm-lint-gui-ze-yu-shu-chu-yan-zheng-qi.md",
+      "section": "深入解析",
+      "group": "运维与质量",
+      "level": "Beginner"
+    },
+    {
+      "slug": "32-ban-ben-guan-li-yu-ruan-shan-chu-sheng-ming-zhou-qi",
+      "title": "版本管理与软删除生命周期",
+      "file": "32-ban-ben-guan-li-yu-ruan-shan-chu-sheng-ming-zhou-qi.md",
+      "section": "深入解析",
+      "group": "运维与质量",
+      "level": "Intermediate"
+    }
+  ]
+}

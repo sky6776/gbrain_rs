@@ -429,7 +429,8 @@ pub async fn process_document_async(
         doc_meta.language.as_deref().unwrap_or("zh"),
     );
     // 落库元数据
-    let _ = kb.update_document_metadata(
+    // FIX11-04: 元数据更新失败不应静默吞下，至少记录警告
+    if let Err(e) = kb.update_document_metadata(
         doc_id,
         doc_meta.title.as_deref().unwrap_or(""),
         doc_meta.author.as_deref().unwrap_or(""),
@@ -438,7 +439,9 @@ pub async fn process_document_async(
         doc_meta.source_uri.as_deref().unwrap_or(""),
         doc_meta.document_date.as_deref(),
         doc_meta.modified_at.as_deref(),
-    );
+    ) {
+        tracing::warn!("文档 {} 元数据更新失败: {}", doc_id, e);
+    }
 
     // P1-014: 文档粒度分类（解析完成后立即判定）
     let char_count = parsed.content.chars().count();
@@ -606,28 +609,46 @@ pub async fn process_document_async(
                                 .get("row_count")
                                 .and_then(|v| v.as_i64())
                                 .unwrap_or(0) as i32;
-                            if let Ok(table_id) = crate::kb::table_index::insert_table(
+                            match crate::kb::table_index::insert_table(
                                 conn, doc_id, name, &headers, row_count,
                             ) {
-                                if let Some(rows) =
-                                    sheet_data.get("rows").and_then(|v| v.as_array())
-                                {
-                                    for (ri, row) in rows.iter().enumerate() {
-                                        let row_text = headers
-                                            .iter()
-                                            .filter_map(|h| {
-                                                row.get(h)
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| format!("{}: {}", h, s))
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(" ");
-                                        let row_json =
-                                            serde_json::to_string(row).unwrap_or_default();
-                                        let _ = crate::kb::table_index::insert_table_row(
-                                            conn, table_id, ri as i32, &row_text, &row_json,
-                                        );
+                                Ok(table_id) => {
+                                    if let Some(rows) =
+                                        sheet_data.get("rows").and_then(|v| v.as_array())
+                                    {
+                                        for (ri, row) in rows.iter().enumerate() {
+                                            let row_text = headers
+                                                .iter()
+                                                .filter_map(|h| {
+                                                    row.get(h)
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| format!("{}: {}", h, s))
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join(" ");
+                                            let row_json =
+                                                serde_json::to_string(row).unwrap_or_default();
+                                            // FIX11-05: 表格行插入失败不应静默吞下
+                                            if let Err(e) = crate::kb::table_index::insert_table_row(
+                                                conn, table_id, ri as i32, &row_text, &row_json,
+                                            ) {
+                                                tracing::warn!(
+                                                    "表格行插入失败 table_id={} row={}: {}",
+                                                    table_id,
+                                                    ri,
+                                                    e
+                                                );
+                                            }
+                                        }
                                     }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "表格元数据创建失败 doc_id={} table_name={}: {}",
+                                        doc_id,
+                                        name,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1055,32 +1076,10 @@ fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> 
             rows.filter_map(|r| r.ok()).collect()
         };
 
+        // FIX12-03: 复用 engine 的 cleanup_node_vectors，统一清理 vec 表 + kb_node_embeddings，
+        // 之前的内联逻辑用 let _ 吞掉所有删除失败，文档重处理时可能留下孤立向量数据
         for &node_id in &node_ids {
-            // 清理所有 index 的 vec 表（用 LIKE 匹配）
-            let _ = conn.execute(
-                "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
-                rusqlite::params![node_id],
-            );
-            // 清理 per-index vec 表（通过 kb_node_embeddings 反查 index_id）
-            if let Ok(mut stmt) = conn.prepare(
-                "SELECT DISTINCT embedding_index_id FROM kb_node_embeddings WHERE node_id = ?1",
-            ) {
-                let index_ids: Vec<i64> = stmt
-                    .query_map(rusqlite::params![node_id], |row| row.get(0))
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default();
-                for idx_id in index_ids {
-                    let vec_table = crate::kb::embedding_index::vec_table_name_for_index(idx_id);
-                    let _ = conn.execute(
-                        &format!("DELETE FROM {} WHERE node_id = ?1", vec_table),
-                        rusqlite::params![node_id],
-                    );
-                }
-            }
-            let _ = conn.execute(
-                "DELETE FROM kb_node_embeddings WHERE node_id = ?1",
-                rusqlite::params![node_id],
-            );
+            crate::kb::engine::cleanup_node_vectors(conn, node_id);
         }
 
         conn.execute(

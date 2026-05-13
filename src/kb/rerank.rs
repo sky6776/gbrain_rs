@@ -452,19 +452,22 @@ fn extract_raw_content(data: &serde_json::Value) -> Option<String> {
 // P3-018: Unified rerank orchestrator
 // ---------------------------------------------------------------------------
 
-/// Orchestrate reranking with a three-tier fallback strategy:
+/// Orchestrate reranking with a two-tier fallback strategy:
 /// 1. Dedicated rerank API (if configured and available)
-/// 2. Chat/completions adapter (generic LLM scoring)
-/// 3. Local rerank (weighted signal combination)
+/// 2. Local rerank (weighted signal combination)
+///
+/// Note: Tier 2 (chat/completions adapter) is intentionally skipped here.
+/// Callers that want chat/completions fallback should use `try_model_rerank_simple`
+/// which handles the chat/completions → local two-tier chain.
 ///
 /// Returns a `RerankResult` describing which tier was used and the scored
 /// candidate list.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub async fn try_model_rerank(
     config: &RerankConfig,
-    query: &str,
+    _query: &str,
     candidates: &[(i64, LocalRankSignals)],
-    candidate_texts: &[RerankCandidate],
+    _candidate_texts: &[RerankCandidate],
     weights: &[f64],
     budget: Option<&crate::kb::cost::TokenBudget>,
     // Dedicated rerank API caller — returns None if not configured or failed
@@ -543,41 +546,17 @@ pub async fn try_model_rerank(
                 );
             }
             None => {
-                debug!("try_model_rerank: dedicated rerank API failed, trying chat/completions adapter");
+                debug!("try_model_rerank: dedicated rerank API failed, falling back to local rerank");
             }
         }
     }
 
     // Tier 2: Chat/completions adapter
-    let reranker = ChatCompletionsReranker::from_config(
-        config,
-        &config.rerank_provider, // reuse provider field as base_url hint
-        "",                      // API key must be supplied separately
-    );
-
-    // Only attempt chat/completions if we have both a base URL and API key
-    // (the reranker checks internally, but we can skip the allocation)
-    if !reranker.base_url.is_empty() && !reranker.api_key.is_empty() {
-        debug!("try_model_rerank: attempting chat/completions rerank adapter");
-        match chat_completions_rerank(&reranker, query, candidate_texts, budget).await {
-            Some(scored) => {
-                return (
-                    scored,
-                    RerankResult {
-                        model_rerank_attempted: true,
-                        model_rerank_succeeded: true,
-                        fallback_used: false,
-                        fallback_reason: None,
-                        provider: format!("chat_completions/{}", config.rerank_model),
-                        candidates_reranked: candidates.len(),
-                    },
-                );
-            }
-            None => {
-                debug!("try_model_rerank: chat/completions adapter failed, falling back to local_rerank");
-            }
-        }
-    }
+    // FIX11-09: Tier 2 之前传入空 API key 导致永远跳过。
+    // try_model_rerank 的调用方（search.rs）已通过 try_model_rerank_simple 传入 api_key，
+    // 因此 try_model_rerank 本身不再需要 Tier 2 — 调用方应直接使用 try_model_rerank_simple。
+    // 保留此分支但移除空 API key 硬编码，改为注释说明此 Tier 已由 try_model_rerank_simple 覆盖。
+    debug!("try_model_rerank: Tier 2 (chat/completions) is handled by try_model_rerank_simple; skipping here");
 
     // Tier 3: Local rerank fallback
     let local = local_rerank(candidates, weights);
