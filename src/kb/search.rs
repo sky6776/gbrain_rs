@@ -279,9 +279,14 @@ pub fn kb_search(
         // Level 6: low_threshold_vector — 降低向量阈值扩大召回
         // 保留用户指定的 library_ids 和 level 过滤，避免返回其它库或层级的结果
         if let Some(vec) = query_vector {
-            if let Ok(fr) =
-                kb_vector_search(conn, vec, &input.library_ids, input.level, fetch_k * 5, input.embedding_index_id)
-            {
+            if let Ok(fr) = kb_vector_search(
+                conn,
+                vec,
+                &input.library_ids,
+                input.level,
+                fetch_k * 5,
+                input.embedding_index_id,
+            ) {
                 if !fr.is_empty() {
                     merged.extend(fr);
                     fallbacks_used.push("low_threshold_vector");

@@ -117,22 +117,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
 fn cleanup_tmp_trio(tmp_path: &Path) -> Result<()> {
     if tmp_path.exists() {
         std::fs::remove_file(tmp_path).map_err(|e| {
-            GBrainError::FileError(format!(
-                "无法删除临时文件 {}: {}",
-                tmp_path.display(),
-                e
-            ))
+            GBrainError::FileError(format!("无法删除临时文件 {}: {}", tmp_path.display(), e))
         })?;
     }
     for ext in &["-wal", "-shm"] {
         let p = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
         if p.exists() {
             std::fs::remove_file(&p).map_err(|e| {
-                GBrainError::FileError(format!(
-                    "无法删除临时 sidecar 文件 {}: {}",
-                    p.display(),
-                    e
-                ))
+                GBrainError::FileError(format!("无法删除临时 sidecar 文件 {}: {}", p.display(), e))
             })?;
         }
     }
@@ -187,10 +179,8 @@ pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()>
             .unwrap_or_else(|_| "query_failed".to_string());
         if integrity != "ok" {
             // conn 在 drop 前清理文件会失败，先让 block 结束释放连接
-            let integrity_err = GBrainError::FileError(format!(
-                "备份文件完整性校验失败: {}",
-                integrity
-            ));
+            let integrity_err =
+                GBrainError::FileError(format!("备份文件完整性校验失败: {}", integrity));
             drop(conn);
             let _ = cleanup_tmp_trio(&tmp_path);
             return Err(integrity_err);

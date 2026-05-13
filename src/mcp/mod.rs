@@ -1409,22 +1409,21 @@ impl McpServer {
                     if validated_index_info.is_some() || unique_configs.len() <= 1 {
                         // 指定了 embedding_index_id 时，直接使用该 index 的配置生成 query vector，
                         // 不受 unique_configs 数量限制（多库场景下仍可按指定 index 检索）
-                        let (embed_model, embed_dims) = if let Some((model, dims, _)) =
-                            validated_index_info
-                        {
-                            (model, dims)
-                        } else {
-                            // 未指定 index_id，使用 lib_configs（已优先从 active index 获取）
-                            lib_configs
-                                .first()
-                                .map(|(_, _, m, d, _)| (m.clone(), *d))
-                                .unwrap_or_else(|| {
-                                    (
-                                        self.config.embedding_model.clone(),
-                                        self.config.embedding_dimensions as i32,
-                                    )
-                                })
-                        };
+                        let (embed_model, embed_dims) =
+                            if let Some((model, dims, _)) = validated_index_info {
+                                (model, dims)
+                            } else {
+                                // 未指定 index_id，使用 lib_configs（已优先从 active index 获取）
+                                lib_configs
+                                    .first()
+                                    .map(|(_, _, m, d, _)| (m.clone(), *d))
+                                    .unwrap_or_else(|| {
+                                        (
+                                            self.config.embedding_model.clone(),
+                                            self.config.embedding_dimensions as i32,
+                                        )
+                                    })
+                            };
 
                         // FIX10-R3: 模型为空或维度为 0 时禁用 vector，避免发送无效请求
                         // 先解析 embedding_dimensions override，再判断最终维度是否为 0
@@ -1440,7 +1439,10 @@ impl McpServer {
                                 )));
                             }
                             // 如果目标 index 维度已知且非 0，override 维度必须与之一致
-                            if input.embedding_index_id.is_some() && embed_dims != 0 && override_dims != embed_dims as i64 {
+                            if input.embedding_index_id.is_some()
+                                && embed_dims != 0
+                                && override_dims != embed_dims as i64
+                            {
                                 return Err(GBrainError::InvalidInput(format!(
                                     "指定了 embedding_index_id 时，embedding_dimensions 必须等于该 index 的维度 {}，当前值: {}",
                                     embed_dims, override_dims

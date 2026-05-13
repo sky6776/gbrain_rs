@@ -524,7 +524,8 @@ pub async fn process_document_async(
     // semantic → chunk_overlap; Markdown → 0; Recursive → chunk_overlap.min(chunk_size/2)
     let full_text = &parsed.content;
     let max_overlap = splitter_max_overlap(&splitter_config, embedder.is_some());
-    let chunk_offsets: Vec<(usize, usize)> = locate_chunk_char_offsets(full_text, &chunks, max_overlap);
+    let chunk_offsets: Vec<(usize, usize)> =
+        locate_chunk_char_offsets(full_text, &chunks, max_overlap);
 
     // 对每个 chunk，找与其 span 重叠最多的 block
     #[allow(clippy::type_complexity)]
