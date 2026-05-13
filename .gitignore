@@ -2,3 +2,5 @@ target/
 AGENTS.md
 .claude/
 .omc/
+*.exe
+*.pdb

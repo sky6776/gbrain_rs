@@ -488,6 +488,8 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "folder_id", description: "Filter to folder", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             // FIX9-03: 允许调用方指定 embedding 维度，覆盖全局配置
             ParamDef { name: "embedding_dimensions", description: "Override embedding dimensions for query vector", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            // FIX10-R3: 允许调用方指定 embedding_index_id，使用特定 index 的模型配置
+            ParamDef { name: "embedding_index_id", description: "Specific embedding index ID to use for query vector (must belong to target library)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
     OperationDef {

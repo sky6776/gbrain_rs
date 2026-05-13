@@ -62,11 +62,19 @@ pub fn backup_database(db_path: &Path, output_dir: &Path) -> Result<PathBuf> {
     // 同时复制 WAL 和 SHM 文件（如果存在）
     // 注意：使用字符串拼接而非 with_extension，因为 with_extension 会替换扩展名，
     // 当 DB 文件名为 gbrain.sqlite 或无扩展名时会产生错误路径
+    // 复制失败时报错，而非静默忽略，避免备份不完整
     for ext in &["-wal", "-shm"] {
         let src = PathBuf::from(format!("{}{}", db_path.display(), ext));
         if src.exists() {
             let dst = output_dir.join(format!("gbrain.db{}", ext));
-            std::fs::copy(&src, &dst).ok();
+            std::fs::copy(&src, &dst).map_err(|e| {
+                GBrainError::FileError(format!(
+                    "无法复制备份 sidecar {} 到 {}: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                ))
+            })?;
         }
     }
 
@@ -104,107 +112,225 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
     Ok(count)
 }
 
+/// 清理临时路径三件套（main + -wal + -shm），用于函数入口预清理和失败回滚
+/// 返回删除失败的文件路径和错误信息，调用方决定是否要中止操作
+fn cleanup_tmp_trio(tmp_path: &Path) -> Result<()> {
+    if tmp_path.exists() {
+        std::fs::remove_file(tmp_path).map_err(|e| {
+            GBrainError::FileError(format!(
+                "无法删除临时文件 {}: {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+    }
+    for ext in &["-wal", "-shm"] {
+        let p = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
+        if p.exists() {
+            std::fs::remove_file(&p).map_err(|e| {
+                GBrainError::FileError(format!(
+                    "无法删除临时 sidecar 文件 {}: {}",
+                    p.display(),
+                    e
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// 从备份恢复 DB。
 ///
 /// FIX10-06: Windows 安全恢复流程：
-/// 1. 复制备份到临时路径
+/// 1. 清理残留的临时文件，复制备份到临时路径
 /// 2. 对临时文件执行 PRAGMA integrity_check 校验完整性
 /// 3. 三阶段替换：现有DB→.bak, tmp→目标, 成功删.bak/失败回滚
 /// 4. 同步处理 -wal/-shm 侧车文件
 pub fn restore_database(backup_path: &Path, target_db_path: &Path) -> Result<()> {
-    // 步骤1：复制到临时路径
+    // 步骤0：清理上次残留的临时文件（含 sidecar），防止 stale WAL/SHM 被误用
+    // 删除失败时返回错误，而非 best-effort 忽略，避免锁定/无权限场景下留下脏 sidecar
     let tmp_path = target_db_path.with_extension("db.restoring");
+    cleanup_tmp_trio(&tmp_path)?;
+
+    // 步骤1：复制到临时路径
     std::fs::copy(backup_path, &tmp_path)
         .map_err(|e| GBrainError::FileError(format!("无法复制备份到临时路径: {}", e)))?;
 
     // 同时复制 WAL/SHM 侧车文件（如果存在）
+    // 复制失败时报错，而非静默忽略，避免恢复后主 DB 与 stale WAL/SHM 搭配导致数据不一致
     for ext in &["-wal", "-shm"] {
         let src = PathBuf::from(format!("{}{}", backup_path.display(), ext));
         if src.exists() {
             let dst = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
-            std::fs::copy(&src, &dst).ok();
+            std::fs::copy(&src, &dst).map_err(|e| {
+                cleanup_tmp_trio(&tmp_path).ok();
+                GBrainError::FileError(format!(
+                    "无法复制备份 sidecar {} 到 {}: {}",
+                    src.display(),
+                    dst.display(),
+                    e
+                ))
+            })?;
         }
     }
 
     // 步骤2：校验临时文件的完整性
-    if let Ok(conn) = Connection::open(&tmp_path) {
+    // 临时 DB 必须能打开，否则视为 restore 失败，避免跳过完整性校验
+    // 校验放入独立 block，确保 conn 在 rename/cleanup 前释放，避免 Windows 下文件被占用
+    {
+        let conn = Connection::open(&tmp_path).map_err(|e| {
+            let _ = cleanup_tmp_trio(&tmp_path);
+            GBrainError::FileError(format!("无法打开临时数据库进行完整性校验: {}", e))
+        })?;
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .unwrap_or_else(|_| "query_failed".to_string());
         if integrity != "ok" {
-            // 校验失败，删除临时文件
-            let _ = std::fs::remove_file(&tmp_path);
-            let _ =
-                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-wal")));
-            let _ =
-                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-shm")));
-            return Err(GBrainError::FileError(format!(
+            // conn 在 drop 前清理文件会失败，先让 block 结束释放连接
+            let integrity_err = GBrainError::FileError(format!(
                 "备份文件完整性校验失败: {}",
                 integrity
-            )));
+            ));
+            drop(conn);
+            let _ = cleanup_tmp_trio(&tmp_path);
+            return Err(integrity_err);
         }
     }
 
     // 步骤3：三阶段替换流程（兼容 Windows）
-    // 3a: 将现有 DB 重命名为 .bak
+    // 3a: 将现有 DB 及其 WAL/SHM sidecar 一起重命名为 .bak
+    // FIX10-R4: 不删除 sidecar，而是和 main DB 一起移到 .bak 侧，确保回滚完整
     let bak_path = target_db_path.with_extension("db.bak");
     let existing_db_exists = target_db_path.exists();
-    if existing_db_exists {
-        // 先删除旧的 .bak（如果存在）
-        let _ = std::fs::remove_file(&bak_path);
-        // 删除旧 DB 的 WAL/SHM 侧车文件
+
+    // 如果主 DB 不存在但目标路径残留 sidecar，必须先清理，
+    // 否则新 DB 会和旧 WAL/SHM 搭配导致数据不一致
+    // 删除失败时返回错误，而非 best-effort 忽略，防止锁定/无权限场景下留下脏 sidecar
+    if !existing_db_exists {
         for ext in &["-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
             if sidecar.exists() {
-                let _ = std::fs::remove_file(&sidecar);
+                std::fs::remove_file(&sidecar).map_err(|e| {
+                    let _ = cleanup_tmp_trio(&tmp_path);
+                    GBrainError::FileError(format!(
+                        "无法删除残留 sidecar 文件 {}: {}",
+                        sidecar.display(),
+                        e
+                    ))
+                })?;
             }
+        }
+    }
+
+    if existing_db_exists {
+        // 先删除旧的 .bak 文件（如果存在）
+        let _ = std::fs::remove_file(&bak_path);
+        for ext in &["-wal", "-shm"] {
+            let old_bak_sidecar = PathBuf::from(format!("{}{}", bak_path.display(), ext));
+            let _ = std::fs::remove_file(&old_bak_sidecar);
         }
         // 将现有 DB 重命名为 .bak
         std::fs::rename(target_db_path, &bak_path).map_err(|e| {
             // 重命名失败，清理临时文件
-            let _ = std::fs::remove_file(&tmp_path);
+            let _ = cleanup_tmp_trio(&tmp_path);
             GBrainError::FileError(format!("无法将现有数据库重命名为备份: {}", e))
         })?;
+        // FIX10-R4: 将 WAL/SHM sidecar 也移到 .bak 侧
+        // 记录已成功移动的 sidecar，任一失败时全部回滚（包括已移走的 sidecar）
+        let mut moved_sidecars: Vec<(PathBuf, PathBuf)> = Vec::new(); // (原始路径, .bak路径)
+        for ext in &["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+            if sidecar.exists() {
+                let bak_sidecar = PathBuf::from(format!("{}{}", bak_path.display(), ext));
+                if let Err(e) = std::fs::rename(&sidecar, &bak_sidecar) {
+                    // FIX10-R4: sidecar rename 失败，回滚所有已移动的文件
+                    // 先把 main DB 移回去
+                    let _ = std::fs::rename(&bak_path, target_db_path);
+                    // 把已成功移动的 sidecar 也移回原路径
+                    for (orig, bak) in &moved_sidecars {
+                        let _ = std::fs::rename(bak, orig);
+                    }
+                    // 清理临时文件三件套
+                    let _ = cleanup_tmp_trio(&tmp_path);
+                    return Err(GBrainError::FileError(format!(
+                        "无法重命名 sidecar 文件 {}: {}",
+                        sidecar.display(),
+                        e
+                    )));
+                }
+                moved_sidecars.push((sidecar, bak_sidecar));
+            }
+        }
     }
 
     // 3b: 将临时文件重命名为目标 DB
     let rename_result = std::fs::rename(&tmp_path, target_db_path);
     match rename_result {
         Ok(()) => {
-            // 同时重命名侧车文件
+            // FIX10-R5: 重命名侧车文件，记录已移动的新 sidecar，失败时先清理再回滚
+            let mut moved_tmp_sidecars: Vec<(PathBuf, PathBuf)> = Vec::new(); // (tmp路径, 目标路径)
             for ext in &["-wal", "-shm"] {
                 let src = PathBuf::from(format!("{}{}", tmp_path.display(), ext));
                 let dst = PathBuf::from(format!("{}{}", target_db_path.display(), ext));
                 if src.exists() {
-                    std::fs::rename(&src, &dst).ok();
+                    if let Err(e) = std::fs::rename(&src, &dst) {
+                        // FIX10-R5: 先清理已成功移动到目标路径的新 sidecar
+                        for (tmp_sc, dst_sc) in &moved_tmp_sidecars {
+                            // 尝试移回 tmp；如果目标路径文件已不在则忽略
+                            if dst_sc.exists() {
+                                let _ = std::fs::rename(dst_sc, tmp_sc);
+                            }
+                        }
+                        // 将目标 DB 移回 tmp
+                        let _ = std::fs::rename(target_db_path, &tmp_path);
+                        // 恢复 .bak 及其 sidecar
+                        if existing_db_exists {
+                            let _ = std::fs::rename(&bak_path, target_db_path);
+                            for ext2 in &["-wal", "-shm"] {
+                                let bak_sc =
+                                    PathBuf::from(format!("{}{}", bak_path.display(), ext2));
+                                let orig_sc =
+                                    PathBuf::from(format!("{}{}", target_db_path.display(), ext2));
+                                if bak_sc.exists() {
+                                    let _ = std::fs::rename(&bak_sc, &orig_sc);
+                                }
+                            }
+                        }
+                        // 清理残留的临时文件（main 已移回 tmp，但 sidecar 可能仍在目标路径）
+                        let _ = cleanup_tmp_trio(&tmp_path);
+                        return Err(GBrainError::FileError(format!(
+                            "无法重命名临时 sidecar 文件 {}: {}",
+                            src.display(),
+                            e
+                        )));
+                    }
+                    moved_tmp_sidecars.push((src, dst));
                 }
             }
-            // 3c: 成功，删除 .bak 文件
+            // 3c: 成功，删除 .bak 文件及其 sidecar
             if existing_db_exists {
                 let _ = std::fs::remove_file(&bak_path);
-                let _ = std::fs::remove_file(PathBuf::from(format!(
-                    "{}{}",
-                    bak_path.display(),
-                    "-wal"
-                )));
-                let _ = std::fs::remove_file(PathBuf::from(format!(
-                    "{}{}",
-                    bak_path.display(),
-                    "-shm"
-                )));
+                for ext in &["-wal", "-shm"] {
+                    let bak_sidecar = PathBuf::from(format!("{}{}", bak_path.display(), ext));
+                    let _ = std::fs::remove_file(&bak_sidecar);
+                }
             }
         }
         Err(e) => {
-            // 3b 失败：回滚 — 将 .bak 恢复为原始 DB
+            // 3b 失败：回滚 — 将 .bak 及其 sidecar 全部恢复为原始 DB
             if existing_db_exists {
                 let _ = std::fs::rename(&bak_path, target_db_path);
+                for ext in &["-wal", "-shm"] {
+                    let bak_sidecar = PathBuf::from(format!("{}{}", bak_path.display(), ext));
+                    let orig_sidecar =
+                        PathBuf::from(format!("{}{}", target_db_path.display(), ext));
+                    if bak_sidecar.exists() {
+                        let _ = std::fs::rename(&bak_sidecar, &orig_sidecar);
+                    }
+                }
             }
             // 清理临时文件
-            let _ = std::fs::remove_file(&tmp_path);
-            let _ =
-                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-wal")));
-            let _ =
-                std::fs::remove_file(PathBuf::from(format!("{}{}", tmp_path.display(), "-shm")));
+            let _ = cleanup_tmp_trio(&tmp_path);
             return Err(GBrainError::FileError(format!("无法替换目标数据库: {}", e)));
         }
     }

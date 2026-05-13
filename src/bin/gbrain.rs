@@ -1629,7 +1629,11 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
         Commands::KbRestore { input } => {
             let input_dir = std::path::Path::new(&input);
             let db_path = config.db_path();
+            // P1 修复：Windows 下打开的 SQLite 文件不能被 rename，必须先断开连接
+            engine.disconnect()?;
             gbrain_core::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
+            engine.connect()?;
+            engine.init_schema()?;
             // FIX9-10: 同时恢复 storage 目录
             let storage_dir = config
                 .kb_storage_dir

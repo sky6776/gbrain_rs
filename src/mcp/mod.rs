@@ -1277,46 +1277,127 @@ impl McpServer {
                     group_by_document: arguments["group_by_document"].as_bool().unwrap_or(false),
                     rerank_api_key: self.config.openai_api_key.clone(),
                     rerank_base_url: self.config.openai_base_url.clone(),
+                    // FIX10-R3: 从 arguments 解析 embedding_index_id，使 MCP kb_search 可指定 index
+                    embedding_index_id: arguments["embedding_index_id"].as_i64(),
                     ..Default::default()
                 };
 
-                // FIX10-10: 多 library 搜索时按 (provider, model, dimensions, external_embedding_allowed) 分组，
+                // FIX10-R2/R3: 多 library 搜索时按 (provider, model, dimensions, external_embedding_allowed) 分组，
                 // 每组生成对应 query vector 并分别检索，再做最终融合。
                 // 如果暂时不支持多模型混搜，检测到不一致时禁用 vector retriever 并在 debug 中返回原因。
                 let conn_for_embed = self.engine.connection()?;
                 let kb = crate::kb::engine::KbEngine::new(&conn_for_embed);
 
-                // 收集每个目标库的 embedding 配置
-                let mut lib_configs: Vec<(i64, String, String, i32, bool)> = Vec::new(); // (lib_id, provider, model, dims, ext_allowed)
+                // FIX10-R3: 收集每个目标库的 active embedding index 配置（而非 library 冗余字段）
+                // (lib_id, provider, model, dims, ext_allowed)
+                let mut debug_reason: Option<String> = None;
+                let mut lib_configs: Vec<(i64, String, String, i32, bool)> = Vec::new();
                 if input.library_ids.is_empty() {
                     // 未指定 library_ids，取所有库
-                    if let Ok(libs) = kb.list_libraries() {
-                        for lib in libs {
-                            lib_configs.push((
-                                lib.id,
-                                lib.embedding_provider.clone(),
-                                lib.embedding_model.clone(),
-                                lib.embedding_dimensions.unwrap_or(0),
-                                lib.external_embedding_allowed,
-                            ));
+                    match kb.list_libraries() {
+                        Ok(libs) => {
+                            for lib in libs {
+                                // FIX10-R3: 优先使用 active embedding index 的配置
+                                let active =
+                                    crate::kb::embedding_index::get_active_index_for_library(
+                                        &conn_for_embed,
+                                        lib.id,
+                                    )?;
+                                if let Some(idx) = active {
+                                    lib_configs.push((
+                                        lib.id,
+                                        idx.provider,
+                                        idx.model,
+                                        idx.dimensions,
+                                        lib.external_embedding_allowed,
+                                    ));
+                                } else {
+                                    // 无 active index，使用 library 字段作为回退
+                                    lib_configs.push((
+                                        lib.id,
+                                        lib.embedding_provider.clone(),
+                                        lib.embedding_model.clone(),
+                                        lib.embedding_dimensions.unwrap_or(0),
+                                        lib.external_embedding_allowed,
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // FIX10-R2: list_libraries 失败时禁用 vector，在 debug 中返回原因
+                            debug_reason =
+                                Some(format!("list_libraries 失败: {}，已禁用向量检索", e));
                         }
                     }
                 } else {
+                    // FIX10-R2: 指定 library_ids 时，任一库不存在或读取失败应返回错误
                     for &lib_id in &input.library_ids {
-                        if let Ok(lib) = kb.get_library(lib_id) {
-                            lib_configs.push((
-                                lib.id,
-                                lib.embedding_provider.clone(),
-                                lib.embedding_model.clone(),
-                                lib.embedding_dimensions.unwrap_or(0),
-                                lib.external_embedding_allowed,
-                            ));
+                        match kb.get_library(lib_id) {
+                            Ok(lib) => {
+                                // FIX10-R3: 优先使用 active embedding index 的配置
+                                let active =
+                                    crate::kb::embedding_index::get_active_index_for_library(
+                                        &conn_for_embed,
+                                        lib.id,
+                                    )?;
+                                if let Some(idx) = active {
+                                    lib_configs.push((
+                                        lib.id,
+                                        idx.provider,
+                                        idx.model,
+                                        idx.dimensions,
+                                        lib.external_embedding_allowed,
+                                    ));
+                                } else {
+                                    lib_configs.push((
+                                        lib.id,
+                                        lib.embedding_provider.clone(),
+                                        lib.embedding_model.clone(),
+                                        lib.embedding_dimensions.unwrap_or(0),
+                                        lib.external_embedding_allowed,
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                return Err(GBrainError::InvalidInput(format!(
+                                    "library_id={} 不存在或读取失败: {}",
+                                    lib_id, e
+                                )));
+                            }
                         }
                     }
                 }
 
-                // 检查是否所有库的 embedding 配置一致
-                let all_ext_allowed = lib_configs.iter().all(|(_, _, _, _, ext)| *ext);
+                // 校验 embedding_index_id：无论后续是否生成 query vector，只要调用方指定了就必须有效
+                // 同时缓存 index 的配置信息，供后续生成 query vector 时复用，避免重复查询
+                let validated_index_info: Option<(String, i32, i64)> = if let Some(eidx_id) =
+                    input.embedding_index_id
+                {
+                    let idx_row = conn_for_embed.query_row(
+                        "SELECT model, dimensions, library_id FROM kb_embedding_indexes WHERE id = ?1",
+                        rusqlite::params![eidx_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?, row.get::<_, i64>(2)?)),
+                    ).map_err(|e| GBrainError::InvalidInput(format!(
+                        "embedding_index_id={} 不存在或查询失败: {}", eidx_id, e
+                    )))?;
+                    let (_, _, idx_lib_id) = idx_row;
+                    // 校验该 index 属于目标 library
+                    let target_lib_ids: Vec<i64> =
+                        lib_configs.iter().map(|(id, _, _, _, _)| *id).collect();
+                    if !target_lib_ids.is_empty() && !target_lib_ids.contains(&idx_lib_id) {
+                        return Err(GBrainError::InvalidInput(format!(
+                            "embedding_index_id={} 属于 library_id={}，不在目标库列表中",
+                            eidx_id, idx_lib_id
+                        )));
+                    }
+                    Some(idx_row)
+                } else {
+                    None
+                };
+
+                // FIX10-R2: all_ext_allowed 必须要求 lib_configs 非空，空集合时 all() 返回 true 是误判
+                let all_ext_allowed =
+                    !lib_configs.is_empty() && lib_configs.iter().all(|(_, _, _, _, ext)| *ext);
                 let unique_configs: Vec<(String, String, i32)> = lib_configs
                     .iter()
                     .map(|(_, p, m, d, _)| (p.clone(), m.clone(), *d))
@@ -1324,27 +1405,16 @@ impl McpServer {
                     .into_iter()
                     .collect();
 
-                let mut debug_reason: Option<String> = None;
-
                 let query_vector: Option<Vec<f32>> = if all_ext_allowed {
-                    if unique_configs.len() <= 1 {
-                        // 配置一致（或仅一个库），正常生成 query vector
-                        let (embed_model, embed_dims) = if let Some(eidx_id) =
-                            input.embedding_index_id
+                    if validated_index_info.is_some() || unique_configs.len() <= 1 {
+                        // 指定了 embedding_index_id 时，直接使用该 index 的配置生成 query vector，
+                        // 不受 unique_configs 数量限制（多库场景下仍可按指定 index 检索）
+                        let (embed_model, embed_dims) = if let Some((model, dims, _)) =
+                            validated_index_info
                         {
-                            conn_for_embed
-                                .query_row(
-                                    "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
-                                    rusqlite::params![eidx_id],
-                                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
-                                )
-                                .ok()
-                                .unwrap_or_else(|| {
-                                    lib_configs.first()
-                                        .map(|(_, _, m, d, _)| (m.clone(), *d))
-                                        .unwrap_or_else(|| (self.config.embedding_model.clone(), self.config.embedding_dimensions as i32))
-                                })
+                            (model, dims)
                         } else {
+                            // 未指定 index_id，使用 lib_configs（已优先从 active index 获取）
                             lib_configs
                                 .first()
                                 .map(|(_, _, m, d, _)| (m.clone(), *d))
@@ -1356,31 +1426,59 @@ impl McpServer {
                                 })
                         };
 
-                        let embed_dims = arguments["embedding_dimensions"]
-                            .as_i64()
-                            .map(|v| v as i32)
-                            .unwrap_or(embed_dims);
-
-                        if let Some(api_key) = self.config.openai_api_key.as_deref() {
-                            let embedder = crate::embedding::Embedder::new(
-                                api_key,
-                                self.config.openai_base_url.as_deref(),
-                                Some(&embed_model),
-                                Some(embed_dims as usize),
-                            );
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .ok();
-                            match rt {
-                                Some(rt) => rt
-                                    .block_on(embedder.embed_batch(&[query]))
-                                    .ok()
-                                    .and_then(|v| v.into_iter().next()),
-                                None => None,
+                        // FIX10-R3: 模型为空或维度为 0 时禁用 vector，避免发送无效请求
+                        // 先解析 embedding_dimensions override，再判断最终维度是否为 0
+                        // 这样旧库/导入库存量维度为 0 时，调用方传有效 override 仍可启用向量检索
+                        const MAX_EMBEDDING_DIMS_I64: i64 = 8192;
+                        let final_dims: i32 = if let Some(override_dims) =
+                            arguments["embedding_dimensions"].as_i64()
+                        {
+                            if override_dims <= 0 || override_dims > MAX_EMBEDDING_DIMS_I64 {
+                                return Err(GBrainError::InvalidInput(format!(
+                                    "embedding_dimensions 必须为 1~{} 的正整数，当前值: {}",
+                                    MAX_EMBEDDING_DIMS_I64, override_dims
+                                )));
                             }
+                            // 如果目标 index 维度已知且非 0，override 维度必须与之一致
+                            if input.embedding_index_id.is_some() && embed_dims != 0 && override_dims != embed_dims as i64 {
+                                return Err(GBrainError::InvalidInput(format!(
+                                    "指定了 embedding_index_id 时，embedding_dimensions 必须等于该 index 的维度 {}，当前值: {}",
+                                    embed_dims, override_dims
+                                )));
+                            }
+                            override_dims as i32
                         } else {
+                            embed_dims
+                        };
+
+                        if embed_model.is_empty() || final_dims == 0 {
+                            debug_reason = Some(format!(
+                                "embedding 模型为空或维度为 0 (model={}, dims={})，已禁用向量检索",
+                                embed_model, final_dims
+                            ));
                             None
+                        } else {
+                            if let Some(api_key) = self.config.openai_api_key.as_deref() {
+                                let embedder = crate::embedding::Embedder::new(
+                                    api_key,
+                                    self.config.openai_base_url.as_deref(),
+                                    Some(&embed_model),
+                                    Some(final_dims as usize),
+                                );
+                                let rt = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                    .ok();
+                                match rt {
+                                    Some(rt) => rt
+                                        .block_on(embedder.embed_batch(&[query]))
+                                        .ok()
+                                        .and_then(|v| v.into_iter().next()),
+                                    None => None,
+                                }
+                            } else {
+                                None
+                            }
                         }
                     } else {
                         // FIX10-10: 多模型混搜暂不支持，禁用 vector retriever
@@ -1505,7 +1603,22 @@ impl McpServer {
                 }
                 let input_dir = std::path::Path::new(input);
                 let db_path = self.config.db_path();
-                crate::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
+                // P1 修复：Windows 下打开的 SQLite 文件不能被 rename，必须先断开连接
+                self.engine.disconnect()?;
+                // 无论 restore/connect/init_schema 是否成功，都尝试重连，避免 engine 持续断连
+                let restore_result = (|| -> Result<()> {
+                    crate::kb::backup::restore_database(&input_dir.join("gbrain.db"), &db_path)?;
+                    self.engine.connect()?;
+                    self.engine.init_schema()?;
+                    Ok(())
+                })();
+                // restore 失败时仍尝试重连，确保后续工具调用可用
+                if restore_result.is_err() && self.engine.connection().is_err() {
+                    if let Err(reconnect_err) = self.engine.connect() {
+                        tracing::warn!("restore 失败后重连数据库也失败: {}", reconnect_err);
+                    }
+                }
+                restore_result?;
 
                 // FIX9-10: 同时恢复 storage 目录
                 let storage_dir = self

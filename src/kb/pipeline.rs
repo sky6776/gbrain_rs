@@ -17,6 +17,156 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
 
+/// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
+///
+/// 严格区分 byte offset 和 char offset：
+/// - `String` 切片和 `find()` 返回的都是 byte offset
+/// - 存储到 chunk_offsets 的是 char offset（字符偏移），与 source_start/source_end 语义一致
+/// - 更新 byte_cursor 时确保落在 UTF-8 字符边界上
+/// - fallback 路径用字符 offset 推进，再通过 char_indices 找对应 byte offset，始终 clamp 到 full_text.len()
+///
+/// 游标推进策略：匹配当前 chunk 后，游标推进到 end_char（无回退）。
+/// 搜索下一 chunk 前，按相邻 chunk 的实际 suffix/prefix overlap 回退游标到重叠区，
+/// 使 overlap chunk 能从重叠区域精确匹配，而非 fallback 到错误位置。
+///
+/// `max_overlap` 为 splitter 可能产生的最大重叠字符数，作为 overlap 上限：
+/// - 防止偶然的 suffix/prefix 相同被误判为 splitter overlap
+/// - 例：chunk_overlap=0 或 Markdown splitter 无 overlap 时传 0，
+///   即使 chunks[i-1] 尾部和 chunks[i] 头部偶然相同也不回退
+/// - Recursive splitter 传 config.chunk_overlap（splitter 内部已 cap 到 chunk_size/2）
+///
+/// 回退时机必须在搜索当前块之前，而非搜索之后：
+/// - 搜索之后回退只能影响下一块，当前块已经从错误位置搜索过了
+/// - 例：full_text="abcdef"、chunks ["abcd","cdef"]
+///   若第一块后 cursor=4，第二块从 4 开始 find("cdef") 找不到，fallback 记录 4..8
+///   正确做法：搜索第二块前回退 cursor 到 2，从 2 开始 find("cdef") 精确匹配 2..6
+pub fn locate_chunk_char_offsets(
+    full_text: &str,
+    chunks: &[String],
+    max_overlap: usize,
+) -> Vec<(usize, usize)> {
+    let mut offsets = Vec::with_capacity(chunks.len());
+    let mut byte_cursor: usize = 0;
+    let mut char_cursor: usize = 0;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        // 搜索当前块前，按与前一块的实际 overlap 回退游标到重叠区
+        // 实际 overlap 取 suffix/prefix 匹配长度，但不超过 max_overlap 上限
+        // max_overlap=0 时（Markdown splitter / chunk_overlap=0）不回退，避免偶然相同误判
+        if i > 0 && max_overlap > 0 {
+            let overlap_chars = actual_overlap_chars(&chunks[i - 1], chunk, max_overlap);
+            // 允许 overlap_chars == char_cursor 回退到 0：
+            // 例 full_text="abcdef"、chunks=["a","abcdef"]、max_overlap=1
+            // 第一块后 char_cursor=1，overlap_chars=1，应回退到 0 才能精确匹配
+            if overlap_chars > 0 && overlap_chars <= char_cursor {
+                let back_char = char_cursor - overlap_chars;
+                byte_cursor = full_text
+                    .char_indices()
+                    .nth(back_char)
+                    .map(|(i, _)| i)
+                    .unwrap_or(full_text.len());
+                char_cursor = back_char;
+            }
+        }
+
+        // FIX10-R1: 先检查 byte_cursor 不越界，再尝试 find
+        // find 成功 → 精确匹配路径；find 失败或 byte_cursor 越界 → fallback 推算路径
+        let found = if byte_cursor <= full_text.len() {
+            full_text[byte_cursor..].find(chunk.as_str())
+        } else {
+            None
+        };
+        if let Some(pos) = found {
+            let start_byte = byte_cursor + pos;
+
+            // byte offset 转字符 offset
+            let start_char = char_cursor + full_text[byte_cursor..start_byte].chars().count();
+            let end_char = start_char + chunk.chars().count();
+            offsets.push((start_char, end_char));
+
+            // 匹配成功后，游标推进到 end_char（不回退）
+            // 下一次迭代开始时会根据与当前块的 overlap 回退
+            byte_cursor = full_text
+                .char_indices()
+                .nth(end_char)
+                .map(|(i, _)| i)
+                .unwrap_or(full_text.len());
+            char_cursor = end_char;
+        } else {
+            // 无法找到精确位置，用推算偏移
+            // fallback 路径：用字符 offset 推进，再通过 char_indices 找对应 byte offset
+            let start_char = char_cursor;
+            let chunk_char_len = chunk.chars().count();
+            let end_char = start_char + chunk_char_len;
+            offsets.push((start_char, end_char));
+
+            // fallback 也推进到 end_char
+            let skip_chars = end_char.saturating_sub(char_cursor);
+            byte_cursor = full_text[byte_cursor..]
+                .char_indices()
+                .nth(skip_chars)
+                .map(|(i, _)| byte_cursor + i)
+                .unwrap_or(full_text.len());
+            // 始终 clamp 到 full_text.len()，防止越界
+            byte_cursor = byte_cursor.min(full_text.len());
+            char_cursor = end_char;
+        }
+    }
+
+    offsets
+}
+
+/// 计算两个相邻 chunk 的实际 suffix/prefix overlap 字符数
+///
+/// 取前一个 chunk 的尾部和当前 chunk 的头部，找到最大公共子串长度。
+/// 结果不超过 `max_overlap` 上限，防止偶然的 suffix/prefix 相同被误判为 splitter overlap。
+/// 例：max_overlap=0 时直接返回 0；max_overlap=2 时最多回退 2 个字符。
+fn actual_overlap_chars(prev: &str, curr: &str, max_overlap: usize) -> usize {
+    if max_overlap == 0 {
+        return 0;
+    }
+    let prev_chars: Vec<char> = prev.chars().collect();
+    let curr_chars: Vec<char> = curr.chars().collect();
+    let max_possible = prev_chars.len().min(curr_chars.len()).min(max_overlap);
+
+    // 从最大可能重叠开始递减，找到第一个匹配的长度
+    for overlap in (1..=max_possible).rev() {
+        let prev_suffix = &prev_chars[prev_chars.len() - overlap..];
+        let curr_prefix = &curr_chars[..overlap];
+        if prev_suffix == curr_prefix {
+            return overlap;
+        }
+    }
+    0
+}
+
+/// 根据 splitter 配置计算最大可能 overlap 字符数
+///
+/// 优先级与 `create_async_splitter` 一致：
+/// 1. semantic_enabled + 有 embedder → SemanticSplitter 有 overlap → 返回 chunk_overlap
+/// 2. semantic_enabled 但无 embedder → 回退到 Markdown/Recursive
+/// 3. Markdown 扩展名 → MarkdownHeaderSplitter 无 overlap → 返回 0
+/// 4. 其余 → RecursiveCharSplitter，内部 cap 到 chunk_size/2 → 返回 chunk_overlap.min(chunk_size/2)
+///
+/// `has_embedder` 参数指示调用方是否实际提供了 embedder，
+/// 用于匹配 `create_async_splitter` 中 semantic_enabled=true 但无 embedder 的回退逻辑。
+pub fn splitter_max_overlap(config: &SplitterConfig, has_embedder: bool) -> usize {
+    if config.semantic_enabled && has_embedder {
+        return config.chunk_overlap;
+    }
+    // semantic_enabled=true 但无 embedder 时，回退到与 create_splitter 相同的逻辑
+    let ext = std::path::Path::new(&config.file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "md" || ext == "markdown" {
+        0
+    } else {
+        config.chunk_overlap.min(config.chunk_size / 2)
+    }
+}
+
 /// 进度回调类型: 接收阶段名称和进度消息
 pub type ProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 
@@ -370,28 +520,11 @@ pub async fn process_document_async(
         })
         .unwrap_or_default();
 
-    // FIX10-08: 使用 cursor 在原文中定位 chunk，正确处理 overlap/semantic splitter 等路径
-    // 不再假设 chunks 无重叠地拼接为原文，而是用 find 定位每个 chunk 的真实位置
+    // FIX10-R1: 使用统一的 helper 定位 chunk 字符偏移，max_overlap 按 splitter 类型计算
+    // semantic → chunk_overlap; Markdown → 0; Recursive → chunk_overlap.min(chunk_size/2)
     let full_text = &parsed.content;
-    let mut chunk_offsets: Vec<(usize, usize)> = Vec::with_capacity(chunks.len());
-    {
-        let mut cursor: usize = 0;
-        for chunk in &chunks {
-            let chunk_char_len = chunk.chars().count();
-            if let Some(pos) = full_text[cursor..].find(chunk.as_str()) {
-                let start = cursor + pos;
-                let end = start + chunk_char_len;
-                chunk_offsets.push((start, end));
-                cursor = start + 1; // 下次从匹配位置后开始查找
-            } else {
-                // 无法找到精确位置，用推算偏移
-                let start = cursor;
-                let end = cursor + chunk_char_len;
-                chunk_offsets.push((start, end));
-                cursor = end;
-            }
-        }
-    }
+    let max_overlap = splitter_max_overlap(&splitter_config, embedder.is_some());
+    let chunk_offsets: Vec<(usize, usize)> = locate_chunk_char_offsets(full_text, &chunks, max_overlap);
 
     // 对每个 chunk，找与其 span 重叠最多的 block
     #[allow(clippy::type_complexity)]
@@ -1129,5 +1262,38 @@ mod tests {
         assert!(files[0].ends_with("test.md"));
 
         let _ = std::fs::remove_dir_all(&sub);
+    }
+
+    #[test]
+    fn test_locate_chunk_overlap_boundary() {
+        // P2 修复：overlap_chars == char_cursor 时应允许回退到 0
+        // full_text="abcdef"、chunks=["a","abcdef"]、max_overlap=1
+        // 第一块 "a" 匹配后 char_cursor=1，第二块与第一块 overlap=1（'a'）
+        // overlap_chars(1) == char_cursor(1)，应回退到 0，从 0 开始 find("abcdef")
+        let full_text = "abcdef".to_string();
+        let chunks = vec!["a".to_string(), "abcdef".to_string()];
+        let offsets = locate_chunk_char_offsets(&full_text, &chunks, 1);
+        assert_eq!(offsets[0], (0, 1)); // "a" at 0..1
+        assert_eq!(offsets[1], (0, 6)); // "abcdef" at 0..6（回退到 0 后精确匹配）
+    }
+
+    #[test]
+    fn test_locate_chunk_overlap_normal() {
+        // 正常 overlap：full_text="abcdef"、chunks=["abcd","cdef"]、max_overlap=2
+        let full_text = "abcdef".to_string();
+        let chunks = vec!["abcd".to_string(), "cdef".to_string()];
+        let offsets = locate_chunk_char_offsets(&full_text, &chunks, 2);
+        assert_eq!(offsets[0], (0, 4)); // "abcd" at 0..4
+        assert_eq!(offsets[1], (2, 6)); // "cdef" at 2..6（overlap=2 回退到 2）
+    }
+
+    #[test]
+    fn test_locate_chunk_no_overlap() {
+        // max_overlap=0 不回退
+        let full_text = "abcdef".to_string();
+        let chunks = vec!["abcd".to_string(), "ef".to_string()];
+        let offsets = locate_chunk_char_offsets(&full_text, &chunks, 0);
+        assert_eq!(offsets[0], (0, 4)); // "abcd" at 0..4
+        assert_eq!(offsets[1], (4, 6)); // "ef" at 4..6（不回退）
     }
 }

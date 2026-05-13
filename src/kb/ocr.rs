@@ -151,26 +151,10 @@ pub fn writeback_ocr_results(
     // 当一个 OCR 页被切成多个 chunk，或多个短页合并成一个 chunk 时，
     // 按 chunk 在全文中的真实位置与 block 的 source span 重叠度匹配。
 
-    // 计算每个 chunk 在全文中的真实位置（用 cursor 查找）
-    let mut chunk_spans: Vec<(usize, usize)> = Vec::with_capacity(chunks.len());
-    {
-        let mut cursor: usize = 0;
-        for chunk in &chunks {
-            if let Some(pos) = full_text[cursor..].find(chunk.as_str()) {
-                let start = cursor + pos;
-                // FIX10-08: 统一使用字符偏移（chars().count()），禁止混用 byte 长度
-                let end = start + chunk.chars().count();
-                chunk_spans.push((start, end));
-                cursor = start + 1; // 下次从匹配位置后开始查找
-            } else {
-                // 无法找到精确位置，用推算偏移
-                let start = cursor;
-                let end = cursor + chunk.chars().count();
-                chunk_spans.push((start, end));
-                cursor = end;
-            }
-        }
-    }
+    // FIX10-R1: 使用统一的 helper 定位 chunk 字符偏移，max_overlap 按 splitter 类型计算
+    let max_overlap = crate::kb::pipeline::splitter_max_overlap(&splitter_config, false);
+    let chunk_spans: Vec<(usize, usize)> =
+        crate::kb::pipeline::locate_chunk_char_offsets(&full_text, &chunks, max_overlap);
 
     #[allow(clippy::type_complexity)]
     let block_meta_vec: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = blocks
