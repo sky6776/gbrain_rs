@@ -2,9 +2,35 @@
 
 中文 | [English](./README_EN.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+
 **Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with added KB subsystem (async document processing pipeline + RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle (restore/purge-deleted), time-decay search, and more. Built on SQLite + sqlite-vec + FTS5 with a zero-config embedded architecture — ready to use out of the box.
 
 > The original TypeScript version was developed by [Garry Tan](https://github.com/garrytan). Built with **Vibe coding**.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Build
+cargo build --release
+
+# 2. Initialize a knowledge base
+gbrain init
+
+# 3. Create a page
+gbrain put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
+
+# 4. Search
+gbrain query "who is Alice"
+
+# 5. Start MCP server (for AI agent integration)
+gbrain serve
+```
+
+No database or external services to configure — works out of the box. AI features like embeddings and query expansion are optional and activate automatically when API keys are configured.
 
 ---
 
@@ -14,12 +40,16 @@
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
 - **KB Subsystem** — Async five-stage document processing pipeline (parse → split → embed → RAPTOR → persist), RAPTOR recursive summarization tree, document upload and processing, multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext/code), semantic chunking (Savitzky-Golay smoothing + chunk_overlap overlap)
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
-- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 51 tools for AI agent integration
+- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 58 tools for AI agent integration
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
 - **Autopilot** — Self-maintenance daemon that auto-embeds stale content and runs integrity checks
 - **Safety Guards** — Path traversal protection, slug validation, remote-call input sanitization, parameterized queries against SQL injection
+- **Code Knowledge Graph** — Tree-sitter AST code chunking + regex symbol indexing with symbol definitions, references, and call graph (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
+- **Audio Transcription** — Groq Whisper (default) or OpenAI Whisper support
+- **Writer Modes** — Strict (full validation) / Lint (zero-LLM quality checks) / Off (free write) strategies
+- **Soft-Delete Lifecycle** — Delete → restore → permanent purge, with time-based batch cleanup
 
 ---
 
@@ -30,6 +60,25 @@ cargo build --release          # Build
 cargo install --path .         # Install to ~/.cargo/bin/
 gbrain install                 # Install to ~/.gbrain/bin/
 ```
+
+
+---
+
+## Data Directory
+
+After initialization, the `~/.gbrain/` directory structure is:
+
+```
+~/.gbrain/
+  brain.db           # SQLite database (FTS5 + sqlite-vec)
+  config.json        # Runtime config (generated via gbrain config set)
+  files/             # Uploaded file storage
+  cache/             # Cache directory
+  logs/              # Log files
+    gbrain.log
+```
+
+Customize the root directory via the `GBRAIN_DIR` environment variable.
 
 ---
 
@@ -118,9 +167,61 @@ gbrain install                 # Install to ~/.gbrain/bin/
 
 ---
 
+## MCP Integration
+
+gbrain can run as an MCP server for AI tools like Claude, Cursor, etc.
+
+### Start the Server
+
+```bash
+gbrain serve
+```
+
+### Claude Desktop Configuration
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "gbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Cursor Configuration
+
+Add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "gbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Security Model
+
+The MCP server sets `remote=true` for remote callers, enabling additional security validations:
+- Slug format validation (path traversal prevention)
+- Input content sanitization
+- Parameterized queries (SQL injection prevention)
+- Filename safety checks
+
+CLI uses `remote=false` directly, bypassing remote security restrictions.
+
+---
+
 ## MCP Tools
 
-gbrain provides 51 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
+gbrain provides 58 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
 
 ### Search
 
@@ -232,6 +333,13 @@ gbrain provides 51 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `kb_list_documents` | List documents in a library |
 | `kb_search` | Cross-library hybrid search (vector + keyword + RRF fusion) |
 | `kb_create_folder` | Create a folder in a library |
+| `kb_purge_document` | Permanently delete a document (requires confirmation) |
+| `kb_check_index_health` | Check knowledge library index health |
+| `kb_repair_index` | Repair knowledge library index |
+| `kb_backup` | Backup knowledge library to file |
+| `kb_restore` | Restore knowledge library from backup file |
+| `kb_add_eval_query` | Add a search evaluation query |
+| `kb_add_search_feedback` | Add search result feedback rating |
 
 ---
 
@@ -314,6 +422,19 @@ gbrain provides 51 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 
 > **API Compatibility Note**: This project only supports OpenAI-compatible API formats (`/embeddings`, `/chat/completions`, `/audio/transcriptions`). Anthropic/Claude API is not supported. By setting `*_BASE_URL`, you can connect to any OpenAI-compatible service (DeepSeek, Zhipu, DashScope, Ollama, etc.).
 
+### API Key Fallback Chain
+
+Each module's API key falls back in this priority order:
+
+```
+Embeddings:  GBRAIN_OPENAI_API_KEY
+Expansion:   GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+LLM Chunker: GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
+KB RAPTOR:   GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+```
+
+Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-module for different models/providers.
+
 ### Base Configuration
 
 | Variable | Description | Default |
@@ -395,12 +516,74 @@ gbrain provides 51 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 
 ---
 
+## Writer Modes
+
+gbrain provides three write strategies, controlled via the `writer_mode` parameter of `put_page`:
+
+| Mode | Description |
+|------|-------------|
+| `Strict` | Full validation — requires frontmatter, rejects empty content, checks link reference validity |
+| `Lint` | Zero-LLM quality checks — runs 6 rules, auto-fixes where possible |
+| `Off` | Free write — skips all validation, writes directly |
+
+### Lint Rules
+
+| Rule | Description |
+|------|-------------|
+| LLM preamble detection | Detect and remove typical AI-generated preambles ("Here is...", "Sure, I'll...") |
+| Placeholder date detection | Detect unsubstituted date placeholders (e.g., `YYYY-MM-DD`) |
+| Missing frontmatter | Detect missing YAML frontmatter |
+| Broken citations | Detect wikilinks referencing non-existent pages |
+| Empty sections | Detect sections with headings but no content |
+| Unclosed code fences | Detect unclosed ``` code blocks |
+
+---
+
+## Soft-Delete Lifecycle
+
+Page deletion follows a soft-delete mechanism to prevent accidental data loss:
+
+```
+Active page ──delete──→ Soft-deleted (still in storage, not queryable)
+                          │
+                          ├──restore──→ Restored to active page
+                          │
+                          └──purge-deleted──→ Permanently deleted (storage freed)
+```
+
+- `gbrain delete <slug>` — Soft-delete; page is marked deleted but data is retained
+- `gbrain restore <slug>` — Restore a soft-deleted page
+- `gbrain purge-deleted --older-than-hours 168` — Permanently purge soft-deleted pages older than 7 days
+
+---
+
+## Code Knowledge Graph
+
+Based on Tree-sitter AST chunking + regex symbol indexing, supporting the following languages:
+
+| Language | Tree-sitter Binding |
+|----------|-------------------|
+| Rust | `tree-sitter-rust` |
+| TypeScript | `tree-sitter-typescript` |
+| JavaScript | `tree-sitter-javascript` |
+| Python | `tree-sitter-python` |
+| Go | `tree-sitter-go` |
+| Java | `tree-sitter-java` |
+| C | `tree-sitter-c` |
+| C++ | `tree-sitter-cpp` |
+
+When importing code files via `gbrain import`, Tree-sitter performs AST chunking and regex extracts symbol definitions, references, and call graphs. Query via `gbrain code` commands or MCP tools.
+
+---
+
 ## Testing
 
 ```bash
 cargo test                    # All tests
 cargo test --test engine_test # Engine integration tests
 cargo test --test search_test # Search integration tests
+cargo test --test fuzzy_test  # Fuzzy matching tests
+cargo test --test dedup_test  # Deduplication tests
 cargo clippy                  # Lint
 ```
 
@@ -420,7 +603,7 @@ Three-layer design:
 
 ### Search Pipeline
 
-9-step hybrid search pipeline:
+9-step hybrid search pipeline (+ two-stage code graph expansion + dedup):
 
 1. FTS5 BM25 keyword search (weights: title 10x, compiled_truth 5x, timeline 2x)
 2. sqlite-vec cosine similarity
@@ -430,7 +613,7 @@ Three-layer design:
 6. Backlink boost
 7. Recency boost (time decay)
 8. Intent type boost (entity/time/event)
-9. 4-layer dedup (slug → compiled_truth priority → score sort → truncation)
+9. 6-layer dedup (slug top-3 → cross-source dedup → text similarity → type diversity → per-page cap → compiled_truth guarantee)
 
 ### KB Subsystem Architecture
 

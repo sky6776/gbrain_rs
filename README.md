@@ -2,9 +2,35 @@
 
 [English](./README_EN.md) | 中文
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+
 **个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增 KB 子系统（异步文档处理管线 + RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期（restore/purge-deleted）、时间衰减搜索等特性。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式架构，开箱即用。
 
 > 原始 TypeScript 版本由 [Garry Tan](https://github.com/garrytan) 开发。本项目采用**Vibe coding**构建。
+
+---
+
+## 快速开始
+
+```bash
+# 1. 构建
+cargo build --release
+
+# 2. 初始化知识库
+gbrain init
+
+# 3. 创建页面
+gbrain put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
+
+# 4. 搜索
+gbrain query "谁是 Alice"
+
+# 5. 启动 MCP 服务器（供 AI 智能体使用）
+gbrain serve
+```
+
+无需配置数据库或外部服务——开箱即用。嵌入向量、查询扩展等 AI 功能为可选，配置 API Key 后自动启用。
 
 ---
 
@@ -14,12 +40,16 @@
 - **知识图谱** — Wiki 链接提取、类型化链接、图遍历、反向链接对称性验证
 - **KB 子系统** — 异步五阶段文档处理管线（解析→拆分→嵌入→RAPTOR→持久化），RAPTOR 递归摘要树，文档上传与处理，多格式解析器（Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本/代码），语义分块（Savitzky-Golay 平滑 + chunk_overlap 重叠）
 - **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
-- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，51 个工具，用于 AI 智能体集成
+- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，58 个工具，用于 AI 智能体集成
 - **零配置** — 嵌入式 SQLite，无需外部服务（嵌入向量可选）
 - **分层丰富** — 自动实体检测与提升（提及 → 存根 → 完善）
 - **版本历史** — 完整的页面版本管理，支持回滚
 - **自动驾驶** — 自维护守护进程，自动嵌入过期内容并执行完整性检查
 - **安全防护** — 路径遍历防护、slug 验证、远程调用输入清理、参数化查询防 SQL 注入
+- **代码知识图谱** — Tree-sitter AST 代码分块 + regex 符号索引，支持符号定义、引用和调用图（Rust/TypeScript/JavaScript/Python/Go/Java/C/C++）
+- **音频转录** — 支持 Groq Whisper（默认）或 OpenAI Whisper
+- **写作模式** — Strict（严格校验）/ Lint（零 LLM 质量检查）/ Off（自由写入）三种写入策略
+- **软删除生命周期** — 删除 → 恢复 → 永久清理，支持按时间批量清理
 
 ---
 
@@ -30,6 +60,25 @@ cargo build --release          # 构建
 cargo install --path .         # 安装到 ~/.cargo/bin/
 gbrain install                 # 安装到 ~/.gbrain/bin/
 ```
+
+
+---
+
+## 数据目录
+
+初始化后，`~/.gbrain/` 目录结构如下：
+
+```
+~/.gbrain/
+  brain.db           # SQLite 数据库（FTS5 + sqlite-vec）
+  config.json        # 运行时配置（通过 gbrain config set 生成）
+  files/             # 上传文件存储
+  cache/             # 缓存目录
+  logs/              # 日志文件
+    gbrain.log
+```
+
+可通过 `GBRAIN_DIR` 环境变量自定义根目录。
 
 ---
 
@@ -118,9 +167,61 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 
 ---
 
+## MCP 集成
+
+gbrain 可作为 MCP 服务器运行，供 Claude、Cursor 等 AI 工具调用。
+
+### 启动服务器
+
+```bash
+gbrain serve
+```
+
+### Claude Desktop 配置
+
+在 `claude_desktop_config.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "gbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Cursor 配置
+
+在 `.cursor/mcp.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "gbrain": {
+      "command": "gbrain",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### 安全模型
+
+MCP 服务器对远程调用者设置 `remote=true`，启用额外的安全验证：
+- slug 格式校验（防路径遍历）
+- 输入内容清理
+- 参数化查询（防 SQL 注入）
+- 文件名安全检查
+
+CLI 直接使用 `remote=false`，跳过远程安全限制。
+
+---
+
 ## MCP 工具
 
-gbrain 提供 51 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
+gbrain 提供 58 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
 
 ### 搜索
 
@@ -232,6 +333,13 @@ gbrain 提供 51 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `kb_list_documents` | 列出知识库中的文档 |
 | `kb_search` | 跨库混合搜索（向量 + 关键词 + RRF 融合） |
 | `kb_create_folder` | 在知识库中创建文件夹 |
+| `kb_purge_document` | 永久删除文档（需确认） |
+| `kb_check_index_health` | 检查知识库索引健康状态 |
+| `kb_repair_index` | 修复知识库索引 |
+| `kb_backup` | 备份知识库到文件 |
+| `kb_restore` | 从备份文件恢复知识库 |
+| `kb_add_eval_query` | 添加搜索评估查询 |
+| `kb_add_search_feedback` | 添加搜索结果反馈评分 |
 
 ---
 
@@ -314,6 +422,19 @@ gbrain 提供 51 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 
 > **API 兼容性说明**: 本项目仅支持 OpenAI 兼容格式的 API（`/embeddings`、`/chat/completions`、`/audio/transcriptions`），不支持 Anthropic/Claude API。通过设置 `*_BASE_URL` 可接入任何 OpenAI 兼容服务（DeepSeek、Zhipu、DashScope、Ollama 等）。
 
+### API Key 回退链
+
+各模块的 API Key 按以下优先级回退：
+
+```
+嵌入向量:  GBRAIN_OPENAI_API_KEY
+查询扩展:  GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+LLM 分块:  GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
+KB RAPTOR: GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+```
+
+只需设置 `GBRAIN_OPENAI_API_KEY` 即可启用所有 AI 功能。如需不同模型/提供商，可按模块单独覆盖。
+
 ### 基础配置
 
 | 变量 | 说明 | 默认值 |
@@ -395,12 +516,74 @@ gbrain 提供 51 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 
 ---
 
+## 写入模式
+
+gbrain 提供三种写入策略，通过 `put_page` 的 `writer_mode` 参数控制：
+
+| 模式 | 说明 |
+|------|------|
+| `Strict` | 严格校验——要求 frontmatter、禁止空内容、检查链接引用有效性 |
+| `Lint` | 零 LLM 质量检查——运行 6 条规则，自动修复可修复的问题 |
+| `Off` | 自由写入——跳过所有校验，直接写入 |
+
+### Lint 规则
+
+| 规则 | 说明 |
+|------|------|
+| LLM 前言检测 | 检测并移除 AI 生成的典型前言（"Here is..."、"Sure, I'll..."） |
+| 占位日期检测 | 检测未替换的日期占位符（如 `YYYY-MM-DD`） |
+| 缺失 frontmatter | 检测缺失的 YAML frontmatter |
+| 断裂引用 | 检测引用了不存在页面的 wikilink |
+| 空章节 | 检测仅有标题无内容的章节 |
+| 未闭合代码围栏 | 检测未闭合的 ``` 代码块 |
+
+---
+
+## 软删除生命周期
+
+页面删除遵循软删除机制，防止误删并支持恢复：
+
+```
+正常页面 ──delete──→ 软删除状态（仍占存储，不可查询）
+                        │
+                        ├──restore──→ 恢复为正常页面
+                        │
+                        └──purge-deleted──→ 永久删除（释放存储）
+```
+
+- `gbrain delete <slug>` — 软删除，页面标记为已删除但数据保留
+- `gbrain restore <slug>` — 恢复软删除的页面
+- `gbrain purge-deleted --older-than-hours 168` — 永久清理 7 天前的软删除页面
+
+---
+
+## 代码知识图谱
+
+基于 Tree-sitter AST 分块 + regex 符号索引，支持以下语言：
+
+| 语言 | Tree-sitter 绑定 |
+|------|-----------------|
+| Rust | `tree-sitter-rust` |
+| TypeScript | `tree-sitter-typescript` |
+| JavaScript | `tree-sitter-javascript` |
+| Python | `tree-sitter-python` |
+| Go | `tree-sitter-go` |
+| Java | `tree-sitter-java` |
+| C | `tree-sitter-c` |
+| C++ | `tree-sitter-cpp` |
+
+通过 `gbrain import` 导入代码文件时，Tree-sitter 进行 AST 分块，regex 提取符号定义、引用和调用图。之后可通过 `gbrain code` 命令或 MCP 工具查询。
+
+---
+
 ## 测试
 
 ```bash
 cargo test                    # 所有测试
 cargo test --test engine_test # 引擎集成测试
 cargo test --test search_test # 搜索集成测试
+cargo test --test fuzzy_test  # 模糊匹配测试
+cargo test --test dedup_test  # 去重测试
 cargo clippy                  # 代码检查
 ```
 
@@ -420,7 +603,7 @@ cargo clippy                  # 代码检查
 
 ### 搜索流水线
 
-9 步混合搜索流水线:
+9 步混合搜索流水线（+ 两阶段代码图扩展 + 去重）:
 
 1. FTS5 BM25 关键词搜索（权重: 标题 10x, compiled_truth 5x, 时间线 2x）
 2. sqlite-vec 余弦相似度
@@ -430,7 +613,7 @@ cargo clippy                  # 代码检查
 6. 反向链接提升
 7. 时效性提升（时间衰减）
 8. 意图类型提升（实体/时间/事件）
-9. 4 层去重（slug → compiled_truth 优先 → 分数排序 → 截断）
+9. 6 层去重（slug top-3 → 跨源去重 → 文本相似度 → 类型多样性 → 每页上限 → compiled_truth 保证）
 
 ### KB 子系统架构
 
