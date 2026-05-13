@@ -546,7 +546,9 @@ pub async fn try_model_rerank(
                 );
             }
             None => {
-                debug!("try_model_rerank: dedicated rerank API failed, falling back to local rerank");
+                debug!(
+                    "try_model_rerank: dedicated rerank API failed, falling back to local rerank"
+                );
             }
         }
     }
