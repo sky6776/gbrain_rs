@@ -324,6 +324,9 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     }
 
     // --- 阶段 5: 持久化 ---
+    // 修复：持久化前再次校验 run_id，防止 stale job 在通过初始校验后
+    // 继续跑完后续阶段（新上传可能已更新 run_id）
+    kb.ensure_document_run_current(doc_id, run_id)?;
     persist_nodes_and_vectors(conn, doc_id, lib_id, &raptor_nodes)?;
 
     kb.update_document_stats(doc_id, word_total, split_total, None)?;
@@ -845,6 +848,9 @@ pub async fn process_document_async(
     }
 
     // --- 阶段 5: 持久化 ---
+    // 修复：持久化前再次校验 run_id，防止 stale job 在通过初始校验后
+    // 继续跑完后续阶段（新上传可能已更新 run_id）
+    kb.ensure_document_run_current(doc_id, run_id)?;
     report_progress(
         on_progress,
         "persist",

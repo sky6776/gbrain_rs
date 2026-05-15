@@ -15,7 +15,9 @@ use tracing::{debug, info};
 /// accidental leakage when `Config::save()` writes config.json. Keys are still
 /// deserialized from config files (for backward compatibility) but are never
 /// written back out — they should only come from environment variables.
+// 修复：添加 #[serde(default)]，旧 config.json 缺少新增字段时仍能正常加载
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     // --- Database ---
     pub database_path: Option<String>,
@@ -81,6 +83,14 @@ pub struct Config {
     pub kb_synonyms_file: Option<String>,
     /// P3-004: 别名映射文件路径
     pub kb_aliases_file: Option<String>,
+
+    // --- 单入口多投影融合架构 ---
+    /// Artifact 存储目录（默认 $GBRAIN_DIR/artifacts）
+    pub artifact_storage_dir: Option<String>,
+    /// 默认 KB library ID（upload_source 使用）
+    pub default_kb_library_id: Option<i64>,
+    /// 上传默认提升策略
+    pub upload_default_promotion_policy: String,
 }
 
 impl Default for Config {
@@ -137,20 +147,35 @@ impl Default for Config {
             kb_raptor_model: "gpt-4o-mini".to_string(),
             kb_max_file_size_mb: 50,
             kb_allowed_extensions: vec![
+                // 修复：默认 KB 允许列表与 KB_SUPPORTED_EXTENSIONS 保持一致，
+                // 否则 route planner 认为可处理的文件会被 MCP 安全检查拒绝
                 "pdf".into(),
                 "docx".into(),
                 "xlsx".into(),
                 "csv".into(),
+                "tsv".into(),
                 "html".into(),
                 "htm".into(),
                 "txt".into(),
                 "md".into(),
+                "markdown".into(),
+                "rst".into(),
+                "json".into(),
+                "xml".into(),
+                "yaml".into(),
+                "yml".into(),
+                "toml".into(),
             ],
             kb_storage_dir: None,
             kb_worker_enabled: true,
             kb_worker_poll_interval_secs: 30,
             kb_synonyms_file: None,
             kb_aliases_file: None,
+
+            // 单入口多投影融合架构
+            artifact_storage_dir: None,
+            default_kb_library_id: None,
+            upload_default_promotion_policy: "candidate".to_string(),
         }
     }
 }
@@ -298,6 +323,19 @@ impl Config {
             }
         }
 
+        // --- 单入口多投影融合架构 env vars ---
+        if let Ok(dir) = std::env::var("GBRAIN_ARTIFACT_STORAGE_DIR") {
+            config.artifact_storage_dir = Some(dir);
+        }
+        if let Ok(id) = std::env::var("GBRAIN_DEFAULT_KB_LIBRARY_ID") {
+            if let Ok(library_id) = id.parse::<i64>() {
+                config.default_kb_library_id = Some(library_id);
+            }
+        }
+        if let Ok(policy) = std::env::var("GBRAIN_UPLOAD_PROMOTION_POLICY") {
+            config.upload_default_promotion_policy = policy;
+        }
+
         info!(
             db_path = %config.db_path().display(),
             log_level = %config.log_level,
@@ -336,6 +374,30 @@ impl Config {
     /// Get the cache directory
     pub fn cache_dir(&self) -> PathBuf {
         Self::base_dir().join("cache")
+    }
+
+    /// 获取 artifact store 目录（统一 resolver）
+    ///
+    /// 修复：上传用 engine.gbrain_dir()/artifacts（db_path 的父目录），
+    /// 备份用 Config::base_dir()/artifacts（~/.gbrain/），两者不一致。
+    /// 当用户配置了自定义 database_path 但没配置 artifact_storage_dir 时，
+    /// 上传写入 db_path 父目录下的 artifacts，备份却从 ~/.gbrain/artifacts 读取，
+    /// 导致原始文件漏备份。
+    ///
+    /// 统一规则：
+    /// 1. 用户显式配置 artifact_storage_dir → 直接使用
+    /// 2. 未配置 → 使用 db_path 的父目录 + "artifacts"（与上传一致）
+    pub fn artifact_dir(&self) -> PathBuf {
+        self.artifact_storage_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let db_path = self.db_path();
+                db_path
+                    .parent()
+                    .map(|p| p.join("artifacts"))
+                    .unwrap_or_else(|| Self::base_dir().join("artifacts"))
+            })
     }
 
     /// P2-7: Get the source of the database URL (mirrors TS getDbUrlSource).
@@ -557,6 +619,16 @@ impl Config {
         }
         if other.kb_aliases_file.is_some() {
             self.kb_aliases_file = other.kb_aliases_file.clone();
+        }
+        // 单入口多投影融合架构 — config file values
+        if other.artifact_storage_dir.is_some() {
+            self.artifact_storage_dir = other.artifact_storage_dir;
+        }
+        if other.default_kb_library_id.is_some() {
+            self.default_kb_library_id = other.default_kb_library_id;
+        }
+        if !other.upload_default_promotion_policy.is_empty() {
+            self.upload_default_promotion_policy = other.upload_default_promotion_policy;
         }
     }
 }

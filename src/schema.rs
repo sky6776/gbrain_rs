@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 22;
+pub const SCHEMA_VERSION: i32 = 26;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -1477,6 +1477,260 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
     ON kb_documents(library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL;
 "#;
 
+/// V23: 单入口多投影融合架构 — 新增 5 张表
+///
+/// source_artifacts: 原件内容对象，按 sha256 去重
+/// artifact_occurrences: 每次上传/同步/关联事件
+/// artifact_projections: artifact 到 KB/brain/file 投影的映射
+/// promotion_candidates: 从 KB 证据抽取的候选变更
+/// provenance_ledger: gbrain 事实与 KB 证据的来源追溯
+pub const MIGRATION_V23_DDL: &str = r#"
+-- ============================================================================
+-- 单入口多投影融合架构：新增 5 张核心表
+-- ============================================================================
+
+-- 1. 原件内容对象（按 sha256 去重，不等同于 KB 文档或 gbrain page）
+CREATE TABLE IF NOT EXISTS source_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_uid TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT,
+
+    sha256 TEXT NOT NULL,
+    original_name TEXT NOT NULL DEFAULT '',
+    extension TEXT NOT NULL DEFAULT '',
+    mime_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+
+    storage_path TEXT NOT NULL DEFAULT '',
+    canonical_slug TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+
+    deleted_at TEXT,
+    purged_at TEXT
+);
+
+-- sha256 唯一索引（仅对未清除的记录）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_artifacts_sha256
+    ON source_artifacts(sha256) WHERE purged_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_source_artifacts_slug ON source_artifacts(canonical_slug);
+CREATE INDEX IF NOT EXISTS idx_source_artifacts_status ON source_artifacts(status);
+
+-- 2. 上传/同步/关联事件（保存每次上传的上下文）
+CREATE TABLE IF NOT EXISTS artifact_occurrences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurrence_uid TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL DEFAULT 'upload',
+    source_uri TEXT NOT NULL DEFAULT '',
+    original_path TEXT NOT NULL DEFAULT '',
+    original_name TEXT NOT NULL DEFAULT '',
+    owner_ref TEXT NOT NULL DEFAULT '',
+
+    intent TEXT NOT NULL DEFAULT 'auto',
+    target_slug TEXT NOT NULL DEFAULT '',
+    page_slug TEXT NOT NULL DEFAULT '',
+    library_id INTEGER,
+    folder_id INTEGER,
+    promotion_policy TEXT NOT NULL DEFAULT 'candidate',
+
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_artifact ON artifact_occurrences(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_source ON artifact_occurrences(source_kind, source_uri);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_target ON artifact_occurrences(target_slug);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_page ON artifact_occurrences(page_slug);
+
+-- 3. 投影映射（artifact 到 KB/brain/file 的投影记录）
+CREATE TABLE IF NOT EXISTS artifact_projections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    projection_type TEXT NOT NULL,
+    projection_key TEXT NOT NULL DEFAULT '',
+    projection_ref TEXT NOT NULL DEFAULT '',
+
+    status TEXT NOT NULL DEFAULT 'active',
+    version_hash TEXT NOT NULL DEFAULT '',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+
+    -- 修复：移除 UNIQUE(artifact_id, projection_type, projection_key, status) 约束，
+    -- 改用 partial unique index（仅 status='active' 时唯一）。
+    -- 旧约束在 insert_projection 先插新 active 再标旧 active 为 superseded 时会撞唯一约束，
+    -- 导致重复上传同一文档失败。partial index 允许先标旧行 superseded 再插新 active。
+    -- 历史行（superseded/stale/orphaned）不参与唯一约束，可自由共存。
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_artifact ON artifact_projections(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_occurrence ON artifact_projections(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_type ON artifact_projections(projection_type);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_ref ON artifact_projections(projection_ref);
+-- 修复：partial unique index，仅 status='active' 时保证同一 key 唯一。
+-- 历史行（superseded/stale/orphaned）不参与唯一约束，可自由共存。
+-- 这允许 insert_projection 先标旧行 superseded 再插新 active，不会撞约束。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_proj_active_unique
+    ON artifact_projections(artifact_id, projection_type, projection_key)
+    WHERE status = 'active';
+
+-- 4. 候选变更（从 KB 证据抽取，默认进入 review）
+CREATE TABLE IF NOT EXISTS promotion_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    kb_document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    kb_node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+
+    candidate_type TEXT NOT NULL,
+    target_slug TEXT NOT NULL DEFAULT '',
+    target_field TEXT NOT NULL DEFAULT '',
+
+    title TEXT NOT NULL DEFAULT '',
+    proposed_payload TEXT NOT NULL DEFAULT '{}',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+
+    confidence REAL NOT NULL DEFAULT 0.0,
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT NOT NULL DEFAULT '',
+    review_notes TEXT NOT NULL DEFAULT '',
+    applied_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_artifact ON promotion_candidates(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_occurrence ON promotion_candidates(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_doc ON promotion_candidates(kb_document_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_status ON promotion_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_target ON promotion_candidates(target_slug);
+
+-- 5. 来源追溯（gbrain 事实与 KB 证据的来源关系）
+CREATE TABLE IF NOT EXISTS provenance_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER REFERENCES source_artifacts(id) ON DELETE SET NULL,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    kb_document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    kb_node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    promotion_candidate_id INTEGER REFERENCES promotion_candidates(id) ON DELETE SET NULL,
+
+    brain_slug TEXT NOT NULL DEFAULT '',
+    brain_field TEXT NOT NULL DEFAULT '',
+    fact_hash TEXT NOT NULL DEFAULT '',
+
+    quote_text TEXT NOT NULL DEFAULT '',
+    quote_start INTEGER,
+    quote_end INTEGER,
+    page_number INTEGER,
+
+    confidence REAL NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_provenance_artifact ON provenance_ledger(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_occurrence ON provenance_ledger(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_kb_doc ON provenance_ledger(kb_document_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_kb_node ON provenance_ledger(kb_node_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_brain_slug ON provenance_ledger(brain_slug);
+CREATE INDEX IF NOT EXISTS idx_provenance_fact_hash ON provenance_ledger(fact_hash);
+"#;
+
+/// V24: artifact_events 审计表（§7.6）
+///
+/// 记录 artifact 系统的关键事件，用于审计和回滚支持。
+pub const MIGRATION_V24_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS artifact_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    artifact_id INTEGER REFERENCES source_artifacts(id) ON DELETE SET NULL,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_events_artifact ON artifact_events(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_events_occurrence ON artifact_events(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_events_type ON artifact_events(event_type);
+"#;
+
+/// V25: 投影版本链 — 添加 superseded_by 列（§31）
+///
+/// 当同 artifact 的新投影替代旧投影时，旧投影的 superseded_by 指向新投影 ID，
+/// 形成完整的版本历史链。
+pub const MIGRATION_V25_DDL: &str = r#"
+ALTER TABLE artifact_projections ADD COLUMN superseded_by INTEGER REFERENCES artifact_projections(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_superseded ON artifact_projections(superseded_by);
+"#;
+
+/// V26: 修复 projection 唯一约束 — 移除表级 UNIQUE，改用 partial unique index
+///
+/// 旧约束 UNIQUE(artifact_id, projection_type, projection_key, status) 在
+/// insert_projection 先插新 active 再标旧 active 为 superseded 时会撞唯一约束，
+/// 导致重复上传同一文档失败。partial index 仅 status='active' 时唯一，
+/// 允许先标旧行 superseded 再插新 active。
+pub const MIGRATION_V26_DDL: &str = r#"
+-- SQLite 不支持 ALTER TABLE DROP CONSTRAINT，需要重建表来移除旧 UNIQUE 约束
+-- 步骤：创建新表（无表级 UNIQUE）→ 复制数据 → 删旧表 → 重命名新表 → 重建索引
+
+CREATE TABLE IF NOT EXISTS artifact_projections_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    projection_type TEXT NOT NULL,
+    projection_key TEXT NOT NULL DEFAULT '',
+    projection_ref TEXT NOT NULL DEFAULT '',
+
+    status TEXT NOT NULL DEFAULT 'active',
+    version_hash TEXT NOT NULL DEFAULT '',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    superseded_by INTEGER REFERENCES artifact_projections_new(id) ON DELETE SET NULL
+);
+
+INSERT INTO artifact_projections_new
+    SELECT id, created_at, updated_at, artifact_id, occurrence_id,
+           projection_type, projection_key, projection_ref,
+           status, version_hash, stale_reason, metadata_json, superseded_by
+    FROM artifact_projections;
+
+DROP TABLE artifact_projections;
+
+ALTER TABLE artifact_projections_new RENAME TO artifact_projections;
+
+-- 重建原有索引
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_artifact ON artifact_projections(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_occurrence ON artifact_projections(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_type ON artifact_projections(projection_type);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_ref ON artifact_projections(projection_ref);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_superseded ON artifact_projections(superseded_by);
+
+-- 新增 partial unique index：仅 status='active' 时保证同一 key 唯一
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_proj_active_unique
+    ON artifact_projections(artifact_id, projection_type, projection_key)
+    WHERE status = 'active';
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1501,5 +1755,9 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (20, MIGRATION_V20_DDL),
         (21, MIGRATION_V21_DDL),
         (22, MIGRATION_V22_DDL),
+        (23, MIGRATION_V23_DDL),
+        (24, MIGRATION_V24_DDL),
+        (25, MIGRATION_V25_DDL),
+        (26, MIGRATION_V26_DDL),
     ]
 }

@@ -3,6 +3,7 @@
 //! Rust implementation of gbrain's core brain functionality using
 //! SQLite + sqlite-vec + FTS5 as the storage engine.
 
+pub mod artifact;
 pub mod autopilot;
 pub mod backoff;
 pub mod budget;

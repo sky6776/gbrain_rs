@@ -89,6 +89,15 @@ pub fn backup_storage(storage_dir: &Path, output_dir: &Path) -> Result<usize> {
     copy_dir_recursive(storage_dir, &dest)
 }
 
+/// 备份 artifact store 目录
+/// 将 artifact 文件（按 hash 去重存储的原始文件）复制到备份目录
+pub fn backup_artifact_store(artifact_dir: &Path, output_dir: &Path) -> Result<usize> {
+    let dest = output_dir.join("artifacts");
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| GBrainError::FileError(format!("cannot create artifact backup dir: {}", e)))?;
+    copy_dir_recursive(artifact_dir, &dest)
+}
+
 /// 递归复制目录
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
     let mut count = 0usize;
@@ -333,6 +342,18 @@ pub fn restore_storage(backup_dir: &Path, target_dir: &Path) -> Result<usize> {
     let source = backup_dir.join("storage");
     std::fs::create_dir_all(target_dir)
         .map_err(|e| GBrainError::FileError(format!("cannot create target storage dir: {}", e)))?;
+    copy_dir_recursive(&source, target_dir)
+}
+
+/// 从备份恢复 artifact store
+pub fn restore_artifact_store(backup_dir: &Path, target_dir: &Path) -> Result<usize> {
+    let source = backup_dir.join("artifacts");
+    if !source.exists() {
+        // 旧版备份可能没有 artifacts 目录，跳过
+        return Ok(0);
+    }
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| GBrainError::FileError(format!("cannot create target artifact dir: {}", e)))?;
     copy_dir_recursive(&source, target_dir)
 }
 

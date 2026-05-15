@@ -1,0 +1,702 @@
+//! 投影管理 — KB 投影、影子页面投影、文件存储投影的创建和管理
+//!
+//! 负责投影的创建、更新、过期标记、一致性检查等。
+
+use rusqlite::{params, Connection};
+use tracing::{debug, info};
+
+use crate::error::{GBrainError, Result};
+use crate::kb::jobs::{new_run_id, KbProcessPayload};
+
+use super::store;
+use super::types::*;
+
+/// 创建 KB 投影
+///
+/// 在 artifact_projections 表中记录 artifact -> kb_document 的映射，
+/// 同时创建 kb_documents 记录（source_type='artifact'）并入队 KB 处理 job。
+/// 返回 projection_ref（格式: kb_document:{id}）。
+pub fn create_kb_projection(
+    conn: &Connection,
+    artifact_id: i64,
+    occurrence_id: i64,
+    library_id: i64,
+) -> Result<String> {
+    let proj_key = format!("library:{}", library_id);
+
+    // 检查是否已存在投影 — 用 artifact_id + projection_key 去重
+    // 修复：之前只按 projection_type + projection_key 查，没有限定 artifact_id，
+    // 同一 library 下所有 artifact 的 key 都是 library:{id}，第二个文件会
+    // 复用第一个的 kb_document，不会创建自己的 KB 文档
+    let existing = store::find_projection_by_key(conn, artifact_id, "kb_document", &proj_key)
+        .map_err(|e| GBrainError::Database(format!("查找 KB 投影失败: {}", e)))?;
+
+    if let Some(existing) = existing {
+        if existing.status == "active" {
+            if existing.occurrence_id == Some(occurrence_id) {
+                debug!(
+                    "KB 投影已存在且 occurrence_id 未变，跳过创建: artifact_id={}, key={}",
+                    artifact_id, proj_key
+                );
+                return Ok(existing.projection_ref.clone());
+            }
+            // 修复：occurrence_id 不同时，复用旧 kb_document（同 hash = 同内容），
+            // 只创建新 projection 行和 KB job，避免撞 kb_documents 唯一索引
+            // (library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL。
+            // 之前直接 INSERT 新 kb_document，同 hash 重传会失败，
+            // insert_projection supersede 逻辑根本执行不到。
+            if let Some(kb_doc_id) = existing
+                .projection_ref
+                .strip_prefix("kb_document:")
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                // 重新入队 KB 处理 job，让新 promotion_policy 生效
+                let run_id = new_run_id();
+                // 更新 kb_documents 的 processing_run_id 和状态为 queued
+                conn.execute(
+                    "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', updated_at = datetime('now') WHERE id = ?2",
+                    params![run_id, kb_doc_id],
+                )
+                .map_err(|e| GBrainError::Database(format!("更新 KB document run_id 失败: {}", e)))?;
+
+                // 查找 artifact 信息用于构建 job payload
+                let artifact = store::find_artifact_by_id(conn, artifact_id)
+                    .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?
+                    .ok_or_else(|| {
+                        GBrainError::PageNotFound(format!("artifact {} 不存在", artifact_id))
+                    })?;
+
+                let payload = KbProcessPayload {
+                    kind: "kb_process_document".to_string(),
+                    document_id: kb_doc_id,
+                    library_id,
+                    processing_run_id: run_id,
+                    storage_path: artifact.storage_path.clone(),
+                    extension: artifact.extension.clone(),
+                };
+                let payload_json = serde_json::to_string(&payload).map_err(|e| {
+                    GBrainError::Serialization(format!("序列化 KB job payload 失败: {}", e))
+                })?;
+                conn.execute(
+                    "INSERT INTO jobs (job_type, payload, status, priority, created_at)
+                     VALUES ('kb_process_document', ?1, 'pending', 0, datetime('now'))",
+                    params![payload_json],
+                )
+                .map_err(|e| GBrainError::Database(format!("重新入队 KB job 失败: {}", e)))?;
+                let job_id = conn.last_insert_rowid();
+
+                // 更新 kb_documents 的 job_id
+                conn.execute(
+                    "UPDATE kb_documents SET job_id = ?1 WHERE id = ?2",
+                    params![job_id.to_string(), kb_doc_id],
+                )
+                .map_err(|e| {
+                    GBrainError::Database(format!("更新 KB document job_id 失败: {}", e))
+                })?;
+
+                // 创建新投影行（insert_projection 会自动标记旧行为 superseded）
+                let proj_ref = format!("kb_document:{}", kb_doc_id);
+                let now = now_str();
+                let proj = ArtifactProjection {
+                    id: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    projection_type: ProjectionType::KbDocument.to_string(),
+                    projection_key: proj_key.clone(),
+                    projection_ref: proj_ref.clone(),
+                    status: "active".to_string(),
+                    version_hash: String::new(),
+                    stale_reason: String::new(),
+                    metadata_json: format!(
+                        "{{\"kb_document_id\": {}, \"job_id\": {}}}",
+                        kb_doc_id, job_id
+                    ),
+                    superseded_by: None,
+                };
+
+                let _proj_id = store::insert_projection(conn, &proj)
+                    .map_err(|e| GBrainError::Database(format!("插入 KB 投影失败: {}", e)))?;
+
+                info!(
+                    "重复上传：复用 kb_document={}, 创建新投影，重新入队 KB job: job_id={}",
+                    kb_doc_id, job_id
+                );
+
+                return Ok(proj_ref);
+            }
+        }
+    }
+
+    // 查找 artifact 信息用于创建 kb_document
+    let artifact = store::find_artifact_by_id(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?
+        .ok_or_else(|| GBrainError::PageNotFound(format!("artifact {} 不存在", artifact_id)))?;
+
+    // 查找 occurrence 信息
+    let occurrence = store::find_occurrence_by_id(conn, occurrence_id)
+        .map_err(|e| GBrainError::Database(format!("查找 occurrence 失败: {}", e)))?;
+
+    // 先生成 processing_run_id，确保 kb_documents 和 job payload 使用同一个 run id
+    // 修复：之前 job payload 用 new_run_id() 但 kb_documents 没写入 processing_run_id，
+    // 导致 worker 校验 DB 里的 run id 为空串，判定为 stale 作业
+    let run_id = new_run_id();
+
+    // 创建 kb_documents 记录 — 写入 processing_run_id 以匹配 job payload
+    conn.execute(
+        "INSERT INTO kb_documents
+            (library_id, folder_id, original_name, name_tokens, file_size,
+             content_hash, extension, mime_type, source_type, storage_path,
+             original_path, document_status, processing_run_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            library_id,
+            occurrence.as_ref().and_then(|o| o.folder_id),
+            artifact.original_name,
+            "", // name_tokens 后续由 KB worker 填充
+            artifact.size_bytes,
+            artifact.sha256,
+            artifact.extension,
+            artifact.mime_type,
+            "artifact", // source_type 标记为 artifact
+            artifact.storage_path,
+            occurrence
+                .as_ref()
+                .map(|o| o.original_path.clone())
+                .unwrap_or_default(),
+            "queued",
+            run_id,
+            artifact.created_at,
+            artifact.updated_at,
+        ],
+    )
+    .map_err(|e| GBrainError::Database(format!("创建 KB document 失败: {}", e)))?;
+    let kb_doc_id = conn.last_insert_rowid();
+
+    // 创建 KB 处理 job — 使用与 kb_documents 相同的 run_id
+    let payload = KbProcessPayload {
+        kind: "kb_process_document".to_string(),
+        document_id: kb_doc_id,
+        library_id,
+        processing_run_id: run_id,
+        storage_path: artifact.storage_path.clone(),
+        extension: artifact.extension.clone(),
+    };
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|e| GBrainError::Serialization(format!("序列化 KB job payload 失败: {}", e)))?;
+    conn.execute(
+        "INSERT INTO jobs (job_type, payload, status, priority, created_at)
+         VALUES ('kb_process_document', ?1, 'pending', 0, datetime('now'))",
+        params![payload_json],
+    )
+    .map_err(|e| GBrainError::Database(format!("创建 KB job 失败: {}", e)))?;
+    let job_id = conn.last_insert_rowid();
+
+    // 更新 kb_documents 的 job_id
+    conn.execute(
+        "UPDATE kb_documents SET job_id = ?1 WHERE id = ?2",
+        params![job_id.to_string(), kb_doc_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("更新 KB document job_id 失败: {}", e)))?;
+
+    // 创建投影记录 — projection_ref 使用实际的 kb_document:{id}
+    let proj_ref = format!("kb_document:{}", kb_doc_id);
+    let now = now_str();
+    let proj = ArtifactProjection {
+        id: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        occurrence_id: Some(occurrence_id),
+        projection_type: ProjectionType::KbDocument.to_string(),
+        projection_key: proj_key.clone(),
+        projection_ref: proj_ref.clone(),
+        status: "active".to_string(),
+        version_hash: String::new(),
+        stale_reason: String::new(),
+        metadata_json: format!(
+            "{{\"kb_document_id\": {}, \"job_id\": {}}}",
+            kb_doc_id, job_id
+        ),
+        superseded_by: None,
+    };
+
+    let _proj_id = store::insert_projection(conn, &proj)
+        .map_err(|e| GBrainError::Database(format!("插入 KB 投影失败: {}", e)))?;
+
+    info!(
+        "创建 KB 投影: artifact_id={}, kb_doc_id={}, job_id={}",
+        artifact_id, kb_doc_id, job_id
+    );
+
+    Ok(proj_ref)
+}
+
+/// 创建影子页面投影
+///
+/// 在 artifact_projections 表中记录 artifact -> shadow_page 的映射。
+pub fn create_shadow_page_projection(
+    conn: &Connection,
+    artifact_id: i64,
+    occurrence_id: i64,
+    brain_slug: &str,
+) -> Result<ArtifactProjection> {
+    let proj_key = format!("slug:{}", brain_slug);
+    let proj_ref = format!("slug:{}", brain_slug);
+
+    // 检查是否已存在
+    let existing = store::find_projection_by_ref(conn, "brain_shadow_page", &proj_key)
+        .map_err(|e| GBrainError::Database(format!("查找影子页面投影失败: {}", e)))?;
+
+    if let Some(existing) = existing {
+        if existing.status == "active" {
+            debug!(
+                "影子页面投影已存在: artifact_id={}, slug={}",
+                artifact_id, brain_slug
+            );
+            return Ok(existing);
+        }
+    }
+
+    let now = now_str();
+    let proj = ArtifactProjection {
+        id: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        occurrence_id: Some(occurrence_id),
+        projection_type: ProjectionType::BrainShadowPage.to_string(),
+        projection_key: proj_key.clone(),
+        projection_ref: proj_ref.clone(),
+        status: "active".to_string(),
+        version_hash: String::new(),
+        stale_reason: String::new(),
+        metadata_json: "{}".to_string(),
+        superseded_by: None,
+    };
+
+    let _proj_id = store::insert_projection(conn, &proj)
+        .map_err(|e| GBrainError::Database(format!("插入影子页面投影失败: {}", e)))?;
+
+    info!(
+        "创建影子页面投影: artifact_id={}, slug={}",
+        artifact_id, brain_slug
+    );
+
+    Ok(proj)
+}
+
+/// 创建文件存储投影
+///
+/// 在 artifact_projections 表中记录 artifact -> file 的映射。
+pub fn create_file_projection(
+    conn: &Connection,
+    artifact_id: i64,
+    occurrence_id: i64,
+    page_slug: &str,
+    filename: &str,
+    file_id: i64,
+) -> Result<ArtifactProjection> {
+    let proj_key = format!("page:{}:file:{}", page_slug, filename);
+    let proj_ref = format!("file:{}", file_id);
+
+    let now = now_str();
+    let proj = ArtifactProjection {
+        id: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        occurrence_id: Some(occurrence_id),
+        projection_type: ProjectionType::FileAttachment.to_string(),
+        projection_key: proj_key.clone(),
+        projection_ref: proj_ref.clone(),
+        status: "active".to_string(),
+        version_hash: String::new(),
+        stale_reason: String::new(),
+        metadata_json: "{}".to_string(),
+        superseded_by: None,
+    };
+
+    store::insert_projection(conn, &proj)
+        .map_err(|e| GBrainError::Database(format!("插入文件投影失败: {}", e)))?;
+
+    Ok(proj)
+}
+
+/// 标记 KB 投影为过期（KB document 被删除时调用）
+pub fn mark_kb_projection_stale(
+    conn: &Connection,
+    artifact_id: i64,
+    library_id: i64,
+    reason: &str,
+) -> Result<()> {
+    let proj_key = format!("library:{}", library_id);
+    // 查找投影
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    for proj in projections {
+        if proj.projection_type == "kb_document" && proj.projection_key == proj_key {
+            store::mark_projection_stale(conn, proj.id, reason)
+                .map_err(|e| GBrainError::Database(format!("标记投影过期失败: {}", e)))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 标记影子页面投影为过期（shadow page 被删除时调用）
+pub fn mark_shadow_projection_stale(
+    conn: &Connection,
+    artifact_id: i64,
+    brain_slug: &str,
+    reason: &str,
+) -> Result<()> {
+    let proj_key = format!("slug:{}", brain_slug);
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    for proj in projections {
+        if proj.projection_type == "brain_shadow_page" && proj.projection_key == proj_key {
+            store::mark_projection_stale(conn, proj.id, reason)
+                .map_err(|e| GBrainError::Database(format!("标记投影过期失败: {}", e)))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 标记所有投影为过期（artifact 被删除时调用）
+pub fn mark_all_projections_stale(conn: &Connection, artifact_id: i64, reason: &str) -> Result<()> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    for proj in projections {
+        if proj.status == "active" {
+            store::mark_projection_stale(conn, proj.id, reason)
+                .map_err(|e| GBrainError::Database(format!("标记投影过期失败: {}", e)))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// 查找 artifact 的影子页面 slug
+pub fn find_shadow_page_slug(conn: &Connection, artifact_id: i64) -> Result<Option<String>> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    for proj in projections {
+        if proj.projection_type == "brain_shadow_page" && proj.status == "active" {
+            // 从 projection_ref 中提取 slug
+            if let Some(slug) = proj.projection_ref.strip_prefix("slug:") {
+                return Ok(Some(slug.to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// 查找 artifact 的 KB document ID
+pub fn find_kb_document_id(conn: &Connection, artifact_id: i64) -> Result<Option<i64>> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    for proj in projections {
+        if proj.projection_type == "kb_document" && proj.status == "active" {
+            if let Some(id_str) = proj.projection_ref.strip_prefix("kb_document:") {
+                if let Ok(id) = id_str.parse::<i64>() {
+                    return Ok(Some(id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// 查找 artifact 的所有 KB document ID（不限状态）
+///
+/// 用于 delete_artifact 时软删除所有关联 kb_documents，
+/// 包括已 stale/orphaned 的投影，确保 deleted_at 被设置。
+pub fn find_all_kb_document_ids(conn: &Connection, artifact_id: i64) -> Result<Vec<i64>> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    let mut ids = Vec::new();
+    for proj in projections {
+        if proj.projection_type == "kb_document" {
+            if let Some(id_str) = proj.projection_ref.strip_prefix("kb_document:") {
+                if let Ok(id) = id_str.parse::<i64>() {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+
+    Ok(ids)
+}
+
+/// 投影垃圾回收结果
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GcResult {
+    /// 清理的孤儿投影数
+    pub orphaned_count: usize,
+    /// 删除的过期投影数
+    pub deleted_count: usize,
+    /// 清理的 KB 向量数
+    pub kb_vector_cleaned: usize,
+    /// 清理的影子页面数
+    pub shadow_page_cleaned: usize,
+    /// 错误列表
+    pub errors: Vec<String>,
+}
+
+/// 投影垃圾回收（§31 gc_orphan_projections）
+///
+/// 定期清理孤儿投影和过期投影：
+/// 1. 查找所有孤儿投影（artifact 已删除但投影仍为 active）
+/// 2. 将孤儿投影标记为 orphaned
+/// 3. 清理关联的 KB 向量
+/// 4. 清理关联的影子页面
+/// 5. 删除已过期超过指定天数的投影记录
+pub fn gc_orphan_projections(
+    conn: &Connection,
+    stale_days: u32,
+    dry_run: bool,
+) -> Result<GcResult> {
+    let mut result = GcResult::default();
+
+    // 1. 查找孤儿投影 — artifact 已删除但投影仍为 active/stale
+    let orphan_projections = store::find_orphan_projections(conn)
+        .map_err(|e| GBrainError::Database(format!("查找孤儿投影失败: {}", e)))?;
+
+    for proj in &orphan_projections {
+        if dry_run {
+            result.orphaned_count += 1;
+            continue;
+        }
+
+        // 修复：先清理关联数据，成功后再标 orphaned。
+        // 之前先标 orphaned 再清理，清理失败后投影丢出重试集合
+        // （find_orphan_projections 只查 active/stale）。
+        let mut cleanup_ok = true;
+
+        // 清理关联的 KB 向量
+        if proj.projection_type == "kb_document" {
+            if let Some(kb_doc_id) = proj
+                .projection_ref
+                .strip_prefix("kb_document:")
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                if let Err(e) = cleanup_kb_vectors(conn, kb_doc_id) {
+                    result.errors.push(format!(
+                        "清理 KB 向量 kb_document:{} 失败: {}",
+                        kb_doc_id, e
+                    ));
+                    cleanup_ok = false;
+                } else {
+                    result.kb_vector_cleaned += 1;
+                }
+            }
+        }
+
+        // 清理关联的影子页面
+        if proj.projection_type == "brain_shadow_page" {
+            if let Some(slug) = proj.projection_ref.strip_prefix("slug:") {
+                if let Err(e) = cleanup_shadow_page(conn, slug) {
+                    result
+                        .errors
+                        .push(format!("清理影子页面 {} 失败: {}", slug, e));
+                    cleanup_ok = false;
+                } else {
+                    result.shadow_page_cleaned += 1;
+                }
+            }
+        }
+
+        // 清理成功后才标 orphaned；失败则保持 active/stale，下次 GC 可重试
+        if cleanup_ok {
+            if let Err(e) = store::mark_projection_orphaned(conn, proj.id) {
+                result
+                    .errors
+                    .push(format!("标记投影 {} 为 orphaned 失败: {}", proj.id, e));
+            } else {
+                result.orphaned_count += 1;
+            }
+        }
+    }
+
+    // 2. 删除已过期超过指定天数的投影记录
+    // 修复：保留期 sweep 只删除 orphaned/superseded，不删除 stale。
+    // stale projection 可能是清理失败后保留的重试句柄（清理失败时不标 orphaned），
+    // 如果这里也删 stale，清理失败的 projection 会丢失，KB/shadow 残留无法重试。
+    let cutoff = format!("datetime('now', '-{} days')", stale_days);
+    let deleted: usize = if dry_run {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM artifact_projections
+                 WHERE status IN ('orphaned', 'superseded')
+                 AND updated_at < {}",
+                cutoff
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
+    } else {
+        conn.execute(
+            &format!(
+                "DELETE FROM artifact_projections
+                 WHERE status IN ('orphaned', 'superseded')
+                 AND updated_at < {}",
+                cutoff
+            ),
+            [],
+        )
+        .map_err(|e| GBrainError::Database(format!("删除过期投影失败: {}", e)))? as usize
+    };
+    result.deleted_count = deleted;
+
+    info!(
+        "投影 GC 完成: 孤儿={}, 删除={}, KB清理={}, 影子页面清理={}, dry_run={}",
+        result.orphaned_count,
+        result.deleted_count,
+        result.kb_vector_cleaned,
+        result.shadow_page_cleaned,
+        dry_run
+    );
+
+    Ok(result)
+}
+
+/// 清理 KB 向量 — 软删除 kb_document 并清理关联数据
+///
+/// 修复：设置 deleted_at 而非仅 document_status='deleted'，
+/// 否则唯一索引 idx_kb_docs_library_hash（WHERE deleted_at IS NULL AND purged_at IS NULL）
+/// 仍会排除已删除行，导致同 hash 重传撞唯一约束。
+fn cleanup_kb_vectors(conn: &Connection, kb_doc_id: i64) -> Result<()> {
+    // 软删除 kb_document：同时设置 deleted_at 和 document_status
+    crate::kb::lifecycle::soft_delete_document(conn, kb_doc_id)?;
+
+    // 修复：同步标记关联 provenance 为 stale，失败则返回错误
+    // 让外层 cleanup_ok=false，保留 projection 以便后续重试。
+    // 之前只 warn 后继续，外层会认为 KB 清理成功，
+    // 可能把 projection 标为 orphaned 后删除，留下仍为 active 的 provenance。
+    crate::artifact::provenance::mark_provenance_stale_by_kb_document(
+        conn,
+        kb_doc_id,
+        "kb_document_gc_cleanup",
+    )?;
+
+    // 修复：先收集所有 node_id，逐个调用 cleanup_node_vectors 清理
+    // vec_kb_nodes、per-index vec_kb_{id} 虚表和 kb_node_embeddings，
+    // 再删 kb_document_nodes。之前只删 kb_node_embeddings + kb_document_nodes，
+    // 但 vec_kb_nodes 和 vec_kb_{index_id} 中的向量数据会残留，
+    // 随时间累积影响搜索结果和磁盘空间。
+    let node_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")
+            .map_err(|e| GBrainError::Database(format!("查询 KB 文档节点失败: {}", e)))?;
+        stmt.query_map(rusqlite::params![kb_doc_id], |row| row.get(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    };
+
+    for node_id in node_ids {
+        crate::kb::engine::cleanup_node_vectors(conn, node_id);
+    }
+
+    // 删除 kb_document_nodes，触发 FTS 清理。
+    // 删除 nodes 后，kb_doc_fts 的触发器会自动清理 FTS 索引
+    conn.execute(
+        "DELETE FROM kb_document_nodes WHERE document_id = ?1",
+        rusqlite::params![kb_doc_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("清理 KB 文档节点失败: {}", e)))?;
+
+    debug!("KB 向量清理完成: kb_document_id={}", kb_doc_id);
+    Ok(())
+}
+
+/// 清理影子页面 — 删除 pages 表中对应的记录
+fn cleanup_shadow_page(conn: &Connection, slug: &str) -> Result<()> {
+    // 先保存版本历史到 page_versions（旧代码引用不存在的 pages_version_history 表）
+    let now = now_str();
+    conn.execute(
+        "INSERT OR IGNORE INTO page_versions (page_id, compiled_truth, frontmatter, title, page_type, snapshot_at)
+         SELECT id, compiled_truth, frontmatter, title, page_type, ?2 FROM pages WHERE slug = ?1",
+        rusqlite::params![slug, now],
+    )
+    .map_err(|e| GBrainError::Database(format!("保存影子页面版本历史失败: {}", e)))?;
+
+    // 删除页面
+    conn.execute(
+        "DELETE FROM pages WHERE slug = ?1 AND page_type = 'source'",
+        rusqlite::params![slug],
+    )
+    .map_err(|e| GBrainError::Database(format!("删除影子页面失败: {}", e)))?;
+
+    debug!("影子页面清理完成: slug={}", slug);
+    Ok(())
+}
+
+fn now_str() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// 替代旧投影（§31 版本链 superseded_by）
+///
+/// 当同一 projection_key 下创建新投影时，将旧投影标记为 superseded，
+/// 并设置 superseded_by 指向新投影 ID。
+pub fn supersede_projection(
+    conn: &Connection,
+    old_proj_id: i64,
+    new_proj_id: i64,
+) -> crate::error::Result<()> {
+    store::supersede_projection(conn, old_proj_id, new_proj_id)
+        .map_err(|e| GBrainError::Database(format!("替代投影失败: {}", e)))?;
+
+    // 记录事件
+    let _ = store::record_event(
+        conn,
+        None,
+        None,
+        "projection_superseded",
+        "supersede_projection",
+        &serde_json::json!({"old_proj_id": old_proj_id, "new_proj_id": new_proj_id}).to_string(),
+    );
+
+    info!(
+        "投影替代: old_proj_id={} -> new_proj_id={}",
+        old_proj_id, new_proj_id
+    );
+    Ok(())
+}
+
+/// 查询投影版本链（§31）
+///
+/// 按 projection_key 查询历史投影记录，最新在前。
+/// 修复：增加 artifact_id 和 projection_type 可选过滤，避免同一 library 下
+/// 多个 artifact 的投影混合
+pub fn get_projection_history(
+    conn: &Connection,
+    projection_key: &str,
+    artifact_id: Option<i64>,
+    projection_type: Option<&str>,
+    limit: i64,
+) -> crate::error::Result<Vec<ArtifactProjection>> {
+    store::find_projection_history(conn, projection_key, artifact_id, projection_type, limit)
+        .map_err(|e| GBrainError::Database(format!("查询投影历史失败: {}", e)))
+}
+
+/// 按 ID 查找投影
+pub fn find_projection_by_id(
+    conn: &Connection,
+    id: i64,
+) -> crate::error::Result<Option<ArtifactProjection>> {
+    store::find_projection_by_id(conn, id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))
+}

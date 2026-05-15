@@ -580,7 +580,7 @@ fn title_name_retriever(
         "SELECT MIN(n.id) FROM kb_doc_name_fts f \
          JOIN kb_documents d ON d.id = f.rowid \
          JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE kb_doc_name_fts MATCH ?1 AND d.deleted_at IS NULL",
+         WHERE kb_doc_name_fts MATCH ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
 
@@ -756,7 +756,7 @@ fn summary_retriever(
         "SELECT MIN(n.id) FROM kb_document_summaries s \
          JOIN kb_documents d ON d.id = s.document_id \
          JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE s.summary_tokens LIKE ?1 AND d.deleted_at IS NULL",
+         WHERE s.summary_tokens LIKE ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
     let like_query = format!("%{}%", query);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
@@ -813,7 +813,7 @@ fn table_retriever(
          JOIN kb_tables t ON t.id = r.table_id \
          JOIN kb_documents d ON d.id = t.document_id \
          JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE r.row_text LIKE ?1 AND d.deleted_at IS NULL",
+         WHERE r.row_text LIKE ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
     let like_query = format!("%{}%", query);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
@@ -869,7 +869,7 @@ fn metadata_retriever(
         "SELECT MIN(n.id) FROM kb_documents d \
          JOIN kb_document_nodes n ON n.document_id = d.id \
          WHERE (d.title LIKE ?1 OR d.keywords LIKE ?1 \
-         OR d.entity_names LIKE ?1) AND d.deleted_at IS NULL",
+         OR d.entity_names LIKE ?1) AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
     let like_query = format!("%{}%", query);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
@@ -924,7 +924,7 @@ fn filter_deleted_docs(conn: &Connection, merged: Vec<RankedResult>) -> Vec<Rank
     let sql = format!(
         "SELECT n.id FROM kb_document_nodes n \
          INNER JOIN kb_documents d ON d.id = n.document_id \
-         WHERE n.id IN ({}) AND d.deleted_at IS NULL",
+         WHERE n.id IN ({}) AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
         placeholders.join(",")
     );
     let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged
@@ -1115,7 +1115,8 @@ pub fn kb_fts_search(
         "SELECT f.rowid \
          FROM kb_doc_fts f \
          INNER JOIN kb_document_nodes n ON n.id = f.rowid \
-         WHERE kb_doc_fts MATCH ?1",
+         INNER JOIN kb_documents d ON d.id = n.document_id \
+         WHERE kb_doc_fts MATCH ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
@@ -1255,11 +1256,14 @@ fn try_vec_knn(
     top_k: usize,
     table_name: &str,
 ) -> Result<Vec<RankedResult>> {
+    // 修复：JOIN kb_documents 过滤已删除文档，否则向量搜索会返回已软删的节点
     let mut sql = format!(
         "SELECT v.node_id \
          FROM {} v \
          INNER JOIN kb_document_nodes n ON n.id = v.node_id \
-         WHERE v.embedding MATCH ?1 AND k = ?2",
+         INNER JOIN kb_documents d ON d.id = n.document_id \
+         WHERE v.embedding MATCH ?1 AND k = ?2 \
+         AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
         table_name,
     );
 
@@ -1327,11 +1331,13 @@ fn vector_search_fallback(
     top_k: usize,
     embedding_index_id: Option<i64>,
 ) -> Result<Vec<RankedResult>> {
+    // 修复：JOIN kb_documents 过滤已删除文档，否则 fallback 向量搜索也会返回已软删的节点
     let mut sql = String::from(
         "SELECT ne.node_id, ne.embedding \
          FROM kb_node_embeddings ne \
          INNER JOIN kb_document_nodes n ON n.id = ne.node_id \
-         WHERE 1=1",
+         INNER JOIN kb_documents d ON d.id = n.document_id \
+         WHERE d.deleted_at IS NULL AND d.document_status != 'deleted'",
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -1469,7 +1475,7 @@ fn filter_by_folder(
     let sql = format!(
         "SELECT DISTINCT n.id FROM kb_document_nodes n \
          JOIN kb_documents d ON d.id = n.document_id \
-         WHERE n.id IN ({}) AND d.folder_id = ?{}",
+         WHERE n.id IN ({}) AND d.folder_id = ?{} AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
         placeholders.join(","),
         placeholders.len() + 1,
     );
@@ -1523,7 +1529,7 @@ fn fetch_node_details(
          FROM kb_document_nodes n \
          INNER JOIN kb_documents d ON d.id = n.document_id \
          INNER JOIN kb_libraries l ON l.id = n.library_id \
-         WHERE n.id IN ({})",
+         WHERE n.id IN ({}) AND d.deleted_at IS NULL AND d.document_status != 'deleted'",
         placeholders.join(",")
     );
 

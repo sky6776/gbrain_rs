@@ -545,12 +545,14 @@ impl<'a> KbEngine<'a> {
         offset: usize,
     ) -> Result<Vec<DocumentListItem>> {
         self.query(|conn| {
+            // 修复：排除已软删除的文档，与搜索路径保持一致
             let sql = if folder_id.is_some() {
                 "SELECT id, original_name, extension, file_size, \
                         parsing_status, parsing_progress, embedding_status, embedding_progress, \
                         job_id, folder_id, updated_at, \
                         title, document_granularity \
                  FROM kb_documents WHERE library_id = ?1 AND folder_id = ?2 \
+                 AND deleted_at IS NULL AND document_status != 'deleted' \
                  ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4"
             } else {
                 "SELECT id, original_name, extension, file_size, \
@@ -558,6 +560,7 @@ impl<'a> KbEngine<'a> {
                         job_id, folder_id, updated_at, \
                         title, document_granularity \
                  FROM kb_documents WHERE library_id = ?1 \
+                 AND deleted_at IS NULL AND document_status != 'deleted' \
                  ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4"
             };
 
@@ -916,8 +919,9 @@ impl<'a> KbEngine<'a> {
 
     pub fn count_documents(&self, library_id: i64) -> Result<i64> {
         self.query(|conn| {
+            // 修复：排除已软删除的文档，与搜索路径保持一致
             conn.query_row(
-                "SELECT COUNT(*) FROM kb_documents WHERE library_id = ?1",
+                "SELECT COUNT(*) FROM kb_documents WHERE library_id = ?1 AND deleted_at IS NULL AND document_status != 'deleted'",
                 [library_id],
                 |row| row.get(0),
             )

@@ -1,0 +1,962 @@
+//! 单入口多投影融合架构 — 核心类型定义
+//!
+//! 包含 5 张核心表对应的 Rust 结构体、输入/输出类型、枚举等。
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+// ============================================================================
+// 枚举类型
+// ============================================================================
+
+/// 原件状态
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactStatus {
+    Active,
+    Deleted,
+    Purged,
+}
+
+impl fmt::Display for ArtifactStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArtifactStatus::Active => write!(f, "active"),
+            ArtifactStatus::Deleted => write!(f, "deleted"),
+            ArtifactStatus::Purged => write!(f, "purged"),
+        }
+    }
+}
+
+/// 上传来源类型
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    Upload,
+    Sync,
+    Link,
+    Mcp,
+}
+
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourceKind::Upload => write!(f, "upload"),
+            SourceKind::Sync => write!(f, "sync"),
+            SourceKind::Link => write!(f, "link"),
+            SourceKind::Mcp => write!(f, "mcp"),
+        }
+    }
+}
+
+/// 上传意图（用户可见语义）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadIntent {
+    /// 自动判断路由（根据文件类型和 MIME）
+    Auto,
+    /// 文档检索：KB + shadow page + candidate promotion
+    Document,
+    /// 仅附件：file attachment，不进 KB，不生成候选
+    Attachment,
+    /// 整理进记忆：KB + shadow page + candidate + 低风险自动应用
+    Memory,
+    /// 明确提升：KB + shadow page + proposed changes
+    Promote,
+}
+
+impl fmt::Display for UploadIntent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UploadIntent::Auto => write!(f, "auto"),
+            UploadIntent::Document => write!(f, "document"),
+            UploadIntent::Attachment => write!(f, "attachment"),
+            UploadIntent::Memory => write!(f, "memory"),
+            UploadIntent::Promote => write!(f, "promote"),
+        }
+    }
+}
+
+/// 投影类型
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionType {
+    /// KB 文档投影
+    KbDocument,
+    /// gbrain 影子页面投影
+    BrainShadowPage,
+    /// 文件附件投影
+    FileAttachment,
+    /// 候选变更投影
+    PromotionCandidate,
+    /// gbrain 链接投影
+    BrainLink,
+    /// gbrain 时间线投影
+    BrainTimeline,
+    /// gbrain 页面更新投影
+    BrainPageUpdate,
+}
+
+impl fmt::Display for ProjectionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProjectionType::KbDocument => write!(f, "kb_document"),
+            ProjectionType::BrainShadowPage => write!(f, "brain_shadow_page"),
+            ProjectionType::FileAttachment => write!(f, "file_attachment"),
+            ProjectionType::PromotionCandidate => write!(f, "promotion_candidate"),
+            ProjectionType::BrainLink => write!(f, "brain_link"),
+            ProjectionType::BrainTimeline => write!(f, "brain_timeline"),
+            ProjectionType::BrainPageUpdate => write!(f, "brain_page_update"),
+        }
+    }
+}
+
+impl ProjectionType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "kb_document" => Some(ProjectionType::KbDocument),
+            "brain_shadow_page" => Some(ProjectionType::BrainShadowPage),
+            "file_attachment" => Some(ProjectionType::FileAttachment),
+            "promotion_candidate" => Some(ProjectionType::PromotionCandidate),
+            "brain_link" => Some(ProjectionType::BrainLink),
+            "brain_timeline" => Some(ProjectionType::BrainTimeline),
+            "brain_page_update" => Some(ProjectionType::BrainPageUpdate),
+            // 兼容旧值
+            "brain_page" => Some(ProjectionType::BrainShadowPage),
+            "shadow_page" => Some(ProjectionType::BrainShadowPage),
+            "file_store" => Some(ProjectionType::FileAttachment),
+            _ => None,
+        }
+    }
+}
+
+/// 候选变更类型
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateType {
+    /// 文档摘要
+    DocumentSummary,
+    /// 实体提及
+    EntityMention,
+    /// 链接建议
+    LinkSuggestion,
+    /// 时间线事件
+    TimelineEvent,
+    /// 事实声明
+    FactClaim,
+    /// 页面创建
+    PageCreate,
+    /// 页面更新
+    PageUpdate,
+}
+
+impl fmt::Display for CandidateType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CandidateType::DocumentSummary => write!(f, "document_summary"),
+            CandidateType::EntityMention => write!(f, "entity_mention"),
+            CandidateType::LinkSuggestion => write!(f, "link_suggestion"),
+            CandidateType::TimelineEvent => write!(f, "timeline_event"),
+            CandidateType::FactClaim => write!(f, "fact_claim"),
+            CandidateType::PageCreate => write!(f, "page_create"),
+            CandidateType::PageUpdate => write!(f, "page_update"),
+        }
+    }
+}
+
+impl CandidateType {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "document_summary" => Some(CandidateType::DocumentSummary),
+            "entity_mention" => Some(CandidateType::EntityMention),
+            "link_suggestion" => Some(CandidateType::LinkSuggestion),
+            "timeline_event" => Some(CandidateType::TimelineEvent),
+            "fact_claim" => Some(CandidateType::FactClaim),
+            "page_create" => Some(CandidateType::PageCreate),
+            "page_update" => Some(CandidateType::PageUpdate),
+            // 兼容旧值
+            "entity" => Some(CandidateType::EntityMention),
+            "keyword" => Some(CandidateType::FactClaim),
+            "timeline" => Some(CandidateType::TimelineEvent),
+            _ => None,
+        }
+    }
+}
+
+/// 候选变更状态
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateStatus {
+    /// 待审核
+    Pending,
+    /// 已接受
+    Accepted,
+    /// 已拒绝
+    Rejected,
+    /// 已应用
+    Applied,
+    /// 已回滚
+    RolledBack,
+    /// 已过期
+    Stale,
+    /// 已被取代
+    Superseded,
+}
+
+impl fmt::Display for CandidateStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CandidateStatus::Pending => write!(f, "pending"),
+            CandidateStatus::Accepted => write!(f, "accepted"),
+            CandidateStatus::Rejected => write!(f, "rejected"),
+            CandidateStatus::Applied => write!(f, "applied"),
+            CandidateStatus::RolledBack => write!(f, "rolled_back"),
+            CandidateStatus::Stale => write!(f, "stale"),
+            CandidateStatus::Superseded => write!(f, "superseded"),
+        }
+    }
+}
+
+impl CandidateStatus {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "pending" => CandidateStatus::Pending,
+            "accepted" => CandidateStatus::Accepted,
+            "rejected" => CandidateStatus::Rejected,
+            "applied" => CandidateStatus::Applied,
+            "rolled_back" => CandidateStatus::RolledBack,
+            "stale" => CandidateStatus::Stale,
+            "superseded" => CandidateStatus::Superseded,
+            // 兼容旧值
+            "approved" => CandidateStatus::Accepted,
+            "expired" => CandidateStatus::Stale,
+            _ => CandidateStatus::Stale,
+        }
+    }
+}
+
+/// 风险等级
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RiskLevel::Low => write!(f, "low"),
+            RiskLevel::Medium => write!(f, "medium"),
+            RiskLevel::High => write!(f, "high"),
+        }
+    }
+}
+
+/// 提升策略
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionPolicy {
+    /// 不自动提升
+    None,
+    /// 仅记录影子页面，不生成候选
+    Shadow,
+    /// 生成候选，需要人工审核
+    Candidate,
+    /// 自动接受低风险候选
+    AutoAcceptLowRisk,
+}
+
+impl fmt::Display for PromotionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PromotionPolicy::None => write!(f, "none"),
+            PromotionPolicy::Shadow => write!(f, "shadow"),
+            PromotionPolicy::Candidate => write!(f, "candidate"),
+            PromotionPolicy::AutoAcceptLowRisk => write!(f, "auto_accept_low_risk"),
+        }
+    }
+}
+
+impl PromotionPolicy {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(PromotionPolicy::None),
+            "shadow" => Some(PromotionPolicy::Shadow),
+            "candidate" => Some(PromotionPolicy::Candidate),
+            "auto_accept_low_risk" => Some(PromotionPolicy::AutoAcceptLowRisk),
+            // 兼容旧值
+            "auto" => Some(PromotionPolicy::AutoAcceptLowRisk),
+            "auto-low-risk" => Some(PromotionPolicy::AutoAcceptLowRisk),
+            _ => None,
+        }
+    }
+}
+
+/// 来源追溯状态
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceStatus {
+    Active,
+    Stale,
+    Superseded,
+}
+
+impl fmt::Display for ProvenanceStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProvenanceStatus::Active => write!(f, "active"),
+            ProvenanceStatus::Stale => write!(f, "stale"),
+            ProvenanceStatus::Superseded => write!(f, "superseded"),
+        }
+    }
+}
+
+/// 查询策略
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryStrategy {
+    /// 先查 gbrain，再查 KB 补充
+    BrainFirst,
+    /// 先查 KB 证据，再查 gbrain 上下文
+    EvidenceFirst,
+    /// 仅追溯来源链
+    Provenance,
+    /// 先查时间线事件，再查 gbrain 上下文（§11.1/§11.2）
+    TimelineFirst,
+}
+
+impl fmt::Display for QueryStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryStrategy::BrainFirst => write!(f, "brain_first"),
+            QueryStrategy::EvidenceFirst => write!(f, "evidence_first"),
+            QueryStrategy::Provenance => write!(f, "provenance"),
+            QueryStrategy::TimelineFirst => write!(f, "timeline_first"),
+        }
+    }
+}
+
+// ============================================================================
+// 数据库行结构体
+// ============================================================================
+
+/// source_artifacts 表行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceArtifact {
+    pub id: i64,
+    pub artifact_uid: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_seen_at: Option<String>,
+
+    pub sha256: String,
+    pub original_name: String,
+    pub extension: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+
+    pub storage_path: String,
+    pub canonical_slug: String,
+    pub status: String,
+    pub metadata_json: String,
+
+    pub deleted_at: Option<String>,
+    pub purged_at: Option<String>,
+}
+
+/// artifact_occurrences 表行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactOccurrence {
+    pub id: i64,
+    pub occurrence_uid: String,
+    pub created_at: String,
+    pub updated_at: String,
+
+    pub artifact_id: i64,
+    pub source_kind: String,
+    pub source_uri: String,
+    pub original_path: String,
+    pub original_name: String,
+    pub owner_ref: String,
+
+    pub intent: String,
+    pub target_slug: String,
+    pub page_slug: String,
+    pub library_id: Option<i64>,
+    pub folder_id: Option<i64>,
+    pub promotion_policy: String,
+
+    pub status: String,
+    pub metadata_json: String,
+}
+
+/// artifact_projections 表行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactProjection {
+    pub id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+
+    pub artifact_id: i64,
+    pub occurrence_id: Option<i64>,
+    pub projection_type: String,
+    pub projection_key: String,
+    pub projection_ref: String,
+
+    pub status: String,
+    pub version_hash: String,
+    pub stale_reason: String,
+    pub metadata_json: String,
+    /// 被哪个投影替代（§31 版本链）
+    pub superseded_by: Option<i64>,
+}
+
+/// promotion_candidates 表行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionCandidate {
+    pub id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+
+    pub artifact_id: i64,
+    pub occurrence_id: Option<i64>,
+    pub kb_document_id: Option<i64>,
+    pub kb_node_id: Option<i64>,
+
+    pub candidate_type: String,
+    pub target_slug: String,
+    pub target_field: String,
+
+    pub title: String,
+    pub proposed_payload: String,
+    pub evidence_json: String,
+
+    pub confidence: f64,
+    pub risk_level: String,
+    pub status: String,
+    pub reviewer: String,
+    pub review_notes: String,
+    pub applied_at: Option<String>,
+}
+
+/// provenance_ledger 表行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceRecord {
+    pub id: i64,
+    pub created_at: String,
+    pub updated_at: String,
+
+    pub artifact_id: Option<i64>,
+    pub occurrence_id: Option<i64>,
+    pub kb_document_id: Option<i64>,
+    pub kb_node_id: Option<i64>,
+    pub promotion_candidate_id: Option<i64>,
+
+    pub brain_slug: String,
+    pub brain_field: String,
+    pub fact_hash: String,
+
+    pub quote_text: String,
+    pub quote_start: Option<i64>,
+    pub quote_end: Option<i64>,
+    pub page_number: Option<i64>,
+
+    pub confidence: f64,
+    pub status: String,
+    pub stale_reason: String,
+    pub metadata_json: String,
+}
+
+// ============================================================================
+// 输入/输出类型
+// ============================================================================
+
+/// 上传源文件输入
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSourceInput {
+    /// 文件内容（从 path 读取或直接传入）
+    pub content: Vec<u8>,
+    /// 本地文件路径（可选，用于 dry_run 和日志）
+    pub path: Option<std::path::PathBuf>,
+    /// 原始文件名
+    pub original_name: String,
+    /// 来源类型
+    pub source_kind: SourceKind,
+    /// 来源 URI
+    pub source_uri: String,
+    /// 上传意图
+    pub intent: UploadIntent,
+    /// 目标 slug（可选，用于关联 gbrain page）
+    pub target_slug: Option<String>,
+    /// 目标 page slug（可选）
+    pub page_slug: Option<String>,
+    /// 库 ID（可选）
+    pub library_id: Option<i64>,
+    /// 文件夹 ID（可选）
+    pub folder_id: Option<i64>,
+    /// 提升策略
+    // 修复：改为 Option，仅在用户显式指定时覆盖 intent 推断的提升策略
+    pub promotion_policy: Option<PromotionPolicy>,
+    /// 所有者引用
+    pub owner_ref: Option<String>,
+    /// 额外元数据
+    pub metadata: Option<serde_json::Value>,
+    /// 仅返回路由计划，不实际写入
+    pub dry_run: bool,
+}
+
+/// 上传源文件输出
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSourceOutput {
+    /// 原件 ID
+    pub artifact_id: i64,
+    /// 原件 UID
+    pub artifact_uid: String,
+    /// 事件 ID
+    pub occurrence_id: i64,
+    /// 事件 UID
+    pub occurrence_uid: String,
+    /// SHA256
+    pub sha256: String,
+    /// 是否为新增（vs 已存在）
+    pub is_new: bool,
+    /// 路由计划
+    pub route_plan: RoutePlan,
+    /// 投影结果
+    pub projections: Vec<ProjectionResult>,
+}
+
+/// 路由计划
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutePlan {
+    /// 是否投影到 KB
+    pub to_kb: bool,
+    /// 是否投影到 gbrain（正式页面）
+    pub to_brain: bool,
+    /// 是否投影到文件附件
+    pub to_file: bool,
+    /// 是否创建影子页面
+    pub to_shadow: bool,
+    /// 提升策略
+    pub promotion: PromotionPolicy,
+}
+
+/// 投影结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectionResult {
+    /// 投影类型
+    pub projection_type: ProjectionType,
+    /// 投影键
+    pub projection_key: String,
+    /// 投影引用（如 KB document ID、brain slug 等）
+    pub projection_ref: String,
+    /// 是否为新建
+    pub created: bool,
+    /// 状态
+    pub status: String,
+}
+
+/// 候选审核输入
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewCandidateInput {
+    /// 候选 ID
+    pub candidate_id: i64,
+    /// 审核动作：approve / reject
+    pub action: String,
+    /// 审核人
+    pub reviewer: String,
+    /// 审核备注
+    pub notes: Option<String>,
+}
+
+/// 批量应用候选结果（§10.5 promotion_apply_all）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchApplyResult {
+    /// 总候选数
+    pub total_candidates: usize,
+    /// 成功应用数
+    pub applied: usize,
+    /// 失败数
+    pub failed: usize,
+    /// 失败详情
+    pub failures: Vec<String>,
+    /// 是否 dry_run
+    pub dry_run: bool,
+    /// dry_run 模式下的候选预览
+    pub candidates: Vec<String>,
+}
+
+/// 统一查询输入
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedQueryInput {
+    /// 查询文本
+    pub query: String,
+    /// 查询策略
+    pub strategy: QueryStrategy,
+    /// 限制数量
+    pub limit: Option<i64>,
+    /// 过滤 slug（可选）
+    pub filter_slug: Option<String>,
+    /// 是否包含 KB 证据
+    pub include_evidence: bool,
+    /// 是否包含来源追溯
+    pub include_provenance: bool,
+}
+
+/// 统一查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedQueryResult {
+    /// 查询策略
+    pub strategy: String,
+    /// gbrain 命中
+    pub brain_hits: Vec<BrainHit>,
+    /// KB 证据命中
+    pub evidence_hits: Vec<EvidenceHit>,
+    /// 时间线命中（§11.1 TimelineFirst 策略）
+    pub timeline_hits: Vec<TimelineHit>,
+    /// 来源追溯记录
+    pub provenance_records: Vec<ProvenanceRecord>,
+    /// 总命中数
+    pub total_hits: i64,
+}
+
+/// gbrain 命中
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrainHit {
+    /// page slug
+    pub slug: String,
+    /// page 标题
+    pub title: String,
+    /// page 内容片段
+    pub snippet: String,
+    /// 相关度
+    pub relevance: f64,
+    /// 来源追溯（如有）
+    pub provenance: Vec<ProvenanceRecord>,
+}
+
+/// KB 证据命中
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceHit {
+    /// KB 文档 ID
+    pub kb_document_id: i64,
+    /// KB 文档标题
+    pub title: String,
+    /// 内容片段
+    pub snippet: String,
+    /// 相关度
+    pub relevance: f64,
+    /// 关联的原件信息
+    pub artifact: Option<SourceArtifact>,
+    /// 关联的影子页面 slug
+    pub shadow_page_slug: Option<String>,
+    /// 关联的投影
+    pub projections: Vec<ArtifactProjection>,
+}
+
+/// 时间线命中（§11.1 TimelineFirst 策略）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineHit {
+    /// 候选 ID
+    pub candidate_id: i64,
+    /// 事件日期
+    pub event_date: String,
+    /// 事件描述
+    pub description: String,
+    /// 关联的 artifact ID
+    pub artifact_id: i64,
+    /// 关联的 KB 文档 ID
+    pub kb_document_id: Option<i64>,
+    /// 关联的影子页面 slug
+    pub shadow_page_slug: Option<String>,
+    /// 来源文档标题
+    pub source_title: String,
+}
+
+/// 健康检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactHealthReport {
+    /// 原件总数
+    pub total_artifacts: i64,
+    /// 活跃原件数
+    pub active_artifacts: i64,
+    /// 孤立投影数（artifact 已删除但投影仍存在）
+    pub orphan_projections: i64,
+    /// 过期投影数
+    pub stale_projections: i64,
+    /// 待审核候选数
+    pub pending_candidates: i64,
+    /// 活跃来源追溯数
+    pub active_provenance: i64,
+    /// 过期来源追溯数
+    pub stale_provenance: i64,
+    /// 问题列表
+    pub issues: Vec<HealthIssue>,
+}
+
+/// 健康问题
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthIssue {
+    /// 问题级别
+    pub severity: String,
+    /// 问题类型
+    pub issue_type: String,
+    /// 问题描述
+    pub description: String,
+    /// 建议修复
+    pub suggestion: String,
+}
+
+/// artifact_events 审计记录（§7.6）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactEvent {
+    /// 事件 ID
+    pub id: i64,
+    /// 创建时间
+    pub created_at: String,
+    /// 关联的 artifact ID
+    pub artifact_id: Option<i64>,
+    /// 关联的 occurrence ID
+    pub occurrence_id: Option<i64>,
+    /// 事件类型（如 artifact_created, projection_created, promotion_applied 等）
+    pub event_type: String,
+    /// 执行者
+    pub actor: String,
+    /// 事件负载 JSON
+    pub payload_json: String,
+}
+
+// ============================================================================
+// 辅助函数
+// ============================================================================
+
+/// KB 支持的文档扩展名列表
+///
+/// 设计文档 §6.2: PDF/DOCX/XLSX/CSV/HTML/TXT/MD 走 KB 投影路径。
+/// 图片和二进制文件不支持 KB 解析，走附件路径。
+/// 修复：移除 doc/xls — ParserRegistry 未注册对应 parser，
+/// 旧版二进制 Office 文件走 text fallback 要求 UTF-8 会失败
+pub const KB_SUPPORTED_EXTENSIONS: &[&str] = &[
+    "pdf", "docx", "xlsx", "csv", "tsv", "html", "htm", "txt", "md", "markdown", "rst", "json",
+    "xml", "yaml", "yml", "toml",
+];
+
+/// 代码文件扩展名列表
+///
+/// 设计文档 §6.2: 代码文件/repo 走现有 code import/sync 路径，不进 KB。
+pub const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "c", "cpp", "h", "rb", "php", "sh", "bash",
+    "zsh", "ps1", "sql", "r", "m", "swift", "kt", "scala", "lua", "vim", "el", "clj",
+];
+
+/// 图片扩展名列表
+///
+/// 设计文档 §6.2: 图片/二进制不支持 KB 解析，走附件路径。
+pub const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp", "avif",
+];
+
+/// 判断扩展名是否为 KB 支持的文档类型
+pub fn is_kb_supported(extension: &str) -> bool {
+    KB_SUPPORTED_EXTENSIONS.contains(&extension)
+}
+
+/// 判断扩展名是否为代码文件
+pub fn is_code_file(extension: &str) -> bool {
+    CODE_EXTENSIONS.contains(&extension)
+}
+
+/// 判断扩展名是否为图片文件
+pub fn is_image_file(extension: &str) -> bool {
+    IMAGE_EXTENSIONS.contains(&extension)
+}
+
+/// 根据意图、扩展名和 MIME 类型推断路由计划
+///
+/// 设计文档 §6.2 路由规则:
+/// | 条件                                  | Artifact | KB | Shadow | File | Promotion |
+/// |--------------------------------------|----------|----|--------|------|-----------|
+/// | --intent attachment                  | yes      | no | no     | yes  | none      |
+/// | --intent document                    | yes      | yes| yes    | no   | candidate |
+/// | --intent memory                      | yes      | yes| yes    | no   | auto-low  |
+/// | --intent promote                     | yes      | yes| yes    | no   | candidate |
+/// | PDF/DOCX/XLSX/CSV/HTML/TXT with auto| yes      | yes| yes    | no   | candidate |
+/// | Raw Markdown with auto               | yes      | yes| yes    | no   | candidate |
+/// | Markdown with gbrain frontmatter     | optional | no | no     | no   | direct put_page |
+/// | Code file/repo with auto             | optional | no | no     | no   | code import/sync |
+/// | Image/binary unsupported by KB       | yes      | no | optional| yes | no        |
+pub fn infer_route_plan(extension: &str, _mime_type: &str, intent: &UploadIntent) -> RoutePlan {
+    match intent {
+        // 明确意图：直接按意图路由，不根据文件类型调整
+        UploadIntent::Attachment => RoutePlan {
+            to_kb: false,
+            to_shadow: false,
+            to_file: true,
+            to_brain: false,
+            promotion: PromotionPolicy::None,
+        },
+        UploadIntent::Document => RoutePlan {
+            to_kb: true,
+            to_shadow: true,
+            to_file: false,
+            to_brain: false,
+            promotion: PromotionPolicy::Candidate,
+        },
+        UploadIntent::Memory => RoutePlan {
+            to_kb: true,
+            to_shadow: true,
+            to_file: false,
+            to_brain: false,
+            promotion: PromotionPolicy::AutoAcceptLowRisk,
+        },
+        UploadIntent::Promote => RoutePlan {
+            to_kb: true,
+            to_shadow: true,
+            to_file: false,
+            to_brain: true,
+            promotion: PromotionPolicy::Candidate,
+        },
+        // Auto 意图：根据文件类型智能路由
+        UploadIntent::Auto => {
+            let ext = extension.to_lowercase();
+
+            // 代码文件 → 不进 KB，走现有 import/sync 路径
+            if is_code_file(&ext) {
+                return RoutePlan {
+                    to_kb: false,
+                    to_shadow: false,
+                    to_file: false,
+                    to_brain: false,
+                    promotion: PromotionPolicy::None,
+                };
+            }
+
+            // 图片/二进制 → 不进 KB，走附件路径
+            if is_image_file(&ext) || !is_kb_supported(&ext) {
+                return RoutePlan {
+                    to_kb: false,
+                    to_shadow: false,
+                    to_file: true,
+                    to_brain: false,
+                    promotion: PromotionPolicy::None,
+                };
+            }
+
+            // KB 支持的文档类型 → KB + shadow + candidate
+            RoutePlan {
+                to_kb: true,
+                to_shadow: true,
+                to_file: false,
+                to_brain: false,
+                promotion: PromotionPolicy::Candidate,
+            }
+        }
+    }
+}
+
+/// 生成投影键
+///
+/// 设计文档 projection_key 规则:
+/// | projection_type    | projection_key                        |
+/// |--------------------|---------------------------------------|
+/// | kb_document        | library:{library_id}                  |
+/// | brain_shadow_page  | slug:{brain_slug}                     |
+/// | file_attachment    | page:{page_slug}:file:{filename}      |
+/// | promotion_candidate| candidate:{candidate_id}              |
+/// | brain_link         | link:{from}:{to}:{type}               |
+/// | brain_timeline     | timeline:{slug}:{date}:{hash}         |
+/// | brain_page_update  | page_update:{slug}:{fact_hash}        |
+pub fn make_projection_key(proj_type: &str, ref_id: &str) -> String {
+    format!("{}:{}", proj_type, ref_id)
+}
+
+/// 生成事实哈希（SHA256）
+///
+/// 设计文档: hash = sha256(brain_slug + field + normalized_payload + artifact_uid + kb_node_id)
+pub fn make_fact_hash(
+    brain_slug: &str,
+    field: &str,
+    payload: &str,
+    artifact_uid: &str,
+    kb_node_id: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let input = format!(
+        "{}|{}|{}|{}|{}",
+        brain_slug, field, payload, artifact_uid, kb_node_id
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 生成规范 slug（从文件名）
+///
+/// 产出必须通过 validate_page_slug 校验（仅允许 ASCII 小写+数字+-），
+/// 因此 Unicode 字母和下划线都会转为 `-`。
+/// 修复：之前允许 Unicode 字母和 `_`，但 validate_page_slug 只接受 ASCII，
+/// 导致 my_doc.pdf、中文文件名等校验失败，shadow page 静默丢失。
+pub fn make_canonical_slug(original_name: &str, sha256: &str) -> String {
+    let stem = original_name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(original_name);
+    let slug = stem
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            // 仅保留 ASCII 小写字母、数字和 -，其余全部转为 -
+            // _ 转为 -（validate_page_slug 不允许 _）
+            // Unicode 字母转为 -（validate_page_slug 不允许非 ASCII）
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    // 去除连续 - 和首尾 -
+    let slug = slug
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    // 附加 sha256 前 8 位确保唯一
+    format!("{}-{}", slug, &sha256[..8.min(sha256.len())])
+}
+
+/// 从文件名推断扩展名
+pub fn infer_extension(filename: &str) -> String {
+    filename
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_lowercase())
+        .unwrap_or_default()
+}
+
+/// 从扩展名推断 MIME 类型
+pub fn infer_mime_type(extension: &str) -> String {
+    match extension {
+        "txt" => "text/plain".to_string(),
+        "md" | "markdown" => "text/markdown".to_string(),
+        "html" | "htm" => "text/html".to_string(),
+        "json" => "application/json".to_string(),
+        "xml" => "application/xml".to_string(),
+        "pdf" => "application/pdf".to_string(),
+        "doc" => "application/msword".to_string(),
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+        }
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "gif" => "image/gif".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "csv" => "text/csv".to_string(),
+        "tsv" => "text/tab-separated-values".to_string(),
+        "rst" => "text/x-rst".to_string(),
+        "yaml" | "yml" => "application/x-yaml".to_string(),
+        "toml" => "application/toml".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}

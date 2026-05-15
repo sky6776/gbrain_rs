@@ -205,6 +205,8 @@ pub struct Operations<'a> {
     /// not wrap link reconciliation in `transaction_with_engine` (SQLite does
     /// not support nested `BEGIN IMMEDIATE`).
     in_transaction: bool,
+    /// 统一查询缓存（§31 query_cache）
+    query_cache: crate::artifact::query_cache::QueryCache,
 }
 
 impl<'a> Operations<'a> {
@@ -231,6 +233,7 @@ impl<'a> Operations<'a> {
             ctx,
             config,
             in_transaction: false,
+            query_cache: crate::artifact::query_cache::QueryCache::new(256, 300),
         }
     }
 
@@ -253,6 +256,7 @@ impl<'a> Operations<'a> {
             ctx,
             config,
             in_transaction: true,
+            query_cache: crate::artifact::query_cache::QueryCache::new(256, 300),
         }
     }
 
@@ -1358,6 +1362,375 @@ impl<'a> Operations<'a> {
         let brain_results = self.query(brain_query, SearchOpts::default())?;
         let kb_results = self.kb_query(kb_input)?;
         Ok((brain_results, kb_results))
+    }
+
+    // ========================================================================
+    // 单入口多投影融合架构 — upload_source / memory_query / promotion
+    // ========================================================================
+
+    /// 统一上传源文件
+    ///
+    /// 创建 Source Artifact、Occurrence、投影，并触发 KB 处理。
+    /// CLI 和 MCP 都通过此方法调用。
+    pub fn upload_source(
+        &self,
+        input: crate::artifact::types::UploadSourceInput,
+    ) -> crate::error::Result<crate::artifact::types::UploadSourceOutput> {
+        use crate::artifact::upload;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        // 安全校验
+        if self.ctx.remote {
+            // MCP 远程调用：限制在 working_dir 内
+            // 文件内容已通过 input.content 传入，无需路径校验
+        }
+
+        // 获取 artifact 目录（使用统一 resolver，与备份/恢复保持一致）
+        let artifact_dir = self.config.artifact_dir();
+
+        // 确保目录存在
+        std::fs::create_dir_all(&artifact_dir).map_err(|e| {
+            crate::error::GBrainError::FileError(format!("创建 artifact 目录失败: {}", e))
+        })?;
+
+        // 在事务中执行
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            // 修复：传入 config.default_kb_library_id 和 upload_default_promotion_policy，
+            // 让配置默认值实际参与上传决策
+            upload::upload_source(
+                conn,
+                &input,
+                &artifact_dir,
+                &self.engine.gbrain_dir(),
+                self.config.default_kb_library_id,
+                &self.config.upload_default_promotion_policy,
+            )
+        })
+    }
+
+    /// 统一查询（memory_query）
+    ///
+    /// 根据查询意图自动选择 BrainFirst / EvidenceFirst / Provenance / TimelineFirst 策略。
+    /// 支持 §31 query_cache 缓存。
+    pub fn memory_query(
+        &self,
+        input: crate::artifact::types::UnifiedQueryInput,
+    ) -> crate::error::Result<crate::artifact::types::UnifiedQueryResult> {
+        use crate::artifact::query;
+
+        // 计算缓存 key
+        // 修复：加入 filter_slug，避免 Provenance 策略按不同 slug 查不同页面时串缓存
+        let limit = input.limit.unwrap_or(10);
+        let cache_key = crate::artifact::query_cache::QueryCache::make_cache_key(
+            &input.query,
+            &input.strategy.to_string(),
+            limit,
+            input.include_evidence,
+            input.include_provenance,
+            input.filter_slug.as_deref(),
+        );
+
+        // 尝试从缓存获取
+        if let Some(cached) = self.query_cache.get(&cache_key) {
+            debug!("查询缓存命中: key={}", cache_key);
+            return Ok(cached);
+        }
+
+        let conn = self.engine.connection()?;
+        let result = query::unified_query(conn, &input, self.engine, &self.config)?;
+
+        // 写入缓存
+        self.query_cache.set(cache_key, result.clone());
+
+        Ok(result)
+    }
+
+    /// 列出候选变更
+    pub fn promotion_list_candidates(
+        &self,
+        status: Option<&str>,
+        candidate_type: Option<&str>,
+        target_slug: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::PromotionCandidate>> {
+        use crate::artifact::promotion;
+
+        let conn = self.engine.connection()?;
+        promotion::list_candidates(conn, status, candidate_type, target_slug, limit, offset)
+    }
+
+    /// 获取候选变更详情
+    pub fn promotion_get_candidate(
+        &self,
+        candidate_id: i64,
+    ) -> crate::error::Result<Option<crate::artifact::types::PromotionCandidate>> {
+        use crate::artifact::promotion;
+
+        let conn = self.engine.connection()?;
+        promotion::find_candidate_by_id(conn, candidate_id)
+    }
+
+    /// 审核候选变更（accept / reject）
+    pub fn promotion_review_candidate(
+        &self,
+        input: crate::artifact::types::ReviewCandidateInput,
+    ) -> crate::error::Result<crate::artifact::types::PromotionCandidate> {
+        use crate::artifact::promotion;
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            promotion::review_candidate(conn, &input)
+        })
+    }
+
+    /// 应用候选变更
+    pub fn promotion_apply_candidate(
+        &self,
+        candidate_id: i64,
+    ) -> crate::error::Result<crate::artifact::types::PromotionCandidate> {
+        use crate::artifact::promotion;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            promotion::apply_candidate(conn, candidate_id)
+        })
+    }
+
+    /// 回滚已应用的候选变更（§31 rollback_candidate）
+    pub fn promotion_rollback_candidate(
+        &self,
+        candidate_id: i64,
+    ) -> crate::error::Result<crate::artifact::types::PromotionCandidate> {
+        use crate::artifact::promotion;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            promotion::rollback_candidate(conn, candidate_id)
+        })
+    }
+
+    /// 投影垃圾回收（§31 gc_orphan_projections）
+    pub fn gc_orphan_projections(
+        &self,
+        stale_days: u32,
+        dry_run: bool,
+    ) -> crate::error::Result<crate::artifact::projection::GcResult> {
+        use crate::artifact::projection;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            projection::gc_orphan_projections(conn, stale_days, dry_run)
+        })
+    }
+
+    /// 查询 artifact 事件历史（§7.6）
+    pub fn artifact_event_history(
+        &self,
+        artifact_id: i64,
+        limit: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::ArtifactEvent>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::find_events_by_artifact(conn, artifact_id, limit)
+            .map_err(|e| crate::error::GBrainError::Database(format!("查询事件历史失败: {}", e)))
+    }
+
+    /// 自动应用低风险候选
+    pub fn promotion_auto_apply(&self, artifact_id: i64) -> crate::error::Result<Vec<i64>> {
+        use crate::artifact::promotion;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            promotion::auto_apply_candidates(conn, artifact_id, None, None)
+        })
+    }
+
+    /// 批量应用候选（§10.5 promotion_apply_all）
+    pub fn promotion_batch_apply(
+        &self,
+        artifact_id: Option<i64>,
+        risk_filter: Option<&str>,
+        dry_run: bool,
+    ) -> crate::error::Result<crate::artifact::types::BatchApplyResult> {
+        use crate::artifact::promotion;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            promotion::batch_apply_candidates(conn, artifact_id, risk_filter, dry_run)
+        })
+    }
+
+    /// Artifact 健康检查
+    pub fn artifact_health_check(
+        &self,
+    ) -> crate::error::Result<crate::artifact::types::ArtifactHealthReport> {
+        use crate::artifact::query;
+
+        let conn = self.engine.connection()?;
+        query::check_artifact_health(conn)
+    }
+
+    /// 获取 Source Artifact 详情
+    pub fn get_artifact(
+        &self,
+        artifact_id: i64,
+    ) -> crate::error::Result<Option<crate::artifact::types::SourceArtifact>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::find_artifact_by_id(conn, artifact_id)
+            .map_err(|e| crate::error::GBrainError::Database(e.to_string()))
+    }
+
+    /// 获取 Source Artifact 详情（按 UID）
+    pub fn get_artifact_by_uid(
+        &self,
+        uid: &str,
+    ) -> crate::error::Result<Option<crate::artifact::types::SourceArtifact>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::find_artifact_by_uid(conn, uid)
+            .map_err(|e| crate::error::GBrainError::Database(e.to_string()))
+    }
+
+    /// 列出 Source Artifacts
+    pub fn list_artifacts(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::SourceArtifact>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::list_active_artifacts(conn, limit, offset)
+            .map_err(|e| crate::error::GBrainError::Database(e.to_string()))
+    }
+
+    /// 获取 Artifact 的投影列表
+    pub fn get_artifact_projections(
+        &self,
+        artifact_id: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::ArtifactProjection>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::find_projections_by_artifact(conn, artifact_id)
+            .map_err(|e| crate::error::GBrainError::Database(e.to_string()))
+    }
+
+    /// 获取 Artifact 的 Occurrence 列表
+    pub fn get_artifact_occurrences(
+        &self,
+        artifact_id: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::ArtifactOccurrence>> {
+        use crate::artifact::store;
+
+        let conn = self.engine.connection()?;
+        store::find_occurrences_by_artifact(conn, artifact_id)
+            .map_err(|e| crate::error::GBrainError::Database(e.to_string()))
+    }
+
+    /// 获取 Provenance（按 brain slug）
+    pub fn get_provenance(
+        &self,
+        brain_slug: &str,
+    ) -> crate::error::Result<Vec<crate::artifact::types::ProvenanceRecord>> {
+        use crate::artifact::provenance;
+
+        let conn = self.engine.connection()?;
+        provenance::find_provenance_by_brain_slug(conn, brain_slug)
+    }
+
+    /// 替代旧投影（§31 版本链 superseded_by）
+    pub fn supersede_projection(
+        &self,
+        old_proj_id: i64,
+        new_proj_id: i64,
+    ) -> crate::error::Result<()> {
+        use crate::artifact::projection;
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            projection::supersede_projection(conn, old_proj_id, new_proj_id)
+        })
+    }
+
+    /// 查询投影版本链历史（§31）
+    ///
+    /// 修复：增加 artifact_id 和 projection_type 可选过滤，
+    /// 避免同一 library 下多个 artifact 的投影混合
+    pub fn get_projection_history(
+        &self,
+        projection_key: &str,
+        artifact_id: Option<i64>,
+        projection_type: Option<&str>,
+        limit: i64,
+    ) -> crate::error::Result<Vec<crate::artifact::types::ArtifactProjection>> {
+        use crate::artifact::projection;
+
+        let conn = self.engine.connection()?;
+        projection::get_projection_history(
+            conn,
+            projection_key,
+            artifact_id,
+            projection_type,
+            limit,
+        )
+    }
+
+    /// 软删除 Artifact
+    pub fn delete_artifact(&self, artifact_id: i64) -> crate::error::Result<()> {
+        use crate::artifact::projection;
+        use crate::artifact::store;
+
+        // 写入操作失效查询缓存
+        self.query_cache.invalidate_all();
+
+        self.engine.transaction_with_engine(|engine| {
+            let conn = engine.connection()?;
+            // 标记所有投影为 stale
+            projection::mark_all_projections_stale(conn, artifact_id, "artifact_deleted")?;
+
+            // 修复：软删除关联的 kb_documents，设置 deleted_at。
+            // 否则唯一索引 idx_kb_docs_library_hash（WHERE deleted_at IS NULL AND purged_at IS NULL）
+            // 仍会包含已删除行，导致同 hash 重传撞唯一约束。
+            let kb_doc_ids = projection::find_all_kb_document_ids(conn, artifact_id)?;
+            for kb_doc_id in kb_doc_ids {
+                // 修复：关键清理失败直接返回错误，让事务回滚，
+                // 避免 artifact 已删但 KB 文档/provenance 未清理的半成功状态
+                crate::kb::lifecycle::soft_delete_document(conn, kb_doc_id)?;
+                crate::artifact::provenance::mark_provenance_stale_by_kb_document(
+                    conn,
+                    kb_doc_id,
+                    "kb_document_deleted",
+                )?;
+            }
+
+            // 软删除 artifact
+            store::soft_delete_artifact(conn, artifact_id)?;
+            Ok(())
+        })
     }
 }
 

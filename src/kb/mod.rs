@@ -35,4 +35,7 @@ pub use engine::KbEngine;
 pub use pipeline::{ingest_directory, process_document, process_document_async};
 pub use search::kb_search;
 pub use types::*;
-pub use worker::{run_kb_worker_loop, run_kb_worker_once, spawn_kb_worker_thread};
+pub use worker::{
+    run_artifact_promote_worker_once, run_kb_worker_loop, run_kb_worker_once,
+    spawn_kb_worker_thread,
+};

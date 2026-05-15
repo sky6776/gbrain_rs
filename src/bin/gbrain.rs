@@ -443,6 +443,237 @@ enum Commands {
         #[arg(long, default_value = "30")]
         older_than_days: i32,
     },
+
+    // ========================================================================
+    // 单入口多投影融合架构 — Upload / MemoryQuery / Promotion
+    // ========================================================================
+    /// Upload a source file (unified entry point for gbrain + KB + file storage)
+    Upload {
+        /// File path to upload
+        path: PathBuf,
+
+        /// Upload intent: auto, document, attachment, memory, promote
+        #[arg(long, default_value = "auto")]
+        intent: String,
+
+        /// KB library ID
+        #[arg(long)]
+        library_id: Option<i64>,
+
+        /// Target gbrain page slug (for promotion)
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Target page slug (for file attachment)
+        #[arg(long)]
+        page: Option<String>,
+
+        /// KB folder ID
+        #[arg(long)]
+        folder_id: Option<i64>,
+
+        // 修复：改为 Option，区分用户显式指定和默认值
+        // 用户未指定时让 intent 推断策略（如 Memory → auto_accept_low_risk）
+        #[arg(long)]
+        promotion: Option<String>,
+
+        /// Dry run: only return route plan
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Unified memory query (alias: ask-memory)
+    #[command(alias = "ask-memory")]
+    MemoryQuery {
+        /// Query text
+        query: String,
+
+        /// Query strategy: brain_first, evidence_first, provenance, timeline_first
+        #[arg(long, default_value = "brain_first")]
+        strategy: String,
+
+        /// Maximum results
+        #[arg(long, default_value = "10")]
+        limit: i64,
+
+        /// Filter by slug
+        #[arg(long)]
+        filter_slug: Option<String>,
+
+        /// Include KB evidence
+        #[arg(long, default_value_t = true)]
+        include_evidence: bool,
+
+        /// Include provenance
+        #[arg(long, default_value_t = false)]
+        include_provenance: bool,
+
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// List promotion candidates
+    PromotionList {
+        /// Filter by status: pending, approved, rejected, applied
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by candidate type
+        #[arg(long)]
+        candidate_type: Option<String>,
+
+        /// Filter by target slug
+        #[arg(long)]
+        target_slug: Option<String>,
+
+        /// Maximum results
+        #[arg(long, default_value = "50")]
+        limit: i64,
+
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Get promotion candidate details
+    PromotionGet {
+        /// Candidate ID
+        candidate_id: i64,
+    },
+
+    /// Accept a promotion candidate
+    PromotionAccept {
+        /// Candidate ID
+        candidate_id: i64,
+
+        /// Reviewer name
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+
+        /// Review notes
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// Reject a promotion candidate
+    PromotionReject {
+        /// Candidate ID
+        candidate_id: i64,
+
+        /// Reviewer name
+        #[arg(long, default_value = "cli")]
+        reviewer: String,
+
+        /// Review notes
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// Apply an approved promotion candidate
+    PromotionApply {
+        /// Candidate ID
+        candidate_id: i64,
+    },
+
+    /// Auto-apply low-risk candidates for an artifact
+    PromotionAutoApply {
+        /// Artifact ID
+        artifact_id: i64,
+    },
+
+    /// Batch apply all pending promotion candidates (§10.5)
+    PromotionBatchApply {
+        /// Filter by artifact ID (optional)
+        #[arg(long)]
+        artifact_id: Option<i64>,
+
+        /// Filter by risk level: low, medium, high
+        #[arg(long)]
+        risk: Option<String>,
+
+        /// Preview candidates without applying
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+
+    /// Rollback an applied promotion candidate (§31)
+    PromotionRollback {
+        /// Candidate ID to rollback
+        candidate_id: i64,
+    },
+
+    /// Garbage collect orphaned projections (§31)
+    GcOrphanProjections {
+        /// Delete projections orphaned/superseded for more than N days
+        #[arg(long, default_value = "30")]
+        stale_days: u32,
+
+        /// Preview what would be cleaned without making changes
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+
+    /// Supersede an old projection with a new one (§31 version chain)
+    ProjectionSupersede {
+        /// Old projection ID to supersede
+        old_proj_id: i64,
+
+        /// New projection ID that replaces the old one
+        new_proj_id: i64,
+    },
+
+    /// Query projection version chain history (§31)
+    ProjectionHistory {
+        /// Projection key to query history for
+        projection_key: String,
+
+        /// 限定 artifact ID，避免同一 key 下多个 artifact 的投影混合
+        #[arg(long)]
+        artifact_id: Option<i64>,
+
+        /// 限定 projection type（如 kb_document）
+        #[arg(long)]
+        projection_type: Option<String>,
+
+        /// Maximum history records to return
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+
+    /// List source artifacts
+    ArtifactList {
+        /// Maximum results
+        #[arg(long, default_value = "50")]
+        limit: i64,
+
+        /// Offset
+        #[arg(long, default_value = "0")]
+        offset: i64,
+
+        /// Output as JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Get source artifact details
+    ArtifactGet {
+        /// Artifact ID or UID
+        id_or_uid: String,
+    },
+
+    /// Delete a source artifact (soft delete)
+    ArtifactDelete {
+        /// Artifact ID
+        artifact_id: i64,
+    },
+
+    /// Check artifact health
+    ArtifactHealth,
 }
 
 #[derive(Subcommand)]
@@ -581,19 +812,26 @@ fn main() {
     let cli = Cli::parse();
 
     // Initialize logging from config
-    let config = Config::load().unwrap_or_default();
+    let mut config = Config::load().unwrap_or_default();
     logging::init(&config);
 
-    if let Err(e) = run(cli, &config) {
+    if let Err(e) = run(cli, &mut config) {
         error!("Fatal error: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli, config: &Config) -> Result<()> {
+fn run(cli: Cli, config: &mut Config) -> Result<()> {
     let db_path = cli
         .db
         .unwrap_or_else(|| config.db_path().to_str().unwrap_or("brain.db").to_string());
+
+    // 修复：当 --db 覆盖了 DB 路径时，同步到 config，使 artifact_dir()
+    // 等基于 db_path 推导的目录与实际 DB 路径一致，避免 DB 写到 X 但
+    // artifact 写到默认配置库旁边
+    if config.database_path.as_ref() != Some(&db_path) {
+        config.database_path = Some(db_path.clone());
+    }
 
     info!(db_path = %db_path, "Connecting to brain database");
 
@@ -916,6 +1154,19 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     warn!("[WARN] {} dead link(s):", dead.len());
                     for (from, to) in &dead {
                         warn!("  - {} -> {}", from, to);
+                    }
+                }
+                // Artifact projection consistency check
+                let artifact_health = ops.artifact_health_check()?;
+                if artifact_health.issues.is_empty() {
+                    info!("[OK] Artifact projections consistent");
+                } else {
+                    warn!("[WARN] {} artifact issue(s):", artifact_health.issues.len());
+                    for issue in &artifact_health.issues {
+                        warn!(
+                            "  - [{}] {}: {}",
+                            issue.severity, issue.issue_type, issue.description
+                        );
                     }
                 }
             }
@@ -1623,6 +1874,11 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             if storage_dir.exists() {
                 gbrain_core::kb::backup::backup_storage(&storage_dir, output_dir)?;
             }
+            // 备份 artifact store 目录（使用统一 resolver，与上传保持一致）
+            let artifact_dir = config.artifact_dir();
+            if artifact_dir.exists() {
+                gbrain_core::kb::backup::backup_artifact_store(&artifact_dir, output_dir)?;
+            }
             println!("Backup complete: {}", dest.display());
             return Ok(());
         }
@@ -1643,6 +1899,9 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             if input_dir.join("storage").exists() {
                 gbrain_core::kb::backup::restore_storage(input_dir, &storage_dir)?;
             }
+            // 恢复 artifact store 目录（使用统一 resolver，与上传保持一致）
+            let artifact_dir = config.artifact_dir();
+            gbrain_core::kb::backup::restore_artifact_store(input_dir, &artifact_dir)?;
             println!("Restore complete");
             return Ok(());
         }
@@ -2032,6 +2291,391 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
             return Ok(());
         }
 
+        // ========================================================================
+        // 单入口多投影融合架构 — Upload / MemoryQuery / Promotion / Artifact
+        // ========================================================================
+        Commands::Upload {
+            path,
+            intent,
+            library_id,
+            target,
+            page,
+            folder_id,
+            promotion,
+            dry_run,
+            json,
+        } => {
+            if !path.exists() {
+                error!(path = %path.display(), "File not found");
+                std::process::exit(1);
+            }
+
+            let content = std::fs::read(&path)?;
+            let original_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let upload_intent = match intent.to_lowercase().as_str() {
+                "auto" => gbrain_core::artifact::types::UploadIntent::Auto,
+                "document" => gbrain_core::artifact::types::UploadIntent::Document,
+                "attachment" => gbrain_core::artifact::types::UploadIntent::Attachment,
+                "memory" => gbrain_core::artifact::types::UploadIntent::Memory,
+                "promote" => gbrain_core::artifact::types::UploadIntent::Promote,
+                _ => gbrain_core::artifact::types::UploadIntent::Auto,
+            };
+
+            // 修复：仅在用户显式指定时转换为 PromotionPolicy，否则让 intent 推断
+            let promotion_policy = promotion.as_ref().map(|p| match p.to_lowercase().as_str() {
+                "none" => gbrain_core::artifact::types::PromotionPolicy::None,
+                "shadow" => gbrain_core::artifact::types::PromotionPolicy::Shadow,
+                "candidate" => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+                "auto-low-risk" | "auto_accept_low_risk" => {
+                    gbrain_core::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                }
+                _ => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+            });
+
+            let input = gbrain_core::artifact::types::UploadSourceInput {
+                content,
+                path: Some(path.clone()),
+                original_name,
+                source_kind: gbrain_core::artifact::types::SourceKind::Upload,
+                source_uri: path.to_string_lossy().to_string(),
+                intent: upload_intent,
+                target_slug: target,
+                page_slug: page,
+                library_id,
+                folder_id,
+                promotion_policy,
+                owner_ref: None,
+                metadata: None,
+                dry_run,
+            };
+
+            let result = ops.upload_source(input)?;
+            if json {
+                info!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                info!(
+                    "Artifact: {} (uid={}, sha256={})",
+                    result.artifact_id, result.artifact_uid, result.sha256
+                );
+                info!(
+                    "Occurrence: {} (uid={})",
+                    result.occurrence_id, result.occurrence_uid
+                );
+                info!("New: {}", result.is_new);
+                info!(
+                    "Route: KB={}, Brain={}, File={}, Shadow={}",
+                    result.route_plan.to_kb,
+                    result.route_plan.to_brain,
+                    result.route_plan.to_file,
+                    result.route_plan.to_shadow
+                );
+                info!("Promotion: {}", result.route_plan.promotion);
+                for proj in &result.projections {
+                    info!(
+                        "  Projection: {} key={} ref={} created={} status={}",
+                        proj.projection_type,
+                        proj.projection_key,
+                        proj.projection_ref,
+                        proj.created,
+                        proj.status
+                    );
+                }
+            }
+        }
+
+        Commands::MemoryQuery {
+            query,
+            strategy,
+            limit,
+            filter_slug,
+            include_evidence,
+            include_provenance,
+            json,
+        } => {
+            let query_strategy = match strategy.to_lowercase().as_str() {
+                "brain_first" => gbrain_core::artifact::types::QueryStrategy::BrainFirst,
+                "evidence_first" => gbrain_core::artifact::types::QueryStrategy::EvidenceFirst,
+                "provenance" => gbrain_core::artifact::types::QueryStrategy::Provenance,
+                "timeline_first" => gbrain_core::artifact::types::QueryStrategy::TimelineFirst,
+                _ => gbrain_core::artifact::types::QueryStrategy::BrainFirst,
+            };
+
+            let input = gbrain_core::artifact::types::UnifiedQueryInput {
+                query,
+                strategy: query_strategy,
+                limit: Some(limit),
+                filter_slug,
+                include_evidence,
+                include_provenance,
+            };
+
+            let result = ops.memory_query(input)?;
+            if json {
+                info!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                info!("Strategy: {}", result.strategy);
+                info!("Total hits: {}", result.total_hits);
+                for hit in &result.brain_hits {
+                    info!(
+                        "  Brain: {} | {} | {:.3}",
+                        hit.slug, hit.title, hit.relevance
+                    );
+                }
+                for hit in &result.evidence_hits {
+                    info!(
+                        "  KB: doc_id={} | {} | {:.3}",
+                        hit.kb_document_id, hit.title, hit.relevance
+                    );
+                }
+                for prov in &result.provenance_records {
+                    info!(
+                        "  Provenance: slug={} field={} hash={}",
+                        prov.brain_slug, prov.brain_field, prov.fact_hash
+                    );
+                }
+                for hit in &result.timeline_hits {
+                    info!(
+                        "  Timeline: {} | {} | artifact_id={}",
+                        hit.event_date, hit.description, hit.artifact_id
+                    );
+                }
+            }
+        }
+
+        Commands::PromotionList {
+            status,
+            candidate_type,
+            target_slug,
+            limit,
+            json,
+        } => {
+            let candidates = ops.promotion_list_candidates(
+                status.as_deref(),
+                candidate_type.as_deref(),
+                target_slug.as_deref(),
+                limit,
+                0,
+            )?;
+            if json {
+                info!("{}", serde_json::to_string_pretty(&candidates)?);
+            } else {
+                for c in &candidates {
+                    info!(
+                        "  [{}] {} type={} target={} risk={} confidence={:.2}",
+                        c.status, c.id, c.candidate_type, c.target_slug, c.risk_level, c.confidence
+                    );
+                }
+                info!("{} candidates", candidates.len());
+            }
+        }
+
+        Commands::PromotionGet { candidate_id } => {
+            let candidate = ops.promotion_get_candidate(candidate_id)?;
+            match candidate {
+                Some(c) => info!("{}", serde_json::to_string_pretty(&c)?),
+                None => warn!("Candidate {} not found", candidate_id),
+            }
+        }
+
+        Commands::PromotionAccept {
+            candidate_id,
+            reviewer,
+            notes,
+        } => {
+            let input = gbrain_core::artifact::types::ReviewCandidateInput {
+                candidate_id,
+                action: "accept".to_string(),
+                reviewer,
+                notes,
+            };
+            let result = ops.promotion_review_candidate(input)?;
+            info!("Candidate {} accepted by {}", result.id, result.reviewer);
+        }
+
+        Commands::PromotionReject {
+            candidate_id,
+            reviewer,
+            notes,
+        } => {
+            let input = gbrain_core::artifact::types::ReviewCandidateInput {
+                candidate_id,
+                action: "reject".to_string(),
+                reviewer,
+                notes,
+            };
+            let result = ops.promotion_review_candidate(input)?;
+            info!("Candidate {} rejected by {}", result.id, result.reviewer);
+        }
+
+        Commands::PromotionApply { candidate_id } => {
+            let result = ops.promotion_apply_candidate(candidate_id)?;
+            info!("Candidate {} applied", result.id);
+        }
+
+        Commands::PromotionAutoApply { artifact_id } => {
+            let applied = ops.promotion_auto_apply(artifact_id)?;
+            info!(
+                "Auto-applied {} low-risk candidates for artifact {}",
+                applied.len(),
+                artifact_id
+            );
+        }
+
+        Commands::PromotionBatchApply {
+            artifact_id,
+            risk,
+            dry_run,
+        } => {
+            let result = ops.promotion_batch_apply(artifact_id, risk.as_deref(), dry_run)?;
+            if dry_run {
+                info!(
+                    "Dry run: {} candidates would be applied",
+                    result.total_candidates
+                );
+                for c in &result.candidates {
+                    info!("  {}", c);
+                }
+            } else {
+                info!(
+                    "Batch apply: total={}, applied={}, failed={}",
+                    result.total_candidates, result.applied, result.failed
+                );
+                for f in &result.failures {
+                    info!("  FAIL: {}", f);
+                }
+            }
+        }
+
+        Commands::PromotionRollback { candidate_id } => {
+            let result = ops.promotion_rollback_candidate(candidate_id)?;
+            info!(
+                "Candidate {} rolled back (was: {})",
+                candidate_id, result.status
+            );
+        }
+
+        Commands::GcOrphanProjections {
+            stale_days,
+            dry_run,
+        } => {
+            let result = ops.gc_orphan_projections(stale_days, dry_run)?;
+            if dry_run {
+                info!(
+                    "Dry run: {} orphaned projections found, {} stale records would be deleted",
+                    result.orphaned_count, result.deleted_count
+                );
+            } else {
+                info!(
+                    "GC complete: orphaned={}, deleted={}, KB cleaned={}, shadow pages cleaned={}",
+                    result.orphaned_count,
+                    result.deleted_count,
+                    result.kb_vector_cleaned,
+                    result.shadow_page_cleaned
+                );
+                for e in &result.errors {
+                    info!("  ERROR: {}", e);
+                }
+            }
+        }
+
+        Commands::ProjectionSupersede {
+            old_proj_id,
+            new_proj_id,
+        } => {
+            ops.supersede_projection(old_proj_id, new_proj_id)?;
+            info!("Projection superseded: {} -> {}", old_proj_id, new_proj_id);
+        }
+
+        Commands::ProjectionHistory {
+            projection_key,
+            artifact_id,
+            projection_type,
+            limit,
+        } => {
+            let history = ops.get_projection_history(
+                &projection_key,
+                artifact_id,
+                projection_type.as_deref(),
+                limit,
+            )?;
+            if history.is_empty() {
+                info!("No projection history found for key: {}", projection_key);
+            } else {
+                info!("Projection history for '{}':", projection_key);
+                for p in &history {
+                    info!(
+                        "  id={}, type={}, ref={}, status={}, superseded_by={:?}",
+                        p.id, p.projection_type, p.projection_ref, p.status, p.superseded_by
+                    );
+                }
+            }
+        }
+
+        Commands::ArtifactList {
+            limit,
+            offset,
+            json,
+        } => {
+            let artifacts = ops.list_artifacts(limit, offset)?;
+            if json {
+                info!("{}", serde_json::to_string_pretty(&artifacts)?);
+            } else {
+                for a in &artifacts {
+                    info!(
+                        "  [{}] {} uid={} sha256={} size={} status={}",
+                        a.id,
+                        a.original_name,
+                        a.artifact_uid,
+                        &a.sha256[..16.min(a.sha256.len())],
+                        a.size_bytes,
+                        a.status
+                    );
+                }
+                info!("{} artifacts", artifacts.len());
+            }
+        }
+
+        Commands::ArtifactGet { id_or_uid } => {
+            let artifact = if id_or_uid.starts_with("art_") {
+                ops.get_artifact_by_uid(&id_or_uid)?
+            } else {
+                let id = id_or_uid.parse::<i64>().ok();
+                match id {
+                    Some(id) => ops.get_artifact(id)?,
+                    None => None,
+                }
+            };
+            match artifact {
+                Some(a) => {
+                    info!("{}", serde_json::to_string_pretty(&a)?);
+                    // 显示投影
+                    let projections = ops.get_artifact_projections(a.id)?;
+                    for p in &projections {
+                        info!(
+                            "  Projection: {} key={} ref={} status={}",
+                            p.projection_type, p.projection_key, p.projection_ref, p.status
+                        );
+                    }
+                }
+                None => warn!("Artifact '{}' not found", id_or_uid),
+            }
+        }
+
+        Commands::ArtifactDelete { artifact_id } => {
+            ops.delete_artifact(artifact_id)?;
+            info!("Artifact {} soft-deleted", artifact_id);
+        }
+
+        Commands::ArtifactHealth => {
+            let report = ops.artifact_health_check()?;
+            info!("{}", serde_json::to_string_pretty(&report)?);
+        }
+
         Commands::KbWorker { once, interval } => {
             if once {
                 let processed = gbrain_core::kb::run_kb_worker_once(&engine, config)?;
@@ -2039,6 +2683,11 @@ fn run(cli: Cli, config: &Config) -> Result<()> {
                     info!("KB worker: processed one job");
                 } else {
                     info!("KB worker: no pending jobs");
+                }
+                // 同时处理 artifact promotion 作业
+                let promoted = gbrain_core::kb::run_artifact_promote_worker_once(&engine, config)?;
+                if promoted {
+                    info!("Artifact promote worker: processed one job");
                 }
             } else {
                 info!(interval, "KB worker: starting daemon mode");

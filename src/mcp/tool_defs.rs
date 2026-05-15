@@ -555,6 +555,161 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "comment", description: "Optional feedback comment", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
+
+    // ========================================================================
+    // 单入口多投影融合架构 — upload_source / memory_query / promotion / artifact
+    // ========================================================================
+
+    OperationDef {
+        name: "upload_source",
+        description: "Upload a source file (unified entry point for gbrain + KB + file storage). The system automatically creates Source Artifact, KB projection, shadow page, and file attachment based on intent.",
+        params: &[
+            ParamDef { name: "path", description: "Local file path to upload", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "intent", description: "Upload intent: auto, document, attachment, memory, promote", required: false, param_type: ParamType::String, enum_values: Some(&["auto", "document", "attachment", "memory", "promote"]), items_type: None },
+            ParamDef { name: "library_id", description: "KB library ID (optional, uses default if not specified)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "target_slug", description: "Target gbrain page slug for promotion", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "page_slug", description: "Target page slug for file attachment", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "folder_id", description: "KB folder ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "promotion", description: "Promotion policy: none, shadow, candidate, auto-low-risk", required: false, param_type: ParamType::String, enum_values: Some(&["none", "shadow", "candidate", "auto-low-risk"]), items_type: None },
+            ParamDef { name: "dry_run", description: "Only return route plan without committing", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "memory_query",
+        description: "Unified memory query. Searches both gbrain curated knowledge and KB document evidence. The planner automatically selects the best strategy based on query intent.",
+        params: &[
+            ParamDef { name: "query", description: "Query text", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "strategy", description: "Query strategy: brain_first, evidence_first, provenance, timeline_first", required: false, param_type: ParamType::String, enum_values: Some(&["brain_first", "evidence_first", "provenance", "timeline_first"]), items_type: None },
+            ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "filter_slug", description: "Filter by brain slug", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "include_evidence", description: "Include KB evidence hits", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "include_provenance", description: "Include provenance records", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_list_candidates",
+        description: "List promotion candidates (suggested changes extracted from KB evidence)",
+        params: &[
+            ParamDef { name: "status", description: "Filter by status: pending, accepted, rejected, applied, rolled_back, stale, superseded", required: false, param_type: ParamType::String, enum_values: Some(&["pending", "accepted", "rejected", "applied", "rolled_back", "stale", "superseded"]), items_type: None },
+            ParamDef { name: "candidate_type", description: "Filter by type: document_summary, entity_mention, link_suggestion, timeline_event, fact_claim, page_create, page_update", required: false, param_type: ParamType::String, enum_values: Some(&["document_summary", "entity_mention", "link_suggestion", "timeline_event", "fact_claim", "page_create", "page_update"]), items_type: None },
+            ParamDef { name: "target_slug", description: "Filter by target slug", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_get_candidate",
+        description: "Get details of a promotion candidate",
+        params: &[
+            ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_accept_candidate",
+        description: "Accept a promotion candidate",
+        params: &[
+            ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "reviewer", description: "Reviewer name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "notes", description: "Review notes", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_reject_candidate",
+        description: "Reject a promotion candidate",
+        params: &[
+            ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "reviewer", description: "Reviewer name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "reason", description: "Rejection reason", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_apply_candidate",
+        description: "Apply an approved promotion candidate to gbrain",
+        params: &[
+            ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_rollback_candidate",
+        description: "Rollback an applied promotion candidate, undoing shadow page updates and marking provenance stale (§31)",
+        params: &[
+            ParamDef { name: "candidate_id", description: "Candidate ID to rollback", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "gc_orphan_projections",
+        description: "Garbage collect orphaned projections and clean up stale projection records (§31)",
+        params: &[
+            ParamDef { name: "stale_days", description: "Delete projections orphaned/superseded for more than N days (default: 30)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "dry_run", description: "Preview what would be cleaned without making changes", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "projection_supersede",
+        description: "Supersede an old projection with a new one, marking the old as superseded and setting superseded_by (§31 version chain)",
+        params: &[
+            ParamDef { name: "old_proj_id", description: "Old projection ID to supersede", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "new_proj_id", description: "New projection ID that replaces the old one", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "projection_history",
+        description: "Query projection version chain history by projection_key (§31). Supports optional artifact_id and projection_type filters to avoid mixing projections from different artifacts sharing the same key.",
+        params: &[
+            ParamDef { name: "projection_key", description: "Projection key to query history for", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "artifact_id", description: "Optional artifact ID to filter by (avoids mixing projections from different artifacts)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "projection_type", description: "Optional projection type to filter by (e.g. 'kb_document')", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "Maximum history records to return (default: 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_list",
+        description: "List source artifacts",
+        params: &[
+            ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "offset", description: "Offset", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_get",
+        description: "Get source artifact details by ID or UID",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID or UID (e.g. '1' or 'art_ab12cd34ef56')", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_delete",
+        description: "Soft delete a source artifact (marks all projections as stale)",
+        params: &[
+            ParamDef { name: "artifact_id", description: "Artifact ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_health",
+        description: "Check artifact projection consistency and health",
+        params: &[],
+    },
+
+    OperationDef {
+        name: "get_provenance",
+        description: "Get provenance records for a brain page (trace where facts came from)",
+        params: &[
+            ParamDef { name: "brain_slug", description: "Brain page slug", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
 ];
 
 /// Build all tool definitions from structured operation definitions

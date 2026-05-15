@@ -1555,6 +1555,14 @@ impl McpServer {
                     crate::kb::backup::backup_storage(&storage_dir, output_dir)?;
                 }
 
+                // 修复：同时备份 artifact store 目录，MCP 路径之前漏掉 artifact 备份
+                // CLI 路径已备份 artifacts，但 MCP 只备份了 kb_files，
+                // 恢复后 source_artifacts.storage_path 会指向不存在的原件
+                let artifact_dir = self.config.artifact_dir();
+                if artifact_dir.exists() {
+                    crate::kb::backup::backup_artifact_store(&artifact_dir, output_dir)?;
+                }
+
                 // 收集真实数据填充 manifest
                 let kb = self.engine.kb_engine()?;
                 let library_ids: Vec<i64> = kb.list_libraries()?.iter().map(|lib| lib.id).collect();
@@ -1633,6 +1641,12 @@ impl McpServer {
                     crate::kb::backup::restore_storage(input_dir, &storage_dir)?;
                 }
 
+                // 修复：同时恢复 artifact store 目录，MCP 路径之前漏掉 artifact 恢复
+                // CLI 路径已恢复 artifacts，但 MCP 只恢复了 kb_files，
+                // 恢复后 source_artifacts.storage_path 会指向不存在的原件
+                let artifact_dir = self.config.artifact_dir();
+                crate::kb::backup::restore_artifact_store(input_dir, &artifact_dir)?;
+
                 Ok(serde_json::json!({"ok": true}))
             }
             "kb_add_eval_query" => {
@@ -1673,6 +1687,288 @@ impl McpServer {
                     comment,
                 )?;
                 Ok(serde_json::json!({"id": id}))
+            }
+
+            // ========================================================================
+            // 单入口多投影融合架构 — upload_source / memory_query / promotion / artifact
+            // ========================================================================
+            "upload_source" => {
+                let path = arguments["path"].as_str().unwrap_or("").to_string();
+                let file_path = std::path::PathBuf::from(&path);
+
+                // 修复：复用 validate_upload_source 做完整安全校验
+                // （路径 containment + 扩展名 + 文件大小），防止远程 MCP 读取超大文件
+                // 或伪装扩展名/不允许类型进入 artifact/KB 流程
+                let intent_str = arguments["intent"].as_str().unwrap_or("auto");
+                let intent = match intent_str {
+                    "auto" => crate::artifact::types::UploadIntent::Auto,
+                    "document" => crate::artifact::types::UploadIntent::Document,
+                    "attachment" => crate::artifact::types::UploadIntent::Attachment,
+                    "memory" => crate::artifact::types::UploadIntent::Memory,
+                    "promote" => crate::artifact::types::UploadIntent::Promote,
+                    // 向后兼容旧值
+                    "kb_only" => crate::artifact::types::UploadIntent::Document,
+                    "brain_only" => crate::artifact::types::UploadIntent::Promote,
+                    "file_only" => crate::artifact::types::UploadIntent::Attachment,
+                    "kb_and_brain" => crate::artifact::types::UploadIntent::Promote,
+                    "all" => crate::artifact::types::UploadIntent::Promote,
+                    _ => crate::artifact::types::UploadIntent::Auto,
+                };
+
+                // 修复：先按扩展名推断 route plan，再根据 to_kb/to_file 选择允许列表。
+                // Auto 下图片/非KB类型应走 to_file=true，但默认 kb_allowed_extensions
+                // 不含图片/zip/json/yaml 等，导致安全校验阶段提前失败。
+                let ext_for_route = file_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let route_plan =
+                    crate::artifact::types::infer_route_plan(&ext_for_route, "", &intent);
+                let allowed_extensions: Vec<String> = if route_plan.to_file {
+                    // 走附件路径：在 KB 允许列表基础上追加常见附件/图片类型
+                    let mut exts = self.config.kb_allowed_extensions.clone();
+                    for extra in &[
+                        // 修复：补充 tif（IMAGE_EXTENSIONS 包含 tif 和 tiff，之前只加了 tiff）
+                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
+                        "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
+                    ] {
+                        let s = extra.to_string();
+                        if !exts.contains(&s) {
+                            exts.push(s);
+                        }
+                    }
+                    exts
+                } else {
+                    //  KB 路径：仅使用 KB 允许列表
+                    self.config.kb_allowed_extensions.clone()
+                };
+                let max_file_bytes = self.config.kb_max_file_size_mb * 1024 * 1024;
+
+                let validated_path = crate::kb::security::validate_upload_source(
+                    &file_path,
+                    true, // remote
+                    &ctx.working_dir,
+                    max_file_bytes,
+                    &allowed_extensions,
+                )?;
+
+                // 扩展名已通过 validate_upload_source 验证，再校验 MIME
+                let ext = validated_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let content = std::fs::read(&validated_path)?;
+                let _mime = crate::kb::security::detect_and_validate_mime(&content, &ext)?;
+
+                let original_name = validated_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                // 修复：仅在 MCP 调用方显式传入 promotion 时解析，否则让 intent 推断
+                let promotion_policy =
+                    arguments
+                        .get("promotion")
+                        .and_then(|v| v.as_str())
+                        .map(|s| match s {
+                            "none" => crate::artifact::types::PromotionPolicy::None,
+                            "shadow" => crate::artifact::types::PromotionPolicy::Shadow,
+                            "candidate" => crate::artifact::types::PromotionPolicy::Candidate,
+                            "auto-low-risk" | "auto_accept_low_risk" => {
+                                crate::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                            }
+                            _ => crate::artifact::types::PromotionPolicy::Candidate,
+                        });
+
+                let input = crate::artifact::types::UploadSourceInput {
+                    content,
+                    original_name: original_name.clone(),
+                    source_kind: crate::artifact::types::SourceKind::Mcp,
+                    source_uri: path,
+                    intent,
+                    target_slug: arguments["target_slug"].as_str().map(|s| s.to_string()),
+                    page_slug: arguments["page_slug"].as_str().map(|s| s.to_string()),
+                    library_id: arguments["library_id"].as_i64(),
+                    folder_id: arguments["folder_id"].as_i64(),
+                    promotion_policy,
+                    owner_ref: None,
+                    metadata: None,
+                    // 修复：传 validated_path 而非 original_name，
+                    // 否则核心层用 input.path 写 occurrence.original_path 时只保存文件名，
+                    // 不是原始路径，削弱后续审计、追溯和恢复诊断能力
+                    path: Some(validated_path.clone()),
+                    dry_run: arguments["dry_run"].as_bool().unwrap_or(false),
+                };
+
+                let result = ops.upload_source(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "memory_query" => {
+                let query = arguments["query"].as_str().unwrap_or("").to_string();
+                let strategy_str = arguments["strategy"].as_str().unwrap_or("brain_first");
+                let strategy = match strategy_str {
+                    "brain_first" => crate::artifact::types::QueryStrategy::BrainFirst,
+                    "evidence_first" => crate::artifact::types::QueryStrategy::EvidenceFirst,
+                    "provenance" => crate::artifact::types::QueryStrategy::Provenance,
+                    "timeline_first" => crate::artifact::types::QueryStrategy::TimelineFirst,
+                    _ => crate::artifact::types::QueryStrategy::BrainFirst,
+                };
+
+                let input = crate::artifact::types::UnifiedQueryInput {
+                    query,
+                    strategy,
+                    limit: arguments["limit"].as_i64(),
+                    filter_slug: arguments["filter_slug"].as_str().map(|s| s.to_string()),
+                    include_evidence: arguments["include_evidence"].as_bool().unwrap_or(true),
+                    include_provenance: arguments["include_provenance"].as_bool().unwrap_or(false),
+                };
+
+                let result = ops.memory_query(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "promotion_list_candidates" => {
+                let status = arguments["status"].as_str();
+                let candidate_type = arguments["candidate_type"].as_str();
+                let target_slug = arguments["target_slug"].as_str();
+                let limit = arguments["limit"].as_i64().unwrap_or(50);
+
+                let candidates =
+                    ops.promotion_list_candidates(status, candidate_type, target_slug, limit, 0)?;
+                Ok(serde_json::to_value(candidates)?)
+            }
+
+            "promotion_get_candidate" => {
+                let candidate_id = arguments["candidate_id"].as_i64().unwrap_or(0);
+                let candidate = ops.promotion_get_candidate(candidate_id)?;
+                Ok(serde_json::to_value(candidate)?)
+            }
+
+            "promotion_accept_candidate" => {
+                let candidate_id = arguments["candidate_id"].as_i64().unwrap_or(0);
+                let reviewer = arguments["reviewer"].as_str().unwrap_or("mcp").to_string();
+                let notes = arguments["notes"].as_str().map(|s| s.to_string());
+
+                let input = crate::artifact::types::ReviewCandidateInput {
+                    candidate_id,
+                    action: "accept".to_string(),
+                    reviewer,
+                    notes,
+                };
+
+                let result = ops.promotion_review_candidate(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "promotion_reject_candidate" => {
+                let candidate_id = arguments["candidate_id"].as_i64().unwrap_or(0);
+                let reviewer = arguments["reviewer"].as_str().unwrap_or("mcp").to_string();
+                let reason = arguments["reason"].as_str().map(|s| s.to_string());
+
+                let input = crate::artifact::types::ReviewCandidateInput {
+                    candidate_id,
+                    action: "reject".to_string(),
+                    reviewer,
+                    notes: reason,
+                };
+
+                let result = ops.promotion_review_candidate(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "promotion_apply_candidate" => {
+                let candidate_id = arguments["candidate_id"].as_i64().unwrap_or(0);
+                let result = ops.promotion_apply_candidate(candidate_id)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "promotion_batch_apply" => {
+                let artifact_id = arguments["artifact_id"].as_i64();
+                let risk_filter = arguments["risk"].as_str();
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+                let result = ops.promotion_batch_apply(artifact_id, risk_filter, dry_run)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "promotion_rollback_candidate" => {
+                let candidate_id = arguments["candidate_id"].as_i64().unwrap_or(0);
+                let result = ops.promotion_rollback_candidate(candidate_id)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "gc_orphan_projections" => {
+                let stale_days = arguments["stale_days"].as_u64().unwrap_or(30) as u32;
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+                let result = ops.gc_orphan_projections(stale_days, dry_run)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            "projection_supersede" => {
+                let old_proj_id = arguments["old_proj_id"].as_i64().unwrap_or(0);
+                let new_proj_id = arguments["new_proj_id"].as_i64().unwrap_or(0);
+                ops.supersede_projection(old_proj_id, new_proj_id)?;
+                Ok(
+                    serde_json::json!({"old_proj_id": old_proj_id, "new_proj_id": new_proj_id, "status": "superseded"}),
+                )
+            }
+
+            "projection_history" => {
+                let projection_key = arguments["projection_key"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let artifact_id = arguments["artifact_id"].as_i64();
+                let projection_type = arguments["projection_type"].as_str().map(|s| s.to_string());
+                let limit = arguments["limit"].as_i64().unwrap_or(20);
+                let history = ops.get_projection_history(
+                    &projection_key,
+                    artifact_id,
+                    projection_type.as_deref(),
+                    limit,
+                )?;
+                Ok(serde_json::to_value(history)?)
+            }
+
+            "artifact_list" => {
+                let limit = arguments["limit"].as_i64().unwrap_or(50);
+                let offset = arguments["offset"].as_i64().unwrap_or(0);
+                let artifacts = ops.list_artifacts(limit, offset)?;
+                Ok(serde_json::to_value(artifacts)?)
+            }
+
+            "artifact_get" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let artifact = if id_or_uid.starts_with("art_") {
+                    ops.get_artifact_by_uid(&id_or_uid)?
+                } else {
+                    let id = id_or_uid.parse::<i64>().ok();
+                    match id {
+                        Some(id) => ops.get_artifact(id)?,
+                        None => None,
+                    }
+                };
+                Ok(serde_json::to_value(artifact)?)
+            }
+
+            "artifact_delete" => {
+                let artifact_id = arguments["artifact_id"].as_i64().unwrap_or(0);
+                ops.delete_artifact(artifact_id)?;
+                Ok(serde_json::json!({"artifact_id": artifact_id, "status": "deleted"}))
+            }
+
+            "artifact_health" => {
+                let report = ops.artifact_health_check()?;
+                Ok(serde_json::to_value(report)?)
+            }
+
+            "get_provenance" => {
+                let brain_slug = arguments["brain_slug"].as_str().unwrap_or("").to_string();
+                let records = ops.get_provenance(&brain_slug)?;
+                Ok(serde_json::to_value(records)?)
             }
 
             _ => Err(crate::error::GBrainError::InvalidInput(format!(

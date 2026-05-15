@@ -6,6 +6,9 @@ use tracing::warn;
 
 /// Allowed slug directory prefixes (from gbrain's DIR_PATTERN)
 /// P1-9: Added meetings, deal, civic, source, media, yc, funds, area, event, industry
+/// 修复：加入 documents 前缀 — shadow page 固定生成 documents/<slug>，
+/// 但允许列表里没有 documents，导致 validate_page_slug 校验失败，
+/// upload.rs 静默跳过 shadow page 创建，核心投影失效
 const ALLOWED_SLUG_PREFIXES: &[&str] = &[
     "people",
     "companies",
@@ -31,6 +34,7 @@ const ALLOWED_SLUG_PREFIXES: &[&str] = &[
     "event",
     "industry",
     "code",
+    "documents",
 ];
 
 /// Allowed file extensions for uploads

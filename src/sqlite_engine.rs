@@ -276,6 +276,14 @@ impl SqliteEngine {
         self.conn.as_ref().ok_or(GBrainError::NotConnected)
     }
 
+    /// 获取 gbrain 基础目录（db_path 的父目录）
+    pub fn gbrain_dir(&self) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(&self.db_path);
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     /// Create a KbEngine borrowing the current connection
     pub fn kb_engine(&self) -> Result<crate::kb::engine::KbEngine<'_>> {
         let conn = self.conn.as_ref().ok_or(GBrainError::NotConnected)?;
