@@ -6,11 +6,13 @@ triggers:
   - "save this to brain"
   - "process this meeting"
 tools:
-  - search
+  - query
   - get_page
   - put_page
   - add_link
   - add_timeline_entry
+  - upload_source
+  - memory_query
   - sync_brain
 mutating: true
 writes_pages: true
@@ -77,7 +79,7 @@ the signal detection loop that makes the brain compound over time.
 1. **Scan the message** for entity mentions: people, companies, concepts, original
    thinking. Fire on every message (no exceptions unless purely operational).
 2. **For each entity detected:**
-   - `gbrain search "name"` -- does a page already exist?
+   - `gbrain query "name"` -- does a page already exist?
    - **If yes:** load context with `gbrain get <slug>`. Use the compiled truth to
      inform your response. Update the page if the message contains new information.
    - **If no:** assess notability (see `skills/_brain-filing-rules.md`). If the entity

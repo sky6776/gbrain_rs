@@ -41,7 +41,7 @@ gbrain serve
 - **KB 子系统** — 异步五阶段文档处理管线（解析→拆分→嵌入→RAPTOR→持久化），RAPTOR 递归摘要树，文档上传与处理，多格式解析器（Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本/代码），语义分块（Savitzky-Golay 平滑 + chunk_overlap 重叠）
 - **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
 - **单入口多投影融合** — 原件上传（Upload）自动路由至多投影（KB 文档 / 影子页面 / 候选变更 / 文件附件 / 链接 / 时间线），溯源审计（Provenance Ledger），候选评审与提升（Promotion），版本链与回滚（Projection Supersede / Rollback），统一记忆查询（Memory Query，4 种策略）
-- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，71 个工具，用于 AI 智能体集成
+- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，74 个工具，用于 AI 智能体集成
 - **零配置** — 嵌入式 SQLite，无需外部服务（嵌入向量可选）
 - **分层丰富** — 自动实体检测与提升（提及 → 存根 → 完善）
 - **版本历史** — 完整的页面版本管理，支持回滚
@@ -107,6 +107,22 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | 列出页面（可筛选） |
 | `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | 混合搜索（别名: `ask`），支持代码过滤和两阶段检索 |
 
+#### 示例
+
+```bash
+# 初始化知识库
+gbrain init
+
+# 创建页面
+gbrain put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
+
+# 搜索
+gbrain query "Rust 异步编程" --limit 5 --lang rust
+
+# 恢复误删页面
+gbrain restore people/alice
+```
+
 ### 搜索与图谱
 
 | 命令 | 说明 |
@@ -116,6 +132,22 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain graph-query <from> [--to <slug>] [--depth <N>] [--link-type <TYPE>]` | 查询页面间的图谱关系 |
 | `gbrain code search/def/refs/callers/callees/edges` | 代码 chunk、符号定义/引用和调用图查询 |
 
+#### 示例
+
+```bash
+# 模糊解析 slug
+gbrain resolve ali
+
+# 遍历知识图谱
+gbrain graph people/alice --depth 3
+
+# 查询两个页面间的关系路径
+gbrain graph-query people/alice --to companies/acme --depth 3
+
+# 查找 Rust 函数定义
+gbrain code def --symbol "parse_config" --lang rust
+```
+
 ### 反向链接
 
 | 命令 | 说明 |
@@ -123,6 +155,19 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain backlinks list <slug>` | 列出页面的反向链接 |
 | `gbrain backlinks check [slug]` | 检查缺失的反向链接 |
 | `gbrain backlinks fix [slug]` | 修复缺失的反向链接 |
+
+#### 示例
+
+```bash
+# 列出反向链接
+gbrain backlinks list people/alice
+
+# 检查所有页面的反向链接完整性
+gbrain backlinks check
+
+# 修复缺失的反向链接
+gbrain backlinks fix people/alice
+```
 
 ### 数据管理
 
@@ -134,6 +179,22 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain extract [--mode links\|timeline\|all]` | 批量提取链接/时间线 |
 | `gbrain lint [slug] [--fix] [--dry-run]` | 零 LLM 质量检查（6 条规则） |
 
+#### 示例
+
+```bash
+# 导入目录并生成嵌入
+gbrain import ./my-notes --embed --auto-link
+
+# 导出所有页面
+gbrain export --dir ./backup
+
+# 批量提取链接和时间线
+gbrain extract --mode all
+
+# 运行 lint 检查并自动修复
+gbrain lint --fix
+```
+
 ### 文件存储
 
 | 命令 | 说明 |
@@ -143,6 +204,19 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain file sync <dir>` | 同步目录到存储 |
 | `gbrain file verify` | 验证所有文件记录 |
 | `gbrain file url <storage-path>` | 获取文件的本地路径/URL |
+
+#### 示例
+
+```bash
+# 上传文件并关联到页面
+gbrain file upload report.pdf --page projects/annual-report
+
+# 列出某页面关联的文件
+gbrain file list projects/annual-report
+
+# 获取文件路径
+gbrain file url files/report.pdf
+```
 
 ### 健康与维护
 
@@ -154,6 +228,22 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain integrity` | 检查数据完整性 |
 | `gbrain orphans` | 检测孤立页面 |
 | `gbrain autopilot [--once] [--interval <SECS>]` | 自维护守护进程 |
+
+#### 示例
+
+```bash
+# 查看知识库统计
+gbrain stats
+
+# 快速诊断
+gbrain doctor --fast
+
+# 运行一次自维护
+gbrain autopilot --once
+
+# 持续自维护（每 10 分钟）
+gbrain autopilot --interval 600
+```
 
 ### 配置与其他
 
@@ -167,6 +257,81 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain tools-json` | 以 JSON 输出 MCP 工具定义 |
 | `gbrain serve` | 作为 MCP stdio 服务器运行 |
 
+#### 示例
+
+```bash
+# 查看所有配置
+gbrain config show
+
+# 设置嵌入模型
+gbrain config set embedding_model text-embedding-3-large
+
+# 生成维护报告
+gbrain report --report-type maintenance --title "Weekly Check"
+
+# 启动 MCP 服务器
+gbrain serve
+```
+
+### KB 子系统（CLI）
+
+| 命令 | 说明 |
+|------|------|
+| `gbrain kb-worker [--once] [--interval <SECS>]` | 运行 KB 文档处理工作器（从队列领取作业） |
+| `gbrain kb-eval --library-id <ID>` | 运行 KB 搜索评估 |
+| `gbrain kb-backup --output <DIR>` | 备份 KB 数据库和存储 |
+| `gbrain kb-restore --input <DIR>` | 从备份恢复 KB |
+| `gbrain kb-source-add --library-id <ID> --path <DIR>` | 添加本地目录为 KB 导入源 |
+| `gbrain kb-sync-source --source-id <ID>` | 同步 KB 导入源 |
+| `gbrain kb-jobs list/pause/resume --library-id <ID>` | KB 作业管理（列出/暂停/恢复） |
+| `gbrain kb-export-library --library-id <ID> --output <DIR>` | 导出 KB 库到目录 |
+| `gbrain kb-import-library --archive <DIR> [--new-name <NAME>]` | 从导出导入 KB 库 |
+| `gbrain kb-reembed --library-id <ID> [--embedding-index-id <ID>]` | 重新嵌入文档（使用新模型） |
+| `gbrain kb-eval-compare --index-id-1 <ID> --index-id-2 <ID>` | 比较两个嵌入索引的搜索质量 |
+| `gbrain kb-health-check [--library-id <ID>] [--repair]` | 检查 KB 索引健康状态（可选修复） |
+| `gbrain kb-rebuild-document --document-id <ID>` | 重建单个文档索引 |
+| `gbrain kb-rebuild-library --library-id <ID>` | 重建整个库索引 |
+| `gbrain kb-purge-deleted [--library-id <ID>] [--older-than-days <N>]` | 清理已删除的 KB 文档 |
+
+#### 示例
+
+```bash
+# 启动 KB 工作器（持续运行）
+gbrain kb-worker --interval 30
+
+# 运行一次 KB 工作器
+gbrain kb-worker --once
+
+# 备份 KB
+gbrain kb-backup --output ./kb-backup
+
+# 从备份恢复
+gbrain kb-restore --input ./kb-backup
+
+# 添加导入源并同步
+gbrain kb-source-add --library-id 1 --path ./documents
+gbrain kb-sync-source --source-id 1
+
+# 导出/导入库
+gbrain kb-export-library --library-id 1 --output ./export
+gbrain kb-import-library --archive ./export --new-name "Restored Library"
+
+# 重新嵌入文档
+gbrain kb-reembed --library-id 1
+
+# 比较两个嵌入索引
+gbrain kb-eval-compare --index-id-1 1 --index-id-2 2
+
+# 检查并修复索引
+gbrain kb-health-check --library-id 1 --repair
+
+# 重建单个文档索引
+gbrain kb-rebuild-document --document-id 42
+
+# 清理 30 天前的已删除文档
+gbrain kb-purge-deleted --older-than-days 30
+```
+
 ### 单入口多投影融合（Artifact）
 
 | 命令 | 说明 |
@@ -177,6 +342,25 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情（支持 ID 或 UID 如 `art_ab12cd34ef56`） |
 | `gbrain artifact delete <artifact_id>` | 软删除 Artifact（标记所有投影为 stale） |
 | `gbrain artifact health` | 检查 Artifact 投影一致性与健康状态 |
+
+#### 示例
+
+```bash
+# 上传文档自动路由
+gbrain upload report.pdf --intent document --library-id 1
+
+# 上传并自动提升低风险候选
+gbrain upload notes.md --intent promote --target people/alice --promotion auto-low-risk
+
+# 预览上传路由（不实际执行）
+gbrain upload data.xlsx --intent auto --dry-run
+
+# 统一记忆查询
+gbrain memory-query "Alice 的项目经历" --strategy evidence_first --limit 10
+
+# 查看 Artifact 详情
+gbrain artifact get art_ab12cd34ef56
+```
 
 ### 候选变更与提升（Promotion）
 
@@ -191,6 +375,22 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain promotion batch-apply [--artifact-id <ID>] [--risk <LEVEL>] [--dry-run]` | 批量应用候选变更 |
 | `gbrain promotion rollback <candidate_id>` | 回滚已应用的候选变更 |
 
+#### 示例
+
+```bash
+# 列出待审候选变更
+gbrain promotion list --status pending
+
+# 接受候选变更
+gbrain promotion accept 42 --reviewer alice --notes "信息准确"
+
+# 批量应用低风险候选（预览模式）
+gbrain promotion batch-apply --risk low --dry-run
+
+# 回滚已应用的候选
+gbrain promotion rollback 42
+```
+
 ### 投影管理（Projection）
 
 | 命令 | 说明 |
@@ -198,6 +398,19 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain projection supersede <old_proj_id> <new_proj_id>` | 用新投影替代旧投影（版本链） |
 | `gbrain projection history <projection_key> [--artifact-id <ID>] [--projection-type <TYPE>] [--limit <N>]` | 查询投影版本链历史 |
 | `gbrain gc-orphan-projections [--stale-days <N>] [--dry-run]` | 清理孤立/过期的投影记录 |
+
+#### 示例
+
+```bash
+# 替代旧投影
+gbrain projection supersede 101 202
+
+# 查询投影版本链
+gbrain projection history kb_doc:42 --artifact-id 7 --limit 10
+
+# 预览清理孤立投影
+gbrain gc-orphan-projections --stale-days 30 --dry-run
+```
 
 ---
 
@@ -255,16 +468,32 @@ CLI 直接使用 `remote=false`，跳过远程安全限制。
 
 ## MCP 工具
 
-gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
+gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
 
 ### 搜索
 
 | 工具 | 说明 |
 |------|------|
 | `query` | 混合搜索（向量 + 关键词 + 扩展），支持详情级别、代码过滤、两阶段检索和搜索元数据 |
-| `search` | 全文搜索（向量 + 关键词 + RRF 融合），支持代码过滤 |
 | `find_by_title_fuzzy` | 基于三元组相似度的标题模糊搜索 |
 | `resolve_slugs` | 模糊解析部分 slug 到匹配页面 |
+
+#### 示例
+
+```json
+// MCP 调用示例
+{ "tool": "query", "params": { "query": "Rust 异步编程", "limit": 5, "lang": "rust" } }
+```
+
+```json
+// 标题模糊搜索
+{ "tool": "find_by_title_fuzzy", "params": { "query": "Alice", "min_similarity": 0.6 } }
+```
+
+```json
+// 模糊解析 slug
+{ "tool": "resolve_slugs", "params": { "partial": "ali" } }
+```
 
 ### 页面增删改查
 
@@ -272,9 +501,31 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 |------|------|
 | `get_page` | 读取页面（支持模糊匹配） |
 | `put_page` | 写入/更新页面（Markdown + frontmatter） |
-| `delete_page` | 软删除页面 |
+| `delete_page` | 软删除页面（需 confirm=true 确认） |
 | `list_pages` | 列出页面（支持类型/标签/数量筛选） |
 | `get_chunks` | 获取页面的内容块 |
+
+#### 示例
+
+```json
+// 读取页面
+{ "tool": "get_page", "params": { "slug": "people/alice" } }
+```
+
+```json
+// 创建/更新页面
+{ "tool": "put_page", "params": { "slug": "people/alice", "content": "---\ntitle: Alice\n---\n一位工程师" } }
+```
+
+```json
+// 软删除页面（需确认）
+{ "tool": "delete_page", "params": { "slug": "people/alice", "confirm": true } }
+```
+
+```json
+// 列出页面
+{ "tool": "list_pages", "params": { "type": "person", "limit": 10 } }
+```
 
 ### 标签
 
@@ -283,6 +534,18 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `add_tag` | 为页面添加标签 |
 | `remove_tag` | 从页面移除标签 |
 | `get_tags` | 列出页面的标签 |
+
+#### 示例
+
+```json
+// 添加标签
+{ "tool": "add_tag", "params": { "slug": "people/alice", "tag": "engineer" } }
+```
+
+```json
+// 列出标签
+{ "tool": "get_tags", "params": { "slug": "people/alice" } }
+```
 
 ### 链接与图谱
 
@@ -294,12 +557,41 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `get_backlinks` | 列出页面的入站链接 |
 | `traverse_graph` | 从页面遍历链接图谱 |
 
+#### 示例
+
+```json
+// 创建类型化链接
+{ "tool": "add_link", "params": { "from": "people/alice", "to": "companies/acme", "link_type": "works_at" } }
+```
+
+```json
+// 遍历图谱
+{ "tool": "traverse_graph", "params": { "slug": "people/alice", "depth": 3, "direction": "both" } }
+```
+
+```json
+// 获取反向链接
+{ "tool": "get_backlinks", "params": { "slug": "people/alice" } }
+```
+
 ### 时间线
 
 | 工具 | 说明 |
 |------|------|
 | `add_timeline_entry` | 为页面添加时间线条目 |
 | `get_timeline` | 获取页面的时间线 |
+
+#### 示例
+
+```json
+// 添加时间线
+{ "tool": "add_timeline_entry", "params": { "slug": "people/alice", "date": "2024-01-15", "summary": "加入 Acme 公司" } }
+```
+
+```json
+// 获取时间线
+{ "tool": "get_timeline", "params": { "slug": "people/alice" } }
+```
 
 ### 版本管理
 
@@ -308,12 +600,36 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `get_versions` | 页面版本历史 |
 | `revert_version` | 将页面回滚到先前版本 |
 
+#### 示例
+
+```json
+// 查看版本历史
+{ "tool": "get_versions", "params": { "slug": "people/alice" } }
+```
+
+```json
+// 回滚到指定版本
+{ "tool": "revert_version", "params": { "slug": "people/alice", "version_id": 3 } }
+```
+
 ### 原始数据
 
 | 工具 | 说明 |
 |------|------|
 | `put_raw_data` | 存储页面的原始 API 响应数据 |
 | `get_raw_data` | 获取页面的原始数据 |
+
+#### 示例
+
+```json
+// 存储原始数据
+{ "tool": "put_raw_data", "params": { "slug": "companies/acme", "source": "crustdata", "data": { "founded": "2020" } } }
+```
+
+```json
+// 获取原始数据
+{ "tool": "get_raw_data", "params": { "slug": "companies/acme", "source": "crustdata" } }
+```
 
 ### 代码知识图谱
 
@@ -327,6 +643,28 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `get_code_edges_by_chunk` | 获取代码块关联的代码图边 |
 | `reindex_code_page` | 重建代码页的代码块和代码边 |
 
+#### 示例
+
+```json
+// 查找符号定义
+{ "tool": "code_def", "params": { "symbol": "parse_config", "lang": "rust" } }
+```
+
+```json
+// 查找符号引用
+{ "tool": "code_refs", "params": { "symbol": "SqliteEngine", "lang": "rust" } }
+```
+
+```json
+// 获取调用者
+{ "tool": "get_callers", "params": { "slug": "src/engine.rs", "symbol": "query" } }
+```
+
+```json
+// 重建代码页索引
+{ "tool": "reindex_code_page", "params": { "slug": "src/engine.rs" } }
+```
+
 ### 文件存储
 
 | 工具 | 说明 |
@@ -334,6 +672,18 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `file_upload` | 上传文件到存储 |
 | `file_list` | 列出已存储的文件 |
 | `file_url` | 获取文件的 URL/路径 |
+
+#### 示例
+
+```json
+// 上传文件
+{ "tool": "file_upload", "params": { "path": "/path/to/report.pdf", "page_slug": "projects/annual-report" } }
+```
+
+```json
+// 列出文件
+{ "tool": "file_list", "params": { "slug": "projects/annual-report" } }
+```
 
 ### 导入与同步
 
@@ -344,12 +694,41 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `sync_brain` | 从 Git 仓库同步知识库 |
 | `find_orphans` | 查找无入站链接的孤立页面 |
 
+#### 示例
+
+```json
+// 同步 Git 仓库
+{ "tool": "sync_brain", "params": { "repo_path": "/path/to/repo", "force_full": false } }
+```
+
+```json
+// 查找孤立页面
+{ "tool": "find_orphans", "params": { "include_pseudo": false } }
+```
+
+```json
+// 获取导入日志
+{ "tool": "get_ingest_log", "params": { "limit": 10 } }
+```
+
 ### 健康与统计
 
 | 工具 | 说明 |
 |------|------|
 | `get_stats` | 知识库统计（页面数、块数等） |
 | `get_health` | 健康仪表盘（嵌入覆盖率、孤立页面等） |
+
+#### 示例
+
+```json
+// 获取统计信息
+{ "tool": "get_stats", "params": {} }
+```
+
+```json
+// 获取健康状态
+{ "tool": "get_health", "params": {} }
+```
 
 ### KB 子系统
 
@@ -375,6 +754,33 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `kb_add_eval_query` | 添加搜索评估查询 |
 | `kb_add_search_feedback` | 添加搜索结果反馈评分 |
 
+#### 示例
+
+```json
+// 列出知识库
+{ "tool": "kb_list_libraries", "params": {} }
+```
+
+```json
+// 创建知识库
+{ "tool": "kb_create_library", "params": { "name": "项目文档", "raptor_enabled": true, "embedding_model": "text-embedding-3-large" } }
+```
+
+```json
+// 上传文档
+{ "tool": "kb_upload_document", "params": { "library_id": 1, "file_path": "/path/to/doc.pdf" } }
+```
+
+```json
+// KB 搜索
+{ "tool": "kb_search", "params": { "query": "部署流程", "library_ids": [1], "top_k": 10, "profile": "accurate" } }
+```
+
+```json
+// 备份与恢复
+{ "tool": "kb_backup", "params": { "output": "/path/to/backup" } }
+```
+
 ### 单入口多投影融合（Artifact）
 
 | 工具 | 说明 |
@@ -387,6 +793,28 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `artifact_health` | 检查 Artifact 投影一致性与健康状态 |
 | `get_provenance` | 获取页面的溯源记录（追踪事实来源） |
 
+#### 示例
+
+```json
+// 上传原件
+{ "tool": "upload_source", "params": { "path": "/path/to/report.pdf", "intent": "document", "library_id": 1 } }
+```
+
+```json
+// 统一记忆查询
+{ "tool": "memory_query", "params": { "query": "Alice 的项目经历", "strategy": "evidence_first", "limit": 10 } }
+```
+
+```json
+// 获取溯源记录
+{ "tool": "get_provenance", "params": { "brain_slug": "people/alice" } }
+```
+
+```json
+// 查看 Artifact 健康状态
+{ "tool": "artifact_health", "params": {} }
+```
+
 ### 候选变更与提升（Promotion）
 
 | 工具 | 说明 |
@@ -394,9 +822,37 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `promotion_list_candidates` | 列出候选变更（从 KB 证据提取的建议修改） |
 | `promotion_get_candidate` | 获取候选变更详情 |
 | `promotion_accept_candidate` | 接受候选变更 |
-| `promotion_reject_candidate` | 拒绝候选变更 |
+| `promotion_reject_candidate` | 拒绝候选变更（含 reason 参数说明拒绝原因） |
 | `promotion_apply_candidate` | 应用已接受的候选变更到 gbrain |
+| `promotion_batch_apply` | 批量应用候选变更，可按 artifact 和风险等级筛选 |
 | `promotion_rollback_candidate` | 回滚已应用的候选变更，撤销影子页面更新并标记溯源为 stale |
+
+#### 示例
+
+```json
+// 列出待审候选
+{ "tool": "promotion_list_candidates", "params": { "status": "pending", "limit": 20 } }
+```
+
+```json
+// 接受候选
+{ "tool": "promotion_accept_candidate", "params": { "candidate_id": 42, "reviewer": "alice", "notes": "信息准确" } }
+```
+
+```json
+// 拒绝候选（含原因）
+{ "tool": "promotion_reject_candidate", "params": { "candidate_id": 43, "reason": "信息过时" } }
+```
+
+```json
+// 批量应用低风险候选（预览）
+{ "tool": "promotion_batch_apply", "params": { "risk": "low", "dry_run": true } }
+```
+
+```json
+// 回滚候选
+{ "tool": "promotion_rollback_candidate", "params": { "candidate_id": 42 } }
+```
 
 ### 投影管理（Projection）
 
@@ -405,6 +861,23 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `gc_orphan_projections` | 清理孤立/过期的投影记录 |
 | `projection_supersede` | 用新投影替代旧投影（版本链） |
 | `projection_history` | 查询投影版本链历史 |
+
+#### 示例
+
+```json
+// 替代旧投影
+{ "tool": "projection_supersede", "params": { "old_proj_id": 101, "new_proj_id": 202 } }
+```
+
+```json
+// 查询投影版本链
+{ "tool": "projection_history", "params": { "projection_key": "kb_doc:42", "artifact_id": 7, "limit": 10 } }
+```
+
+```json
+// 清理孤立投影（预览）
+{ "tool": "gc_orphan_projections", "params": { "stale_days": 30, "dry_run": true } }
+```
 
 ---
 
@@ -471,6 +944,27 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `chunk_overlap` | integer | 否 | 分块重叠（字符数） |
 | `batch_max_documents` | integer | 否 | 每批最大文档数 |
 | `batch_max_chunks` | integer | 否 | 每批最大块数 |
+| `embedding_provider` | string | 否 | 嵌入提供商名称 |
+| `embedding_model` | string | 否 | 嵌入模型名称 |
+| `embedding_dimensions` | integer | 否 | 嵌入向量维度 |
+| `search_profile` | string | 否 | 搜索配置名称 |
+| `rerank_enabled` | boolean | 否 | 启用重排序 |
+| `rerank_provider` | string | 否 | 重排序提供商名称 |
+| `summary_enabled` | boolean | 否 | 启用摘要 |
+| `external_embedding_allowed` | boolean | 否 | 允许外部嵌入调用 |
+| `external_rerank_allowed` | boolean | 否 | 允许外部重排序调用 |
+| `external_summary_allowed` | boolean | 否 | 允许外部摘要调用 |
+| `external_ocr_allowed` | boolean | 否 | 允许外部 OCR 调用 |
+| `redaction_enabled` | boolean | 否 | 启用敏感内容脱敏 |
+
+### `kb_list_documents`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 知识库 ID |
+| `folder_id` | integer | 否 | 按文件夹筛选文档 |
+| `limit` | integer | 否 | 最大结果数（默认 50） |
+| `offset` | integer | 否 | 分页偏移量 |
 
 ### `kb_search`
 
@@ -480,6 +974,16 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `library_ids` | integer[] | 否 | 限定搜索的知识库 ID（空 = 全部） |
 | `level` | integer | 否 | RAPTOR 树层级过滤 |
 | `top_k` | integer | 否 | 最大结果数（默认 10，上限 50） |
+| `profile` | string | 否 | 搜索配置: fast/balanced/accurate/file_lookup/table |
+| `debug` | boolean | 否 | 启用调试模式（返回规划器/重排序/回退信息） |
+| `include_context` | boolean | 否 | 包含匹配节点前后上下文 |
+| `context_before` | integer | 否 | 匹配前上下文字符数（默认 200） |
+| `context_after` | integer | 否 | 匹配后上下文字符数（默认 200） |
+| `include_highlights` | boolean | 否 | 返回高亮字符范围 |
+| `group_by_document` | boolean | 否 | 按文档分组结果 |
+| `folder_id` | integer | 否 | 按文件夹筛选 |
+| `embedding_dimensions` | integer | 否 | 覆盖查询向量的嵌入维度 |
+| `embedding_index_id` | integer | 否 | 使用特定嵌入索引的模型配置 |
 
 ### `upload_source`
 
@@ -513,6 +1017,14 @@ gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `candidate_type` | string | 否 | 按类型过滤: document_summary/entity_mention/link_suggestion/timeline_event/fact_claim/page_create/page_update |
 | `target_slug` | string | 否 | 按目标 slug 过滤 |
 | `limit` | integer | 否 | 最大结果数 |
+
+### `promotion_batch_apply`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `artifact_id` | integer | 否 | 按 Artifact ID 筛选 |
+| `risk` | string | 否 | 按风险等级筛选: low/medium/high |
+| `dry_run` | boolean | 否 | 仅预览，不实际应用 |
 
 ---
 

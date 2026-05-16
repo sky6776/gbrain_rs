@@ -8,7 +8,6 @@ description: |
 triggers:
   - any brain read/write/lookup/citation
 tools:
-  - search
   - query
   - get_page
   - put_page
@@ -16,6 +15,13 @@ tools:
   - add_timeline_entry
   - get_backlinks
   - sync_brain
+  - upload_source
+  - memory_query
+  - kb_search
+  - kb_list_libraries
+  - code_def
+  - code_refs
+  - get_callers
 mutating: true
 writes_pages: true
 writes_to:
@@ -56,7 +62,7 @@ broken brain. See `skills/conventions/quality.md` for format.
 
 Before using ANY external API to research a person, company, or topic:
 
-1. `gbrain search "name"` — keyword search for existing pages
+1. `gbrain query "name"` — hybrid search for existing pages (keyword + vector + expansion)
 2. `gbrain query "natural question about name"` — hybrid search for context
 3. `gbrain get <slug>` — if you know the slug, read the full page
 4. Check backlinks: who references this entity?
@@ -136,7 +142,7 @@ Rules:
 - The key is `sources.id` (immutable), never `sources.name` (mutable display).
 - Single-source brains still write `[default:slug]` OR may omit the prefix
   for backward compat.
-- Every page payload returned by `search`, `query`, `get_page`, `list_pages`
+- Every page payload returned by `query`, `get_page`, `list_pages`
   carries `source_id` — always use it when citing, never guess.
 
 If a search result has `source_id: "gstack"` and `slug: "plans/foo"`,
@@ -153,11 +159,17 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 
 ## Tools Used
 
-- `search` — keyword search
-- `query` — hybrid vector+keyword search
+- `query` — hybrid vector+keyword+expansion search
 - `get_page` — read a brain page
 - `put_page` — create/update brain pages
 - `add_link` — cross-reference entities
 - `add_timeline_entry` — record events
 - `get_backlinks` — check who references an entity
 - `sync_brain` — sync changes to the index
+- `upload_source` — upload source files (unified entry point)
+- `memory_query` — unified cross-subsystem query
+- `kb_search` — search KB libraries with profiles
+- `kb_list_libraries` — list KB libraries
+- `code_def` — find code symbol definitions
+- `code_refs` — find code symbol references
+- `get_callers` — find callers of a symbol

@@ -11,7 +11,7 @@ triggers:
   - "task list"
   - "defer task"
 tools:
-  - search
+  - query
   - get_page
   - put_page
   - add_timeline_entry

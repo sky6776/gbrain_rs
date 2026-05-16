@@ -19,8 +19,8 @@ triggers:
   - "connections"
   - "graph query"
 tools:
-  - search
   - query
+  - memory_query
   - get_page
   - list_pages
   - get_backlinks
@@ -49,8 +49,8 @@ This skill guarantees:
    - Semantic query for conceptual questions
    - Structured queries (list by type, backlinks) for relational questions
 2. **Execute searches:**
-   - Keyword search gbrain for FTS matches (search)
    - Hybrid search gbrain for semantic+keyword with expansion (query)
+   - Unified memory query for cross-subsystem search (memory_query)
    - List pages in gbrain by type or check backlinks for structural queries
 3. **Read top results.** Read the top 3-5 pages from gbrain to get full context.
 4. **Synthesize answer** with citations. Every claim traces back to a specific page slug.
@@ -86,8 +86,9 @@ Answers should include:
 Search returns **chunks**, not full pages. Read the excerpts first before deciding
 whether to load a full page.
 
-- `gbrain search` / `gbrain query` return ranked chunks with context snippets.
+- `gbrain query` return ranked chunks with context snippets.
   These are often enough to answer the question directly.
+- `gbrain memory-query` searches both gbrain curated knowledge and KB document evidence.
 - Only use `gbrain get <slug>` to load the full page when a chunk confirms the
   page is relevant and you need more context (e.g., compiled truth, timeline).
 - **"Tell me about X"** -- get the full page (the user wants the complete picture).
@@ -140,14 +141,14 @@ connected entities surface higher.
 If search results seem off (wrong results, missing known pages, irrelevant hits):
 - Run `gbrain doctor` to check index health
 - Check embedding coverage -- partial embeddings degrade hybrid search
-- Compare keyword search (`gbrain search`) vs hybrid search (`gbrain query`)
+- Compare keyword-only search (`gbrain query "name" --expand false`) vs hybrid search (`gbrain query "name"`)
   for the same query to isolate whether the issue is embedding-related
 - Report search quality issues in the maintain workflow (see maintain skill)
 
 ## Tools Used
 
-- Keyword search gbrain (search)
 - Hybrid search gbrain (query)
+- Unified memory query (memory_query)
 - Read a page from gbrain (get_page)
 - List pages in gbrain with filters (list_pages)
 - Check backlinks in gbrain (get_backlinks)

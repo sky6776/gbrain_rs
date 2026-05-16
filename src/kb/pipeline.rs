@@ -777,16 +777,16 @@ pub async fn process_document_async(
                         }
                     }
                     // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
-                        kb.update_document_status_with_run_guard(
-                            doc_id,
-                            None,
-                            None,
-                            None,
-                            Some(STATUS_PROCESSING),
-                            Some(80),
-                            None,
-                            Some(run_id),
-                        )?;
+                    kb.update_document_status_with_run_guard(
+                        doc_id,
+                        None,
+                        None,
+                        None,
+                        Some(STATUS_PROCESSING),
+                        Some(80),
+                        None,
+                        Some(run_id),
+                    )?;
                 }
                 Err(e) => {
                     embedding_failed = true;
@@ -796,16 +796,16 @@ pub async fn process_document_async(
                         &format!("嵌入失败: {}, 标记为 embedding_failed", e),
                     );
                     // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
-                        kb.update_document_status_with_run_guard(
-                            doc_id,
-                            None,
-                            None,
-                            None,
-                            Some(STATUS_FAILED),
-                            Some(80),
-                            Some(&format!("embedding failed: {}", e)),
-                            Some(run_id),
-                        )?;
+                    kb.update_document_status_with_run_guard(
+                        doc_id,
+                        None,
+                        None,
+                        None,
+                        Some(STATUS_FAILED),
+                        Some(80),
+                        Some(&format!("embedding failed: {}", e)),
+                        Some(run_id),
+                    )?;
                 }
             }
         }

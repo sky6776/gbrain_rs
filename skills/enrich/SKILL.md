@@ -14,11 +14,12 @@ triggers:
 tools:
   - get_page
   - put_page
-  - search
   - query
   - add_link
   - add_timeline_entry
   - get_backlinks
+  - upload_source
+  - memory_query
 mutating: true
 writes_pages: true
 writes_to:
@@ -93,7 +94,7 @@ Extract people, companies, concepts from the incoming signal.
 ### Step 2: Check brain state
 
 For each entity:
-- `gbrain search "name"` -- does a page already exist?
+- `gbrain query "name"` -- does a page already exist?
 - **If yes:** UPDATE path (add new signal, update compiled truth if material)
 - **If no:** CREATE path (check notability gate first, then create)
 
@@ -116,7 +117,7 @@ Don't just capture facts. Capture texture:
 Priority order -- stop when you have enough signal for the entity's tier.
 
 **4a. Brain cross-reference (always, all tiers)**
-- `gbrain search "name"` and `gbrain query "what do we know about name"`
+- `gbrain query "name"` and `gbrain query "what do we know about name"`
 - Check related pages: company pages for person enrichment and vice versa
 - This is free and often the richest source
 

@@ -12,7 +12,7 @@
     {
       "name": "query",
       "path": "query/SKILL.md",
-      "description": "Answer questions using gbrain_rs search, query, pages, graph, backlinks, and timeline."
+      "description": "Answer questions using gbrain_rs query, pages, graph, backlinks, and timeline."
     },
     {
       "name": "brain-ops",
@@ -58,6 +58,21 @@
       "name": "migrate",
       "path": "migrate/SKILL.md",
       "description": "Migrate Markdown, CSV, JSON, and other note exports into gbrain_rs-supported pages."
+    },
+    {
+      "name": "kb-ops",
+      "path": "kb-ops/SKILL.md",
+      "description": "KB subsystem lifecycle management: create libraries, upload documents, search with profiles, health checks, backup/restore, evaluation."
+    },
+    {
+      "name": "promotion",
+      "path": "promotion/SKILL.md",
+      "description": "Single-entry multi-projection fusion: upload sources, review promotion candidates, accept/reject/apply/rollback, manage artifacts and projection chains."
+    },
+    {
+      "name": "code-graph",
+      "path": "code-graph/SKILL.md",
+      "description": "Code knowledge graph: find definitions, trace references, explore call graphs, search code chunks, reindex code pages."
     }
   ],
   "resolver": "RESOLVER.md",

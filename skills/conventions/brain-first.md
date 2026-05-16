@@ -12,8 +12,7 @@ commands:
 
 | Tool | Use for |
 |------|---------|
-| `search` | Keyword search, fast and always works |
-| `query` | Hybrid search, best quality when embeddings are available |
+| `query` | Hybrid search (keyword + vector + expansion), best quality when embeddings are available |
 | `get_page` | Direct page read when you know the slug |
 | `get_links` | Outgoing links from a page |
 | `get_backlinks` | Who references this entity |
@@ -23,16 +22,29 @@ commands:
 | `put_page` | Create or update a brain page |
 | `add_timeline_entry` | Add a dated event |
 | `add_link` | Add a relationship edge |
+| `upload_source` | Upload a source file (unified entry point) |
+| `memory_query` | Unified memory query across gbrain + KB |
+| `kb_search` | Search across KB libraries with profiles |
+| `kb_list_libraries` | List KB libraries and their stats |
+| `code_def` | Find code symbol definitions |
+| `code_refs` | Find code symbol references |
+| `get_callers` | Who calls this function |
+| `get_callees` | What this function calls |
+| `artifact_get` | Get artifact details |
+| `get_provenance` | Trace fact origins on a page |
 
 Tool names vary by transport. MCP uses short names; CLI commands are usually
 `gbrain <command>`. Use whichever your environment provides.
 
 ## The Lookup Chain (MANDATORY ORDER)
 
-1. **`search`** first — keyword search, fast, zero API cost
-2. **`query`** if search is thin — hybrid semantic search, uses embedding API
+1. **`query`** first — hybrid search (keyword + vector + expansion), zero API cost when embeddings are local
+2. **`query`** with `expand=false` for keyword-only mode — fast, no LLM expansion
 3. **`get_page`** if you found a slug — read the full compiled truth
-4. **External APIs only after steps 1-2 return nothing useful**
+4. **`memory_query`** for cross-subsystem search — brain + KB evidence in one call
+5. **`kb_search`** for document-heavy queries — search KB libraries with profile selection
+6. **`code_def`** / **`code_refs`** for code symbol lookups — precise graph queries
+7. **External APIs only after steps 1-6 return nothing useful**
 
 Never skip to external APIs without completing steps 1-2. The brain has
 thousands of pages. The answer is almost always there.
@@ -49,7 +61,7 @@ thousands of pages. The answer is almost always there.
   appropriate to the deployment (GitHub URL, local path, or slug).
 - **Never use `memory_search` for entity lookups.** Memory tools search
   session notes (MEMORY.md), not the brain knowledge graph. Use
-  `search` or `query` for entity lookups.
+  `query` for entity lookups.
 
 ## Entity Page Conventions
 

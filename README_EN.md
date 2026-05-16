@@ -41,7 +41,7 @@ No database or external services to configure — works out of the box. AI featu
 - **KB Subsystem** — Async five-stage document processing pipeline (parse → split → embed → RAPTOR → persist), RAPTOR recursive summarization tree, document upload and processing, multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext/code), semantic chunking (Savitzky-Golay smoothing + chunk_overlap overlap)
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact upload automatically routes to multiple projections (KB document / shadow page / candidate changes / file attachment / links / timeline), provenance audit ledger, candidate review & promotion workflow, version chain with rollback (Projection Supersede / Rollback), unified memory query (Memory Query, 4 strategies)
-- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 71 tools for AI agent integration
+- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 74 tools for AI agent integration
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
@@ -107,6 +107,22 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | List pages (filterable) |
 | `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | Hybrid search (alias: `ask`), with code filtering and two-stage retrieval |
 
+#### Examples
+
+```bash
+# Initialize a knowledge base
+gbrain init
+
+# Create a page
+gbrain put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
+
+# Search
+gbrain query "Rust async programming" --limit 5 --lang rust
+
+# Restore a mistakenly deleted page
+gbrain restore people/alice
+```
+
 ### Search & Graph
 
 | Command | Description |
@@ -116,6 +132,22 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain graph-query <from> [--to <slug>] [--depth <N>] [--link-type <TYPE>]` | Query graph relationships between pages |
 | `gbrain code search/def/refs/callers/callees/edges` | Code chunk, symbol definition/reference, and call graph queries |
 
+#### Examples
+
+```bash
+# Fuzzy-resolve a slug
+gbrain resolve ali
+
+# Traverse the knowledge graph
+gbrain graph people/alice --depth 3
+
+# Query relationship path between two pages
+gbrain graph-query people/alice --to companies/acme --depth 3
+
+# Find a Rust function definition
+gbrain code def --symbol "parse_config" --lang rust
+```
+
 ### Backlinks
 
 | Command | Description |
@@ -123,6 +155,19 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain backlinks list <slug>` | List backlinks for a page |
 | `gbrain backlinks check [slug]` | Check for missing backlinks |
 | `gbrain backlinks fix [slug]` | Fix missing backlinks |
+
+#### Examples
+
+```bash
+# List backlinks
+gbrain backlinks list people/alice
+
+# Check backlink integrity for all pages
+gbrain backlinks check
+
+# Fix missing backlinks
+gbrain backlinks fix people/alice
+```
 
 ### Data Management
 
@@ -134,6 +179,22 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain extract [--mode links\|timeline\|all]` | Batch extract links/timeline |
 | `gbrain lint [slug] [--fix] [--dry-run]` | Zero-LLM quality checks (6 rules) |
 
+#### Examples
+
+```bash
+# Import a directory and generate embeddings
+gbrain import ./my-notes --embed --auto-link
+
+# Export all pages
+gbrain export --dir ./backup
+
+# Batch extract links and timeline
+gbrain extract --mode all
+
+# Run lint checks and auto-fix
+gbrain lint --fix
+```
+
 ### File Storage
 
 | Command | Description |
@@ -143,6 +204,19 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain file sync <dir>` | Sync a directory to storage |
 | `gbrain file verify` | Verify all file records |
 | `gbrain file url <storage-path>` | Get local path/URL for a file |
+
+#### Examples
+
+```bash
+# Upload a file and associate with a page
+gbrain file upload report.pdf --page projects/annual-report
+
+# List files associated with a page
+gbrain file list projects/annual-report
+
+# Get file path
+gbrain file url files/report.pdf
+```
 
 ### Health & Maintenance
 
@@ -155,6 +229,22 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain orphans` | Detect orphan pages |
 | `gbrain autopilot [--once] [--interval <SECS>]` | Self-maintenance daemon |
 
+#### Examples
+
+```bash
+# View knowledge base statistics
+gbrain stats
+
+# Quick diagnostics
+gbrain doctor --fast
+
+# Run self-maintenance once
+gbrain autopilot --once
+
+# Continuous self-maintenance (every 10 minutes)
+gbrain autopilot --interval 600
+```
+
 ### Config & Misc
 
 | Command | Description |
@@ -166,6 +256,67 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain ingest-log [--limit <N>]` | View ingest log |
 | `gbrain tools-json` | Output MCP tool definitions as JSON |
 | `gbrain serve` | Run as an MCP stdio server |
+
+#### Examples
+
+```bash
+# View all configuration
+gbrain config show
+
+# Set embedding model
+gbrain config set embedding_model text-embedding-3-large
+
+# Generate a maintenance report
+gbrain report --report-type maintenance --title "Weekly Check"
+
+# Start MCP server
+gbrain serve
+```
+
+### KB Subsystem
+
+| Command | Description |
+|---------|-------------|
+| `gbrain kb-worker [--once] [--interval <SECS>]` | Start KB document processing worker (dequeues jobs from queue) |
+| `gbrain kb-eval --library-id <ID>` | Run KB search quality evaluation |
+| `gbrain kb-backup --output <DIR>` | Backup KB database and storage |
+| `gbrain kb-restore --input <DIR>` | Restore KB from backup |
+| `gbrain kb-source-add --library-id <ID> --path <DIR>` | Add local directory as KB import source |
+| `gbrain kb-sync-source --source-id <ID>` | Sync KB import source |
+| `gbrain kb-jobs list/pause/resume --library-id <ID>` | KB job management (list/pause/resume) |
+| `gbrain kb-export-library --library-id <ID> --output <DIR>` | Export KB library to directory |
+| `gbrain kb-import-library --archive <DIR> [--new-name <NAME>]` | Import KB library from export |
+| `gbrain kb-reembed --library-id <ID> [--embedding-index-id <ID>]` | Re-embed documents (with new model) |
+| `gbrain kb-eval-compare --index-id-1 <ID> --index-id-2 <ID>` | Compare search quality of two embedding indexes |
+| `gbrain kb-health-check [--library-id <ID>] [--repair]` | Check KB index health (optional repair) |
+| `gbrain kb-rebuild-document --document-id <ID>` | Rebuild a single document's index |
+| `gbrain kb-rebuild-library --library-id <ID>` | Rebuild an entire library's index |
+| `gbrain kb-purge-deleted [--library-id <ID>] [--older-than-days <N>]` | Purge soft-deleted KB documents |
+
+#### Examples
+
+```bash
+# Start the KB processing worker (one pass)
+gbrain kb-worker --once
+
+# Run search quality evaluation
+gbrain kb-eval --library-id 1
+
+# Backup KB database
+gbrain kb-backup --output ./kb-backup
+
+# Add a local directory as import source
+gbrain kb-source-add --library-id 1 --path ./docs
+
+# Re-embed documents with a new model
+gbrain kb-reembed --library-id 1
+
+# Check KB health
+gbrain kb-health-check
+
+# Purge soft-deleted documents older than 30 days
+gbrain kb-purge-deleted --older-than-days 30
+```
 
 ### Single-Entry Multi-Projection Fusion (Artifact)
 
@@ -255,16 +406,32 @@ CLI uses `remote=false` directly, bypassing remote security restrictions.
 
 ## MCP Tools
 
-gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
+gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
 
 ### Search
 
 | Tool | Description |
 |------|-------------|
 | `query` | Hybrid search (vector + keyword + expansion), with detail levels, code filtering, two-stage retrieval, and search metadata |
-| `search` | Full-text search (vector + keyword + RRF fusion), with code filtering |
 | `find_by_title_fuzzy` | Fuzzy title search based on trigram similarity |
 | `resolve_slugs` | Fuzzy-resolve partial slugs to matching pages |
+
+#### Examples
+
+```json
+// Hybrid search
+{ "tool": "query", "params": { "query": "Rust async programming", "limit": 5, "lang": "rust" } }
+```
+
+```json
+// Fuzzy title search
+{ "tool": "find_by_title_fuzzy", "params": { "query": "Alice", "min_similarity": 0.6 } }
+```
+
+```json
+// Fuzzy-resolve slugs
+{ "tool": "resolve_slugs", "params": { "partial": "ali" } }
+```
 
 ### Page CRUD
 
@@ -272,9 +439,31 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 |------|-------------|
 | `get_page` | Read a page (supports fuzzy matching) |
 | `put_page` | Write/update a page (Markdown + frontmatter) |
-| `delete_page` | Soft-delete a page |
+| `delete_page` | Soft-delete a page (requires confirm=true) |
 | `list_pages` | List pages (filter by type/tag/limit) |
 | `get_chunks` | Get content chunks for a page |
+
+#### Examples
+
+```json
+// Read a page
+{ "tool": "get_page", "params": { "slug": "people/alice" } }
+```
+
+```json
+// Create/update a page
+{ "tool": "put_page", "params": { "slug": "people/alice", "content": "---\ntitle: Alice\n---\nAn engineer" } }
+```
+
+```json
+// Soft-delete a page (requires confirmation)
+{ "tool": "delete_page", "params": { "slug": "people/alice", "confirm": true } }
+```
+
+```json
+// List pages
+{ "tool": "list_pages", "params": { "type": "person", "limit": 10 } }
+```
 
 ### Tags
 
@@ -283,6 +472,18 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `add_tag` | Add a tag to a page |
 | `remove_tag` | Remove a tag from a page |
 | `get_tags` | List tags for a page |
+
+#### Examples
+
+```json
+// Add a tag
+{ "tool": "add_tag", "params": { "slug": "people/alice", "tag": "engineer" } }
+```
+
+```json
+// List tags
+{ "tool": "get_tags", "params": { "slug": "people/alice" } }
+```
 
 ### Links & Graph
 
@@ -294,12 +495,41 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `get_backlinks` | List inbound links for a page |
 | `traverse_graph` | Traverse the link graph from a page |
 
+#### Examples
+
+```json
+// Create a typed link
+{ "tool": "add_link", "params": { "from": "people/alice", "to": "companies/acme", "link_type": "works_at" } }
+```
+
+```json
+// Traverse the graph
+{ "tool": "traverse_graph", "params": { "slug": "people/alice", "depth": 3, "direction": "both" } }
+```
+
+```json
+// Get backlinks
+{ "tool": "get_backlinks", "params": { "slug": "people/alice" } }
+```
+
 ### Timeline
 
 | Tool | Description |
 |------|-------------|
 | `add_timeline_entry` | Add a timeline entry to a page |
 | `get_timeline` | Get timeline for a page |
+
+#### Examples
+
+```json
+// Add a timeline entry
+{ "tool": "add_timeline_entry", "params": { "slug": "people/alice", "date": "2024-01-15", "summary": "Joined Acme Corp" } }
+```
+
+```json
+// Get timeline
+{ "tool": "get_timeline", "params": { "slug": "people/alice" } }
+```
 
 ### Versioning
 
@@ -308,12 +538,36 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `get_versions` | Page version history |
 | `revert_version` | Revert a page to a previous version |
 
+#### Examples
+
+```json
+// View version history
+{ "tool": "get_versions", "params": { "slug": "people/alice" } }
+```
+
+```json
+// Revert to a specific version
+{ "tool": "revert_version", "params": { "slug": "people/alice", "version_id": 3 } }
+```
+
 ### Raw Data
 
 | Tool | Description |
 |------|-------------|
 | `put_raw_data` | Store raw API response data for a page |
 | `get_raw_data` | Get raw data for a page |
+
+#### Examples
+
+```json
+// Store raw data
+{ "tool": "put_raw_data", "params": { "slug": "companies/acme", "source": "crustdata", "data": { "founded": "2020" } } }
+```
+
+```json
+// Get raw data
+{ "tool": "get_raw_data", "params": { "slug": "companies/acme", "source": "crustdata" } }
+```
 
 ### Code Knowledge Graph
 
@@ -327,6 +581,28 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `get_code_edges_by_chunk` | Get code graph edges for a chunk |
 | `reindex_code_page` | Rebuild code chunks and edges for a code page |
 
+#### Examples
+
+```json
+// Find symbol definition
+{ "tool": "code_def", "params": { "symbol": "parse_config", "lang": "rust" } }
+```
+
+```json
+// Find symbol references
+{ "tool": "code_refs", "params": { "symbol": "SqliteEngine", "lang": "rust" } }
+```
+
+```json
+// Get callers
+{ "tool": "get_callers", "params": { "slug": "src/engine.rs", "symbol": "query" } }
+```
+
+```json
+// Rebuild code page index
+{ "tool": "reindex_code_page", "params": { "slug": "src/engine.rs" } }
+```
+
 ### File Storage
 
 | Tool | Description |
@@ -334,6 +610,18 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `file_upload` | Upload a file to storage |
 | `file_list` | List stored files |
 | `file_url` | Get URL/path for a file |
+
+#### Examples
+
+```json
+// Upload a file
+{ "tool": "file_upload", "params": { "path": "/path/to/report.pdf", "page_slug": "projects/annual-report" } }
+```
+
+```json
+// List files
+{ "tool": "file_list", "params": { "slug": "projects/annual-report" } }
+```
 
 ### Import & Sync
 
@@ -344,12 +632,41 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `sync_brain` | Sync knowledge base from a Git repo |
 | `find_orphans` | Find orphan pages with no inbound links |
 
+#### Examples
+
+```json
+// Sync from Git repo
+{ "tool": "sync_brain", "params": { "repo_path": "/path/to/repo", "force_full": false } }
+```
+
+```json
+// Find orphan pages
+{ "tool": "find_orphans", "params": { "include_pseudo": false } }
+```
+
+```json
+// Get ingest log
+{ "tool": "get_ingest_log", "params": { "limit": 10 } }
+```
+
 ### Health & Stats
 
 | Tool | Description |
 |------|-------------|
 | `get_stats` | Knowledge base statistics (page count, chunk count, etc.) |
 | `get_health` | Health dashboard (embedding coverage, orphan pages, etc.) |
+
+#### Examples
+
+```json
+// Get statistics
+{ "tool": "get_stats", "params": {} }
+```
+
+```json
+// Get health status
+{ "tool": "get_health", "params": {} }
+```
 
 ### KB Subsystem
 
@@ -375,6 +692,33 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `kb_add_eval_query` | Add a search evaluation query |
 | `kb_add_search_feedback` | Add search result feedback rating |
 
+#### Examples
+
+```json
+// List knowledge libraries
+{ "tool": "kb_list_libraries", "params": {} }
+```
+
+```json
+// Create a knowledge library
+{ "tool": "kb_create_library", "params": { "name": "Project Docs", "raptor_enabled": true, "embedding_model": "text-embedding-3-large" } }
+```
+
+```json
+// Upload a document
+{ "tool": "kb_upload_document", "params": { "library_id": 1, "file_path": "/path/to/doc.pdf" } }
+```
+
+```json
+// KB search
+{ "tool": "kb_search", "params": { "query": "deployment process", "library_ids": [1], "top_k": 10, "profile": "accurate" } }
+```
+
+```json
+// Backup and restore
+{ "tool": "kb_backup", "params": { "output": "/path/to/backup" } }
+```
+
 ### Single-Entry Multi-Projection Fusion (Artifact)
 
 | Tool | Description |
@@ -387,6 +731,28 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `artifact_health` | Check artifact projection consistency and health |
 | `get_provenance` | Get provenance records for a brain page (trace where facts came from) |
 
+#### Examples
+
+```json
+// Upload a source file
+{ "tool": "upload_source", "params": { "path": "/path/to/report.pdf", "intent": "document", "library_id": 1 } }
+```
+
+```json
+// Unified memory query
+{ "tool": "memory_query", "params": { "query": "Alice's project history", "strategy": "evidence_first", "limit": 10 } }
+```
+
+```json
+// Get provenance records
+{ "tool": "get_provenance", "params": { "brain_slug": "people/alice" } }
+```
+
+```json
+// Check artifact health
+{ "tool": "artifact_health", "params": {} }
+```
+
 ### Candidate Changes & Promotion
 
 | Tool | Description |
@@ -394,9 +760,37 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `promotion_list_candidates` | List promotion candidates (suggested changes extracted from KB evidence) |
 | `promotion_get_candidate` | Get candidate details |
 | `promotion_accept_candidate` | Accept a candidate |
-| `promotion_reject_candidate` | Reject a candidate |
+| `promotion_reject_candidate` | Reject a candidate (with reason parameter for rejection explanation) |
 | `promotion_apply_candidate` | Apply an accepted candidate to gbrain |
+| `promotion_batch_apply` | Batch apply pending promotion candidates, optionally filtered by artifact and risk level |
 | `promotion_rollback_candidate` | Rollback an applied candidate, undo shadow page updates and mark provenance as stale |
+
+#### Examples
+
+```json
+// List pending candidates
+{ "tool": "promotion_list_candidates", "params": { "status": "pending", "limit": 20 } }
+```
+
+```json
+// Accept a candidate
+{ "tool": "promotion_accept_candidate", "params": { "candidate_id": 42, "reviewer": "alice", "notes": "Information is accurate" } }
+```
+
+```json
+// Reject a candidate (with reason)
+{ "tool": "promotion_reject_candidate", "params": { "candidate_id": 43, "reason": "Outdated information" } }
+```
+
+```json
+// Batch apply low-risk candidates (preview)
+{ "tool": "promotion_batch_apply", "params": { "risk": "low", "dry_run": true } }
+```
+
+```json
+// Rollback a candidate
+{ "tool": "promotion_rollback_candidate", "params": { "candidate_id": 42 } }
+```
 
 ### Projection Management
 
@@ -405,6 +799,23 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `gc_orphan_projections` | Garbage collect orphaned/superseded projections |
 | `projection_supersede` | Supersede an old projection with a new one (version chain) |
 | `projection_history` | Query projection version chain history |
+
+#### Examples
+
+```json
+// Supersede an old projection
+{ "tool": "projection_supersede", "params": { "old_proj_id": 101, "new_proj_id": 202 } }
+```
+
+```json
+// Query projection version chain
+{ "tool": "projection_history", "params": { "projection_key": "kb_doc:42", "artifact_id": 7, "limit": 10 } }
+```
+
+```json
+// Garbage collect orphan projections (preview)
+{ "tool": "gc_orphan_projections", "params": { "stale_days": 30, "dry_run": true } }
+```
 
 ---
 
@@ -471,6 +882,18 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `chunk_overlap` | integer | No | Chunk overlap in characters |
 | `batch_max_documents` | integer | No | Max documents per batch |
 | `batch_max_chunks` | integer | No | Max chunks per batch |
+| `embedding_provider` | string | No | Embedding provider name |
+| `embedding_model` | string | No | Embedding model name |
+| `embedding_dimensions` | integer | No | Embedding vector dimensions |
+| `search_profile` | string | No | Search profile name |
+| `rerank_enabled` | boolean | No | Enable reranking |
+| `rerank_provider` | string | No | Rerank provider name |
+| `summary_enabled` | boolean | No | Enable summarization |
+| `external_embedding_allowed` | boolean | No | Allow external embedding calls |
+| `external_rerank_allowed` | boolean | No | Allow external rerank calls |
+| `external_summary_allowed` | boolean | No | Allow external summary calls |
+| `external_ocr_allowed` | boolean | No | Allow external OCR calls |
+| `redaction_enabled` | boolean | No | Enable redaction of sensitive content |
 
 ### `kb_search`
 
@@ -480,6 +903,25 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `library_ids` | integer[] | No | Constrain search to specific library IDs (empty = all) |
 | `level` | integer | No | RAPTOR tree level filter |
 | `top_k` | integer | No | Max results (default 10, max 50) |
+| `profile` | string | No | Search profile: fast/balanced/accurate/file_lookup/table |
+| `debug` | boolean | No | Enable debug mode (returns planner/rerank/fallback info) |
+| `include_context` | boolean | No | Include context before/after matched nodes |
+| `context_before` | integer | No | Characters of context before match (default 200) |
+| `context_after` | integer | No | Characters of context after match (default 200) |
+| `include_highlights` | boolean | No | Return highlight character ranges |
+| `group_by_document` | boolean | No | Group results by document |
+| `folder_id` | integer | No | Filter to folder |
+| `embedding_dimensions` | integer | No | Override embedding dimensions for query vector |
+| `embedding_index_id` | integer | No | Specific embedding index ID to use for query vector |
+
+### `kb_list_documents`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Library ID |
+| `folder_id` | integer | No | Filter documents by folder |
+| `limit` | integer | No | Max results (default 50) |
+| `offset` | integer | No | Pagination offset |
 
 ### `upload_source`
 
@@ -513,6 +955,14 @@ gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `candidate_type` | string | No | Filter by type: document_summary/entity_mention/link_suggestion/timeline_event/fact_claim/page_create/page_update |
 | `target_slug` | string | No | Filter by target slug |
 | `limit` | integer | No | Maximum results |
+
+### `promotion_batch_apply`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `artifact_id` | integer | No | Filter by Artifact ID |
+| `risk` | string | No | Filter by risk level: low/medium/high |
+| `dry_run` | boolean | No | Preview only, don't actually apply |
 
 ---
 

@@ -10,7 +10,7 @@ triggers:
   - "create new page"
   - "which directory"
 tools:
-  - search
+  - query
   - get_page
   - list_pages
 mutating: false

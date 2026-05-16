@@ -216,7 +216,7 @@ enum Commands {
         interval: u64,
     },
 
-        Config {
+    Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },

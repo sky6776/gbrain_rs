@@ -7,7 +7,7 @@ triggers:
   - "import from notion"
 tools:
   - put_page
-  - search
+  - query
   - add_link
   - add_tag
   - sync_brain
@@ -89,7 +89,7 @@ After any migration:
 2. Check gbrain health for orphans and missing embeddings
 3. Export pages from gbrain for round-trip verification
 4. Spot-check 5-10 pages by reading them from gbrain
-5. Test search: search gbrain for "someone you know is in the data"
+5. Test search: query gbrain for "someone you know is in the data"
 
 ## Anti-Patterns
 

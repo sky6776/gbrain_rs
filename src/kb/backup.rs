@@ -820,47 +820,47 @@ fn import_documents(
         let archive_file_path = json_str(doc, "archive_file_path");
         let new_storage_path = if !old_storage_path.is_empty() {
             if let Some(storage_root) = target_storage_dir {
-            // 优先使用 archive_file_path（跨平台兼容）
-            if !archive_file_path.is_empty() {
-                let archive_file = archive_dir.join("files").join(&archive_file_path);
-                if archive_file.exists() {
-                    let dest = storage_root.join(&archive_file_path);
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    if std::fs::copy(&archive_file, &dest).is_ok() {
-                        dest.to_string_lossy().to_string()
-                    } else {
-                        // 复制失败，保留旧路径
-                        old_storage_path.clone()
-                    }
-                } else {
-                    // archive 中没有此文件，保留旧路径
-                    old_storage_path.clone()
-                }
-            } else {
-                // 回退：兼容旧版导出（无 archive_file_path），尝试从旧路径推断
-                let old_path = std::path::Path::new(&old_storage_path);
-                if let Ok(relative) = old_path.strip_prefix("/") {
-                    let archive_file = archive_dir.join("files").join(relative);
+                // 优先使用 archive_file_path（跨平台兼容）
+                if !archive_file_path.is_empty() {
+                    let archive_file = archive_dir.join("files").join(&archive_file_path);
                     if archive_file.exists() {
-                        let dest = storage_root.join(relative);
+                        let dest = storage_root.join(&archive_file_path);
                         if let Some(parent) = dest.parent() {
                             std::fs::create_dir_all(parent).ok();
                         }
                         if std::fs::copy(&archive_file, &dest).is_ok() {
                             dest.to_string_lossy().to_string()
                         } else {
+                            // 复制失败，保留旧路径
                             old_storage_path.clone()
                         }
                     } else {
+                        // archive 中没有此文件，保留旧路径
                         old_storage_path.clone()
                     }
                 } else {
-                    // 无法提取相对路径，保留旧路径
-                    old_storage_path.clone()
+                    // 回退：兼容旧版导出（无 archive_file_path），尝试从旧路径推断
+                    let old_path = std::path::Path::new(&old_storage_path);
+                    if let Ok(relative) = old_path.strip_prefix("/") {
+                        let archive_file = archive_dir.join("files").join(relative);
+                        if archive_file.exists() {
+                            let dest = storage_root.join(relative);
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent).ok();
+                            }
+                            if std::fs::copy(&archive_file, &dest).is_ok() {
+                                dest.to_string_lossy().to_string()
+                            } else {
+                                old_storage_path.clone()
+                            }
+                        } else {
+                            old_storage_path.clone()
+                        }
+                    } else {
+                        // 无法提取相对路径，保留旧路径
+                        old_storage_path.clone()
+                    }
                 }
-            }
             } else {
                 old_storage_path.clone()
             }

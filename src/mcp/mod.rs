@@ -340,7 +340,6 @@ impl McpServer {
                 }
             }
 
-            
             "get_page" => {
                 let slug = arguments["slug"].as_str().unwrap_or("");
                 crate::security::validate_page_slug(slug)?;

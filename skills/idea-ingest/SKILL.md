@@ -12,12 +12,13 @@ triggers:
   - "think about this"
   - "put this in brain"
 tools:
-  - search
   - query
   - get_page
   - put_page
   - add_link
   - add_timeline_entry
+  - upload_source
+  - memory_query
   - file_upload
 mutating: true
 writes_pages: true

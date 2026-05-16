@@ -13,7 +13,7 @@ triggers:
   - "check citations"
   - "citation fixer"
 tools:
-  - search
+  - query
   - get_page
   - put_page
   - list_pages

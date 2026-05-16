@@ -357,8 +357,16 @@ fn query_kb_evidence(
 
     let mut hits = Vec::new();
     for row in rows {
-        let (_node_id, kb_document_id, content, level, original_name, doc_title, _doc_summary, artifact_id) =
-            row.map_err(|e| GBrainError::Database(format!("映射 KB 行失败: {}", e)))?;
+        let (
+            _node_id,
+            kb_document_id,
+            content,
+            level,
+            original_name,
+            doc_title,
+            _doc_summary,
+            artifact_id,
+        ) = row.map_err(|e| GBrainError::Database(format!("映射 KB 行失败: {}", e)))?;
 
         let title = if doc_title.is_empty() {
             original_name
@@ -375,7 +383,9 @@ fn query_kb_evidence(
         // 修复：当 filter_slug 存在时，SQL JOIN 已带出 artifact_id，
         // 直接查 artifact 填充，避免 shadow_page_slug 已非空时跳过补全分支
         let artifact = if artifact_id > 0 {
-            super::store::find_artifact_by_id(conn, artifact_id).ok().flatten()
+            super::store::find_artifact_by_id(conn, artifact_id)
+                .ok()
+                .flatten()
         } else {
             None
         };

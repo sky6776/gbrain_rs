@@ -11,12 +11,13 @@ triggers:
   - "meeting notes"
   - meeting transcript received
 tools:
-  - search
   - query
   - get_page
   - put_page
   - add_link
   - add_timeline_entry
+  - upload_source
+  - memory_query
 mutating: true
 writes_pages: true
 writes_to:
@@ -81,7 +82,7 @@ Extract from the transcript:
 ### Phase 3: Attendee enrichment (MANDATORY)
 
 For EACH attendee:
-1. `gbrain search "{name}"` — does a people page exist?
+1. `gbrain query "{name}"` — does a people page exist?
 2. If NO → create via enrich skill (this is mandatory, not optional)
 3. If YES → update compiled truth with meeting context
 4. Add timeline entry on the person's page:

@@ -347,11 +347,7 @@ fn compute_candidate_fingerprint(
     use sha2::{Digest, Sha256};
     let input = format!(
         "{}|{}|{}|{}|{}",
-        artifact_id,
-        candidate_type,
-        target_slug,
-        target_field,
-        proposed_payload
+        artifact_id, candidate_type, target_slug, target_field, proposed_payload
     );
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -561,8 +557,10 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
     // 现在先执行修改，再生成 applied_at，确保 snapshot_at < applied_at 成立。
 
     // 根据候选类型应用变更
-    let candidate_type =
-        candidate.candidate_type.parse().unwrap_or(CandidateType::FactClaim);
+    let candidate_type = candidate
+        .candidate_type
+        .parse()
+        .unwrap_or(CandidateType::FactClaim);
     match candidate_type {
         CandidateType::DocumentSummary => {
             apply_summary_candidate(conn, candidate)?;
@@ -862,8 +860,10 @@ fn remove_candidate_content_from_page(
             serde_json::from_str(&candidate.proposed_payload).unwrap_or(serde_json::json!({}));
 
         // 尝试从页面内容中移除候选添加的行
-        let candidate_type =
-            candidate.candidate_type.parse().unwrap_or(CandidateType::FactClaim);
+        let candidate_type = candidate
+            .candidate_type
+            .parse()
+            .unwrap_or(CandidateType::FactClaim);
 
         let text_to_remove = extract_candidate_text_for_removal(&candidate_type, &payload);
         if !text_to_remove.is_empty() {
