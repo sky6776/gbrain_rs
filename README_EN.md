@@ -100,12 +100,12 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 |---------|-------------|
 | `gbrain init` | Initialize a new knowledge base |
 | `gbrain get <slug>` | Read a page by slug |
-| `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>]` | Create or update a page |
+| `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>] [--page-type <TYPE>]` | Create or update a page |
 | `gbrain delete <slug> [--force]` | Soft-delete a page |
 | `gbrain restore <slug>` | Restore a soft-deleted page |
 | `gbrain purge-deleted [--older-than-hours <N>]` | Permanently clean up old soft-deleted pages |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | List pages (filterable) |
-| `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | Hybrid search (alias: `ask`), with code filtering and two-stage retrieval |
+| `gbrain query <query> [--limit <N>] [--detail <LEVEL>] [--lang <LANG>] [--symbol-kind <KIND>] [--near-symbol <SYMBOL>] [--walk-depth <DEPTH>] [--expand]` | Hybrid search (alias: `ask`), with code filtering and two-stage retrieval |
 
 #### Examples
 
@@ -121,6 +121,33 @@ gbrain query "Rust async programming" --limit 5 --lang rust
 
 # Restore a mistakenly deleted page
 gbrain restore people/alice
+
+# Update page content
+gbrain put people/alice --title "Alice" --content "A senior engineer skilled in Rust and systems programming, currently at Acme Corp"
+
+# Create page from file
+gbrain put projects/alpha --title "Project Alpha" --file ./notes/alpha.md
+
+# Create page with type
+gbrain put people/bob --title "Bob" --content "Product manager" --page-type person
+
+# Search code-related content
+gbrain query "async runtime" --lang rust --limit 10
+
+# Search with detail level
+gbrain query "Acme Corp" --detail high --limit 5
+
+# Two-stage code graph retrieval
+gbrain query "handle_request" --near-symbol "HttpHandler" --walk-depth 1
+
+# Keyword search (no expansion)
+gbrain query "Rust" --limit 5 --expand false
+
+# List pages by type
+gbrain list --page-type person --limit 20
+
+# Permanently purge pages deleted more than 7 days ago
+gbrain purge-deleted --older-than-hours 168
 ```
 
 ### Search & Graph
@@ -146,6 +173,27 @@ gbrain graph-query people/alice --to companies/acme --depth 3
 
 # Find a Rust function definition
 gbrain code def --symbol "parse_config" --lang rust
+
+# Query graph relationship path
+gbrain graph-query people/alice --to projects/alpha --depth 2
+
+# Query by link type
+gbrain graph-query people/alice --link-type works_at --depth 1
+
+# Find code symbol references
+gbrain code refs --symbol "SqliteEngine" --lang rust
+
+# Search code chunks
+gbrain code search "async fn handle" --lang rust
+
+# View callers
+gbrain code callers --slug src/engine.rs --symbol "query"
+
+# View callees
+gbrain code callees --slug src/engine.rs --symbol "query"
+
+# Reindex code page
+gbrain code reindex src/engine.rs
 ```
 
 ### Backlinks
@@ -193,6 +241,24 @@ gbrain extract --mode all
 
 # Run lint checks and auto-fix
 gbrain lint --fix
+
+# Export specific pages
+gbrain export people/alice companies/acme --dir ./backup
+
+# Export by type
+gbrain export --dir ./people-backup --page-type person
+
+# Extract links only
+gbrain extract --mode links
+
+# Extract timeline only
+gbrain extract --mode timeline
+
+# Check page quality (no fix)
+gbrain lint people/alice
+
+# Preview lint fixes
+gbrain lint --fix --dry-run
 ```
 
 ### File Storage
@@ -216,6 +282,15 @@ gbrain file list projects/annual-report
 
 # Get file path
 gbrain file url files/report.pdf
+
+# Sync directory to storage
+gbrain file sync ./documents
+
+# Verify all file records
+gbrain file verify
+
+# List all files
+gbrain file list
 ```
 
 ### Health & Maintenance
@@ -243,6 +318,18 @@ gbrain autopilot --once
 
 # Continuous self-maintenance (every 10 minutes)
 gbrain autopilot --interval 600
+
+# View health dashboard
+gbrain health
+
+# Check data integrity
+gbrain integrity
+
+# Detect orphan pages
+gbrain orphans
+
+# Generate embeddings for specific pages
+gbrain embed people/alice companies/acme --batch-size 10
 ```
 
 ### Config & Misc
@@ -271,6 +358,18 @@ gbrain report --report-type maintenance --title "Weekly Check"
 
 # Start MCP server
 gbrain serve
+
+# Get single config value
+gbrain config get embedding_model
+
+# Enable post-write lint
+gbrain config set post_write_lint true
+
+# View ingest log
+gbrain ingest-log --limit 10
+
+# Output MCP tool definitions
+gbrain tools-json
 ```
 
 ### KB Subsystem
@@ -322,12 +421,43 @@ gbrain kb-purge-deleted --older-than-days 30
 
 | Command | Description |
 |---------|-------------|
-| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--promotion <POLICY>] [--dry-run]` | Upload a source file (unified entry point), auto-route to multiple projections. intent: auto/document/attachment/memory/promote; promotion: none/shadow/candidate/auto-low-risk |
-| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>]` | Unified memory query (alias: ask-memory). strategy: brain_first/evidence_first/provenance/timeline_first |
+| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--page <SLUG>] [--folder-id <ID>] [--promotion <POLICY>] [--dry-run]` | Upload a source file (unified entry point), auto-route to multiple projections. intent: auto/document/attachment/memory/promote; promotion: none/shadow/candidate/auto-low-risk |
+| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>] [--include-evidence] [--include-provenance]` | Unified memory query (alias: ask-memory). strategy: brain_first/evidence_first/provenance/timeline_first |
 | `gbrain artifact list [--limit <N>] [--offset <N>]` | List all artifacts |
 | `gbrain artifact get <id_or_uid>` | Get artifact details (supports ID or UID like `art_ab12cd34ef56`) |
 | `gbrain artifact delete <artifact_id>` | Soft delete artifact (marks all projections as stale) |
 | `gbrain artifact health` | Check artifact projection consistency and health |
+
+#### Examples
+
+```bash
+# Upload a document for KB processing
+gbrain upload report.pdf --intent document --library-id 1
+
+# Upload file attachment
+gbrain upload photo.jpg --intent attachment --page people/alice
+
+# Upload to KB specific folder
+gbrain upload report.pdf --intent document --library-id 1 --folder-id 5
+
+# Unified memory query — search KB evidence first
+gbrain memory-query "deployment process" --strategy evidence_first --limit 5
+
+# Unified memory query — trace fact origins
+gbrain memory-query "Alice's position" --strategy provenance --include-provenance
+
+# Unified memory query — sort by timeline
+gbrain memory-query "recent project updates" --strategy timeline_first
+
+# List all artifacts
+gbrain artifact list --limit 20
+
+# Check artifact health
+gbrain artifact health
+
+# Soft delete artifact
+gbrain artifact delete 42
+```
 
 ### Candidate Changes & Promotion
 
@@ -342,6 +472,28 @@ gbrain kb-purge-deleted --older-than-days 30
 | `gbrain promotion batch-apply [--artifact-id <ID>] [--risk <LEVEL>] [--dry-run]` | Batch apply candidates |
 | `gbrain promotion rollback <candidate_id>` | Rollback an applied candidate |
 
+#### Examples
+
+```bash
+# List pending candidates
+gbrain promotion list --status pending
+
+# Get candidate details
+gbrain promotion get 42
+
+# Reject a candidate
+gbrain promotion reject 43 --reviewer bob --notes "Outdated information"
+
+# Apply an accepted candidate
+gbrain promotion apply 42
+
+# Auto-apply low-risk candidates
+gbrain promotion auto-apply 7
+
+# List applied candidates
+gbrain promotion list --status applied
+```
+
 ### Projection Management
 
 | Command | Description |
@@ -349,6 +501,95 @@ gbrain kb-purge-deleted --older-than-days 30
 | `gbrain projection supersede <old_proj_id> <new_proj_id>` | Supersede an old projection with a new one (version chain) |
 | `gbrain projection history <projection_key> [--artifact-id <ID>] [--projection-type <TYPE>] [--limit <N>]` | Query projection version chain history |
 | `gbrain gc-orphan-projections [--stale-days <N>] [--dry-run]` | Garbage collect orphaned/superseded projections |
+
+---
+
+## CLI Command Parameters
+
+### `gbrain put`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug (e.g., people/alice) |
+| `--title` | string | Yes | Page title |
+| `--content` | string | No | Page content (Markdown) |
+| `--file` | path | No | Read content from file |
+| `--page-type` | string | No | Page type (e.g., person, company) |
+
+### `gbrain query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Search query |
+| `--limit` | integer | No | Max results (default 20) |
+| `--detail` | string | No | Result detail level: low/medium/high (default medium) |
+| `--lang` | string | No | Filter code retrieval by programming language |
+| `--symbol-kind` | string | No | Filter code retrieval by symbol type |
+| `--near-symbol` | string | No | Anchor symbol for two-stage code graph retrieval |
+| `--walk-depth` | integer | No | Code graph neighbor walk depth (0-2, default 0) |
+| `--expand` | flag | No | Enable LLM query expansion |
+
+### `gbrain upload`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | path | Yes | File path |
+| `--intent` | string | No | Upload intent: auto/document/attachment/memory/promote (default auto) |
+| `--library-id` | integer | No | KB library ID |
+| `--target` | string | No | Target gbrain page slug (for promotion) |
+| `--page` | string | No | Target page slug (for file attachment) |
+| `--folder-id` | integer | No | KB folder ID |
+| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk |
+| `--dry-run` | flag | No | Return routing plan only, don't execute |
+| `--json` | flag | No | Output as JSON |
+
+### `gbrain memory-query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Query text |
+| `--strategy` | string | No | Query strategy: brain_first/evidence_first/provenance/timeline_first (default brain_first) |
+| `--limit` | integer | No | Max results (default 10) |
+| `--filter-slug` | string | No | Filter by slug |
+| `--include-evidence` | flag | No | Include KB evidence (default true) |
+| `--include-provenance` | flag | No | Include provenance records (default false) |
+| `--json` | flag | No | Output as JSON |
+
+### `gbrain embed`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slugs` | string[] | No | Specific page slugs (empty = all stale content) |
+| `--batch-size` | integer | No | Embedding API batch size (default 20) |
+
+### `gbrain import`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `dir` | string | Yes | Directory to scan for .md files |
+| `--embed` | flag | No | Generate embeddings for imported content |
+| `--auto-link` | flag | No | Auto-link imported pages to existing pages |
+
+### `gbrain export`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slugs` | string[] | No | Specific page slugs to export |
+| `--dir` | string | No | Output directory |
+| `--page-type` | string | No | Filter by page type |
+
+### `gbrain autopilot`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `--once` | flag | No | Run once and exit |
+| `--interval` | integer | No | Cycle interval in seconds (default 3600) |
+
+### `gbrain purge-deleted`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `--older-than-hours` | integer | No | Purge pages deleted more than N hours ago (default 72) |
 
 ---
 
@@ -433,6 +674,16 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "resolve_slugs", "params": { "partial": "ali" } }
 ```
 
+```json
+// Search with metadata
+{ "tool": "query", "params": { "query": "Rust async", "limit": 5, "include_meta": true } }
+```
+
+```json
+// Two-stage code graph retrieval
+{ "tool": "query", "params": { "query": "handle_request", "near_symbol": "HttpHandler", "walk_depth": 1 } }
+```
+
 ### Page CRUD
 
 | Tool | Description |
@@ -465,6 +716,16 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "list_pages", "params": { "type": "person", "limit": 10 } }
 ```
 
+```json
+// Read page with fuzzy matching
+{ "tool": "get_page", "params": { "slug": "ali", "fuzzy": true } }
+```
+
+```json
+// Get page content chunks
+{ "tool": "get_chunks", "params": { "slug": "people/alice" } }
+```
+
 ### Tags
 
 | Tool | Description |
@@ -483,6 +744,11 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 ```json
 // List tags
 { "tool": "get_tags", "params": { "slug": "people/alice" } }
+```
+
+```json
+// Remove a tag
+{ "tool": "remove_tag", "params": { "slug": "people/alice", "tag": "engineer" } }
 ```
 
 ### Links & Graph
@@ -510,6 +776,16 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 ```json
 // Get backlinks
 { "tool": "get_backlinks", "params": { "slug": "people/alice" } }
+```
+
+```json
+// Remove a link
+{ "tool": "remove_link", "params": { "from": "people/alice", "to": "companies/acme", "link_type": "works_at" } }
+```
+
+```json
+// Traverse graph by link type
+{ "tool": "traverse_graph", "params": { "slug": "people/alice", "depth": 3, "link_type": "works_at", "direction": "out" } }
 ```
 
 ### Timeline
@@ -547,6 +823,11 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 
 ```json
 // Revert to a specific version
+{ "tool": "revert_version", "params": { "slug": "people/alice", "version_id": 3 } }
+```
+
+```json
+// Revert to a specific version (creates a new version record)
 { "tool": "revert_version", "params": { "slug": "people/alice", "version_id": 3 } }
 ```
 
@@ -601,6 +882,16 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 ```json
 // Rebuild code page index
 { "tool": "reindex_code_page", "params": { "slug": "src/engine.rs" } }
+```
+
+```json
+// Search code chunks
+{ "tool": "search_code_chunks", "params": { "query": "async fn handle", "lang": "rust" } }
+```
+
+```json
+// Get code edges
+{ "tool": "get_code_edges_by_chunk", "params": { "chunk_id": 42 } }
 ```
 
 ### File Storage
@@ -753,6 +1044,21 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "artifact_health", "params": {} }
 ```
 
+```json
+// Upload file attachment
+{ "tool": "upload_source", "params": { "path": "/path/to/photo.jpg", "intent": "attachment", "page_slug": "people/alice" } }
+```
+
+```json
+// Preview upload routing
+{ "tool": "upload_source", "params": { "path": "/path/to/report.pdf", "intent": "auto", "dry_run": true } }
+```
+
+```json
+// Memory query — trace origins
+{ "tool": "memory_query", "params": { "query": "Alice's position", "strategy": "provenance", "include_provenance": true } }
+```
+
 ### Candidate Changes & Promotion
 
 | Tool | Description |
@@ -835,6 +1141,37 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `near_symbol` | string | No | Anchor symbol for two-stage code graph retrieval |
 | `walk_depth` | integer | No | Code graph neighbor walk depth (0-2) |
 | `include_meta` | boolean | No | Return `{results, meta}` with vector/expansion details |
+
+### `get_page`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `fuzzy` | boolean | No | Enable fuzzy slug resolution (default false) |
+
+### `add_link`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | string | Yes | Source page slug |
+| `to` | string | Yes | Target page slug |
+| `link_type` | string | No | Link type (e.g., works_at, invested_in) |
+| `context` | string | No | Context description for the link |
+
+### `list_pages`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `type` | string | No | Filter by page type |
+| `tag` | string | No | Filter by tag |
+| `limit` | integer | No | Max results (default 50) |
+
+### `delete_page`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `confirm` | boolean | Yes | Must be true to confirm deletion |
 
 ### `put_page`
 
@@ -963,6 +1300,306 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `artifact_id` | integer | No | Filter by Artifact ID |
 | `risk` | string | No | Filter by risk level: low/medium/high |
 | `dry_run` | boolean | No | Preview only, don't actually apply |
+
+### `add_tag`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `tag` | string | Yes | Tag name |
+
+### `remove_tag`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `tag` | string | Yes | Tag name |
+
+### `add_timeline_entry`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `date` | string | Yes | Date (YYYY-MM-DD) |
+| `summary` | string | Yes | Event summary |
+
+### `remove_link`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | string | Yes | Source page slug |
+| `to` | string | Yes | Target page slug |
+| `link_type` | string | No | Link type to remove |
+
+### `revert_version`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `version_id` | integer | Yes | Version ID to revert to |
+
+### `put_raw_data`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `source` | string | Yes | Data source identifier |
+| `data` | object | Yes | Raw data object |
+
+### `get_raw_data`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Page slug |
+| `source` | string | No | Filter by source |
+
+### `resolve_slugs`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `partial` | string | Yes | Partial slug |
+
+### `log_ingest`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `source_type` | string | Yes | Source type (e.g., git, import, api) |
+| `source_ref` | string | Yes | Source reference |
+| `pages_updated` | string[] | Yes | List of updated page slugs |
+| `summary` | string | Yes | Ingestion summary |
+
+### `kb_update_library`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Library ID to update |
+| `name` | string | No | New library name |
+| `semantic_segmentation_enabled` | boolean | No | Enable semantic chunking |
+| `raptor_enabled` | boolean | No | Enable RAPTOR tree summarization |
+| `chunk_size` | integer | No | Chunk size in characters |
+| `chunk_overlap` | integer | No | Chunk overlap in characters |
+| `embedding_provider` | string | No | Embedding provider name |
+| `embedding_model` | string | No | Embedding model name |
+| `embedding_dimensions` | integer | No | Embedding vector dimensions |
+| `search_profile` | string | No | Search profile name |
+| `rerank_enabled` | boolean | No | Enable reranking |
+| `rerank_provider` | string | No | Rerank provider name |
+| `summary_enabled` | boolean | No | Enable summarization |
+| `redaction_enabled` | boolean | No | Enable sensitive content redaction |
+
+### `kb_delete_library`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Library ID to delete |
+| `confirm` | boolean | Yes | Must be true to confirm deletion |
+
+### `kb_upload_document`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Target library ID |
+| `file_path` | string | Yes | Local file path |
+| `folder_id` | integer | No | Folder ID |
+
+### `kb_get_document_status`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | Document ID |
+
+### `kb_retry_document`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | Document ID to retry |
+
+### `kb_cancel_document_job`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | Document ID to cancel |
+
+### `kb_delete_document`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | Document ID to delete |
+| `confirm` | boolean | Yes | Must be true to confirm deletion |
+
+### `kb_purge_document`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | Document ID to permanently destroy |
+| `confirm` | boolean | Yes | Must be true to confirm permanent destruction |
+
+### `kb_create_folder`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Library ID |
+| `name` | string | Yes | Folder name |
+| `parent_id` | integer | No | Parent folder ID (null = root) |
+
+### `kb_add_eval_query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `library_id` | integer | Yes | Library ID |
+| `query` | string | Yes | Evaluation query text |
+| `query_type` | string | No | Query type classification |
+| `expected_document_ids` | string | No | Comma-separated expected document IDs |
+
+### `kb_add_search_feedback`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `search_log_id` | integer | No | Search log entry ID |
+| `document_id` | integer | No | Document ID rated |
+| `node_id` | integer | No | Node ID rated |
+| `rating` | integer | Yes | Relevance rating 0-5 |
+| `comment` | string | No | Feedback comment |
+
+### `code_def`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `symbol` | string | Yes | Qualified or local symbol name |
+| `lang` | string | No | Filter by programming language |
+| `limit` | integer | No | Max results (default 20) |
+
+### `code_refs`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `symbol` | string | Yes | Qualified or local symbol name |
+| `lang` | string | No | Filter by programming language |
+| `limit` | integer | No | Max results (default 20) |
+
+### `search_code_chunks`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Code search query |
+| `limit` | integer | No | Max results (default 20) |
+| `lang` | string | No | Filter by programming language |
+| `symbol_kind` | string | No | Filter by symbol kind |
+
+### `get_callers`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Code page slug |
+| `symbol` | string | Yes | Qualified or local symbol name |
+
+### `get_callees`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Code page slug |
+| `symbol` | string | Yes | Qualified or local symbol name |
+
+### `get_code_edges_by_chunk`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `chunk_id` | integer | Yes | Code chunk ID |
+
+### `reindex_code_page`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Code page slug |
+
+### `file_upload`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Local file path |
+| `page_slug` | string | No | Associated page slug |
+
+### `promotion_get_candidate`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidate_id` | integer | Yes | Candidate ID |
+
+### `promotion_accept_candidate`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidate_id` | integer | Yes | Candidate ID |
+| `reviewer` | string | No | Reviewer name |
+| `notes` | string | No | Review notes |
+
+### `promotion_reject_candidate`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidate_id` | integer | Yes | Candidate ID |
+| `reviewer` | string | No | Reviewer name |
+| `reason` | string | No | Rejection reason |
+
+### `promotion_apply_candidate`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidate_id` | integer | Yes | Candidate ID |
+
+### `promotion_rollback_candidate`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `candidate_id` | integer | Yes | Candidate ID to rollback |
+
+### `gc_orphan_projections`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `stale_days` | integer | No | Purge projections orphaned for more than N days (default 30) |
+| `dry_run` | boolean | No | Preview only, don't actually purge |
+
+### `projection_supersede`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `old_proj_id` | integer | Yes | Old projection ID |
+| `new_proj_id` | integer | Yes | New projection ID |
+
+### `projection_history`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `projection_key` | string | Yes | Projection key |
+| `artifact_id` | integer | No | Filter by Artifact ID |
+| `projection_type` | string | No | Filter by projection type |
+| `limit` | integer | No | Max records (default 20) |
+
+### `artifact_list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Max results |
+| `offset` | integer | No | Offset |
+
+### `artifact_get`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID (e.g., '1' or 'art_ab12cd34ef56') |
+
+### `artifact_delete`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `artifact_id` | integer | Yes | Artifact ID |
+
+### `get_provenance`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `brain_slug` | string | Yes | Brain page slug |
 
 ---
 
