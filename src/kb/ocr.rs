@@ -224,8 +224,8 @@ pub fn writeback_ocr_results(
 
     let nodes_created = nodes.len();
 
-    // 5. 持久化节点
-    persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes)?;
+    // 5. 持久化节点（OCR 路径无 run_id 守卫需求，传 None）
+    persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes, None)?;
 
     // 6. 计算 ocr_text_coverage
     let ocr_pages_with_text = ocr_pages

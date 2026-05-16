@@ -81,16 +81,33 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                 split_total = process_result.split_total,
                 "KB worker: 文档处理完成"
             );
-            complete_kb_job(conn, job_db_id)?;
 
-            // KB 处理完成后，检查是否有 artifact 投影，触发 promotion extraction
-            if let Err(e) = enqueue_artifact_promote_if_linked(conn, payload.document_id) {
+            // 修复：先入队 promotion 再 complete job，避免 enqueue 失败时
+            // job 已完成不会重试，导致 artifact_promote_extract 永久丢失。
+            // 之前先 complete_kb_job 再 enqueue，一旦 INSERT/COMMIT/查询出现
+            // 瞬时 DB 错误，KB job 已完成且不会重试，promotion 入队永久丢失。
+            // 现在先尝试入队，入队成功后再 complete job；
+            // 入队失败时 job 保持可认领状态，下次轮询可重试。
+            // 注意：enqueue_artifact_promote_if_linked 内部已用
+            // BEGIN IMMEDIATE 事务保护 run_id 校验和 INSERT，不存在竞态窗口。
+            if let Err(e) = enqueue_artifact_promote_if_linked(
+                conn,
+                payload.document_id,
+                &payload.processing_run_id,
+            ) {
                 warn!(
                     document_id = payload.document_id,
                     error = %e,
-                    "KB worker: 触发 artifact promotion 失败（不影响 KB 处理结果）"
+                    "KB worker: 触发 artifact promotion 失败，job 保持可重试状态"
                 );
+                // 入队失败时用 fail_kb_job 标记失败（而非 complete），
+                // 让 job 可被人工重试或后续恢复逻辑处理，
+                // 避免无限循环重试同一 job
+                fail_kb_job(conn, job_db_id, &format!("promotion 入队失败: {}", e))?;
+                return Ok(true);
             }
+
+            complete_kb_job(conn, job_db_id)?;
 
             Ok(true)
         }
@@ -101,32 +118,22 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                 error = %e,
                 "KB worker: 文档处理失败"
             );
-            // 修复：先检查 run_id 是否仍为当前值，避免 stale job 覆盖新 run 的文档状态
-            // 重复上传复用 kb_document 后，旧 job 的 run_id 与新 run_id 不同，
-            // 旧 job 失败时不应把新 run 的文档状态改成 FAILED
+            // 修复：直接用 update_document_status_with_run_guard 做条件更新，
+            // 消除 ensure_document_run_current + update_document_status 两步间的竞态。
+            // 旧代码先检查 run_id 再无守卫更新，两步之间新 run 可能更新 processing_run_id，
+            // 导致旧 job 把新 run 文档标为 failed。
+            // 带守卫的 UPDATE 在 SQL 层面原子检查 processing_run_id，不存在竞态窗口。
             let kb = KbEngine::new(conn);
-            if kb
-                .ensure_document_run_current(payload.document_id, &payload.processing_run_id)
-                .is_ok()
-            {
-                // run_id 仍匹配，安全更新文档状态为失败
-                let _ = kb.update_document_status(
-                    payload.document_id,
-                    Some(crate::kb::types::STATUS_FAILED),
-                    None,
-                    Some(&e.to_string()),
-                    None,
-                    None,
-                    None,
-                );
-            } else {
-                // stale job：run_id 已被新上传覆盖，只标记 job 失败，不改文档状态
-                warn!(
-                    job_db_id,
-                    document_id = payload.document_id,
-                    "KB worker: stale job（run_id 已过期），跳过文档状态更新"
-                );
-            }
+            let _ = kb.update_document_status_with_run_guard(
+                payload.document_id,
+                Some(crate::kb::types::STATUS_FAILED),
+                None,
+                Some(&e.to_string()),
+                None,
+                None,
+                None,
+                Some(&payload.processing_run_id),
+            );
             fail_kb_job(conn, job_db_id, &e.to_string())?;
             Ok(true)
         }
@@ -307,10 +314,12 @@ pub fn run_artifact_promote_worker_once(engine: &SqliteEngine, _config: &Config)
                 candidate_count = candidates.len(),
                 "artifact promote worker: 提取完成"
             );
-            complete_kb_job(conn, job.id)?;
 
-            // 修复：优先使用 payload 中的 promotion_policy（入队时绑定的稳定值），
-            // 仅在 payload 未携带时才从 occurrence 反查（兼容旧 job）
+            // 修复：先执行 auto_apply 再 complete job，与 KB worker 的 promotion 入队逻辑一致。
+            // 之前先 complete_kb_job 再 auto_apply，如果 auto_apply 失败，
+            // job 已完成不会重试，低风险候选永远不会被自动应用。
+            // 现在先尝试 auto_apply，成功后再 complete job；
+            // auto_apply 失败时用 fail_kb_job 标记失败，确保可重试。
             let promotion_policy = payload_promotion_policy.unwrap_or_else(|| {
                 if occurrence_id > 0 {
                     crate::artifact::store::find_occurrence_by_id(conn, occurrence_id)
@@ -334,10 +343,15 @@ pub fn run_artifact_promote_worker_once(engine: &SqliteEngine, _config: &Config)
                     warn!(
                         artifact_id,
                         error = %e,
-                        "artifact promote worker: 自动应用低风险候选失败"
+                        "artifact promote worker: 自动应用低风险候选失败，job 保持可重试状态"
                     );
+                    // auto_apply 失败时标记 job 为失败，确保可重试
+                    fail_kb_job(conn, job.id, &format!("自动应用低风险候选失败: {}", e))?;
+                    return Ok(true);
                 }
             }
+
+            complete_kb_job(conn, job.id)?;
 
             Ok(true)
         }
@@ -665,34 +679,83 @@ pub fn spawn_kb_worker_pool(
 
 /// KB 处理完成后，检查 kb_document 是否有对应的 artifact 投影，
 /// 如果有且 promotion_policy 允许，则入队 `artifact_promote_extract` 作业。
-fn enqueue_artifact_promote_if_linked(conn: &Connection, kb_document_id: i64) -> Result<()> {
+///
+/// 修复：入队前校验 kb_documents 的 processing_run_id 仍与传入的 run_id 匹配，
+/// 防止旧 job 在 stats 成功后、入队 promotion 前，新 run 已通过 projection.rs
+/// 抢占当前投影，导致旧 job 给新 occurrence 入队 promotion。
+fn enqueue_artifact_promote_if_linked(
+    conn: &Connection,
+    kb_document_id: i64,
+    run_id: &str,
+) -> Result<()> {
+    // 修复：将 run-id 校验、projection 查询和 job 插入合入同一 BEGIN IMMEDIATE 事务，
+    // 消除竞态窗口。旧代码用 unchecked_transaction()（deferred 事务），
+    // 并发上传在 promotion 入队阶段抢到写锁时可能在 INSERT job 时失败，
+    // 而 KB job 已标记完成，promotion 入队只 warn 不会重试。
+    // BEGIN IMMEDIATE 在 BEGIN 时即获取 RESERVED 锁，阻止其他写事务并发修改。
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| GBrainError::Database(format!("开启 BEGIN IMMEDIATE 事务失败: {}", e)))?;
+
+    // 校验 processing_run_id 仍匹配，防止旧 job 的 promotion 入队串到新 occurrence
+    let current_run_id: String = conn
+        .query_row(
+            "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+            rusqlite::params![kb_document_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| {
+            conn.execute("ROLLBACK", []).ok();
+            GBrainError::Database(format!("查询 processing_run_id 失败: {}", e))
+        })?;
+    if current_run_id != run_id {
+        tracing::warn!(
+            kb_document_id,
+            expected_run_id = run_id,
+            actual_run_id = %current_run_id,
+            "KB worker: promotion 入队时 run_id 已过期，跳过入队"
+        );
+        let _ = conn.execute("ROLLBACK", []);
+        return Ok(());
+    }
+
     // 查找 kb_document 对应的 artifact 投影
     let proj_ref = format!("kb_document:{}", kb_document_id);
-    let mut stmt = conn
-        .prepare(
-            "SELECT ap.artifact_id, ap.occurrence_id, ao.promotion_policy
+    // 修复：不再用 .ok() 吞掉所有数据库错误。
+    // .ok() 把真实查询/prepare/step 错误当成"无 projection"跳过，
+    // 但 KB job 已标记 completed，promotion 入队永久丢失。
+    // 现在只把 QueryReturnedNoRows 转为 None（确实无投影），其它错误 rollback 后返回 Err。
+    let result: Option<(i64, i64, String)> = match conn.query_row(
+        "SELECT ap.artifact_id, ap.occurrence_id, ao.promotion_policy
          FROM artifact_projections ap
          JOIN artifact_occurrences ao ON ao.id = ap.occurrence_id
          WHERE ap.projection_ref = ?1 AND ap.status = 'active'
          LIMIT 1",
-        )
-        .map_err(|e| GBrainError::Database(format!("查询 artifact 投影失败: {}", e)))?;
-
-    let result: Option<(i64, i64, String)> = stmt
-        .query_row(rusqlite::params![proj_ref], |row| {
+        rusqlite::params![proj_ref],
+        |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
             ))
-        })
-        .ok();
+        },
+    ) {
+        Ok(tuple) => Some(tuple),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            conn.execute("ROLLBACK", []).ok();
+            return Err(GBrainError::Database(format!(
+                "查询 artifact 投影失败: {}",
+                e
+            )));
+        }
+    };
 
     let Some((artifact_id, occurrence_id, promotion_policy)) = result else {
         debug!(
             kb_document_id,
             "KB document 无关联 artifact 投影，跳过 promotion"
         );
+        let _ = conn.execute("ROLLBACK", []);
         return Ok(());
     };
 
@@ -706,6 +769,7 @@ fn enqueue_artifact_promote_if_linked(conn: &Connection, kb_document_id: i64) ->
                 artifact_id,
                 kb_document_id, "promotion_policy=none，跳过 promotion"
             );
+            let _ = conn.execute("ROLLBACK", []);
             return Ok(());
         }
         "shadow" => {
@@ -713,6 +777,7 @@ fn enqueue_artifact_promote_if_linked(conn: &Connection, kb_document_id: i64) ->
                 artifact_id,
                 kb_document_id, "promotion_policy=shadow，仅影子页面，不生成候选"
             );
+            let _ = conn.execute("ROLLBACK", []);
             return Ok(());
         }
         _ => {} // candidate / auto_accept_low_risk → 继续入队
@@ -731,7 +796,18 @@ fn enqueue_artifact_promote_if_linked(conn: &Connection, kb_document_id: i64) ->
         })
         .to_string()],
     )
-    .map_err(|e| GBrainError::Database(format!("入队 artifact_promote_extract 失败: {}", e)))?;
+    .map_err(|e| {
+        conn.execute("ROLLBACK", []).ok();
+        GBrainError::Database(format!("入队 artifact_promote_extract 失败: {}", e))
+    })?;
+
+    // 修复：COMMIT 失败时事务可能仍保持打开，必须 ROLLBACK 防止连接状态污染。
+    // SQLite COMMIT 返回 busy/错误时，事务不会自动回滚，后续复用同一连接
+    // 会处于事务中，且 promotion 已无重试入口。
+    conn.execute("COMMIT", []).map_err(|e| {
+        let _ = conn.execute("ROLLBACK", []);
+        GBrainError::Database(format!("提交 promotion 入队事务失败: {}", e))
+    })?;
 
     info!(
         artifact_id,

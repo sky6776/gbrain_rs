@@ -7,7 +7,7 @@
 //! 4. apply 时写入 gbrain page 并记录 provenance
 
 use rusqlite::{params, Connection, Row};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{GBrainError, Result};
 
@@ -243,6 +243,11 @@ pub fn extract_promotion_candidates(
 }
 
 /// 创建候选变更记录
+///
+/// 修复：使用 candidate_fingerprint 做去重，INSERT OR IGNORE 防止重试路径重复创建。
+/// fingerprint = SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
+/// 同一 artifact + 同一内容不应重复创建候选。重试时如果候选已存在（pending/accepted/applied），
+/// INSERT OR IGNORE 会跳过，返回已有候选的 id，保证幂等。
 pub fn create_candidate(
     conn: &Connection,
     artifact_id: i64,
@@ -258,15 +263,32 @@ pub fn create_candidate(
     confidence: f64,
     risk_level: RiskLevel,
 ) -> Result<i64> {
+    // 修复：计算候选指纹用于去重，防止重试路径重复创建同一批候选。
+    // fingerprint 由确定性字段组成：artifact_id + candidate_type + target_slug +
+    // target_field + proposed_payload，不含 confidence/risk_level 等可能因
+    // KB 重新解析而变化的字段。
+    let fingerprint = compute_candidate_fingerprint(
+        artifact_id,
+        &candidate_type,
+        target_slug,
+        target_field,
+        proposed_payload,
+    );
+
     let now = now_str();
-    conn.execute(
-        "INSERT INTO promotion_candidates
+    // 修复：使用 INSERT OR IGNORE + 唯一索引实现幂等插入。
+    // 唯一索引 idx_promo_candidates_fingerprint 仅覆盖
+    // candidate_fingerprint != '' AND status IN ('pending', 'accepted', 'applied')，
+    // 已回滚/拒绝/过期的候选不在索引中，允许重新创建。
+    // INSERT OR IGNORE 在指纹冲突时跳过插入（候选已存在），返回已有 id。
+    let rows = conn.execute(
+        "INSERT OR IGNORE INTO promotion_candidates
             (artifact_id, occurrence_id, kb_document_id, kb_node_id,
              candidate_type, target_slug, target_field,
              title, proposed_payload, evidence_json,
              confidence, risk_level, status, reviewer, review_notes, applied_at,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             candidate_fingerprint, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             artifact_id,
             occurrence_id,
@@ -284,13 +306,55 @@ pub fn create_candidate(
             "",
             "",
             Option::<String>::None,
+            fingerprint,
             now,
             now,
         ],
     )
     .map_err(|e| GBrainError::Database(format!("插入候选变更失败: {}", e)))?;
 
-    Ok(conn.last_insert_rowid())
+    if rows == 0 {
+        // 候选已存在（fingerprint 冲突），返回已有候选的 id
+        let existing_id: i64 = conn
+            .query_row(
+                "SELECT id FROM promotion_candidates WHERE candidate_fingerprint = ?1 AND status IN ('pending', 'accepted', 'applied') LIMIT 1",
+                params![fingerprint],
+                |row| row.get(0),
+            )
+            .map_err(|e| GBrainError::Database(format!("查询已有候选失败: {}", e)))?;
+        debug!(
+            "候选已存在 (fingerprint={}), 返回已有 id={}",
+            fingerprint, existing_id
+        );
+        Ok(existing_id)
+    } else {
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+/// 计算候选指纹 — SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
+///
+/// 使用确定性字段组成指纹，不含 confidence/risk_level 等可能因 KB 重新解析而变化的字段。
+/// 同一 artifact 的同一内容无论重试多少次，指纹始终相同。
+fn compute_candidate_fingerprint(
+    artifact_id: i64,
+    candidate_type: &CandidateType,
+    target_slug: &str,
+    target_field: &str,
+    proposed_payload: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let input = format!(
+        "{}|{}|{}|{}|{}",
+        artifact_id,
+        candidate_type.to_string(),
+        target_slug,
+        target_field,
+        proposed_payload
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// 列出候选变更
@@ -307,7 +371,8 @@ pub fn list_candidates(
                 artifact_id, occurrence_id, kb_document_id, kb_node_id,
                 candidate_type, target_slug, target_field,
                 title, proposed_payload, evidence_json,
-                confidence, risk_level, status, reviewer, review_notes, applied_at
+                confidence, risk_level, status, reviewer, review_notes, applied_at,
+                candidate_fingerprint
          FROM promotion_candidates WHERE 1=1",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -362,7 +427,8 @@ pub fn find_candidate_by_id(conn: &Connection, id: i64) -> Result<Option<Promoti
                 artifact_id, occurrence_id, kb_document_id, kb_node_id,
                 candidate_type, target_slug, target_field,
                 title, proposed_payload, evidence_json,
-                confidence, risk_level, status, reviewer, review_notes, applied_at
+                confidence, risk_level, status, reviewer, review_notes, applied_at,
+                candidate_fingerprint
          FROM promotion_candidates WHERE id = ?1",
         )
         .map_err(|e| GBrainError::Database(format!("准备查询失败: {}", e)))?;
@@ -442,6 +508,51 @@ pub fn apply_candidate(conn: &Connection, candidate_id: i64) -> Result<Promotion
         )));
     }
 
+    // 修复：用 SQLite savepoint 隔离每个 candidate 的所有写入。
+    // apply_candidate 内部会修改 pages.compiled_truth、重建 chunks、写入 provenance、
+    // 更新 candidate 状态。如果中间任何步骤失败，上层只把 candidate 重置回 pending
+    // 并返回 Ok，但 pages/provenance 的半写入不会被回滚，外层事务仍提交。
+    // 下次重试可能重复追加内容。savepoint 确保失败时回滚该 candidate 的所有写入。
+    let sp_name = format!("sp_apply_{}", candidate_id);
+    conn.execute(&format!("SAVEPOINT {}", sp_name), [])
+        .map_err(|e| GBrainError::Database(format!("创建 savepoint 失败: {}", e)))?;
+
+    let apply_result = apply_candidate_inner(conn, &mut candidate);
+
+    match apply_result {
+        Ok(_) => {
+            // 修复：RELEASE SAVEPOINT 等价于提交事务，失败时不能返回 Ok，
+            // 否则调用方认为已应用但事务未提交/连接仍在事务中。
+            // 同时必须先清理 savepoint（ROLLBACK TO + RELEASE），否则 SQLite 连接
+            // 仍停在未释放的 savepoint 里，后续操作会污染连接状态。
+            match conn.execute(&format!("RELEASE {}", sp_name), []) {
+                Ok(_) => Ok(candidate),
+                Err(e) => {
+                    // RELEASE 失败：先回滚到 savepoint 撤销所有写入，再释放 savepoint 清理连接状态
+                    warn!(
+                        "释放 savepoint {} 失败: {}, 回滚并清理 savepoint",
+                        sp_name, e
+                    );
+                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                    Err(GBrainError::Database(format!(
+                        "释放 savepoint {} 失败（事务已回滚）: {}",
+                        sp_name, e
+                    )))
+                }
+            }
+        }
+        Err(e) => {
+            // 失败：回滚到 savepoint，所有写入撤销（pages、chunks、provenance、状态）
+            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+            Err(e)
+        }
+    }
+}
+
+/// apply_candidate 的内部实现，在 savepoint 保护下执行
+fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) -> Result<()> {
     // 修复：applied_at 必须在所有页面修改完成后才生成，
     // 否则 rollback 查 snapshot_at < applied_at 时会找不到修改前快照。
     // 之前 now 在修改前生成，但 page_versions 快照的 snapshot_at 用的是
@@ -453,30 +564,30 @@ pub fn apply_candidate(conn: &Connection, candidate_id: i64) -> Result<Promotion
         CandidateType::from_str(&candidate.candidate_type).unwrap_or(CandidateType::FactClaim);
     match candidate_type {
         CandidateType::DocumentSummary => {
-            apply_summary_candidate(conn, &candidate)?;
+            apply_summary_candidate(conn, candidate)?;
         }
         CandidateType::EntityMention => {
-            apply_entity_candidate(conn, &candidate)?;
+            apply_entity_candidate(conn, candidate)?;
         }
         CandidateType::LinkSuggestion => {
-            apply_link_candidate(conn, &candidate)?;
+            apply_link_candidate(conn, candidate)?;
         }
         CandidateType::TimelineEvent => {
-            apply_timeline_candidate(conn, &candidate)?;
+            apply_timeline_candidate(conn, candidate)?;
         }
         CandidateType::FactClaim => {
-            apply_fact_claim_candidate(conn, &candidate)?;
+            apply_fact_claim_candidate(conn, candidate)?;
         }
         CandidateType::PageCreate => {
-            apply_page_create_candidate(conn, &candidate)?;
+            apply_page_create_candidate(conn, candidate)?;
         }
         CandidateType::PageUpdate => {
-            apply_page_update_candidate(conn, &candidate)?;
+            apply_page_update_candidate(conn, candidate)?;
         }
     }
 
     // 写入 provenance
-    provenance::record_provenance_from_candidate(conn, &candidate)?;
+    provenance::record_provenance_from_candidate(conn, candidate)?;
 
     // 修复：记录本次 apply 前创建的 page_versions.id 到 review_notes，
     // rollback 时按 version id 精确恢复，避免批量 apply 同秒多候选时
@@ -493,33 +604,45 @@ pub fn apply_candidate(conn: &Connection, candidate_id: i64) -> Result<Promotion
     let applied_at = now_str();
 
     // 更新候选状态，同时记录 snapshot_version_id 到 review_notes
+    // 修复：将 snapshot_version_id 附加到现有 review_notes 后面而非覆盖，
+    // 保留审核备注信息（如"自动审核: 低风险高置信度"或"批量审核应用"）。
+    // 格式: {原有审核备注}\nsnapshot_version_id:{id}
+    // rollback 时按行解析首行提取 snapshot_version_id
     let review_notes = match snapshot_version_id {
-        Some(vid) => format!("snapshot_version_id:{}", vid),
-        None => String::new(),
+        Some(vid) => {
+            if candidate.review_notes.is_empty() {
+                format!("snapshot_version_id:{}", vid)
+            } else {
+                format!("{}\nsnapshot_version_id:{}", candidate.review_notes, vid)
+            }
+        }
+        None => candidate.review_notes.clone(),
     };
     conn.execute(
         "UPDATE promotion_candidates SET status = 'applied', applied_at = ?1, review_notes = ?2, updated_at = ?1 WHERE id = ?3",
-        params![applied_at, review_notes, candidate_id],
+        params![applied_at, review_notes, candidate.id],
     ).map_err(|e| GBrainError::Database(format!("更新候选状态失败: {}", e)))?;
 
     candidate.status = "applied".to_string();
     candidate.applied_at = Some(applied_at);
     candidate.review_notes = review_notes;
 
-    info!("候选 {} 已应用", candidate_id);
+    info!("候选 {} 已应用", candidate.id);
 
     // 记录 promotion_applied 事件（§7.6）
-    let _ = store::record_event(
+    if let Err(e) = store::record_event(
         conn,
         Some(candidate.artifact_id),
         candidate.occurrence_id,
         "promotion_applied",
         "promotion",
-        &serde_json::json!({"candidate_id": candidate_id, "type": candidate.candidate_type})
+        &serde_json::json!({"candidate_id": candidate.id, "type": candidate.candidate_type})
             .to_string(),
-    );
+    ) {
+        warn!("记录 promotion_applied 事件失败: {}", e);
+    }
 
-    Ok(candidate)
+    Ok(())
 }
 
 /// 回滚已应用的候选变更（§31 rollback_candidate）
@@ -539,42 +662,91 @@ pub fn rollback_candidate(conn: &Connection, candidate_id: i64) -> Result<Promot
         )));
     }
 
+    // 修复：用 savepoint 保护整个回滚流程的三步操作：
+    // (1) 标记 provenance 为 stale，(2) 恢复影子页面，(3) 更新候选状态。
+    // 任何一步失败时回滚所有写入，避免 provenance 已 stale 但候选仍 applied 的不一致状态。
+    let sp_name = format!("sp_rollback_{}", candidate_id);
+    conn.execute(&format!("SAVEPOINT {}", sp_name), [])
+        .map_err(|e| GBrainError::Database(format!("创建 savepoint 失败: {}", e)))?;
+
+    let rollback_result = rollback_candidate_inner(conn, &mut candidate);
+
+    match rollback_result {
+        Ok(_) => {
+            match conn.execute(&format!("RELEASE {}", sp_name), []) {
+                Ok(_) => Ok(candidate),
+                Err(e) => {
+                    // RELEASE 失败：回滚并清理 savepoint
+                    warn!(
+                        "释放 savepoint {} 失败: {}, 回滚并清理 savepoint",
+                        sp_name, e
+                    );
+                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                    Err(GBrainError::Database(format!(
+                        "释放 savepoint {} 失败（事务已回滚）: {}",
+                        sp_name, e
+                    )))
+                }
+            }
+        }
+        Err(e) => {
+            // 失败：回滚到 savepoint，所有写入撤销
+            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+            Err(e)
+        }
+    }
+}
+
+/// rollback_candidate 的内部实现，在 savepoint 保护下执行
+fn rollback_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) -> Result<()> {
     let now = now_str();
 
     // 1. 标记相关 provenance 为 stale
-    // 修复：按 promotion_candidate_id 精确 stale，避免误伤同字段其它候选来源
     provenance::mark_provenance_stale_by_candidate(
         conn,
-        candidate_id,
-        &format!("rollback: 候选 {} 回滚", candidate_id),
+        candidate.id,
+        &format!("rollback: 候选 {} 回滚", candidate.id),
     )?;
 
     // 2. 尝试恢复影子页面到应用前的版本
-    rollback_shadow_page_update(conn, &candidate)?;
+    rollback_shadow_page_update(conn, candidate)?;
 
     // 3. 更新候选状态为 rolled_back
+    // 修复：将回滚信息附加到 review_notes 而非覆盖，
+    // 保留 snapshot_version_id 信息供后续精确恢复使用。
+    // 格式: snapshot_version_id:{id}\n回滚于 {now}
+    // 或（无 version_id 时）: 回滚于 {now}
+    let new_review_notes = if candidate.review_notes.is_empty() {
+        format!("回滚于 {}", now)
+    } else {
+        format!("{}\n回滚于 {}", candidate.review_notes, now)
+    };
     conn.execute(
         "UPDATE promotion_candidates SET status = 'rolled_back', review_notes = ?1, updated_at = ?2 WHERE id = ?3",
-        params![format!("回滚于 {}", now), now, candidate_id],
+        params![new_review_notes, now, candidate.id],
     ).map_err(|e| GBrainError::Database(format!("更新候选回滚状态失败: {}", e)))?;
 
     candidate.status = "rolled_back".to_string();
-    candidate.review_notes = format!("回滚于 {}", now);
+    candidate.review_notes = new_review_notes;
 
-    info!("候选 {} 已回滚", candidate_id);
+    info!("候选 {} 已回滚", candidate.id);
 
     // 记录 promotion_rolled_back 事件（§7.6）
-    let _ = store::record_event(
+    if let Err(e) = store::record_event(
         conn,
         Some(candidate.artifact_id),
         candidate.occurrence_id,
         "promotion_rolled_back",
         "rollback",
-        &serde_json::json!({"candidate_id": candidate_id, "type": candidate.candidate_type})
+        &serde_json::json!({"candidate_id": candidate.id, "type": candidate.candidate_type})
             .to_string(),
-    );
+    ) {
+        warn!("记录 promotion_rolled_back 事件失败: {}", e);
+    }
 
-    Ok(candidate)
+    Ok(())
 }
 
 /// 回滚影子页面更新 — 尝试恢复到应用前的版本
@@ -583,10 +755,13 @@ fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate
 
     // 修复：优先按 snapshot_version_id 精确恢复，
     // 避免批量 apply 同秒多候选时 rollback 拿到同页其它候选的快照。
-    // snapshot_version_id 存储在 review_notes 中，格式: snapshot_version_id:{id}
+    // snapshot_version_id 存储在 review_notes 的最后一行，格式: snapshot_version_id:{id}
+    // 按行解析取最后一行
     let snapshot_version_id: Option<i64> = candidate
         .review_notes
-        .strip_prefix("snapshot_version_id:")
+        .lines()
+        .last()
+        .and_then(|line| line.strip_prefix("snapshot_version_id:"))
         .and_then(|s| s.parse::<i64>().ok());
 
     let previous_content: Option<String> = if let Some(vid) = snapshot_version_id {
@@ -620,6 +795,9 @@ fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate
         .map_err(|e| GBrainError::Database(format!("恢复影子页面失败: {}", e)))?;
         // 修复：回滚后重建 chunk，确保搜索索引与页面内容一致
         rebuild_chunks_for_page(conn, slug)?;
+        // 修复：同步更新 compiled_truth_tokens 和 content_hash，
+        // 避免 rollback 后 tokens/hash 仍为回滚前状态，导致 FTS 搜索或变更检测不一致
+        sync_page_tokens_and_hash(conn, slug)?;
         info!("影子页面 {} 已恢复到应用前版本", slug);
     } else {
         // 没有版本历史，尝试移除候选添加的内容
@@ -628,6 +806,38 @@ fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate
         remove_candidate_content_from_page(conn, candidate)?;
     }
 
+    Ok(())
+}
+
+/// 同步更新页面的 compiled_truth_tokens 和 content_hash
+///
+/// 在 compiled_truth 变更后调用，确保中文分词索引和内容变更检测与实际内容一致。
+/// apply 和 rollback 路径都应走此函数，避免 tokens/hash 与内容脱节。
+fn sync_page_tokens_and_hash(conn: &Connection, slug: &str) -> Result<()> {
+    let new_truth: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = ?1",
+            params![slug],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    let truth_tokens = crate::nlp::chinese::tokenize_content(&new_truth);
+    let content_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(new_truth.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+    if let Err(e) = conn.execute(
+        "UPDATE pages SET compiled_truth_tokens = ?1, content_hash = ?2 WHERE slug = ?3",
+        params![truth_tokens, content_hash, slug],
+    ) {
+        // 列可能不存在（旧 schema），记录 warn 但不阻断流程
+        warn!(
+            "更新页面 {} 的 compiled_truth_tokens/content_hash 失败: {}",
+            slug, e
+        );
+    }
     Ok(())
 }
 
@@ -666,6 +876,9 @@ fn remove_candidate_content_from_page(
                 .map_err(|e| GBrainError::Database(format!("移除候选内容失败: {}", e)))?;
                 // 修复：移除内容后重建 chunk，确保搜索索引与页面内容一致
                 rebuild_chunks_for_page(conn, &candidate.target_slug)?;
+                // 修复：同步更新 compiled_truth_tokens 和 content_hash，
+                // 避免 rollback 后 tokens/hash 仍为回滚前状态
+                sync_page_tokens_and_hash(conn, &candidate.target_slug)?;
                 debug!(
                     "从页面 {} 移除了候选 {} 的内容",
                     candidate.target_slug, candidate.id
@@ -768,6 +981,13 @@ pub fn auto_apply_candidates(
     let candidates = list_candidates(conn, Some("pending"), None, None, 1000, 0)?;
 
     let mut applied = Vec::new();
+    // 修复：收集所有候选级失败，有失败时返回 Err，
+    // 让 worker 知道存在未完成的 auto-apply，不会 complete job 导致候选永久停在 pending。
+    // 之前 SAVEPOINT 创建失败、review_candidate 失败、apply_candidate_inner 失败、
+    // RELEASE 失败都被 rollback/跳过后继续，函数最终返回 Ok(applied)，
+    // worker 认为 auto-apply 成功并 complete job，低风险候选永久停在 pending 不会重试。
+    let mut failures: Vec<String> = Vec::new();
+
     for candidate in candidates {
         if candidate.artifact_id != artifact_id {
             continue;
@@ -787,6 +1007,19 @@ pub fn auto_apply_candidates(
         }
         // 仅自动应用低风险候选
         if candidate.risk_level == "low" && candidate.confidence >= 0.8 {
+            // 修复：用 savepoint 隔离整个 accept + apply 的所有写入。
+            // 直接调用 apply_candidate_inner（而非 apply_candidate）避免嵌套 savepoint。
+            // apply_candidate 内部有自己的 savepoint，嵌套时内层 savepoint 清理失败
+            // 可能污染连接状态。外层 savepoint 覆盖整个 accept+apply 流程，
+            // 失败时全部回滚，候选恢复为 pending 可重试。
+            let sp_name = format!("sp_auto_apply_{}", candidate.id);
+            match conn.execute(&format!("SAVEPOINT {}", sp_name), []) {
+                Err(e) => {
+                    failures.push(format!("候选 {} 创建 savepoint 失败: {}", candidate.id, e));
+                    continue;
+                }
+                Ok(_) => {}
+            }
             // 先 accept
             let review_input = ReviewCandidateInput {
                 candidate_id: candidate.id,
@@ -794,22 +1027,44 @@ pub fn auto_apply_candidates(
                 reviewer: "auto".to_string(),
                 notes: Some("自动审核: 低风险高置信度".to_string()),
             };
-            // 修复：apply 失败时回滚候选状态为 pending，避免卡在 accepted
-            // 之前 apply 失败后错误被吞掉，候选已从 pending 变成 accepted，
-            // 不会再被下一轮自动应用扫描到
-            if let Ok(_) = review_candidate(conn, &review_input) {
-                match apply_candidate(conn, candidate.id) {
-                    Ok(_) => {
-                        applied.push(candidate.id);
+            match review_candidate(conn, &review_input) {
+                Ok(reviewed) => {
+                    // 再 apply（直接调用 inner 避免嵌套 savepoint）
+                    let mut candidate_for_apply = reviewed;
+                    match apply_candidate_inner(conn, &mut candidate_for_apply) {
+                        Ok(_) => {
+                            // 修复：RELEASE SAVEPOINT 失败时事务未提交，不能认为已应用；
+                            // applied.push() 必须在 RELEASE 成功后执行
+                            match conn.execute(&format!("RELEASE {}", sp_name), []) {
+                                Ok(_) => applied.push(candidate.id),
+                                Err(e) => {
+                                    // RELEASE 失败：回滚整个 accept+apply，候选恢复为 pending
+                                    warn!(
+                                        "自动应用候选 {} 释放 savepoint 失败: {}, 回滚",
+                                        candidate.id, e
+                                    );
+                                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                                    failures.push(format!(
+                                        "候选 {} 释放 savepoint 失败: {}",
+                                        candidate.id, e
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // accept+apply 失败，savepoint 回滚所有写入（含 accept 状态变更）
+                            debug!("自动应用候选 {} 失败: {}, savepoint 回滚", candidate.id, e);
+                            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                            failures.push(format!("候选 {} apply 失败: {}", candidate.id, e));
+                        }
                     }
-                    Err(e) => {
-                        // apply 失败，回滚候选状态为 pending 以便重试
-                        debug!("自动应用候选 {} 失败: {}, 回滚为 pending", candidate.id, e);
-                        let _ = conn.execute(
-                            "UPDATE promotion_candidates SET status = 'pending', reviewer = '', review_notes = '', updated_at = datetime('now') WHERE id = ?1",
-                            params![candidate.id],
-                        );
-                    }
+                }
+                Err(e) => {
+                    // review_candidate 失败：释放 savepoint，记录失败
+                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                    failures.push(format!("候选 {} accept 失败: {}", candidate.id, e));
                 }
             }
         }
@@ -817,6 +1072,23 @@ pub fn auto_apply_candidates(
 
     if !applied.is_empty() {
         info!("自动应用了 {} 个低风险候选", applied.len());
+    }
+
+    // 修复：有候选级失败时返回 Err，让 worker 知道存在未完成的 auto-apply，
+    // 不会 complete job 导致失败候选永久停在 pending 不会重试。
+    // 部分成功时也返回 Err，因为失败候选需要重试。
+    if !failures.is_empty() {
+        warn!(
+            "自动应用存在 {} 个失败: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+        return Err(GBrainError::Database(format!(
+            "自动应用低风险候选部分失败 (成功={}, 失败={}): {}",
+            applied.len(),
+            failures.len(),
+            failures.join("; ")
+        )));
     }
 
     Ok(applied)
@@ -910,6 +1182,18 @@ pub fn batch_apply_candidates(
     let mut failures = Vec::new();
 
     for candidate in &candidates {
+        // 修复：用 savepoint 隔离整个 accept+apply 流程，与 auto_apply_candidates 一致。
+        // 之前先 accept 再 apply，apply 失败后靠 best-effort UPDATE ... pending 恢复，
+        // 但崩溃或恢复 UPDATE 失败时候选会卡在 accepted 状态。
+        // savepoint 确保失败时全部回滚（含 accept 状态变更），候选恢复为 pending 可重试。
+        // 直接调用 apply_candidate_inner（而非 apply_candidate）避免嵌套 savepoint。
+        let sp_name = format!("sp_batch_apply_{}", candidate.id);
+        if conn.execute(&format!("SAVEPOINT {}", sp_name), []).is_err() {
+            failed += 1;
+            failures.push(format!("候选 id={} 创建 savepoint 失败", candidate.id));
+            continue;
+        }
+
         // 先 accept
         let review_input = ReviewCandidateInput {
             candidate_id: candidate.id,
@@ -918,31 +1202,67 @@ pub fn batch_apply_candidates(
             notes: Some("批量审核应用".to_string()),
         };
         if let Err(e) = review_candidate(conn, &review_input) {
+            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
             failed += 1;
             failures.push(format!("候选 id={} accept 失败: {}", candidate.id, e));
             continue;
         }
-        // 再 apply
-        match apply_candidate(conn, candidate.id) {
-            Ok(_) => {
-                applied += 1;
-                info!(
-                    "批量应用候选成功: id={} type={}",
-                    candidate.id, candidate.candidate_type
-                );
+        // 再 apply（直接调用 inner 避免嵌套 savepoint）
+        // review_candidate 返回 accepted 状态的候选，apply_candidate_inner 需要完整记录
+        let mut candidate_for_apply = match find_candidate_by_id(conn, candidate.id) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                failed += 1;
+                failures.push(format!(
+                    "候选 id={} accept 后查询失败: 不存在",
+                    candidate.id
+                ));
+                continue;
             }
             Err(e) => {
-                // 修复：apply 失败时回滚候选状态为 pending，避免卡在 accepted。
-                // review_candidate 只允许审核 pending 候选，accepted 状态的候选
-                // 后续批量重试也扫不到，会永久卡住。
+                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                failed += 1;
+                failures.push(format!("候选 id={} accept 后查询失败: {}", candidate.id, e));
+                continue;
+            }
+        };
+        match apply_candidate_inner(conn, &mut candidate_for_apply) {
+            Ok(_) => {
+                // 修复：RELEASE 失败时回滚整个 accept+apply，候选恢复为 pending
+                match conn.execute(&format!("RELEASE {}", sp_name), []) {
+                    Ok(_) => {
+                        applied += 1;
+                        info!(
+                            "批量应用候选成功: id={} type={}",
+                            candidate.id, candidate.candidate_type
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "批量应用候选 {} 释放 savepoint 失败: {}, 回滚",
+                            candidate.id, e
+                        );
+                        let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                        let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+                        failed += 1;
+                        failures.push(format!(
+                            "候选 id={} ({}) RELEASE savepoint 失败: {}",
+                            candidate.id, candidate.candidate_type, e
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                // accept+apply 失败，savepoint 回滚所有写入（含 accept 状态变更）
                 debug!(
-                    "批量应用候选 {} apply 失败: {}, 回滚为 pending",
+                    "批量应用候选 {} apply 失败: {}, savepoint 回滚",
                     candidate.id, e
                 );
-                let _ = conn.execute(
-                    "UPDATE promotion_candidates SET status = 'pending', reviewer = '', review_notes = '', updated_at = datetime('now') WHERE id = ?1",
-                    params![candidate.id],
-                );
+                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
+                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
                 failed += 1;
                 failures.push(format!(
                     "候选 id={} ({}) apply 失败: {}",
@@ -1136,12 +1456,23 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
         format!("{:x}", hasher.finalize())
     };
     let now = now_str();
-    conn.execute(
+    // 修复：检查 INSERT 影响行数，页面已存在时返回错误而非静默跳过。
+    // INSERT OR IGNORE 在 slug 已存在时不插入也不报错，但候选会被标记为 applied，
+    // 导致"标记 applied 但实际页面未创建/更新"的不一致问题。
+    // 与 update_shadow_page_section 保持一致：操作无效果时返回错误。
+    let rows = conn.execute(
         "INSERT OR IGNORE INTO pages
          (slug, title, compiled_truth, page_type, title_tokens, compiled_truth_tokens, content_hash, created_at, updated_at)
          VALUES (?1, ?2, ?3, 'note', ?4, ?5, ?6, ?7, ?7)",
         params![slug, title, content, title_tokens, truth_tokens, content_hash, now],
     ).map_err(|e| GBrainError::Database(format!("创建页面失败: {}", e)))?;
+
+    if rows == 0 {
+        return Err(GBrainError::InvalidInput(format!(
+            "页面 {} 已存在，无法创建（候选可能应使用 page_update 类型）",
+            slug
+        )));
+    }
 
     info!("页面创建候选已应用: slug={}", slug);
     Ok(())
@@ -1246,25 +1577,9 @@ fn update_shadow_page_section(
         ).map_err(|e| GBrainError::Database(format!("更新影子页面失败: {}", e)))?;
 
         // 修复：同步更新 compiled_truth_tokens 和 content_hash，
-        // 与 put_page 保持一致，确保中文分词索引和内容变更检测正确
-        let new_truth: String = conn
-            .query_row(
-                "SELECT compiled_truth FROM pages WHERE slug = ?1",
-                params![slug],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
-        let truth_tokens = crate::nlp::chinese::tokenize_content(&new_truth);
-        let content_hash = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(new_truth.as_bytes());
-            format!("{:x}", hasher.finalize())
-        };
-        let _ = conn.execute(
-            "UPDATE pages SET compiled_truth_tokens = ?1, content_hash = ?2 WHERE slug = ?3",
-            params![truth_tokens, content_hash, slug],
-        );
+        // 与 put_page 保持一致，确保中文分词索引和内容变更检测正确。
+        // 统一走 sync_page_tokens_and_hash，避免重复代码
+        sync_page_tokens_and_hash(conn, slug)?;
 
         // 修复：更新 compiled_truth 后同步重建 chunk，确保 BrainFirst 搜索能找到新内容
         // 使用 rebuild_chunks_for_page 统一处理，避免列名不一致等重复错误
@@ -1457,6 +1772,7 @@ fn row_to_promotion_candidate(
         reviewer: row.get(16)?,
         review_notes: row.get(17)?,
         applied_at: row.get(18)?,
+        candidate_fingerprint: row.get::<_, Option<String>>(19)?.unwrap_or_default(),
     })
 }
 

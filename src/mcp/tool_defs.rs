@@ -582,7 +582,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "query", description: "Query text", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "strategy", description: "Query strategy: brain_first, evidence_first, provenance, timeline_first", required: false, param_type: ParamType::String, enum_values: Some(&["brain_first", "evidence_first", "provenance", "timeline_first"]), items_type: None },
             ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "filter_slug", description: "Filter by brain slug", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "filter_slug", description: "Filter by brain slug (applies to all strategies: limits brain hits, evidence hits, and timeline hits to this page)", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "include_evidence", description: "Include KB evidence hits", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "include_provenance", description: "Include provenance records", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],

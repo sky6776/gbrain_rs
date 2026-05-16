@@ -711,6 +711,12 @@ impl SqliteEngine {
                     continue;
                 }
             }
+            // 精确 slug 白名单过滤：只保留匹配 include_slugs 的结果
+            if let Some(include) = &opts.include_slugs {
+                if !include.is_empty() && !include.contains(&slug) {
+                    continue;
+                }
+            }
             let page_type = PageType::from_str_lossy(&page_type_str);
             if let Some(ref wanted) = opts.page_type {
                 if &page_type != wanted {
@@ -1189,6 +1195,17 @@ impl BrainEngine for SqliteEngine {
                     sql.push_str(&format!(" AND p.slug NOT IN ({})", placeholders.join(", ")));
                 }
             }
+            // 精确 slug 白名单：只返回匹配 include_slugs 的页面
+            if let Some(ref include) = opts.include_slugs {
+                if !include.is_empty() {
+                    let start_idx = next_param_idx;
+                    next_param_idx += include.len();
+                    let placeholders: Vec<String> = (0..include.len())
+                        .map(|i| format!("?{}", start_idx + i))
+                        .collect();
+                    sql.push_str(&format!(" AND p.slug IN ({})", placeholders.join(", ")));
+                }
+            }
             if !exclude_prefixes.is_empty() {
                 let start_idx = next_param_idx;
                 let clauses: Vec<String> = (0..exclude_prefixes.len())
@@ -1220,6 +1237,11 @@ impl BrainEngine for SqliteEngine {
             }
             if let Some(ref exclude) = opts.exclude_slugs {
                 for s in exclude {
+                    param_values.push(Box::new(s.clone()));
+                }
+            }
+            if let Some(ref include) = opts.include_slugs {
+                for s in include {
                     param_values.push(Box::new(s.clone()));
                 }
             }
@@ -1307,12 +1329,28 @@ impl BrainEngine for SqliteEngine {
                     sql.push_str(&format!(" AND p.slug NOT IN ({})", placeholders.join(", ")));
                 }
             }
+            // 精确 slug 白名单：只返回匹配 include_slugs 的页面
+            if let Some(ref include) = opts.include_slugs {
+                if !include.is_empty() {
+                    let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
+                    let start_idx = if opts.page_type.is_some() {
+                        4 + exact_count
+                    } else {
+                        3 + exact_count
+                    };
+                    let placeholders: Vec<String> = (0..include.len())
+                        .map(|i| format!("?{}", start_idx + i))
+                        .collect();
+                    sql.push_str(&format!(" AND p.slug IN ({})", placeholders.join(", ")));
+                }
+            }
             if !exclude_prefixes.is_empty() {
                 let exact_count = opts.exclude_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
+                let include_count = opts.include_slugs.as_ref().map(|v| v.len()).unwrap_or(0);
                 let start_idx = if opts.page_type.is_some() {
-                    4 + exact_count
+                    4 + exact_count + include_count
                 } else {
-                    3 + exact_count
+                    3 + exact_count + include_count
                 };
                 let clauses: Vec<String> = (0..exclude_prefixes.len())
                     .map(|i| format!("p.slug NOT LIKE ?{}", start_idx + i))
@@ -1331,6 +1369,11 @@ impl BrainEngine for SqliteEngine {
             }
             if let Some(ref exclude) = opts.exclude_slugs {
                 for s in exclude {
+                    param_values.push(Box::new(s.clone()));
+                }
+            }
+            if let Some(ref include) = opts.include_slugs {
+                for s in include {
                     param_values.push(Box::new(s.clone()));
                 }
             }
@@ -1423,6 +1466,17 @@ impl BrainEngine for SqliteEngine {
                 sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
             }
         }
+        // 精确 slug 白名单：只返回匹配 include_slugs 的页面
+        if let Some(ref include) = opts.include_slugs {
+            if !include.is_empty() {
+                let start_idx = next_param_idx;
+                next_param_idx += include.len();
+                let placeholders: Vec<String> = (0..include.len())
+                    .map(|i| format!("?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND p.slug IN ({})", placeholders.join(", ")));
+            }
+        }
         if !exclude_prefixes.is_empty() {
             let start_idx = next_param_idx;
             let clauses: Vec<String> = (0..exclude_prefixes.len())
@@ -1447,6 +1501,11 @@ impl BrainEngine for SqliteEngine {
         if let Some(include) = &opts.include_slug_prefixes {
             for prefix in include {
                 params_vec.push(Box::new(format!("{}%", prefix)));
+            }
+        }
+        if let Some(ref include) = opts.include_slugs {
+            for s in include {
+                params_vec.push(Box::new(s.clone()));
             }
         }
         for prefix in &exclude_prefixes {
@@ -1550,6 +1609,17 @@ impl BrainEngine for SqliteEngine {
                 sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
             }
         }
+        // 精确 slug 白名单：只返回匹配 include_slugs 的页面
+        if let Some(ref include) = opts.include_slugs {
+            if !include.is_empty() {
+                let start_idx = next_param_idx;
+                next_param_idx += include.len();
+                let placeholders: Vec<String> = (0..include.len())
+                    .map(|i| format!("?{}", start_idx + i))
+                    .collect();
+                sql.push_str(&format!(" AND p.slug IN ({})", placeholders.join(", ")));
+            }
+        }
         if let Some(ref exclude) = opts.exclude_slugs {
             if !exclude.is_empty() {
                 let start_idx = next_param_idx;
@@ -1588,6 +1658,11 @@ impl BrainEngine for SqliteEngine {
         if let Some(include) = &opts.include_slug_prefixes {
             for prefix in include {
                 param_values.push(Box::new(format!("{}%", prefix)));
+            }
+        }
+        if let Some(ref include) = opts.include_slugs {
+            for s in include {
+                param_values.push(Box::new(s.clone()));
             }
         }
         if let Some(ref exclude) = opts.exclude_slugs {
@@ -2989,17 +3064,25 @@ impl BrainEngine for SqliteEngine {
                     e => GBrainError::Database(e.to_string()),
                 })?;
             // Also restore title and page_type from the version snapshot (V8 columns)
-            // Clear content_hash so skip-if-unchanged won't incorrectly skip subsequent writes
+            // 修复：同步重算 compiled_truth_tokens 和 content_hash，
+            // 避免 revert 后 tokens 仍为旧值导致 FTS 搜索不一致
+            let truth_tokens = crate::nlp::chinese::tokenize_content(&compiled_truth);
+            let content_hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(compiled_truth.as_bytes());
+                format!("{:x}", hasher.finalize())
+            };
             conn.execute(
                 "UPDATE pages SET
                     compiled_truth = ?1,
                     frontmatter = (SELECT frontmatter FROM page_versions WHERE id = ?2),
                     title = (SELECT title FROM page_versions WHERE id = ?2),
                     page_type = (SELECT page_type FROM page_versions WHERE id = ?2),
-                    content_hash = NULL,
+                    compiled_truth_tokens = ?4,
+                    content_hash = ?5,
                     updated_at = datetime('now')
                  WHERE slug = ?3",
-                params![compiled_truth, version_id, slug],
+                params![compiled_truth, version_id, slug, truth_tokens, content_hash],
             )?;
             Ok(())
         })

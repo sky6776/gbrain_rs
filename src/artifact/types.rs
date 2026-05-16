@@ -439,6 +439,9 @@ pub struct PromotionCandidate {
     pub reviewer: String,
     pub review_notes: String,
     pub applied_at: Option<String>,
+    /// 候选指纹 — SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
+    /// 用于重试路径去重，防止同一内容重复创建候选
+    pub candidate_fingerprint: String,
 }
 
 /// provenance_ledger 表行

@@ -4,7 +4,7 @@
 //! Complete SQLite schema with FTS5, triggers, and indexes.
 
 /// Current schema version
-pub const SCHEMA_VERSION: i32 = 26;
+pub const SCHEMA_VERSION: i32 = 27;
 
 /// Complete schema DDL
 pub const SCHEMA_DDL: &str = r#"
@@ -1607,7 +1607,8 @@ CREATE TABLE IF NOT EXISTS promotion_candidates (
     status TEXT NOT NULL DEFAULT 'pending',
     reviewer TEXT NOT NULL DEFAULT '',
     review_notes TEXT NOT NULL DEFAULT '',
-    applied_at TEXT
+    applied_at TEXT,
+    candidate_fingerprint TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_promo_candidates_artifact ON promotion_candidates(artifact_id);
@@ -1615,6 +1616,10 @@ CREATE INDEX IF NOT EXISTS idx_promo_candidates_occurrence ON promotion_candidat
 CREATE INDEX IF NOT EXISTS idx_promo_candidates_doc ON promotion_candidates(kb_document_id);
 CREATE INDEX IF NOT EXISTS idx_promo_candidates_status ON promotion_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_promo_candidates_target ON promotion_candidates(target_slug);
+-- 唯一索引：同一指纹只允许一条 pending/accepted/applied 记录，防止重试路径重复创建候选
+CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_candidates_fingerprint
+    ON promotion_candidates(candidate_fingerprint)
+    WHERE candidate_fingerprint != '' AND status IN ('pending', 'accepted', 'applied');
 
 -- 5. 来源追溯（gbrain 事实与 KB 证据的来源关系）
 CREATE TABLE IF NOT EXISTS provenance_ledger (
@@ -1731,6 +1736,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_proj_active_unique
     WHERE status = 'active';
 "#;
 
+pub const MIGRATION_V27_DDL: &str = r#"
+-- 为 promotion_candidates 添加候选指纹列，用于重试路径去重
+-- fingerprint = SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
+-- 同一 artifact + 同一内容不应重复创建候选
+ALTER TABLE promotion_candidates ADD COLUMN candidate_fingerprint TEXT NOT NULL DEFAULT '';
+
+-- 唯一索引：同一指纹只允许一条 pending/accepted/applied 记录
+-- 使用 partial index 排除 rolled_back/rejected/stale/superseded 等终态，
+-- 允许回滚后的候选重新创建
+CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_candidates_fingerprint
+    ON promotion_candidates(candidate_fingerprint)
+    WHERE candidate_fingerprint != '' AND status IN ('pending', 'accepted', 'applied');
+"#;
+
 /// Get all schema migrations as (version, DDL) pairs
 pub fn get_migrations() -> Vec<(i32, &'static str)> {
     vec![
@@ -1759,5 +1778,6 @@ pub fn get_migrations() -> Vec<(i32, &'static str)> {
         (24, MIGRATION_V24_DDL),
         (25, MIGRATION_V25_DDL),
         (26, MIGRATION_V26_DDL),
+        (27, MIGRATION_V27_DDL),
     ]
 }

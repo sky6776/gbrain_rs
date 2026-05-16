@@ -648,6 +648,35 @@ impl<'a> KbEngine<'a> {
         embedding_progress: Option<i32>,
         embedding_error: Option<&str>,
     ) -> Result<()> {
+        self.update_document_status_with_run_guard(
+            id,
+            parsing_status,
+            parsing_progress,
+            parsing_error,
+            embedding_status,
+            embedding_progress,
+            embedding_error,
+            None,
+        )
+    }
+
+    /// 修复：带 run_id 守卫的 update_document_status。
+    /// 如果提供了 run_id，UPDATE 语句增加 `AND processing_run_id = ?` 条件，
+    /// 确保只有当前 run 的文档状态才会被更新。如果 run_id 不匹配（0 行受影响），
+    /// 静默忽略（中间状态更新失败不应中断管道），仅记录警告。
+    /// 中间状态（进度/错误）丢失不影响最终一致性，最终 stats 有严格守卫。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_status_with_run_guard(
+        &self,
+        id: i64,
+        parsing_status: Option<i32>,
+        parsing_progress: Option<i32>,
+        parsing_error: Option<&str>,
+        embedding_status: Option<i32>,
+        embedding_progress: Option<i32>,
+        embedding_error: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<()> {
         self.transaction(|conn| {
             let mut sets = Vec::new();
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -682,13 +711,30 @@ impl<'a> KbEngine<'a> {
             }
 
             sets.push("updated_at = datetime('now')".to_string());
+            // id 参数
             param_values.push(Box::new(id));
 
-            let sql = format!("UPDATE kb_documents SET {} WHERE id = ?", sets.join(", "));
+            let sql = if let Some(rid) = run_id {
+                // 修复：增加 processing_run_id WHERE 条件，防止旧 run 污染中间状态
+                param_values.push(Box::new(rid.to_string()));
+                format!(
+                    "UPDATE kb_documents SET {} WHERE id = ? AND processing_run_id = ?",
+                    sets.join(", ")
+                )
+            } else {
+                format!("UPDATE kb_documents SET {} WHERE id = ?", sets.join(", "))
+            };
+
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 param_values.iter().map(|p| p.as_ref()).collect();
 
-            conn.execute(&sql, param_refs.as_slice())?;
+            let rows = conn.execute(&sql, param_refs.as_slice())?;
+            if run_id.is_some() && rows == 0 {
+                tracing::warn!(
+                    id,
+                    "update_document_status: run_id 不匹配，跳过中间状态更新（stale job）"
+                );
+            }
             Ok(())
         })
     }
@@ -754,20 +800,60 @@ impl<'a> KbEngine<'a> {
         split_total: i32,
         embedding_status: Option<i32>,
     ) -> Result<()> {
+        self.update_document_stats_with_run_guard(
+            id,
+            word_total,
+            split_total,
+            embedding_status,
+            None,
+        )
+    }
+
+    /// 内部实现：在调用者已有事务的情况下直接执行条件 UPDATE，不再开事务。
+    /// 修复：SQLite 不支持嵌套 BEGIN，pipeline.rs 外层已 unchecked_transaction，
+    /// 内层不能再通过 self.transaction() 开新事务，否则收尾阶段会失败。
+    /// 此函数供外层事务内直接调用，避免嵌套事务。
+    pub fn update_document_stats_with_run_guard_inner(
+        &self,
+        id: i64,
+        word_total: i32,
+        split_total: i32,
+        embedding_status: Option<i32>,
+        run_id: Option<&str>,
+    ) -> Result<()> {
         let emb_st = embedding_status.unwrap_or(STATUS_COMPLETED);
-        // FIX10-09: 单独处理 STATUS_SKIPPED — 文档已解析完成，只是因策略跳过 embedding
         let (doc_status, idx_status, set_last_indexed) = if emb_st == STATUS_COMPLETED {
             ("ready", "ready", true)
         } else if emb_st == STATUS_FAILED {
             ("failed", "failed", false)
         } else if emb_st == STATUS_SKIPPED {
-            // 解析完成但 embedding 被策略跳过：文档可用，仅关键词索引
             ("ready", "keyword_only", true)
         } else {
             ("processing", "pending", false)
         };
-        self.transaction(|conn| {
-            if set_last_indexed {
+        // 修复：直接在已有事务的 conn 上执行 UPDATE，不再开新事务
+        let conn = self.conn;
+        let run_guard = run_id.is_some();
+        if set_last_indexed {
+            let rows = if let Some(rid) = run_id {
+                conn.execute(
+                    "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
+                     parsing_status = ?3, embedding_status = ?4, \
+                     document_status = ?5, index_status = ?6, \
+                     last_indexed_at = datetime('now'), updated_at = datetime('now') \
+                     WHERE id = ?7 AND processing_run_id = ?8",
+                    params![
+                        word_total,
+                        split_total,
+                        STATUS_COMPLETED,
+                        emb_st,
+                        doc_status,
+                        idx_status,
+                        id,
+                        rid
+                    ],
+                )?
+            } else {
                 conn.execute(
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                      parsing_status = ?3, embedding_status = ?4, \
@@ -783,7 +869,33 @@ impl<'a> KbEngine<'a> {
                         idx_status,
                         id
                     ],
-                )?;
+                )?
+            };
+            if run_guard && rows == 0 {
+                return Err(GBrainError::InvalidInput(
+                    "stale KB processing job; document has a newer run (update_document_stats)"
+                        .to_string(),
+                ));
+            }
+        } else {
+            let rows = if let Some(rid) = run_id {
+                conn.execute(
+                    "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
+                     parsing_status = ?3, embedding_status = ?4, \
+                     document_status = ?5, index_status = ?6, \
+                     updated_at = datetime('now') \
+                     WHERE id = ?7 AND processing_run_id = ?8",
+                    params![
+                        word_total,
+                        split_total,
+                        STATUS_COMPLETED,
+                        emb_st,
+                        doc_status,
+                        idx_status,
+                        id,
+                        rid
+                    ],
+                )?
             } else {
                 conn.execute(
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
@@ -800,9 +912,36 @@ impl<'a> KbEngine<'a> {
                         idx_status,
                         id
                     ],
-                )?;
+                )?
+            };
+            if run_guard && rows == 0 {
+                return Err(GBrainError::InvalidInput(
+                    "stale KB processing job; document has a newer run (update_document_stats)"
+                        .to_string(),
+                ));
             }
-            Ok(())
+        }
+        Ok(())
+    }
+
+    /// 带事务的 update_document_stats_with_run_guard（自带事务）。
+    /// 若调用方已持有事务，请改用 `update_document_stats_with_run_guard_inner` 以避免嵌套事务。
+    pub fn update_document_stats_with_run_guard(
+        &self,
+        id: i64,
+        word_total: i32,
+        split_total: i32,
+        embedding_status: Option<i32>,
+        run_id: Option<&str>,
+    ) -> Result<()> {
+        self.transaction(|_| {
+            self.update_document_stats_with_run_guard_inner(
+                id,
+                word_total,
+                split_total,
+                embedding_status,
+                run_id,
+            )
         })
     }
 
@@ -995,25 +1134,82 @@ impl<'a> KbEngine<'a> {
         document_date: Option<&str>,
         modified_at: Option<&str>,
     ) -> Result<()> {
+        self.update_document_metadata_with_run_guard(
+            id,
+            title,
+            _author,
+            keywords,
+            entity_names,
+            source_uri,
+            document_date,
+            modified_at,
+            None,
+        )
+    }
+
+    /// 修复：带 run_id 守卫的 update_document_metadata。
+    /// 如果提供了 run_id，UPDATE 语句增加 `AND processing_run_id = ?` 条件，
+    /// 防止旧 job 在过期后继续写元数据，污染新 run 的文档。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_metadata_with_run_guard(
+        &self,
+        id: i64,
+        title: &str,
+        _author: &str,
+        keywords: &str,
+        entity_names: &str,
+        source_uri: &str,
+        document_date: Option<&str>,
+        modified_at: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<()> {
         self.transaction(|conn| {
             let title_val = if !title.is_empty() { title } else { "" };
-            conn.execute(
-                "UPDATE kb_documents SET title = COALESCE(NULLIF(?1, ''), title), \
-                 keywords = ?2, entity_names = ?3, source_uri = COALESCE(NULLIF(?4, ''), source_uri), \
-                 document_date = COALESCE(?5, document_date), \
-                 modified_at = COALESCE(?6, modified_at), \
-                 updated_at = datetime('now') \
-                 WHERE id = ?7",
-                rusqlite::params![
-                    title_val,
-                    keywords,
-                    entity_names,
-                    source_uri,
-                    document_date,
-                    modified_at,
-                    id,
-                ],
-            )?;
+            if let Some(rid) = run_id {
+                // 修复：增加 processing_run_id 条件，防止旧 run 污染元数据
+                let rows = conn.execute(
+                    "UPDATE kb_documents SET title = COALESCE(NULLIF(?1, ''), title), \
+                     keywords = ?2, entity_names = ?3, source_uri = COALESCE(NULLIF(?4, ''), source_uri), \
+                     document_date = COALESCE(?5, document_date), \
+                     modified_at = COALESCE(?6, modified_at), \
+                     updated_at = datetime('now') \
+                     WHERE id = ?7 AND processing_run_id = ?8",
+                    rusqlite::params![
+                        title_val,
+                        keywords,
+                        entity_names,
+                        source_uri,
+                        document_date,
+                        modified_at,
+                        id,
+                        rid,
+                    ],
+                )?;
+                if rows == 0 {
+                    tracing::warn!(
+                        id,
+                        "update_document_metadata: run_id 不匹配，跳过元数据更新（stale job）"
+                    );
+                }
+            } else {
+                conn.execute(
+                    "UPDATE kb_documents SET title = COALESCE(NULLIF(?1, ''), title), \
+                     keywords = ?2, entity_names = ?3, source_uri = COALESCE(NULLIF(?4, ''), source_uri), \
+                     document_date = COALESCE(?5, document_date), \
+                     modified_at = COALESCE(?6, modified_at), \
+                     updated_at = datetime('now') \
+                     WHERE id = ?7",
+                    rusqlite::params![
+                        title_val,
+                        keywords,
+                        entity_names,
+                        source_uri,
+                        document_date,
+                        modified_at,
+                        id,
+                    ],
+                )?;
+            }
             Ok(())
         })
     }
@@ -1027,13 +1223,51 @@ impl<'a> KbEngine<'a> {
         char_count: i32,
         page_count: i32,
     ) -> Result<()> {
+        self.update_document_granularity_with_run_guard(
+            id,
+            granularity,
+            chunk_strategy,
+            char_count,
+            page_count,
+            None,
+        )
+    }
+
+    /// 修复：带 run_id 守卫的 update_document_granularity。
+    /// 如果提供了 run_id，UPDATE 语句增加 `AND processing_run_id = ?` 条件，
+    /// 防止旧 job 在过期后继续写 granularity，污染新 run 的文档。
+    pub fn update_document_granularity_with_run_guard(
+        &self,
+        id: i64,
+        granularity: &str,
+        chunk_strategy: &str,
+        char_count: i32,
+        page_count: i32,
+        run_id: Option<&str>,
+    ) -> Result<()> {
         self.transaction(|conn| {
-            conn.execute(
-                "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
-                 content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
-                 WHERE id = ?5",
-                params![granularity, chunk_strategy, char_count, page_count, id],
-            )?;
+            if let Some(rid) = run_id {
+                // 修复：增加 processing_run_id 条件，防止旧 run 污染 granularity
+                let rows = conn.execute(
+                    "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
+                     content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
+                     WHERE id = ?5 AND processing_run_id = ?6",
+                    params![granularity, chunk_strategy, char_count, page_count, id, rid],
+                )?;
+                if rows == 0 {
+                    tracing::warn!(
+                        id,
+                        "update_document_granularity: run_id 不匹配，跳过 granularity 更新（stale job）"
+                    );
+                }
+            } else {
+                conn.execute(
+                    "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
+                     content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
+                     WHERE id = ?5",
+                    params![granularity, chunk_strategy, char_count, page_count, id],
+                )?;
+            }
             Ok(())
         })
     }

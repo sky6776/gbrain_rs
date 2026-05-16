@@ -237,6 +237,9 @@ pub struct SearchOpts {
     pub exclude_slugs: Option<Vec<String>>,
     pub exclude_slug_prefixes: Option<Vec<String>>,
     pub include_slug_prefixes: Option<Vec<String>>,
+    /// 精确 slug 白名单：搜索结果只返回匹配这些 slug 的页面。
+    /// 用于 filter_slug 下推，避免扩大全局候选后后置过滤导致假阴性。
+    pub include_slugs: Option<Vec<String>>,
     /// Pre-computed expanded queries for multi-list RRF fusion.
     /// Caller should run expand_query() asynchronously and pass results here.
     pub expanded_queries: Option<Vec<String>>,

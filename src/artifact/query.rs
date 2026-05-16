@@ -64,15 +64,30 @@ pub fn unified_query(
     match strategy {
         QueryStrategy::BrainFirst => {
             // 1. 先查 gbrain
-            brain_hits = query_brain(conn, &input.query, limit, engine, config)?;
+            // 修复：把 filter_slug 下推到 query_brain，在搜索阶段就限定 slug，
+            // 避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉
+            brain_hits = query_brain(
+                conn,
+                &input.query,
+                limit,
+                engine,
+                config,
+                input.filter_slug.as_deref(),
+            )?;
 
             // 2. 如果 gbrain 结果不足，查 KB 补充
             if brain_hits.len() < limit as usize && input.include_evidence {
-                evidence_hits =
-                    query_kb_evidence(conn, &input.query, limit - brain_hits.len() as i64)?;
+                evidence_hits = query_kb_evidence(
+                    conn,
+                    &input.query,
+                    limit - brain_hits.len() as i64,
+                    input.filter_slug.as_deref(),
+                )?;
             }
 
             // 3. 给 brain hit 附加 provenance
+            // 修复：只收集 filter_slug 匹配的 brain_hits 的 provenance，
+            // 避免提前收集非目标 slug 的来源记录
             if input.include_provenance {
                 for hit in &brain_hits {
                     let prov = provenance::find_provenance_by_brain_slug(conn, &hit.slug)?;
@@ -82,14 +97,19 @@ pub fn unified_query(
         }
         QueryStrategy::EvidenceFirst => {
             // 1. 先查 KB
-            evidence_hits = query_kb_evidence(conn, &input.query, limit)?;
+            // 修复：把 filter_slug 下推到 query_kb_evidence
+            evidence_hits =
+                query_kb_evidence(conn, &input.query, limit, input.filter_slug.as_deref())?;
 
             // 2. 给 KB hit 附加 artifact 和 shadow page 信息
             // 修复：query_kb_evidence 创建 EvidenceHit 时 projections 恒为空，
             // 从 hit.projections 找 kb_document_id 永远找不到。
             // 应直接用 hit.kb_document_id 查 artifact_projections
+            // 修复：当 filter_slug 存在且 shadow_page_slug 已由 SQL JOIN 正确填入时，
+            // 跳过无约束的 projection 查找，避免同一 kb_document 被多个 artifact 复用时
+            // 拿到错误 artifact 的投影并覆盖正确的 shadow_page_slug。
             for hit in &mut evidence_hits {
-                if hit.kb_document_id > 0 {
+                if hit.kb_document_id > 0 && hit.shadow_page_slug.is_none() {
                     let kb_doc_id = hit.kb_document_id;
                     // 查找关联的 artifact 投影
                     let proj = store::find_projection_by_ref(
@@ -115,10 +135,19 @@ pub fn unified_query(
 
             // 3. 查 gbrain 上下文
             if brain_hits.len() < limit as usize {
-                brain_hits = query_brain(conn, &input.query, limit / 2, engine, config)?;
+                // 修复：把 filter_slug 下推到 query_brain
+                brain_hits = query_brain(
+                    conn,
+                    &input.query,
+                    limit / 2,
+                    engine,
+                    config,
+                    input.filter_slug.as_deref(),
+                )?;
             }
 
             // 4. 给 brain hit 附加 provenance
+            // 修复：只收集 filter_slug 匹配的 brain_hits 的 provenance
             if input.include_provenance {
                 for hit in &brain_hits {
                     let prov = provenance::find_provenance_by_brain_slug(conn, &hit.slug)?;
@@ -132,7 +161,7 @@ pub fn unified_query(
                 provenance_records = provenance::find_provenance_by_brain_slug(conn, slug)?;
             } else {
                 // 尝试从查询中推断 slug
-                let brain_hits_tmp = query_brain(conn, &input.query, 1, engine, config)?;
+                let brain_hits_tmp = query_brain(conn, &input.query, 1, engine, config, None)?;
                 if let Some(hit) = brain_hits_tmp.first() {
                     provenance_records =
                         provenance::find_provenance_by_brain_slug(conn, &hit.slug)?;
@@ -142,7 +171,9 @@ pub fn unified_query(
         QueryStrategy::TimelineFirst => {
             // §11.2: "最近发生了什么 / 时间线" → 先查时间线事件，再查 gbrain 上下文
             // 1. 查询已接受的 timeline_event 候选
-            timeline_hits = query_timeline_events(conn, &input.query, limit)?;
+            // 修复：把 filter_slug 下推到 query_timeline_events
+            timeline_hits =
+                query_timeline_events(conn, &input.query, limit, input.filter_slug.as_deref())?;
 
             // 2. 给时间线命中附加 shadow page 信息
             for hit in &mut timeline_hits {
@@ -153,10 +184,19 @@ pub fn unified_query(
             // 3. 查 gbrain 上下文补充
             if timeline_hits.len() < limit as usize {
                 let remaining = limit - timeline_hits.len() as i64;
-                brain_hits = query_brain(conn, &input.query, remaining, engine, config)?;
+                // 修复：把 filter_slug 下推到 query_brain
+                brain_hits = query_brain(
+                    conn,
+                    &input.query,
+                    remaining,
+                    engine,
+                    config,
+                    input.filter_slug.as_deref(),
+                )?;
             }
 
             // 4. 给 brain hit 附加 provenance
+            // 修复：只收集 filter_slug 匹配的 brain_hits 的 provenance
             if input.include_provenance {
                 for hit in &brain_hits {
                     let prov = provenance::find_provenance_by_brain_slug(conn, &hit.slug)?;
@@ -164,6 +204,16 @@ pub fn unified_query(
                 }
             }
         }
+    }
+
+    // 修复：filter_slug 已下推到各查询函数，不再需要后置 retain。
+    // 保留此块作为防御性兜底，确保即使下推逻辑有遗漏也不会泄漏非目标 slug 的结果
+    if let Some(slug) = &input.filter_slug {
+        brain_hits.retain(|hit| hit.slug == *slug);
+        evidence_hits.retain(|hit| hit.shadow_page_slug.as_deref() == Some(slug.as_str()));
+        timeline_hits.retain(|hit| hit.shadow_page_slug.as_deref() == Some(slug.as_str()));
+        // 修复：同步过滤 provenance_records，只保留目标 slug 的来源记录
+        provenance_records.retain(|rec| rec.brain_slug == *slug);
     }
 
     let total_hits =
@@ -180,16 +230,20 @@ pub fn unified_query(
 }
 
 /// 查询 gbrain
+/// 修复：当提供 filter_slug 时，通过 SearchOpts.include_slugs 下推精确 slug 过滤到搜索层，
+/// 让搜索引擎只返回目标 slug 的页面，避免先全局 LIMIT 再后置 retain 导致假阴性。
 fn query_brain(
     _conn: &Connection,
     query: &str,
     limit: i64,
     engine: &crate::sqlite_engine::SqliteEngine,
     _config: &crate::config::Config,
+    filter_slug: Option<&str>,
 ) -> Result<Vec<BrainHit>> {
-    // 使用现有 hybrid search
+    // 修复：使用 include_slugs 精确限定搜索范围，不再扩大 limit * 3 后后置过滤
     let search_opts = crate::types::SearchOpts {
         limit: Some(limit as usize),
+        include_slugs: filter_slug.map(|s| vec![s.to_string()]),
         ..Default::default()
     };
     let hybrid_opts = HybridOpts::default();
@@ -197,22 +251,31 @@ fn query_brain(
     let search_result = hybrid_search(engine, query, None, search_opts, hybrid_opts)
         .map_err(|e| GBrainError::Search(format!("gbrain 搜索失败: {}", e)))?;
 
-    let mut hits = Vec::new();
-    for r in &search_result.results {
-        hits.push(BrainHit {
-            slug: r.slug.clone(),
-            title: r.title.clone(),
-            snippet: r.chunk_text.clone(),
+    let hits = search_result
+        .results
+        .into_iter()
+        .map(|r| BrainHit {
+            slug: r.slug,
+            title: r.title,
+            snippet: r.chunk_text,
             relevance: r.score,
-            provenance: Vec::new(), // 后续填充
-        });
-    }
+            provenance: Vec::new(),
+        })
+        .collect();
 
     Ok(hits)
 }
 
 /// 查询 KB 证据
-fn query_kb_evidence(conn: &Connection, query: &str, limit: i64) -> Result<Vec<EvidenceHit>> {
+/// 修复：增加 filter_slug 参数，下推 slug 过滤到 SQL 查询阶段，
+/// 通过 JOIN artifact_projections 限定只返回目标 slug 的 KB 文档，
+/// 避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉
+fn query_kb_evidence(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+    filter_slug: Option<&str>,
+) -> Result<Vec<EvidenceHit>> {
     // 使用 KB FTS5 搜索
     // kb_doc_fts 的 content_rowid 是 kb_document_nodes.id，
     // 而 document_id 列存储的是 kb_documents.id（父文档 ID）。
@@ -224,11 +287,35 @@ fn query_kb_evidence(conn: &Connection, query: &str, limit: i64) -> Result<Vec<E
     if fts_query.is_empty() {
         return Ok(Vec::new());
     }
-    // 修复：过滤已删除的文档，避免 artifact GC 后已删除文档内容仍被检索到
-    let mut stmt = conn
-        .prepare(
-            "SELECT dn.id, dn.document_id, dn.content, dn.level,
-                d.original_name, d.title, d.summary
+    // 修复：当提供 filter_slug 时，通过 artifact_projections 双 JOIN 限定 slug，
+    // 下推 slug 过滤到 SQL 查询阶段，避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉。
+    // 第一个 JOIN：kb_document 投影 → 获取 artifact_id
+    // 第二个 JOIN：brain_shadow_page 投影 → 匹配 projection_ref = 'slug:{filter_slug}'
+    // 修复：带出 ap_kb.artifact_id，用于后续填充 EvidenceHit.artifact，
+    // 避免 filter_slug 命中时 shadow_page_slug 已非空而跳过 artifact 补全分支
+    let sql = if filter_slug.is_some() {
+        "SELECT dn.id, dn.document_id, dn.content, dn.level,
+            d.original_name, d.title, d.summary,
+            ap_kb.artifact_id
+         FROM kb_doc_fts fts
+         JOIN kb_document_nodes dn ON dn.id = fts.rowid
+         JOIN kb_documents d ON d.id = dn.document_id
+         JOIN artifact_projections ap_kb ON ap_kb.projection_type = 'kb_document'
+              AND ap_kb.projection_ref = 'kb_document:' || dn.document_id
+              AND ap_kb.status = 'active'
+         JOIN artifact_projections ap_sp ON ap_sp.artifact_id = ap_kb.artifact_id
+              AND ap_sp.projection_type = 'brain_shadow_page'
+              AND ap_sp.projection_ref = ?3
+              AND ap_sp.status = 'active'
+         WHERE kb_doc_fts MATCH ?1
+           AND d.document_status != 'deleted'
+           AND d.deleted_at IS NULL
+         ORDER BY rank
+         LIMIT ?2"
+    } else {
+        "SELECT dn.id, dn.document_id, dn.content, dn.level,
+            d.original_name, d.title, d.summary,
+            0 AS artifact_id
          FROM kb_doc_fts fts
          JOIN kb_document_nodes dn ON dn.id = fts.rowid
          JOIN kb_documents d ON d.id = dn.document_id
@@ -236,35 +323,40 @@ fn query_kb_evidence(conn: &Connection, query: &str, limit: i64) -> Result<Vec<E
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
          ORDER BY rank
-         LIMIT ?2",
-        )
+         LIMIT ?2"
+    };
+
+    let mut stmt = conn
+        .prepare(sql)
         .map_err(|e| GBrainError::Database(format!("准备 KB 搜索失败: {}", e)))?;
 
-    let rows = stmt
-        .query_map(params![fts_query, limit], |row| {
-            let node_id: i64 = row.get(0)?;
-            let kb_document_id: i64 = row.get(1)?;
-            let content: String = row.get(2)?;
-            let level: i64 = row.get(3)?;
-            let original_name: String = row.get(4)?;
-            let doc_title: String = row.get(5)?;
-            let doc_summary: String = row.get(6)?;
+    // 修复：filter_slug 参数格式为 'slug:{slug}'，与 artifact_projections.projection_ref 匹配
+    // 使用统一闭包避免 Rust 闭包类型不匹配问题
+    // 修复：增加 artifact_id 字段，用于填充 EvidenceHit.artifact
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, i64, String, i64, String, String, String, i64)> {
+        let node_id: i64 = row.get(0)?;
+        let kb_document_id: i64 = row.get(1)?;
+        let content: String = row.get(2)?;
+        let level: i64 = row.get(3)?;
+        let original_name: String = row.get(4)?;
+        let doc_title: String = row.get(5)?;
+        let doc_summary: String = row.get(6)?;
+        let artifact_id: i64 = row.get(7)?;
+        Ok((node_id, kb_document_id, content, level, original_name, doc_title, doc_summary, artifact_id))
+    };
 
-            Ok((
-                node_id,
-                kb_document_id,
-                content,
-                level,
-                original_name,
-                doc_title,
-                doc_summary,
-            ))
-        })
-        .map_err(|e| GBrainError::Database(format!("KB 搜索失败: {}", e)))?;
+    let rows = if let Some(slug) = filter_slug {
+        let slug_ref = format!("slug:{}", slug);
+        stmt.query_map(params![fts_query, limit, slug_ref], map_row)
+            .map_err(|e| GBrainError::Database(format!("KB 搜索失败: {}", e)))?
+    } else {
+        stmt.query_map(params![fts_query, limit], map_row)
+            .map_err(|e| GBrainError::Database(format!("KB 搜索失败: {}", e)))?
+    };
 
     let mut hits = Vec::new();
     for row in rows {
-        let (_node_id, kb_document_id, content, level, original_name, doc_title, _doc_summary) =
+        let (_node_id, kb_document_id, content, level, original_name, doc_title, _doc_summary, artifact_id) =
             row.map_err(|e| GBrainError::Database(format!("映射 KB 行失败: {}", e)))?;
 
         let title = if doc_title.is_empty() {
@@ -279,13 +371,24 @@ fn query_kb_evidence(conn: &Connection, query: &str, limit: i64) -> Result<Vec<E
             content.clone()
         };
 
+        // 修复：当 filter_slug 存在时，SQL JOIN 已带出 artifact_id，
+        // 直接查 artifact 填充，避免 shadow_page_slug 已非空时跳过补全分支
+        let artifact = if artifact_id > 0 {
+            super::store::find_artifact_by_id(conn, artifact_id).ok().flatten()
+        } else {
+            None
+        };
+
         hits.push(EvidenceHit {
             kb_document_id,
             title,
             snippet,
             relevance: 1.0 / (level as f64 + 1.0), // 简化评分
-            artifact: None,
-            shadow_page_slug: None,
+            artifact,
+            // 修复：当 filter_slug 已在 SQL 中通过 JOIN 过滤时，
+            // 这些 hit 已确认属于该 slug，直接填入 shadow_page_slug。
+            // 否则兜底 retain 要求 shadow_page_slug == filter_slug 会把所有 hit 清空。
+            shadow_page_slug: filter_slug.map(|s| s.to_string()),
             projections: Vec::new(),
         });
     }
@@ -303,42 +406,77 @@ fn query_kb_evidence(conn: &Connection, query: &str, limit: i64) -> Result<Vec<E
 /// 现在查 status IN ('accepted', 'applied')：
 /// - accepted: 已批准但尚未写入 gbrain
 /// - applied: 已写入 gbrain，仍应出现在时间线查询中
-fn query_timeline_events(conn: &Connection, query: &str, limit: i64) -> Result<Vec<TimelineHit>> {
-    // 查询已接受和已应用的 timeline_event 候选，按事件日期降序
+/// 修复：增加 filter_slug 参数，下推 slug 过滤到 SQL 查询阶段，
+/// 通过 JOIN artifact_projections 限定只返回目标 slug 的时间线事件，
+/// 避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉
+fn query_timeline_events(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+    filter_slug: Option<&str>,
+) -> Result<Vec<TimelineHit>> {
+    // 修复：转义 LIKE 通配符 % 和 _，避免用户输入中的这些字符
+    // 被解释为 SQL LIKE 通配符导致匹配意外结果
+    let escaped_query = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+
+    // 修复：当提供 filter_slug 时，JOIN artifact_projections 匹配 brain_shadow_page 投影
+    let sql = if filter_slug.is_some() {
+        "SELECT pc.id, pc.proposed_payload, pc.artifact_id, pc.kb_document_id,
+                d.original_name, d.title
+         FROM promotion_candidates pc
+         LEFT JOIN kb_documents d ON d.id = pc.kb_document_id
+         JOIN artifact_projections ap ON ap.artifact_id = pc.artifact_id
+              AND ap.projection_type = 'brain_shadow_page'
+              AND ap.projection_ref = ?3
+              AND ap.status = 'active'
+         WHERE pc.candidate_type = 'timeline_event'
+           AND pc.status IN ('accepted', 'applied')
+           AND (pc.proposed_payload LIKE '%' || ?1 || '%' ESCAPE '\\'
+                OR d.original_name LIKE '%' || ?1 || '%' ESCAPE '\\'
+                OR d.title LIKE '%' || ?1 || '%' ESCAPE '\\')
+         ORDER BY pc.created_at DESC
+         LIMIT ?2"
+    } else {
+        "SELECT pc.id, pc.proposed_payload, pc.artifact_id, pc.kb_document_id,
+                d.original_name, d.title
+         FROM promotion_candidates pc
+         LEFT JOIN kb_documents d ON d.id = pc.kb_document_id
+         WHERE pc.candidate_type = 'timeline_event'
+           AND pc.status IN ('accepted', 'applied')
+           AND (pc.proposed_payload LIKE '%' || ?1 || '%' ESCAPE '\\'
+                OR d.original_name LIKE '%' || ?1 || '%' ESCAPE '\\'
+                OR d.title LIKE '%' || ?1 || '%' ESCAPE '\\')
+         ORDER BY pc.created_at DESC
+         LIMIT ?2"
+    };
+
     let mut stmt = conn
-        .prepare(
-            "SELECT pc.id, pc.proposed_payload, pc.artifact_id, pc.kb_document_id,
-                    d.original_name, d.title
-             FROM promotion_candidates pc
-             LEFT JOIN kb_documents d ON d.id = pc.kb_document_id
-             WHERE pc.candidate_type = 'timeline_event'
-               AND pc.status IN ('accepted', 'applied')
-               AND (pc.proposed_payload LIKE '%' || ?1 || '%'
-                    OR d.original_name LIKE '%' || ?1 || '%'
-                    OR d.title LIKE '%' || ?1 || '%')
-             ORDER BY pc.created_at DESC
-             LIMIT ?2",
-        )
+        .prepare(sql)
         .map_err(|e| GBrainError::Database(format!("准备时间线查询失败: {}", e)))?;
 
-    let rows = stmt
-        .query_map(params![query, limit], |row| {
-            let candidate_id: i64 = row.get(0)?;
-            let payload: String = row.get(1)?;
-            let artifact_id: i64 = row.get(2)?;
-            let kb_document_id: Option<i64> = row.get(3)?;
-            let original_name: String = row.get(4)?;
-            let doc_title: Option<String> = row.get(5)?;
-            Ok((
-                candidate_id,
-                payload,
-                artifact_id,
-                kb_document_id,
-                original_name,
-                doc_title,
-            ))
-        })
-        .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?;
+    // 修复：filter_slug 参数格式为 'slug:{slug}'，与 artifact_projections.projection_ref 匹配
+    // 使用统一闭包避免 Rust 闭包类型不匹配问题
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, String, i64, Option<i64>, String, Option<String>)> {
+        let candidate_id: i64 = row.get(0)?;
+        let payload: String = row.get(1)?;
+        let artifact_id: i64 = row.get(2)?;
+        let kb_document_id: Option<i64> = row.get(3)?;
+        let original_name: String = row.get(4)?;
+        let doc_title: Option<String> = row.get(5)?;
+        Ok((candidate_id, payload, artifact_id, kb_document_id, original_name, doc_title))
+    };
+
+    let rows = if let Some(slug) = filter_slug {
+        let slug_ref = format!("slug:{}", slug);
+        stmt.query_map(params![escaped_query, limit, slug_ref], map_row)
+            .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?
+    } else {
+        stmt.query_map(params![escaped_query, limit], map_row)
+            .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?
+    };
 
     let mut hits = Vec::new();
     for row in rows {

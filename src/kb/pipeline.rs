@@ -210,7 +210,8 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     let library = kb.get_library(lib_id)?;
 
     // --- 阶段 1: 解析 ---
-    kb.update_document_status(
+    // 修复：所有中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+    kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_PROCESSING),
         Some(10),
@@ -218,6 +219,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         None,
         None,
         None,
+        Some(run_id),
     )?;
 
     let registry = ParserRegistry::new();
@@ -225,7 +227,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     let storage_path = &payload.storage_path;
 
     let file_data = std::fs::read(storage_path).map_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -233,12 +235,13 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             None,
             None,
             None,
+            Some(run_id),
         );
         GBrainError::FileError(format!("无法读取 {}: {}", storage_path, e))
     })?;
 
     let parsed = registry.parse(ext, &file_data).inspect_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -246,11 +249,12 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             None,
             None,
             None,
+            Some(run_id),
         );
     })?;
 
     let word_total: i32 = count_words(&parsed.content) as i32;
-    kb.update_document_status(
+    kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_PROCESSING),
         Some(30),
@@ -258,6 +262,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         None,
         None,
         None,
+        Some(run_id),
     )?;
 
     // --- 阶段 2: 分割 ---
@@ -270,7 +275,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
 
     let splitter = create_splitter(&splitter_config);
     let chunks = splitter.split(&parsed.content).inspect_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -278,11 +283,12 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             None,
             None,
             None,
+            Some(run_id),
         );
     })?;
 
     let split_total: i32 = chunks.len() as i32;
-    kb.update_document_status(
+    kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_COMPLETED),
         Some(100),
@@ -290,6 +296,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         Some(STATUS_PROCESSING),
         Some(10),
         None,
+        Some(run_id),
     )?;
 
     // --- 阶段 3: 构建 Level-0 节点 ---
@@ -327,9 +334,34 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     // 修复：持久化前再次校验 run_id，防止 stale job 在通过初始校验后
     // 继续跑完后续阶段（新上传可能已更新 run_id）
     kb.ensure_document_run_current(doc_id, run_id)?;
-    persist_nodes_and_vectors(conn, doc_id, lib_id, &raptor_nodes)?;
-
-    kb.update_document_stats(doc_id, word_total, split_total, None)?;
+    // 修复：将 persist_nodes_and_vectors 和 update_document_stats_with_run_guard
+    // 合入同一事务，消除两者之间的竞态窗口。旧代码先单独提交 nodes（事务 1），
+    // 再单独更新 stats（事务 2）。若新上传在两者之间更新 processing_run_id，
+    // stats 会失败（run_guard 拒绝），但旧 run 的 nodes 已经留下。
+    // 合入同一事务后，如果 stats 的 run_guard 检查失败，整个事务回滚，
+    // nodes 也不会留下。
+    {
+        let tx = conn.unchecked_transaction()?;
+        let result = (|| -> Result<()> {
+            persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &raptor_nodes, Some(run_id))?;
+            // 修复：外层已开事务，调用 _inner 避免嵌套 BEGIN（SQLite 不支持）
+            kb.update_document_stats_with_run_guard_inner(
+                doc_id,
+                word_total,
+                split_total,
+                None,
+                Some(run_id),
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(_) => tx.commit()?,
+            Err(e) => {
+                let _ = tx.rollback();
+                return Err(e);
+            }
+        }
+    }
 
     Ok(ProcessResult {
         word_total,
@@ -374,7 +406,8 @@ pub async fn process_document_async(
         "parsing",
         &format!("解析 {}", payload.storage_path),
     );
-    kb.update_document_status(
+    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+    kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_PROCESSING),
         Some(10),
@@ -382,6 +415,7 @@ pub async fn process_document_async(
         None,
         None,
         None,
+        Some(run_id),
     )?;
 
     let registry = ParserRegistry::new();
@@ -389,7 +423,7 @@ pub async fn process_document_async(
     let storage_path = &payload.storage_path;
 
     let file_data = std::fs::read(storage_path).map_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -397,12 +431,13 @@ pub async fn process_document_async(
             None,
             None,
             None,
+            Some(run_id),
         );
         GBrainError::FileError(format!("无法读取 {}: {}", storage_path, e))
     })?;
 
     let parsed = registry.parse(ext, &file_data).inspect_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -410,6 +445,7 @@ pub async fn process_document_async(
             None,
             None,
             None,
+            Some(run_id),
         );
     })?;
 
@@ -433,7 +469,8 @@ pub async fn process_document_async(
     );
     // 落库元数据
     // FIX11-04: 元数据更新失败不应静默吞下，至少记录警告
-    if let Err(e) = kb.update_document_metadata(
+    // 修复：传入 run_id，防止旧 job 污染新 run 的文档元数据
+    if let Err(e) = kb.update_document_metadata_with_run_guard(
         doc_id,
         doc_meta.title.as_deref().unwrap_or(""),
         doc_meta.author.as_deref().unwrap_or(""),
@@ -442,6 +479,7 @@ pub async fn process_document_async(
         doc_meta.source_uri.as_deref().unwrap_or(""),
         doc_meta.document_date.as_deref(),
         doc_meta.modified_at.as_deref(),
+        Some(run_id),
     ) {
         tracing::warn!("文档 {} 元数据更新失败: {}", doc_id, e);
     }
@@ -451,15 +489,18 @@ pub async fn process_document_async(
     let page_count = 0; // 将在 P2 PDF/DOCX parser 中填充
     let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
     let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
-    kb.update_document_granularity(
+    // 修复：传入 run_id，防止旧 job 污染新 run 的 granularity
+    kb.update_document_granularity_with_run_guard(
         doc_id,
         granularity.as_str(),
         chunk_strategy,
         char_count as i32,
         page_count as i32,
+        Some(run_id),
     )?;
 
-    kb.update_document_status(
+    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+    kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_PROCESSING),
         Some(30),
@@ -467,6 +508,7 @@ pub async fn process_document_async(
         None,
         None,
         None,
+        Some(run_id),
     )?;
 
     // --- 阶段 2: 分割 ---
@@ -479,7 +521,7 @@ pub async fn process_document_async(
     };
 
     let splitter = create_async_splitter(&splitter_config, embedder.clone()).inspect_err(|e| {
-        let _ = kb.update_document_status(
+        let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
             None,
@@ -487,13 +529,14 @@ pub async fn process_document_async(
             None,
             None,
             None,
+            Some(run_id),
         );
     })?;
     let chunks = splitter
         .split_async(&parsed.content)
         .await
         .inspect_err(|e| {
-            let _ = kb.update_document_status(
+            let _ = kb.update_document_status_with_run_guard(
                 doc_id,
                 Some(STATUS_FAILED),
                 None,
@@ -501,6 +544,7 @@ pub async fn process_document_async(
                 None,
                 None,
                 None,
+                Some(run_id),
             );
         })?;
 
@@ -693,7 +737,8 @@ pub async fn process_document_async(
             "embedding",
             &format!("嵌入 {} 个节点", nodes.len()),
         );
-        kb.update_document_status(
+        // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+        kb.update_document_status_with_run_guard(
             doc_id,
             None,
             None,
@@ -701,6 +746,7 @@ pub async fn process_document_async(
             Some(STATUS_PROCESSING),
             Some(10),
             None,
+            Some(run_id),
         )?;
 
         // P0-016: 检查库级隐私策略 — 禁止外部 embedding 时跳过
@@ -730,15 +776,17 @@ pub async fn process_document_async(
                             node.vector = Some(vectors[i].clone());
                         }
                     }
-                    kb.update_document_status(
-                        doc_id,
-                        None,
-                        None,
-                        None,
-                        Some(STATUS_PROCESSING),
-                        Some(80),
-                        None,
-                    )?;
+                    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+                        kb.update_document_status_with_run_guard(
+                            doc_id,
+                            None,
+                            None,
+                            None,
+                            Some(STATUS_PROCESSING),
+                            Some(80),
+                            None,
+                            Some(run_id),
+                        )?;
                 }
                 Err(e) => {
                     embedding_failed = true;
@@ -747,15 +795,17 @@ pub async fn process_document_async(
                         "embedding",
                         &format!("嵌入失败: {}, 标记为 embedding_failed", e),
                     );
-                    kb.update_document_status(
-                        doc_id,
-                        None,
-                        None,
-                        None,
-                        Some(STATUS_FAILED),
-                        Some(80),
-                        Some(&format!("embedding failed: {}", e)),
-                    )?;
+                    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+                        kb.update_document_status_with_run_guard(
+                            doc_id,
+                            None,
+                            None,
+                            None,
+                            Some(STATUS_FAILED),
+                            Some(80),
+                            Some(&format!("embedding failed: {}", e)),
+                            Some(run_id),
+                        )?;
                 }
             }
         }
@@ -856,21 +906,41 @@ pub async fn process_document_async(
         "persist",
         &format!("持久化 {} 个节点", nodes.len()),
     );
-    persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes)?;
-
-    // FIX9-06: embedding 跳过时写入 STATUS_SKIPPED，而非默认 STATUS_COMPLETED
-    kb.update_document_stats(
-        doc_id,
-        word_total,
-        split_total,
-        if embedding_failed {
+    // 修复：将 persist_nodes_and_vectors 和 update_document_stats_with_run_guard
+    // 合入同一事务，消除两者之间的竞态窗口。旧代码先单独提交 nodes（事务 1），
+    // 再单独更新 stats（事务 2）。若新上传在两者之间更新 processing_run_id，
+    // stats 会失败（run_guard 拒绝），但旧 run 的 nodes 已经留下。
+    // 合入同一事务后，如果 stats 的 run_guard 检查失败，整个事务回滚，
+    // nodes 也不会留下。
+    {
+        let emb_status = if embedding_failed {
             Some(STATUS_FAILED)
         } else if embedding_skipped {
             Some(STATUS_SKIPPED)
         } else {
             None
-        },
-    )?;
+        };
+        let tx = conn.unchecked_transaction()?;
+        let result = (|| -> Result<()> {
+            persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &nodes, Some(run_id))?;
+            // 修复：外层已开事务，调用 _inner 避免嵌套 BEGIN（SQLite 不支持）
+            kb.update_document_stats_with_run_guard_inner(
+                doc_id,
+                word_total,
+                split_total,
+                emb_status,
+                Some(run_id),
+            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(_) => tx.commit()?,
+            Err(e) => {
+                let _ = tx.rollback();
+                return Err(e);
+            }
+        }
+    }
 
     report_progress(
         on_progress,
@@ -1057,12 +1127,16 @@ fn collect_supported_files(dir: &Path, extensions: &[&str], files: &mut Vec<std:
 pub fn persist_nodes_and_vectors(
     conn: &Connection,
     doc_id: i64,
-    _lib_id: i64,
+    lib_id: i64,
     nodes: &[RaptorNode],
+    run_id: Option<&str>,
 ) -> Result<()> {
-    // Wrap all operations in a transaction to prevent partial writes
+    // 修复：如果提供了 run_id，在删除旧节点前校验 processing_run_id 仍匹配。
+    // 这把 run 校验和写入放进同一事务，消除竞态窗口：
+    // 旧 job 通过 ensure_document_run_current 后，新 run 可能立刻更新 processing_run_id，
+    // 旧 job 的 persist 仍会删除新 run 的节点。条件删除确保 run_id 不匹配时操作被拒绝。
     let tx = conn.unchecked_transaction()?;
-    let result = persist_nodes_inner(conn, doc_id, nodes);
+    let result = persist_nodes_and_vectors_inner(conn, doc_id, lib_id, nodes, run_id);
     match result {
         Ok(_) => tx.commit()?,
         Err(_) => {
@@ -1072,7 +1146,31 @@ pub fn persist_nodes_and_vectors(
     result
 }
 
-fn persist_nodes_inner(conn: &Connection, doc_id: i64, nodes: &[RaptorNode]) -> Result<()> {
+/// persist_nodes_and_vectors 的内部实现，不自带事务，可在外层事务内调用。
+/// 修复：将 persist 和 stats 合入同一事务时，需要此内部版本避免嵌套事务。
+pub(crate) fn persist_nodes_and_vectors_inner(
+    conn: &Connection,
+    doc_id: i64,
+    _lib_id: i64,
+    nodes: &[RaptorNode],
+    run_id: Option<&str>,
+) -> Result<()> {
+    // 修复：如果提供了 run_id，校验 processing_run_id 仍匹配，防止 stale job 覆盖新 run 的节点
+    if let Some(rid) = run_id {
+        let current_run_id: String = conn
+            .query_row(
+                "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                [doc_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| GBrainError::Database(format!("查询 processing_run_id 失败: {}", e)))?;
+        if current_run_id != rid {
+            return Err(GBrainError::InvalidInput(
+                "stale KB processing job; document has a newer run (persist 阶段)".to_string(),
+            ));
+        }
+    }
+
     // 删除此文档的旧节点/向量 (内联操作, 避免嵌套事务)
     {
         let node_ids: Vec<i64> = {
