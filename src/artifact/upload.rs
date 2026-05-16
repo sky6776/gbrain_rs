@@ -168,7 +168,7 @@ pub fn upload_source(
     {
         // config 默认值非空且非默认的 "candidate" 时使用配置值
         // "candidate" 是初始默认值，与 intent 推断结果一致，无需覆盖
-        if let Some(policy) = PromotionPolicy::from_str(config_default_promotion_policy) {
+        if let Ok(policy) = config_default_promotion_policy.parse() {
             RoutePlan {
                 promotion: policy,
                 ..route_plan

@@ -72,6 +72,7 @@ pub fn record_provenance_from_candidate(
 }
 
 /// 直接记录 provenance（不通过候选）
+#[allow(clippy::too_many_arguments)]
 pub fn record_provenance(
     conn: &Connection,
     artifact_id: Option<i64>,
@@ -150,7 +151,7 @@ pub fn find_provenance_by_brain_slug(
         )
         .map_err(|e| GBrainError::Database(format!("准备查询 provenance 失败: {}", e)))?;
 
-    let rows = stmt.query_map(params![brain_slug], |row| row_to_provenance_record(row))?;
+    let rows = stmt.query_map(params![brain_slug], row_to_provenance_record)?;
 
     let mut result = Vec::new();
     for row in rows {
@@ -211,7 +212,7 @@ pub fn find_provenance_by_artifact(
         )
         .map_err(|e| GBrainError::Database(format!("准备查询 provenance 失败: {}", e)))?;
 
-    let rows = stmt.query_map(params![artifact_id], |row| row_to_provenance_record(row))?;
+    let rows = stmt.query_map(params![artifact_id], row_to_provenance_record)?;
 
     let mut result = Vec::new();
     for row in rows {
@@ -240,7 +241,7 @@ pub fn find_provenance_by_kb_document(
         )
         .map_err(|e| GBrainError::Database(format!("准备查询 provenance 失败: {}", e)))?;
 
-    let rows = stmt.query_map(params![kb_document_id], |row| row_to_provenance_record(row))?;
+    let rows = stmt.query_map(params![kb_document_id], row_to_provenance_record)?;
 
     let mut result = Vec::new();
     for row in rows {

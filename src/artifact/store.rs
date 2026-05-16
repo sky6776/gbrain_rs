@@ -166,7 +166,7 @@ pub fn list_active_artifacts(
          WHERE status = 'active' AND purged_at IS NULL
          ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
     )?;
-    let rows = stmt.query_map(params![limit, offset], |row| row_to_source_artifact(row))?;
+    let rows = stmt.query_map(params![limit, offset], row_to_source_artifact)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -233,7 +233,7 @@ pub fn find_occurrences_by_artifact(
                 status, metadata_json
          FROM artifact_occurrences WHERE artifact_id = ?1 ORDER BY created_at DESC",
     )?;
-    let rows = stmt.query_map(params![artifact_id], |row| row_to_artifact_occurrence(row))?;
+    let rows = stmt.query_map(params![artifact_id], row_to_artifact_occurrence)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -383,7 +383,7 @@ pub fn find_projections_by_artifact(
                 p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
          FROM artifact_projections WHERE artifact_id = ?1 ORDER BY created_at",
     )?;
-    let rows = stmt.query_map(params![artifact_id], |row| row_to_artifact_projection(row))?;
+    let rows = stmt.query_map(params![artifact_id], row_to_artifact_projection)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);
@@ -508,7 +508,7 @@ pub fn find_orphan_projections(
          WHERE p.status IN ('active', 'stale') AND (a.id IS NULL OR a.status != 'active')
          ORDER BY p.created_at"
     )?;
-    let rows = stmt.query_map([], |row| row_to_artifact_projection(row))?;
+    let rows = stmt.query_map([], row_to_artifact_projection)?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);

@@ -818,8 +818,8 @@ fn import_documents(
         // 源文件不在受控 storage root 内时，保留 original_path，但 storage_path 不指向旧机器路径。
         let old_storage_path = json_str(doc, "storage_path");
         let archive_file_path = json_str(doc, "archive_file_path");
-        let new_storage_path = if !old_storage_path.is_empty() && target_storage_dir.is_some() {
-            let storage_root = target_storage_dir.unwrap();
+        let new_storage_path = if !old_storage_path.is_empty() {
+            if let Some(storage_root) = target_storage_dir {
             // 优先使用 archive_file_path（跨平台兼容）
             if !archive_file_path.is_empty() {
                 let archive_file = archive_dir.join("files").join(&archive_file_path);
@@ -860,6 +860,9 @@ fn import_documents(
                     // 无法提取相对路径，保留旧路径
                     old_storage_path.clone()
                 }
+            }
+            } else {
+                old_storage_path.clone()
             }
         } else {
             old_storage_path.clone()
@@ -914,6 +917,7 @@ fn import_documents(
     Ok(id_map)
 }
 
+#[allow(clippy::type_complexity)]
 fn import_nodes(
     conn: &Connection,
     archive_dir: &Path,

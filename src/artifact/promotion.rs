@@ -248,6 +248,7 @@ pub fn extract_promotion_candidates(
 /// fingerprint = SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
 /// 同一 artifact + 同一内容不应重复创建候选。重试时如果候选已存在（pending/accepted/applied），
 /// INSERT OR IGNORE 会跳过，返回已有候选的 id，保证幂等。
+#[allow(clippy::too_many_arguments)]
 pub fn create_candidate(
     conn: &Connection,
     artifact_id: i64,
@@ -347,7 +348,7 @@ fn compute_candidate_fingerprint(
     let input = format!(
         "{}|{}|{}|{}|{}",
         artifact_id,
-        candidate_type.to_string(),
+        candidate_type,
         target_slug,
         target_field,
         proposed_payload
@@ -561,7 +562,7 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
 
     // 根据候选类型应用变更
     let candidate_type =
-        CandidateType::from_str(&candidate.candidate_type).unwrap_or(CandidateType::FactClaim);
+        candidate.candidate_type.parse().unwrap_or(CandidateType::FactClaim);
     match candidate_type {
         CandidateType::DocumentSummary => {
             apply_summary_candidate(conn, candidate)?;
@@ -862,7 +863,7 @@ fn remove_candidate_content_from_page(
 
         // 尝试从页面内容中移除候选添加的行
         let candidate_type =
-            CandidateType::from_str(&candidate.candidate_type).unwrap_or(CandidateType::FactClaim);
+            candidate.candidate_type.parse().unwrap_or(CandidateType::FactClaim);
 
         let text_to_remove = extract_candidate_text_for_removal(&candidate_type, &payload);
         if !text_to_remove.is_empty() {
@@ -1013,12 +1014,9 @@ pub fn auto_apply_candidates(
             // 可能污染连接状态。外层 savepoint 覆盖整个 accept+apply 流程，
             // 失败时全部回滚，候选恢复为 pending 可重试。
             let sp_name = format!("sp_auto_apply_{}", candidate.id);
-            match conn.execute(&format!("SAVEPOINT {}", sp_name), []) {
-                Err(e) => {
-                    failures.push(format!("候选 {} 创建 savepoint 失败: {}", candidate.id, e));
-                    continue;
-                }
-                Ok(_) => {}
+            if let Err(e) = conn.execute(&format!("SAVEPOINT {}", sp_name), []) {
+                failures.push(format!("候选 {} 创建 savepoint 失败: {}", candidate.id, e));
+                continue;
             }
             // 先 accept
             let review_input = ReviewCandidateInput {
@@ -1132,7 +1130,6 @@ pub fn batch_apply_candidates(
     if let Some(risk) = risk_filter {
         sql.push_str(&format!(" AND risk_level = ?{}", param_idx));
         param_values.push(Box::new(risk.to_string()));
-        param_idx += 1;
     }
 
     sql.push_str(" ORDER BY created_at ASC");

@@ -185,11 +185,7 @@ pub fn writeback_ocr_results(
                     let be = src_end.unwrap_or(i32::MAX / 2) as usize;
                     let overlap_start = chunk_start.max(bs);
                     let overlap_end = chunk_end.min(be);
-                    let overlap = if overlap_end > overlap_start {
-                        overlap_end - overlap_start
-                    } else {
-                        0
-                    };
+                    let overlap = overlap_end.saturating_sub(overlap_start);
                     if overlap > 0 {
                         Some((overlap, title_path, page_num, src_start, src_end))
                     } else {

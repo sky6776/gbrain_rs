@@ -59,10 +59,7 @@ struct JsonRpcError {
 /// 避免手写校验规则与 schema 漂移。
 fn validate_params(tool_name: &str, arguments: &Value) -> Option<String> {
     // 从 OperationDef 查找工具定义
-    let op_def = match get_operation_def(tool_name) {
-        Some(def) => def,
-        None => return None, // 未定义的工具不做校验
-    };
+    let op_def = get_operation_def(tool_name)?;
 
     for param in op_def.params.iter() {
         match arguments.get(param.name) {
@@ -1265,7 +1262,7 @@ impl McpServer {
                 // 每组生成对应 query vector 并分别检索，再做最终融合。
                 // 如果暂时不支持多模型混搜，检测到不一致时禁用 vector retriever 并在 debug 中返回原因。
                 let conn_for_embed = self.engine.connection()?;
-                let kb = crate::kb::engine::KbEngine::new(&conn_for_embed);
+                let kb = crate::kb::engine::KbEngine::new(conn_for_embed);
 
                 // FIX10-R3: 收集每个目标库的 active embedding index 配置（而非 library 冗余字段）
                 // (lib_id, provider, model, dims, ext_allowed)
@@ -1279,7 +1276,7 @@ impl McpServer {
                                 // FIX10-R3: 优先使用 active embedding index 的配置
                                 let active =
                                     crate::kb::embedding_index::get_active_index_for_library(
-                                        &conn_for_embed,
+                                        conn_for_embed,
                                         lib.id,
                                     )?;
                                 if let Some(idx) = active {
@@ -1316,7 +1313,7 @@ impl McpServer {
                                 // FIX10-R3: 优先使用 active embedding index 的配置
                                 let active =
                                     crate::kb::embedding_index::get_active_index_for_library(
-                                        &conn_for_embed,
+                                        conn_for_embed,
                                         lib.id,
                                     )?;
                                 if let Some(idx) = active {

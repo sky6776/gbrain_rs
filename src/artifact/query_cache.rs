@@ -114,6 +114,10 @@ impl QueryCache {
     }
 
     /// 获取当前条目数
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> usize {
         self.entries.lock().map(|e| e.len()).unwrap_or(0)
     }

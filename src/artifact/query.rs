@@ -333,6 +333,7 @@ fn query_kb_evidence(
     // 修复：filter_slug 参数格式为 'slug:{slug}'，与 artifact_projections.projection_ref 匹配
     // 使用统一闭包避免 Rust 闭包类型不匹配问题
     // 修复：增加 artifact_id 字段，用于填充 EvidenceHit.artifact
+    #[allow(clippy::type_complexity)]
     let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, i64, String, i64, String, String, String, i64)> {
         let node_id: i64 = row.get(0)?;
         let kb_document_id: i64 = row.get(1)?;
@@ -406,9 +407,9 @@ fn query_kb_evidence(
 /// 现在查 status IN ('accepted', 'applied')：
 /// - accepted: 已批准但尚未写入 gbrain
 /// - applied: 已写入 gbrain，仍应出现在时间线查询中
-/// 修复：增加 filter_slug 参数，下推 slug 过滤到 SQL 查询阶段，
-/// 通过 JOIN artifact_projections 限定只返回目标 slug 的时间线事件，
-/// 避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉
+///   修复：增加 filter_slug 参数，下推 slug 过滤到 SQL 查询阶段，
+///   通过 JOIN artifact_projections 限定只返回目标 slug 的时间线事件，
+///   避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉
 fn query_timeline_events(
     conn: &Connection,
     query: &str,
@@ -459,6 +460,7 @@ fn query_timeline_events(
 
     // 修复：filter_slug 参数格式为 'slug:{slug}'，与 artifact_projections.projection_ref 匹配
     // 使用统一闭包避免 Rust 闭包类型不匹配问题
+    #[allow(clippy::type_complexity)]
     let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, String, i64, Option<i64>, String, Option<String>)> {
         let candidate_id: i64 = row.get(0)?;
         let payload: String = row.get(1)?;

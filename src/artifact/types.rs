@@ -111,21 +111,23 @@ impl fmt::Display for ProjectionType {
     }
 }
 
-impl ProjectionType {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ProjectionType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "kb_document" => Some(ProjectionType::KbDocument),
-            "brain_shadow_page" => Some(ProjectionType::BrainShadowPage),
-            "file_attachment" => Some(ProjectionType::FileAttachment),
-            "promotion_candidate" => Some(ProjectionType::PromotionCandidate),
-            "brain_link" => Some(ProjectionType::BrainLink),
-            "brain_timeline" => Some(ProjectionType::BrainTimeline),
-            "brain_page_update" => Some(ProjectionType::BrainPageUpdate),
+            "kb_document" => Ok(ProjectionType::KbDocument),
+            "brain_shadow_page" => Ok(ProjectionType::BrainShadowPage),
+            "file_attachment" => Ok(ProjectionType::FileAttachment),
+            "promotion_candidate" => Ok(ProjectionType::PromotionCandidate),
+            "brain_link" => Ok(ProjectionType::BrainLink),
+            "brain_timeline" => Ok(ProjectionType::BrainTimeline),
+            "brain_page_update" => Ok(ProjectionType::BrainPageUpdate),
             // 兼容旧值
-            "brain_page" => Some(ProjectionType::BrainShadowPage),
-            "shadow_page" => Some(ProjectionType::BrainShadowPage),
-            "file_store" => Some(ProjectionType::FileAttachment),
-            _ => None,
+            "brain_page" => Ok(ProjectionType::BrainShadowPage),
+            "shadow_page" => Ok(ProjectionType::BrainShadowPage),
+            "file_store" => Ok(ProjectionType::FileAttachment),
+            _ => Err(format!("unknown projection type: {}", s)),
         }
     }
 }
@@ -164,21 +166,23 @@ impl fmt::Display for CandidateType {
     }
 }
 
-impl CandidateType {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for CandidateType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "document_summary" => Some(CandidateType::DocumentSummary),
-            "entity_mention" => Some(CandidateType::EntityMention),
-            "link_suggestion" => Some(CandidateType::LinkSuggestion),
-            "timeline_event" => Some(CandidateType::TimelineEvent),
-            "fact_claim" => Some(CandidateType::FactClaim),
-            "page_create" => Some(CandidateType::PageCreate),
-            "page_update" => Some(CandidateType::PageUpdate),
+            "document_summary" => Ok(CandidateType::DocumentSummary),
+            "entity_mention" => Ok(CandidateType::EntityMention),
+            "link_suggestion" => Ok(CandidateType::LinkSuggestion),
+            "timeline_event" => Ok(CandidateType::TimelineEvent),
+            "fact_claim" => Ok(CandidateType::FactClaim),
+            "page_create" => Ok(CandidateType::PageCreate),
+            "page_update" => Ok(CandidateType::PageUpdate),
             // 兼容旧值
-            "entity" => Some(CandidateType::EntityMention),
-            "keyword" => Some(CandidateType::FactClaim),
-            "timeline" => Some(CandidateType::TimelineEvent),
-            _ => None,
+            "entity" => Ok(CandidateType::EntityMention),
+            "keyword" => Ok(CandidateType::FactClaim),
+            "timeline" => Ok(CandidateType::TimelineEvent),
+            _ => Err(format!("unknown candidate type: {}", s)),
         }
     }
 }
@@ -217,9 +221,11 @@ impl fmt::Display for CandidateStatus {
     }
 }
 
-impl CandidateStatus {
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl std::str::FromStr for CandidateStatus {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
             "pending" => CandidateStatus::Pending,
             "accepted" => CandidateStatus::Accepted,
             "rejected" => CandidateStatus::Rejected,
@@ -231,7 +237,7 @@ impl CandidateStatus {
             "approved" => CandidateStatus::Accepted,
             "expired" => CandidateStatus::Stale,
             _ => CandidateStatus::Stale,
-        }
+        })
     }
 }
 
@@ -279,17 +285,19 @@ impl fmt::Display for PromotionPolicy {
     }
 }
 
-impl PromotionPolicy {
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for PromotionPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "none" => Some(PromotionPolicy::None),
-            "shadow" => Some(PromotionPolicy::Shadow),
-            "candidate" => Some(PromotionPolicy::Candidate),
-            "auto_accept_low_risk" => Some(PromotionPolicy::AutoAcceptLowRisk),
+            "none" => Ok(PromotionPolicy::None),
+            "shadow" => Ok(PromotionPolicy::Shadow),
+            "candidate" => Ok(PromotionPolicy::Candidate),
+            "auto_accept_low_risk" => Ok(PromotionPolicy::AutoAcceptLowRisk),
             // 兼容旧值
-            "auto" => Some(PromotionPolicy::AutoAcceptLowRisk),
-            "auto-low-risk" => Some(PromotionPolicy::AutoAcceptLowRisk),
-            _ => None,
+            "auto" => Ok(PromotionPolicy::AutoAcceptLowRisk),
+            "auto-low-risk" => Ok(PromotionPolicy::AutoAcceptLowRisk),
+            _ => Err(format!("unknown promotion policy: {}", s)),
         }
     }
 }
