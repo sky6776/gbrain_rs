@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with added KB subsystem (async document processing pipeline + RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle (restore/purge-deleted), time-decay search, and more. Built on SQLite + sqlite-vec + FTS5 with a zero-config embedded architecture — ready to use out of the box.
+**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), KB subsystem (async document processing pipeline + RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle (restore/purge-deleted), time-decay search, and more. Built on SQLite + sqlite-vec + FTS5 with a zero-config embedded architecture — ready to use out of the box.
 
 > The original TypeScript version was developed by [Garry Tan](https://github.com/garrytan). Built with **Vibe coding**.
 
@@ -40,7 +40,8 @@ No database or external services to configure — works out of the box. AI featu
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
 - **KB Subsystem** — Async five-stage document processing pipeline (parse → split → embed → RAPTOR → persist), RAPTOR recursive summarization tree, document upload and processing, multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext/code), semantic chunking (Savitzky-Golay smoothing + chunk_overlap overlap)
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
-- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 58 tools for AI agent integration
+- **Single-Entry Multi-Projection Fusion** — Artifact upload automatically routes to multiple projections (KB document / shadow page / candidate changes / file attachment / links / timeline), provenance audit ledger, candidate review & promotion workflow, version chain with rollback (Projection Supersede / Rollback), unified memory query (Memory Query, 4 strategies)
+- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 71 tools for AI agent integration
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
@@ -72,6 +73,7 @@ After initialization, the `~/.gbrain/` directory structure is:
 ~/.gbrain/
   brain.db           # SQLite database (FTS5 + sqlite-vec)
   config.json        # Runtime config (generated via gbrain config set)
+  artifacts/          # Artifact original file storage (named by SHA256)
   files/             # Uploaded file storage
   cache/             # Cache directory
   logs/              # Log files
@@ -165,6 +167,38 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain tools-json` | Output MCP tool definitions as JSON |
 | `gbrain serve` | Run as an MCP stdio server |
 
+### Single-Entry Multi-Projection Fusion (Artifact)
+
+| Command | Description |
+|---------|-------------|
+| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--promotion <POLICY>] [--dry-run]` | Upload a source file (unified entry point), auto-route to multiple projections. intent: auto/document/attachment/memory/promote; promotion: none/shadow/candidate/auto-low-risk |
+| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>]` | Unified memory query (alias: ask-memory). strategy: brain_first/evidence_first/provenance/timeline_first |
+| `gbrain artifact list [--limit <N>] [--offset <N>]` | List all artifacts |
+| `gbrain artifact get <id_or_uid>` | Get artifact details (supports ID or UID like `art_ab12cd34ef56`) |
+| `gbrain artifact delete <artifact_id>` | Soft delete artifact (marks all projections as stale) |
+| `gbrain artifact health` | Check artifact projection consistency and health |
+
+### Candidate Changes & Promotion
+
+| Command | Description |
+|---------|-------------|
+| `gbrain promotion list [--status <STATUS>] [--candidate-type <TYPE>] [--target-slug <SLUG>]` | List promotion candidates |
+| `gbrain promotion get <candidate_id>` | Get candidate details |
+| `gbrain promotion accept <candidate_id> [--reviewer <NAME>] [--notes <TEXT>]` | Accept a candidate |
+| `gbrain promotion reject <candidate_id> [--reviewer <NAME>] [--notes <TEXT>]` | Reject a candidate |
+| `gbrain promotion apply <candidate_id>` | Apply an accepted candidate to gbrain |
+| `gbrain promotion auto-apply <artifact_id>` | Auto-apply low-risk candidates |
+| `gbrain promotion batch-apply [--artifact-id <ID>] [--risk <LEVEL>] [--dry-run]` | Batch apply candidates |
+| `gbrain promotion rollback <candidate_id>` | Rollback an applied candidate |
+
+### Projection Management
+
+| Command | Description |
+|---------|-------------|
+| `gbrain projection supersede <old_proj_id> <new_proj_id>` | Supersede an old projection with a new one (version chain) |
+| `gbrain projection history <projection_key> [--artifact-id <ID>] [--projection-type <TYPE>] [--limit <N>]` | Query projection version chain history |
+| `gbrain gc-orphan-projections [--stale-days <N>] [--dry-run]` | Garbage collect orphaned/superseded projections |
+
 ---
 
 ## MCP Integration
@@ -221,7 +255,7 @@ CLI uses `remote=false` directly, bypassing remote security restrictions.
 
 ## MCP Tools
 
-gbrain provides 58 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
+gbrain provides 71 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
 
 ### Search
 
@@ -341,6 +375,37 @@ gbrain provides 58 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `kb_add_eval_query` | Add a search evaluation query |
 | `kb_add_search_feedback` | Add search result feedback rating |
 
+### Single-Entry Multi-Projection Fusion (Artifact)
+
+| Tool | Description |
+|------|-------------|
+| `upload_source` | Upload a source file (unified entry point), auto-create Artifact, KB projection, shadow page, and file attachment |
+| `memory_query` | Unified memory query, searches both gbrain curated knowledge and KB document evidence, 4 strategies auto-selected |
+| `artifact_list` | List all artifacts |
+| `artifact_get` | Get artifact details (supports ID or UID) |
+| `artifact_delete` | Soft delete artifact (marks all projections as stale) |
+| `artifact_health` | Check artifact projection consistency and health |
+| `get_provenance` | Get provenance records for a brain page (trace where facts came from) |
+
+### Candidate Changes & Promotion
+
+| Tool | Description |
+|------|-------------|
+| `promotion_list_candidates` | List promotion candidates (suggested changes extracted from KB evidence) |
+| `promotion_get_candidate` | Get candidate details |
+| `promotion_accept_candidate` | Accept a candidate |
+| `promotion_reject_candidate` | Reject a candidate |
+| `promotion_apply_candidate` | Apply an accepted candidate to gbrain |
+| `promotion_rollback_candidate` | Rollback an applied candidate, undo shadow page updates and mark provenance as stale |
+
+### Projection Management
+
+| Tool | Description |
+|------|-------------|
+| `gc_orphan_projections` | Garbage collect orphaned/superseded projections |
+| `projection_supersede` | Supersede an old projection with a new one (version chain) |
+| `projection_history` | Query projection version chain history |
+
 ---
 
 ## MCP Tool Parameters
@@ -416,6 +481,39 @@ gbrain provides 58 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `level` | integer | No | RAPTOR tree level filter |
 | `top_k` | integer | No | Max results (default 10, max 50) |
 
+### `upload_source`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Local file path |
+| `intent` | string | No | Upload intent: auto/document/attachment/memory/promote (default auto) |
+| `library_id` | integer | No | KB library ID |
+| `target_slug` | string | No | Target gbrain page slug (for promotion) |
+| `page_slug` | string | No | Target page slug (for file attachment) |
+| `folder_id` | integer | No | KB folder ID |
+| `promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk |
+| `dry_run` | boolean | No | Return routing plan only, don't execute |
+
+### `memory_query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Query text |
+| `strategy` | string | No | Query strategy: brain_first/evidence_first/provenance/timeline_first (default brain_first) |
+| `limit` | integer | No | Maximum results |
+| `filter_slug` | string | No | Filter by slug (applies to all strategies) |
+| `include_evidence` | boolean | No | Include KB evidence results |
+| `include_provenance` | boolean | No | Include provenance records |
+
+### `promotion_list_candidates`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter by status: pending/accepted/rejected/applied/rolled_back/stale/superseded |
+| `candidate_type` | string | No | Filter by type: document_summary/entity_mention/link_suggestion/timeline_event/fact_claim/page_create/page_update |
+| `target_slug` | string | No | Filter by target slug |
+| `limit` | integer | No | Maximum results |
+
 ---
 
 ## Environment Variables
@@ -441,6 +539,7 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 |----------|-------------|---------|
 | `GBRAIN_DIR` | Data storage root directory | `~/.gbrain` |
 | `GBRAIN_DB_PATH` | Database file path | `$GBRAIN_DIR/brain.db` |
+| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | `$GBRAIN_DIR/artifacts` |
 
 ### Embeddings
 
@@ -630,6 +729,42 @@ Async five-stage document processing pipeline:
 - **Tokenized Index** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting
 - **Chinese Chunking** — Chinese punctuation added to sentence/clause separator levels, CJK punctuation breaks without trailing spaces
 - **Pre-tokenized Column** — schema V16 adds `_tokens` column, FTS5 uses `unicode61` tokenizer, auto-synced on write
+
+### Single-Entry Multi-Projection Fusion Architecture (Artifact)
+
+```
+Upload Source (Single Entry Point)
+  |
+  +-- Route Planner (auto-decides based on intent + file type)
+  |
+  +-- Artifact Original Storage (SHA256 dedup, named by hash)
+  |
+  +-- Multi-Projection Auto-Creation:
+      +-- KB Document Projection -> Document processing pipeline (parse->split->embed->RAPTOR->persist)
+      +-- Shadow Page Projection -> Shadow page (extract content -> generate wiki page)
+      +-- Promotion Candidate Projection -> Candidate changes (entity mentions/link suggestions/timeline events/fact claims)
+      +-- File Attachment Projection -> File attachment (simple file reference)
+      +-- Brain Link Projection -> Auto links
+      +-- Brain Timeline Projection -> Auto timeline
+```
+
+**Core Concepts:**
+
+- **Artifact** — Uploaded original file, with state (active/deleted/purged), source type (upload/sync/link/mcp), upload intent (auto/document/attachment/memory/promote)
+- **Projection** — Representation of the same Artifact in different subsystems, with version chain (superseded_by) and state (active/stale/superseded)
+- **Candidate** — Suggested changes extracted from KB evidence, with risk level (low/medium/high) and review workflow (pending->accepted->applied / rejected / rolled_back)
+- **Provenance** — Audit records tracing page facts back to their source Artifact and Candidate
+
+**Unified Memory Query:**
+
+4 query strategies auto-adapt to different scenarios:
+
+| Strategy | Description |
+|----------|-------------|
+| `brain_first` | Search gbrain curated knowledge first, supplement with KB evidence if insufficient |
+| `evidence_first` | Search KB document evidence first, ideal for queries requiring original sources |
+| `provenance` | Trace fact origins, return provenance records |
+| `timeline_first` | Sort by timeline first, ideal for time-related queries |
 
 ---
 

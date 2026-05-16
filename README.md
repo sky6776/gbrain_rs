@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
-**个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增 KB 子系统（异步文档处理管线 + RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期（restore/purge-deleted）、时间衰减搜索等特性。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式架构，开箱即用。
+**个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增单入口多投影融合架构（Artifact 原件 → KB/影子页面/候选变更/附件多投影 + 溯源审计 + 回滚）、KB 子系统（异步文档处理管线 + RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期（restore/purge-deleted）、时间衰减搜索等特性。基于 SQLite + sqlite-vec + FTS5 构建的零配置嵌入式架构，开箱即用。
 
 > 原始 TypeScript 版本由 [Garry Tan](https://github.com/garrytan) 开发。本项目采用**Vibe coding**构建。
 
@@ -40,7 +40,8 @@ gbrain serve
 - **知识图谱** — Wiki 链接提取、类型化链接、图遍历、反向链接对称性验证
 - **KB 子系统** — 异步五阶段文档处理管线（解析→拆分→嵌入→RAPTOR→持久化），RAPTOR 递归摘要树，文档上传与处理，多格式解析器（Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本/代码），语义分块（Savitzky-Golay 平滑 + chunk_overlap 重叠）
 - **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
-- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，58 个工具，用于 AI 智能体集成
+- **单入口多投影融合** — 原件上传（Upload）自动路由至多投影（KB 文档 / 影子页面 / 候选变更 / 文件附件 / 链接 / 时间线），溯源审计（Provenance Ledger），候选评审与提升（Promotion），版本链与回滚（Projection Supersede / Rollback），统一记忆查询（Memory Query，4 种策略）
+- **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，71 个工具，用于 AI 智能体集成
 - **零配置** — 嵌入式 SQLite，无需外部服务（嵌入向量可选）
 - **分层丰富** — 自动实体检测与提升（提及 → 存根 → 完善）
 - **版本历史** — 完整的页面版本管理，支持回滚
@@ -72,6 +73,7 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 ~/.gbrain/
   brain.db           # SQLite 数据库（FTS5 + sqlite-vec）
   config.json        # 运行时配置（通过 gbrain config set 生成）
+  artifacts/         # Artifact 原件存储（按 SHA256 命名）
   files/             # 上传文件存储
   cache/             # 缓存目录
   logs/              # 日志文件
@@ -165,6 +167,38 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `gbrain tools-json` | 以 JSON 输出 MCP 工具定义 |
 | `gbrain serve` | 作为 MCP stdio 服务器运行 |
 
+### 单入口多投影融合（Artifact）
+
+| 命令 | 说明 |
+|------|------|
+| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--promotion <POLICY>] [--dry-run]` | 上传原件（统一入口），自动路由至多投影。intent: auto/document/attachment/memory/promote；promotion: none/shadow/candidate/auto-low-risk |
+| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>]` | 统一记忆查询（别名: ask-memory）。strategy: brain_first/evidence_first/provenance/timeline_first |
+| `gbrain artifact list [--limit <N>] [--offset <N>]` | 列出所有 Artifact |
+| `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情（支持 ID 或 UID 如 `art_ab12cd34ef56`） |
+| `gbrain artifact delete <artifact_id>` | 软删除 Artifact（标记所有投影为 stale） |
+| `gbrain artifact health` | 检查 Artifact 投影一致性与健康状态 |
+
+### 候选变更与提升（Promotion）
+
+| 命令 | 说明 |
+|------|------|
+| `gbrain promotion list [--status <STATUS>] [--candidate-type <TYPE>] [--target-slug <SLUG>]` | 列出候选变更 |
+| `gbrain promotion get <candidate_id>` | 获取候选变更详情 |
+| `gbrain promotion accept <candidate_id> [--reviewer <NAME>] [--notes <TEXT>]` | 接受候选变更 |
+| `gbrain promotion reject <candidate_id> [--reviewer <NAME>] [--notes <TEXT>]` | 拒绝候选变更 |
+| `gbrain promotion apply <candidate_id>` | 应用已接受的候选变更到 gbrain |
+| `gbrain promotion auto-apply <artifact_id>` | 自动应用低风险候选变更 |
+| `gbrain promotion batch-apply [--artifact-id <ID>] [--risk <LEVEL>] [--dry-run]` | 批量应用候选变更 |
+| `gbrain promotion rollback <candidate_id>` | 回滚已应用的候选变更 |
+
+### 投影管理（Projection）
+
+| 命令 | 说明 |
+|------|------|
+| `gbrain projection supersede <old_proj_id> <new_proj_id>` | 用新投影替代旧投影（版本链） |
+| `gbrain projection history <projection_key> [--artifact-id <ID>] [--projection-type <TYPE>] [--limit <N>]` | 查询投影版本链历史 |
+| `gbrain gc-orphan-projections [--stale-days <N>] [--dry-run]` | 清理孤立/过期的投影记录 |
+
 ---
 
 ## MCP 集成
@@ -221,7 +255,7 @@ CLI 直接使用 `remote=false`，跳过远程安全限制。
 
 ## MCP 工具
 
-gbrain 提供 58 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
+gbrain 提供 71 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
 
 ### 搜索
 
@@ -341,6 +375,37 @@ gbrain 提供 58 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `kb_add_eval_query` | 添加搜索评估查询 |
 | `kb_add_search_feedback` | 添加搜索结果反馈评分 |
 
+### 单入口多投影融合（Artifact）
+
+| 工具 | 说明 |
+|------|------|
+| `upload_source` | 上传原件（统一入口），自动创建 Artifact、KB 投影、影子页面和文件附件 |
+| `memory_query` | 统一记忆查询，同时搜索 gbrain 策展知识和 KB 文档证据，4 种策略自动选择 |
+| `artifact_list` | 列出所有 Artifact |
+| `artifact_get` | 获取 Artifact 详情（支持 ID 或 UID） |
+| `artifact_delete` | 软删除 Artifact（标记所有投影为 stale） |
+| `artifact_health` | 检查 Artifact 投影一致性与健康状态 |
+| `get_provenance` | 获取页面的溯源记录（追踪事实来源） |
+
+### 候选变更与提升（Promotion）
+
+| 工具 | 说明 |
+|------|------|
+| `promotion_list_candidates` | 列出候选变更（从 KB 证据提取的建议修改） |
+| `promotion_get_candidate` | 获取候选变更详情 |
+| `promotion_accept_candidate` | 接受候选变更 |
+| `promotion_reject_candidate` | 拒绝候选变更 |
+| `promotion_apply_candidate` | 应用已接受的候选变更到 gbrain |
+| `promotion_rollback_candidate` | 回滚已应用的候选变更，撤销影子页面更新并标记溯源为 stale |
+
+### 投影管理（Projection）
+
+| 工具 | 说明 |
+|------|------|
+| `gc_orphan_projections` | 清理孤立/过期的投影记录 |
+| `projection_supersede` | 用新投影替代旧投影（版本链） |
+| `projection_history` | 查询投影版本链历史 |
+
 ---
 
 ## MCP 工具参数
@@ -416,6 +481,39 @@ gbrain 提供 58 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `level` | integer | 否 | RAPTOR 树层级过滤 |
 | `top_k` | integer | 否 | 最大结果数（默认 10，上限 50） |
 
+### `upload_source`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `path` | string | 是 | 本地文件路径 |
+| `intent` | string | 否 | 上传意图: auto/document/attachment/memory/promote（默认 auto） |
+| `library_id` | integer | 否 | KB 知识库 ID |
+| `target_slug` | string | 否 | 目标 gbrain 页面 slug（用于提升） |
+| `page_slug` | string | 否 | 目标页面 slug（用于文件附件） |
+| `folder_id` | integer | 否 | KB 文件夹 ID |
+| `promotion` | string | 否 | 提升策略: none/shadow/candidate/auto-low-risk |
+| `dry_run` | boolean | 否 | 仅返回路由计划，不实际执行 |
+
+### `memory_query`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 查询文本 |
+| `strategy` | string | 否 | 查询策略: brain_first/evidence_first/provenance/timeline_first（默认 brain_first） |
+| `limit` | integer | 否 | 最大结果数 |
+| `filter_slug` | string | 否 | 按 slug 过滤（适用于所有策略） |
+| `include_evidence` | boolean | 否 | 包含 KB 证据结果 |
+| `include_provenance` | boolean | 否 | 包含溯源记录 |
+
+### `promotion_list_candidates`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `status` | string | 否 | 按状态过滤: pending/accepted/rejected/applied/rolled_back/stale/superseded |
+| `candidate_type` | string | 否 | 按类型过滤: document_summary/entity_mention/link_suggestion/timeline_event/fact_claim/page_create/page_update |
+| `target_slug` | string | 否 | 按目标 slug 过滤 |
+| `limit` | integer | 否 | 最大结果数 |
+
 ---
 
 ## 环境变量
@@ -441,6 +539,7 @@ KB RAPTOR: GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPEN
 |------|------|--------|
 | `GBRAIN_DIR` | 数据存储根目录 | `~/.gbrain` |
 | `GBRAIN_DB_PATH` | 数据库文件路径 | `$GBRAIN_DIR/brain.db` |
+| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact 原件存储目录 | `$GBRAIN_DIR/artifacts` |
 
 ### 嵌入向量
 
@@ -630,6 +729,42 @@ cargo clippy                  # 代码检查
 - **分词索引** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构
 - **中文分块** — 中文标点加入句子/子句分隔层级，CJK 标点无需后续空格即可断句
 - **预分词列** — schema V16 新增 `_tokens` 列，FTS5 改用 `unicode61` 分词器，写入时自动同步
+
+### 单入口多投影融合架构（Artifact）
+
+```
+上传原件（单一入口）
+  │
+  ├─ 路由规划器（根据 intent + 文件类型自动决策）
+  │
+  ├─ Artifact 原件存储（SHA256 去重，按 hash 命名）
+  │
+  └─ 多投影自动创建：
+      ├─ KB Document 投影 → 文档处理管线（解析→拆分→嵌入→RAPTOR→持久化）
+      ├─ Shadow Page 投影 → 影子页面（提取内容生成 wiki 页面）
+      ├─ Promotion Candidate 投影 → 候选变更（实体提及/链接建议/时间线事件/事实声明）
+      ├─ File Attachment 投影 → 文件附件（简单文件引用）
+      ├─ Brain Link 投影 → 自动链接
+      └─ Brain Timeline 投影 → 自动时间线
+```
+
+**核心概念：**
+
+- **Artifact** — 上传的原始文件，含状态（active/deleted/purged）、来源类型（upload/sync/link/mcp）、上传意图（auto/document/attachment/memory/promote）
+- **Projection** — 同一 Artifact 在不同子系统中的表示，含版本链（superseded_by）和状态（active/stale/superseded）
+- **Candidate** — 从 KB 证据中提取的建议变更，含风险等级（low/medium/high）和评审工作流（pending→accepted→applied / rejected / rolled_back）
+- **Provenance** — 溯源审计记录，追踪页面事实的来源 Artifact 和 Candidate
+
+**统一记忆查询（Memory Query）：**
+
+4 种查询策略自动适配不同场景：
+
+| 策略 | 说明 |
+|------|------|
+| `brain_first` | 优先搜索 gbrain 策展知识，不足时补充 KB 证据 |
+| `evidence_first` | 优先搜索 KB 文档证据，适合需要原始来源的场景 |
+| `provenance` | 追溯事实来源，返回溯源记录 |
+| `timeline_first` | 优先按时间线排序，适合时间相关查询 |
 
 ---
 
