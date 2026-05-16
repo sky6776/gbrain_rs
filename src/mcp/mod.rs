@@ -343,28 +343,7 @@ impl McpServer {
                 }
             }
 
-            "search" => {
-                let query = arguments["query"].as_str().unwrap_or("");
-                let limit = arguments["limit"].as_u64().map(|l| l as usize);
-                let offset = arguments["offset"].as_u64().map(|l| l as usize);
-                let opts = SearchOpts {
-                    limit,
-                    offset,
-                    language: arguments["lang"].as_str().map(ToString::to_string),
-                    symbol_kind: arguments["symbol_kind"].as_str().map(ToString::to_string),
-                    near_symbol: arguments["near_symbol"].as_str().map(ToString::to_string),
-                    walk_depth: arguments["walk_depth"]
-                        .as_u64()
-                        .map(|d| (d as usize).min(2)),
-                    ..Default::default()
-                };
-                // Use Operations::query() for full hybrid search pipeline
-                // (keyword + vector + fallback + RRF fusion + boosts + dedup)
-                // instead of raw engine.search_keyword() which only does FTS5.
-                let results = ops.query(query, opts)?;
-                Ok(serde_json::to_value(results)?)
-            }
-
+            
             "get_page" => {
                 let slug = arguments["slug"].as_str().unwrap_or("");
                 crate::security::validate_page_slug(slug)?;

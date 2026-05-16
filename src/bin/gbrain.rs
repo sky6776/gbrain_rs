@@ -216,11 +216,7 @@ enum Commands {
         interval: u64,
     },
 
-    /// Output all MCP tool definitions as JSON
-    ToolsJson,
-
-    /// Manage brain config (get/set/list)
-    Config {
+        Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
@@ -1330,11 +1326,6 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             } else {
                 autopilot.run_loop(interval);
             }
-        }
-
-        Commands::ToolsJson => {
-            let tools = gbrain_core::mcp::tool_defs::build_tool_defs();
-            info!("{}", serde_json::to_string_pretty(&tools)?);
         }
 
         Commands::Config { command } => match command {

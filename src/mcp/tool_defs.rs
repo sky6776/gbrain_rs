@@ -44,20 +44,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "include_meta", description: "Return {results, meta} with vector/expansion detail", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-    OperationDef {
-        name: "search",
-        description: "Hybrid search (keyword + vector + fallback + RRF fusion + boosts + dedup). Same as query but without expand/detail options.",
-        params: &[
-            ParamDef { name: "query", description: "Search query", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
-            ParamDef { name: "limit", description: "Max results (default 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "offset", description: "Skip first N results (for pagination)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "lang", description: "Filter code-aware retrieval by language", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
-            ParamDef { name: "symbol_kind", description: "Filter code-aware retrieval by symbol kind", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
-            ParamDef { name: "near_symbol", description: "Anchor two-pass code graph retrieval near this symbol", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
-            ParamDef { name: "walk_depth", description: "Walk code graph neighbors up to this depth (0-2)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-        ],
-    },
-    OperationDef {
+        OperationDef {
         name: "get_page",
         description: "Read a page by slug (supports optional fuzzy matching)",
         params: &[
@@ -640,6 +627,16 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
         description: "Rollback an applied promotion candidate, undoing shadow page updates and marking provenance stale (§31)",
         params: &[
             ParamDef { name: "candidate_id", description: "Candidate ID to rollback", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "promotion_batch_apply",
+        description: "Batch apply pending promotion candidates, optionally filtered by artifact and risk level",
+        params: &[
+            ParamDef { name: "artifact_id", description: "Filter by artifact ID (optional)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "risk", description: "Filter by risk level: low, medium, high", required: false, param_type: ParamType::String, enum_values: Some(&["low", "medium", "high"]), items_type: None },
+            ParamDef { name: "dry_run", description: "Preview candidates without applying", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
 
