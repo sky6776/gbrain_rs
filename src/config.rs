@@ -91,6 +91,16 @@ pub struct Config {
     pub default_kb_library_id: Option<i64>,
     /// 上传默认提升策略
     pub upload_default_promotion_policy: String,
+    /// 是否暴露内部工具（kb_*、promotion_*、projection_* 等）给 MCP 调用方
+    /// 默认 false：只暴露 artifact_* facade tools
+    /// 设为 true 时，旧版工具名（upload_source、memory_query、promotion_* 等）仍可使用
+    pub expose_internal_tools: bool,
+    /// artifact 默认意图。默认 "memory"。可选值: memory, evidence, promote
+    pub artifact_default_intent: String,
+    /// 当 artifact_put 需要写入 KB 但没有 Inbox 库时，是否自动创建。默认 true。
+    pub artifact_auto_create_inbox_library: bool,
+    /// artifact_put 的 memory 意图是否写入 KB。默认 true。设为 false 则仅写入 gbrain 页面。
+    pub artifact_manual_memory_to_kb: bool,
 }
 
 impl Default for Config {
@@ -176,6 +186,14 @@ impl Default for Config {
             artifact_storage_dir: None,
             default_kb_library_id: None,
             upload_default_promotion_policy: "candidate".to_string(),
+            // 默认不暴露内部工具，只暴露 artifact_* facade
+            expose_internal_tools: false,
+            // artifact 默认意图为 memory（写入 gbrain 页面 + KB）
+            artifact_default_intent: "memory".to_string(),
+            // 当 artifact_put 需要写入 KB 但没有 Inbox 库时，自动创建
+            artifact_auto_create_inbox_library: true,
+            // artifact_put 的 memory 意图默认写入 KB
+            artifact_manual_memory_to_kb: true,
         }
     }
 }
@@ -335,6 +353,22 @@ impl Config {
         if let Ok(policy) = std::env::var("GBRAIN_UPLOAD_PROMOTION_POLICY") {
             config.upload_default_promotion_policy = policy;
         }
+        // 是否暴露内部工具（默认 false，仅暴露 artifact_* facade）
+        config.expose_internal_tools = std::env::var("GBRAIN_EXPOSE_INTERNAL_TOOLS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(config.expose_internal_tools);
+        // artifact 默认意图（默认 "memory"，可选: memory, evidence, promote）
+        if let Ok(intent) = std::env::var("GBRAIN_ARTIFACT_DEFAULT_INTENT") {
+            config.artifact_default_intent = intent;
+        }
+        // 当 artifact_put 需要写入 KB 但没有 Inbox 库时，是否自动创建
+        config.artifact_auto_create_inbox_library = std::env::var("GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(config.artifact_auto_create_inbox_library);
+        // artifact_put 的 memory 意图是否写入 KB（默认 true，设为 false 则仅写入 gbrain 页面）
+        config.artifact_manual_memory_to_kb = std::env::var("GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(config.artifact_manual_memory_to_kb);
 
         info!(
             db_path = %config.db_path().display(),
@@ -630,5 +664,15 @@ impl Config {
         if !other.upload_default_promotion_policy.is_empty() {
             self.upload_default_promotion_policy = other.upload_default_promotion_policy;
         }
+        // expose_internal_tools — always take config file value
+        self.expose_internal_tools = other.expose_internal_tools;
+        // artifact_default_intent — always take config file value
+        if !other.artifact_default_intent.is_empty() {
+            self.artifact_default_intent = other.artifact_default_intent;
+        }
+        // artifact_auto_create_inbox_library — always take config file value
+        self.artifact_auto_create_inbox_library = other.artifact_auto_create_inbox_library;
+        // artifact_manual_memory_to_kb — always take config file value
+        self.artifact_manual_memory_to_kb = other.artifact_manual_memory_to_kb;
     }
 }

@@ -1,9 +1,10 @@
-//! MCP tool definitions — derived from operation definitions
-//! Mirrors gbrain's src/mcp/tool-defs.ts
+//! MCP tool definitions — Artifact facade + 内部工具
 //!
-//! Each tool is defined via OperationDef. The MCP input_schema JSON
-//! is auto-generated from the structured definition, eliminating
-//! the need for manual JSON construction.
+//! 默认只暴露 artifact_* facade tools（知识操作统一入口）。
+//! kb_*、promotion_*、projection_*、get_provenance 等内部工具
+//! 通过 config.expose_internal_tools 或 admin-tools feature 暴露。
+//!
+//! 设计文档 §8.2: MCP tools 收口
 
 use crate::operations::{OperationDef, ParamDef, ParamType};
 use serde_json::Value;
@@ -26,8 +27,162 @@ impl From<&OperationDef> for ToolDef {
     }
 }
 
-/// All operation definitions — single source of truth for the brain API surface
-pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
+/// Artifact facade 工具定义 — 统一知识操作入口（设计文档 §4.2）
+///
+/// 默认暴露给用户，包含所有 artifact_* 命名空间的 MCP tools。
+pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
+    OperationDef {
+        name: "artifact_put",
+        description: "手动写入长期记忆。创建 text/manual artifact 并投影到 gbrain 页面。支持 --content 直接输入或 --file 从文件读取。",
+        params: &[
+            ParamDef { name: "slug", description: "目标页面 slug（如 people/alice）", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "content", description: "直接输入的文本内容（与 file 二选一）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "file", description: "本地文件路径（与 content 二选一）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "title", description: "页面标题（可选，默认从 slug 推断）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "intent", description: "意图: memory(默认, 进KB+shadow+低风险自动应用), evidence(仅KB证据), promote(明确提升)", required: false, param_type: ParamType::String, enum_values: Some(&["memory", "evidence", "promote"]), items_type: None },
+            ParamDef { name: "dry_run", description: "仅返回路由计划，不实际写入", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_upload",
+        description: "上传文件作为知识源。系统根据文件类型和意图自动路由：文档进KB+影子页，图片/二进制走附件，带--target生成建议变更。",
+        params: &[
+            ParamDef { name: "path", description: "本地文件路径", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "intent", description: "上传意图: auto(自动路由), evidence(文档证据), memory(整理进记忆), attachment(仅附件), promote(明确提升)", required: false, param_type: ParamType::String, enum_values: Some(&["auto", "evidence", "memory", "attachment", "promote"]), items_type: None },
+            ParamDef { name: "target_slug", description: "目标 gbrain 页面 slug（用于生成建议变更）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "page_slug", description: "关联页面 slug（用于附件）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "library_id", description: "KB 库 ID（可选，默认自动选择 Inbox）", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "folder_id", description: "KB 文件夹 ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "promotion", description: "提升策略: none, shadow, candidate, auto-low-risk", required: false, param_type: ParamType::String, enum_values: Some(&["none", "shadow", "candidate", "auto-low-risk"]), items_type: None },
+            ParamDef { name: "dry_run", description: "仅返回路由计划，不实际写入", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_query",
+        description: "统一知识查询。自动混合 gbrain 长期记忆、KB 文档证据、时间线事件和图谱关系。默认隐藏内部 ID。",
+        params: &[
+            ParamDef { name: "query", description: "查询文本", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "mode", description: "查询模式: auto(自动), memory(优先记忆), evidence(优先证据), timeline(优先时间线), graph(图谱扩展)", required: false, param_type: ParamType::String, enum_values: Some(&["auto", "memory", "evidence", "timeline", "graph"]), items_type: None },
+            ParamDef { name: "limit", description: "最大结果数", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "filter_slug", description: "过滤到指定页面 slug", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "include_sources", description: "显示来源追溯（artifact 来源和引用）", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_list",
+        description: "列出知识源（source artifacts）",
+        params: &[
+            ParamDef { name: "limit", description: "最大结果数（默认 50）", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "offset", description: "偏移量", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_get",
+        description: "获取知识源详情。支持 ID 或 UID 查询，可选展示投影和来源追溯。",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'）", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "include_projections", description: "包含投影详情", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "include_sources", description: "包含来源追溯", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_delete",
+        description: "软删除知识源。KB 证据和影子页随生命周期 stale，稳定 gbrain 页面内容不默认删除。支持 dry_run 预览。",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "dry_run", description: "预览删除影响，不实际执行", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_detach",
+        description: "移除知识源与某次使用的关联（occurrence/projection 级），不删除 source artifact 本身，不影响其它页面使用。",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "from", description: "目标页面 slug", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "dry_run", description: "预览影响，不实际执行", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_restore",
+        description: "恢复已软删除的知识源及其可恢复投影",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "dry_run", description: "预览恢复影响，不实际执行", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_reprocess",
+        description: "重新处理知识源：重跑 KB pipeline、投影生成和 promotion 提取",
+        params: &[
+            ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "dry_run", description: "预览重新处理影响，不实际执行", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_health",
+        description: "检查知识源一致性：孤立投影、stale 投影、待审核变更、来源追溯状态",
+        params: &[],
+    },
+
+    OperationDef {
+        name: "artifact_review_list",
+        description: "列出建议变更（suggested changes）。对用户展示为来源证据驱动的变更建议，而非内部 promotion candidate。",
+        params: &[
+            ParamDef { name: "status", description: "过滤状态: pending, accepted, rejected, applied, rolled_back", required: false, param_type: ParamType::String, enum_values: Some(&["pending", "accepted", "rejected", "applied", "rolled_back"]), items_type: None },
+            ParamDef { name: "target_slug", description: "过滤目标页面 slug", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "limit", description: "最大结果数", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_review_get",
+        description: "获取建议变更详情，包含证据、目标记忆、风险等级和来源追溯",
+        params: &[
+            ParamDef { name: "change_id", description: "变更 ID（即内部 candidate_id）", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_review_apply",
+        description: "应用建议变更到 gbrain 长期记忆",
+        params: &[
+            ParamDef { name: "change_id", description: "变更 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_review_reject",
+        description: "拒绝建议变更",
+        params: &[
+            ParamDef { name: "change_id", description: "变更 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "reason", description: "拒绝原因", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+
+    OperationDef {
+        name: "artifact_review_rollback",
+        description: "回滚已应用的建议变更，撤销影子页更新并标记来源追溯为 stale",
+        params: &[
+            ParamDef { name: "change_id", description: "变更 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+];
+
+/// 内部工具定义 — 默认不暴露给用户，仅通过 expose_internal_tools 或 admin-tools feature 可见
+///
+/// 包含: gbrain 页面操作、KB 子系统、promotion/projection 内部操作、
+/// 旧版 upload_source/memory_query（已被 artifact_* facade 取代）
+pub(crate) static INTERNAL_DEFS: &[OperationDef] = &[
+    // --- gbrain 页面操作（内部，默认不暴露） ---
     OperationDef {
         name: "query",
         description: "Hybrid search with vector + keyword + multi-query expansion",
@@ -44,7 +199,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "include_meta", description: "Return {results, meta} with vector/expansion detail", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-        OperationDef {
+    OperationDef {
         name: "get_page",
         description: "Read a page by slug (supports optional fuzzy matching)",
         params: &[
@@ -329,7 +484,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "include_pseudo", description: "Include auto-generated and pseudo pages (default: false)", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-    // P1-9: sync_brain MCP tool (mirrors TS sync_brain operation)
     OperationDef {
         name: "sync_brain",
         description: "Sync brain from a Git repository. Reads .md files, chunking and embedding new/changed pages, removing deleted ones.",
@@ -338,7 +492,8 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "force_full", description: "Force full sync instead of incremental (default: false)", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-    // --- KB subsystem tools ---
+
+    // --- KB 子系统工具（内部，默认不暴露） ---
     OperationDef {
         name: "kb_list_libraries",
         description: "List all knowledge base libraries with document and chunk counts",
@@ -358,7 +513,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "chunk_overlap", description: "Chunk overlap in characters", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "batch_max_documents", description: "Max documents per batch", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "batch_max_chunks", description: "Max chunks per batch", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            // P0-016: Governance and model configuration
             ParamDef { name: "embedding_provider", description: "Embedding provider name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "embedding_model", description: "Embedding model name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "embedding_dimensions", description: "Embedding vector dimensions", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
@@ -386,7 +540,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "raptor_llm_model", description: "Raptor LLM model name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "chunk_size", description: "Chunk size in characters", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "chunk_overlap", description: "Chunk overlap in characters", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            // P0-016: Governance and model configuration
             ParamDef { name: "embedding_provider", description: "Embedding provider name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "embedding_model", description: "Embedding model name", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "embedding_dimensions", description: "Embedding vector dimensions", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
@@ -473,9 +626,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "include_highlights", description: "Return highlight character ranges", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "group_by_document", description: "Group results by document", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "folder_id", description: "Filter to folder", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            // FIX9-03: 允许调用方指定 embedding 维度，覆盖全局配置
             ParamDef { name: "embedding_dimensions", description: "Override embedding dimensions for query vector", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            // FIX10-R3: 允许调用方指定 embedding_index_id，使用特定 index 的模型配置
             ParamDef { name: "embedding_index_id", description: "Specific embedding index ID to use for query vector (must belong to target library)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
@@ -488,7 +639,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "parent_id", description: "Parent folder ID (null = root)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-    // P5/P6 operations tools
     OperationDef {
         name: "kb_purge_document",
         description: "Permanently destroy a soft-deleted document and all its associated data",
@@ -543,10 +693,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
         ],
     },
 
-    // ========================================================================
-    // 单入口多投影融合架构 — upload_source / memory_query / promotion / artifact
-    // ========================================================================
-
+    // --- 旧版 artifact 内部工具（已被 artifact_* facade 取代） ---
     OperationDef {
         name: "upload_source",
         description: "Upload a source file (unified entry point for gbrain + KB + file storage). The system automatically creates Source Artifact, KB projection, shadow page, and file attachment based on intent.",
@@ -561,7 +708,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "dry_run", description: "Only return route plan without committing", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "memory_query",
         description: "Unified memory query. Searches both gbrain curated knowledge and KB document evidence. The planner automatically selects the best strategy based on query intent.",
@@ -575,6 +721,7 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
         ],
     },
 
+    // --- promotion/projection 内部工具（已被 artifact_review_* facade 取代） ---
     OperationDef {
         name: "promotion_list_candidates",
         description: "List promotion candidates (suggested changes extracted from KB evidence)",
@@ -585,7 +732,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_get_candidate",
         description: "Get details of a promotion candidate",
@@ -593,7 +739,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_accept_candidate",
         description: "Accept a promotion candidate",
@@ -603,7 +748,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "notes", description: "Review notes", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_reject_candidate",
         description: "Reject a promotion candidate",
@@ -613,7 +757,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "reason", description: "Rejection reason", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_apply_candidate",
         description: "Apply an approved promotion candidate to gbrain",
@@ -621,15 +764,13 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "candidate_id", description: "Candidate ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_rollback_candidate",
-        description: "Rollback an applied promotion candidate, undoing shadow page updates and marking provenance stale (§31)",
+        description: "Rollback an applied promotion candidate, undoing shadow page updates and marking provenance stale",
         params: &[
             ParamDef { name: "candidate_id", description: "Candidate ID to rollback", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "promotion_batch_apply",
         description: "Batch apply pending promotion candidates, optionally filtered by artifact and risk level",
@@ -639,28 +780,25 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "dry_run", description: "Preview candidates without applying", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "gc_orphan_projections",
-        description: "Garbage collect orphaned projections and clean up stale projection records (§31)",
+        description: "Garbage collect orphaned projections and clean up stale projection records",
         params: &[
             ParamDef { name: "stale_days", description: "Delete projections orphaned/superseded for more than N days (default: 30)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "dry_run", description: "Preview what would be cleaned without making changes", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "projection_supersede",
-        description: "Supersede an old projection with a new one, marking the old as superseded and setting superseded_by (§31 version chain)",
+        description: "Supersede an old projection with a new one, marking the old as superseded and setting superseded_by",
         params: &[
             ParamDef { name: "old_proj_id", description: "Old projection ID to supersede", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "new_proj_id", description: "New projection ID that replaces the old one", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
     OperationDef {
         name: "projection_history",
-        description: "Query projection version chain history by projection_key (§31). Supports optional artifact_id and projection_type filters to avoid mixing projections from different artifacts sharing the same key.",
+        description: "Query projection version chain history by projection_key. Supports optional artifact_id and projection_type filters.",
         params: &[
             ParamDef { name: "projection_key", description: "Projection key to query history for", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "artifact_id", description: "Optional artifact ID to filter by (avoids mixing projections from different artifacts)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
@@ -668,38 +806,6 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
             ParamDef { name: "limit", description: "Maximum history records to return (default: 20)", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
-
-    OperationDef {
-        name: "artifact_list",
-        description: "List source artifacts",
-        params: &[
-            ParamDef { name: "limit", description: "Maximum results", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "offset", description: "Offset", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-        ],
-    },
-
-    OperationDef {
-        name: "artifact_get",
-        description: "Get source artifact details by ID or UID",
-        params: &[
-            ParamDef { name: "id_or_uid", description: "Artifact ID or UID (e.g. '1' or 'art_ab12cd34ef56')", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
-        ],
-    },
-
-    OperationDef {
-        name: "artifact_delete",
-        description: "Soft delete a source artifact (marks all projections as stale)",
-        params: &[
-            ParamDef { name: "artifact_id", description: "Artifact ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
-        ],
-    },
-
-    OperationDef {
-        name: "artifact_health",
-        description: "Check artifact projection consistency and health",
-        params: &[],
-    },
-
     OperationDef {
         name: "get_provenance",
         description: "Get provenance records for a brain page (trace where facts came from)",
@@ -709,17 +815,43 @@ pub(crate) static OPERATION_DEFS: &[OperationDef] = &[
     },
 ];
 
-/// Build all tool definitions from structured operation definitions
+/// 构建 tool 定义列表。默认只暴露 artifact_* facade tools。
+/// 当 expose_internal_tools=true 时，追加内部工具。
 pub fn build_tool_defs() -> Vec<ToolDef> {
-    OPERATION_DEFS.iter().map(|op| op.into()).collect()
+    build_tool_defs_with_internal(false)
 }
 
-/// Get an operation definition by name
+/// 构建 tool 定义列表，可选包含内部工具
+pub fn build_tool_defs_with_internal(expose_internal: bool) -> Vec<ToolDef> {
+    let mut defs: Vec<ToolDef> = ARTIFACT_FACADE_DEFS.iter().map(|op| op.into()).collect();
+    if expose_internal {
+        defs.extend(INTERNAL_DEFS.iter().map(|op| op.into()));
+    }
+    defs
+}
+
+/// 获取操作定义（在 facade 和 internal 中查找）
 pub fn get_operation_def(name: &str) -> Option<&'static OperationDef> {
-    OPERATION_DEFS.iter().find(|op| op.name == name)
+    ARTIFACT_FACADE_DEFS
+        .iter()
+        .find(|op| op.name == name)
+        .or_else(|| INTERNAL_DEFS.iter().find(|op| op.name == name))
 }
 
-/// Get all operation definitions
-pub fn get_operation_defs() -> &'static [OperationDef] {
-    OPERATION_DEFS
+/// 获取所有操作定义（facade + internal）
+pub fn get_operation_defs() -> Vec<&'static OperationDef> {
+    ARTIFACT_FACADE_DEFS
+        .iter()
+        .chain(INTERNAL_DEFS.iter())
+        .collect()
+}
+
+/// 获取 artifact facade 操作定义
+pub fn get_artifact_facade_defs() -> &'static [OperationDef] {
+    ARTIFACT_FACADE_DEFS
+}
+
+/// 获取内部操作定义
+pub fn get_internal_defs() -> &'static [OperationDef] {
+    INTERNAL_DEFS
 }

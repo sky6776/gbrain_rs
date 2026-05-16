@@ -36,6 +36,8 @@ pub enum SourceKind {
     Sync,
     Link,
     Mcp,
+    /// 手动输入（artifact put --content/--file）
+    Manual,
 }
 
 impl fmt::Display for SourceKind {
@@ -45,6 +47,7 @@ impl fmt::Display for SourceKind {
             SourceKind::Sync => write!(f, "sync"),
             SourceKind::Link => write!(f, "link"),
             SourceKind::Mcp => write!(f, "mcp"),
+            SourceKind::Manual => write!(f, "manual"),
         }
     }
 }
@@ -970,4 +973,161 @@ pub fn infer_mime_type(extension: &str) -> String {
         "toml" => "application/toml".to_string(),
         _ => "application/octet-stream".to_string(),
     }
+}
+
+// ============================================================================
+// artifact 统一接口类型（设计文档 §4.2 / §5.1 / §6 / §7）
+// ============================================================================
+
+/// Artifact 意图 — 用户友好的意图表达（设计文档 §5.1）
+///
+/// 映射关系:
+/// - memory → 内部走 Document + shadow 投影 + 低风险自动应用
+/// - evidence → 内部走 Document（仅 KB 证据）
+/// - promote → 内部走 Promote（明确提升）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactIntent {
+    /// 整理进长期记忆（默认）：进 KB + shadow 投影 + 低风险自动应用
+    Memory,
+    /// 仅作为证据存入 KB，不自动投影
+    Evidence,
+    /// 明确提升到 gbrain 页面
+    Promote,
+}
+
+/// artifact_put 请求参数（设计文档 §4.2）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPutInput {
+    /// 目标页面 slug
+    pub slug: String,
+    /// 直接输入的文本内容（与 file 二选一）
+    pub content: Option<String>,
+    /// 本地文件路径（与 content 二选一）
+    pub file: Option<String>,
+    /// 页面标题（可选）
+    pub title: Option<String>,
+    /// 意图（默认 Memory）
+    pub intent: Option<ArtifactIntent>,
+    /// 仅返回路由计划，不实际写入
+    pub dry_run: Option<bool>,
+}
+
+/// artifact_query 请求参数（设计文档 §4.2）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactQueryInput {
+    /// 查询文本
+    pub query: String,
+    /// 查询模式: auto/memory/evidence/timeline/graph
+    pub mode: Option<String>,
+    /// 最大结果数
+    pub limit: Option<usize>,
+    /// 过滤到指定页面 slug
+    pub filter_slug: Option<String>,
+    /// 显示来源追溯
+    pub include_sources: Option<bool>,
+}
+
+/// artifact_query 统一输出（设计文档 §7）
+///
+/// 合并 gbrain 记忆、KB 证据、时间线事件和图谱关系，
+/// 隐藏内部 ID，提供统一的知识查询结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactQueryOutput {
+    /// 查询文本
+    pub query: String,
+    /// 查询模式
+    pub mode: String,
+    /// 记忆结果（来自 gbrain）
+    pub memories: Vec<MemoryResult>,
+    /// 证据结果（来自 KB）
+    pub evidence: Vec<EvidenceResult>,
+    /// 时间线事件
+    pub timeline: Vec<TimelineEvent>,
+    /// 图谱关系
+    pub graph: Vec<GraphRelation>,
+    /// 查询元信息
+    pub meta: QueryMeta,
+}
+
+/// 记忆查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryResult {
+    /// 页面 slug
+    pub slug: String,
+    /// 页面标题
+    pub title: String,
+    /// 内容摘要
+    pub summary: String,
+    /// 相关度分数
+    pub score: f64,
+    /// 来源 artifact（可选）
+    pub source_artifact_id: Option<i64>,
+}
+
+/// 证据查询结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceResult {
+    /// 文档标题
+    pub title: String,
+    /// 内容片段
+    pub snippet: String,
+    /// 相关度分数
+    pub score: f64,
+    /// 来源 artifact ID
+    pub source_artifact_id: Option<i64>,
+}
+
+/// 时间线事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    /// 事件时间
+    pub timestamp: String,
+    /// 事件描述
+    pub description: String,
+    /// 关联页面 slug
+    pub slug: Option<String>,
+}
+
+/// 图谱关系
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphRelation {
+    /// 源页面 slug
+    pub from_slug: String,
+    /// 关系类型
+    pub relation: String,
+    /// 目标页面 slug
+    pub to_slug: String,
+}
+
+/// 查询元信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMeta {
+    /// 总结果数
+    pub total: usize,
+    /// 查询耗时（毫秒）
+    pub elapsed_ms: u64,
+    /// 是否使用了向量搜索
+    pub used_vector: bool,
+    /// 是否使用了关键词搜索
+    pub used_keyword: bool,
+}
+
+/// 建议变更条目 — promotion 的用户友好包装（设计文档 §6）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactReviewItem {
+    /// 变更 ID（内部 candidate_id）
+    pub change_id: i64,
+    /// 目标页面 slug
+    pub target_slug: String,
+    /// 变更状态
+    pub status: String,
+    /// 风险等级
+    pub risk_level: String,
+    /// 变更摘要
+    pub summary: String,
+    /// 来源证据
+    pub evidence: Option<String>,
+    /// 创建时间
+    pub created_at: Option<String>,
 }

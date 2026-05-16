@@ -196,7 +196,8 @@ impl McpServer {
             }),
 
             "tools/list" => {
-                let tools = tool_defs::build_tool_defs();
+                // 根据 expose_internal_tools 配置决定是否暴露内部工具
+                let tools = tool_defs::build_tool_defs_with_internal(self.config.expose_internal_tools);
                 let tools_json: Vec<Value> = tools
                     .into_iter()
                     .map(|t| {
@@ -1665,6 +1666,337 @@ impl McpServer {
             }
 
             // ========================================================================
+            // artifact_* facade — 统一知识操作入口（设计文档 §8.2）
+            // 默认暴露给用户，参数映射到现有内部 handler
+            // ========================================================================
+
+            // artifact_put: 手动写入长期记忆（设计文档 §4.1.2）
+            "artifact_put" => {
+                let slug = arguments["slug"].as_str().unwrap_or("").to_string();
+                let title = arguments["title"].as_str().map(|s| s.to_string());
+                let intent = arguments["intent"].as_str().map(|s| s.to_string());
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+
+                // 安全校验：slug 不能为空
+                if slug.is_empty() {
+                    return Err(GBrainError::InvalidInput("slug 不能为空".to_string()));
+                }
+
+                // 支持 content 和 file 两种输入方式
+                let content = if let Some(c) = arguments["content"].as_str() {
+                    c.to_string()
+                } else if let Some(f) = arguments["file"].as_str() {
+                    // 从文件读取内容
+                    let file_path = std::path::PathBuf::from(f);
+                    // 安全校验：路径必须在 working_dir 内
+                    crate::security::validate_upload_path(&file_path, true, &ctx.working_dir)?;
+                    std::fs::read_to_string(&file_path).map_err(|e| {
+                        GBrainError::FileError(format!("读取文件 {} 失败: {}", f, e))
+                    })?
+                } else {
+                    return Err(GBrainError::InvalidInput(
+                        "必须提供 content 或 file 参数".to_string(),
+                    ));
+                };
+
+                // 安全校验：内容不能为空
+                if content.is_empty() {
+                    return Err(GBrainError::InvalidInput("内容不能为空".to_string()));
+                }
+
+                let svc = ops.artifact_service();
+                svc.put_memory(&slug, &content, title.as_deref(), intent.as_deref(), dry_run)
+            }
+
+            // artifact_upload: 委派到 ArtifactService.upload_file（设计文档 §8.3）
+            "artifact_upload" => {
+                let path = arguments["path"].as_str().unwrap_or("").to_string();
+                let file_path = std::path::PathBuf::from(&path);
+
+                let intent_str = arguments["intent"].as_str().unwrap_or("auto");
+                let intent = match intent_str {
+                    "auto" => crate::artifact::types::UploadIntent::Auto,
+                    "evidence" => crate::artifact::types::UploadIntent::Document,
+                    "memory" => crate::artifact::types::UploadIntent::Memory,
+                    "attachment" => crate::artifact::types::UploadIntent::Attachment,
+                    "promote" => crate::artifact::types::UploadIntent::Promote,
+                    // 向后兼容旧值
+                    "document" => crate::artifact::types::UploadIntent::Document,
+                    "kb_only" => crate::artifact::types::UploadIntent::Document,
+                    "brain_only" => crate::artifact::types::UploadIntent::Promote,
+                    "file_only" => crate::artifact::types::UploadIntent::Attachment,
+                    "kb_and_brain" => crate::artifact::types::UploadIntent::Promote,
+                    "all" => crate::artifact::types::UploadIntent::Promote,
+                    _ => crate::artifact::types::UploadIntent::Auto,
+                };
+
+                // 根据扩展名推断 route plan，再选择允许列表
+                let ext_for_route = file_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let route_plan =
+                    crate::artifact::types::infer_route_plan(&ext_for_route, "", &intent);
+                let allowed_extensions: Vec<String> = if route_plan.to_file {
+                    let mut exts = self.config.kb_allowed_extensions.clone();
+                    for extra in &[
+                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
+                        "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
+                    ] {
+                        let s = extra.to_string();
+                        if !exts.contains(&s) {
+                            exts.push(s);
+                        }
+                    }
+                    exts
+                } else {
+                    self.config.kb_allowed_extensions.clone()
+                };
+                let max_file_bytes = self.config.kb_max_file_size_mb * 1024 * 1024;
+
+                let validated_path = crate::kb::security::validate_upload_source(
+                    &file_path,
+                    true,
+                    &ctx.working_dir,
+                    max_file_bytes,
+                    &allowed_extensions,
+                )?;
+
+                let ext = validated_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let content = std::fs::read(&validated_path)?;
+                let _mime = crate::kb::security::detect_and_validate_mime(&content, &ext)?;
+
+                let original_name = validated_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let promotion_policy =
+                    arguments
+                        .get("promotion")
+                        .and_then(|v| v.as_str())
+                        .map(|s| match s {
+                            "none" => crate::artifact::types::PromotionPolicy::None,
+                            "shadow" => crate::artifact::types::PromotionPolicy::Shadow,
+                            "candidate" => crate::artifact::types::PromotionPolicy::Candidate,
+                            "auto-low-risk" | "auto_accept_low_risk" => {
+                                crate::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                            }
+                            _ => crate::artifact::types::PromotionPolicy::Candidate,
+                        });
+
+                let input = crate::artifact::types::UploadSourceInput {
+                    content,
+                    original_name: original_name.clone(),
+                    source_kind: crate::artifact::types::SourceKind::Mcp,
+                    source_uri: path,
+                    intent,
+                    target_slug: arguments["target_slug"].as_str().map(|s| s.to_string()),
+                    page_slug: arguments["page_slug"].as_str().map(|s| s.to_string()),
+                    library_id: arguments["library_id"].as_i64(),
+                    folder_id: arguments["folder_id"].as_i64(),
+                    promotion_policy,
+                    owner_ref: None,
+                    metadata: None,
+                    path: Some(validated_path.clone()),
+                    dry_run: arguments["dry_run"].as_bool().unwrap_or(false),
+                };
+
+                let svc = ops.artifact_service();
+                let result = svc.upload_file(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            // artifact_query: 统一知识查询（设计文档 §7）
+            // 返回 ArtifactQueryOutput，隐藏内部 ID
+            "artifact_query" => {
+                let query = arguments["query"].as_str().unwrap_or("").to_string();
+                let mode = arguments["mode"].as_str().map(|s| s.to_string());
+                let limit = arguments["limit"].as_u64().map(|l| l as usize);
+                let filter_slug = arguments["filter_slug"].as_str().map(|s| s.to_string());
+                let include_sources = arguments["include_sources"].as_bool();
+
+                let input = crate::artifact::types::ArtifactQueryInput {
+                    query,
+                    mode,
+                    limit,
+                    filter_slug,
+                    include_sources,
+                };
+
+                let svc = ops.artifact_service();
+                let result = svc.query_facade(&input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            // artifact_list: 委派到现有 artifact_list handler
+            "artifact_list" => {
+                let limit = arguments["limit"].as_i64().unwrap_or(50);
+                let offset = arguments["offset"].as_i64().unwrap_or(0);
+                let artifacts = ops.list_artifacts(limit, offset)?;
+                Ok(serde_json::to_value(artifacts)?)
+            }
+
+            // artifact_get: 获取 Artifact 详情（设计文档 §4.1.1）
+            "artifact_get" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let include_projections = arguments["include_projections"].as_bool().unwrap_or(false);
+                let include_sources = arguments["include_sources"].as_bool().unwrap_or(false);
+
+                let svc = ops.artifact_service();
+                let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
+                let artifact = svc.get_artifact(artifact_id)?;
+
+                match artifact {
+                    Some(a) => {
+                        let mut result = serde_json::to_value(&a)?;
+
+                        // 可选：包含投影详情
+                        if include_projections {
+                            let conn = ops.engine.connection()?;
+                            let projections = crate::artifact::store::find_projections_by_artifact(conn, artifact_id)?;
+                            result["projections"] = serde_json::to_value(&projections)?;
+                        }
+
+                        // 可选：包含来源链（provenance）
+                        if include_sources {
+                            let provenance = svc.get_provenance(&a.canonical_slug)?;
+                            result["provenance"] = serde_json::to_value(&provenance)?;
+                        }
+
+                        Ok(result)
+                    }
+                    None => Ok(serde_json::json!({
+                        "error": format!("未找到 artifact '{}'", id_or_uid)
+                    })),
+                }
+            }
+
+            // artifact_delete: 委派到现有 artifact_delete handler
+            // facade 版本用 id_or_uid，内部版本用 artifact_id
+            "artifact_delete" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+
+                let svc = ops.artifact_service();
+                if dry_run {
+                    // dry_run 模式：仅预览，不实际删除
+                    let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
+                    Ok(serde_json::json!({
+                        "dry_run": true,
+                        "artifact_id": artifact_id,
+                        "action": "delete",
+                        "description": format!("将软删除 artifact {} 及其关联投影和 KB 文档", artifact_id),
+                    }))
+                } else {
+                    let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
+                    svc.delete_artifact(artifact_id)?;
+                    Ok(serde_json::json!({"artifact_id": artifact_id, "status": "deleted"}))
+                }
+            }
+
+            // artifact_detach: 移除知识源与页面的关联（设计文档 §4.1.4）
+            "artifact_detach" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let from_slug = arguments["from"].as_str().unwrap_or("").to_string();
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+
+                if from_slug.is_empty() {
+                    return Err(GBrainError::InvalidInput("from (目标页面 slug) 不能为空".to_string()));
+                }
+
+                let svc = ops.artifact_service();
+                svc.detach(&id_or_uid, &from_slug, dry_run)
+            }
+
+            // artifact_restore: 恢复已软删除的知识源（设计文档 §4.1.4）
+            "artifact_restore" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+
+                let svc = ops.artifact_service();
+                svc.restore(&id_or_uid, dry_run)
+            }
+
+            // artifact_reprocess: 重新处理知识源（设计文档 §4.1.4）
+            "artifact_reprocess" => {
+                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
+                let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
+
+                let svc = ops.artifact_service();
+                svc.reprocess(&id_or_uid, dry_run)
+            }
+
+            // artifact_health: 委派到 ArtifactService.health_check
+            "artifact_health" => {
+                let svc = ops.artifact_service();
+                let report = svc.health_check()?;
+                Ok(serde_json::to_value(report)?)
+            }
+
+            // artifact_review_list: 列出建议变更，返回用户友好的 ArtifactReviewItem
+            "artifact_review_list" => {
+                let status = arguments["status"].as_str();
+                let target_slug = arguments["target_slug"].as_str();
+                let limit = arguments["limit"].as_i64().unwrap_or(50);
+
+                let svc = ops.artifact_service();
+                let items = svc.list_suggested_changes(status, target_slug, limit, 0)?;
+                Ok(serde_json::to_value(items)?)
+            }
+
+            // artifact_review_get: 获取建议变更详情，返回用户友好的 ArtifactReviewItem
+            "artifact_review_get" => {
+                let change_id = arguments["change_id"].as_i64().unwrap_or(0);
+
+                let svc = ops.artifact_service();
+                let item = svc.get_suggested_change(change_id)?;
+                Ok(serde_json::to_value(item)?)
+            }
+
+            // artifact_review_apply: 应用建议变更
+            "artifact_review_apply" => {
+                let change_id = arguments["change_id"].as_i64().unwrap_or(0);
+
+                let svc = ops.artifact_service();
+                let result = svc.apply_suggested_change(change_id)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            // artifact_review_reject: 拒绝建议变更
+            "artifact_review_reject" => {
+                let change_id = arguments["change_id"].as_i64().unwrap_or(0);
+                let reviewer = arguments["reviewer"].as_str().unwrap_or("mcp").to_string();
+                let reason = arguments["reason"].as_str().map(|s| s.to_string());
+
+                let input = crate::artifact::types::ReviewCandidateInput {
+                    candidate_id: change_id,
+                    action: "reject".to_string(),
+                    reviewer,
+                    notes: reason,
+                };
+
+                let svc = ops.artifact_service();
+                let result = svc.reject_suggested_change(input)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            // artifact_review_rollback: 回滚已应用的建议变更
+            "artifact_review_rollback" => {
+                let change_id = arguments["change_id"].as_i64().unwrap_or(0);
+
+                let svc = ops.artifact_service();
+                let result = svc.rollback_suggested_change(change_id)?;
+                Ok(serde_json::to_value(result)?)
+            }
+
+            // ========================================================================
             // 单入口多投影融合架构 — upload_source / memory_query / promotion / artifact
             // ========================================================================
             "upload_source" => {
@@ -1906,38 +2238,6 @@ impl McpServer {
                     limit,
                 )?;
                 Ok(serde_json::to_value(history)?)
-            }
-
-            "artifact_list" => {
-                let limit = arguments["limit"].as_i64().unwrap_or(50);
-                let offset = arguments["offset"].as_i64().unwrap_or(0);
-                let artifacts = ops.list_artifacts(limit, offset)?;
-                Ok(serde_json::to_value(artifacts)?)
-            }
-
-            "artifact_get" => {
-                let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
-                let artifact = if id_or_uid.starts_with("art_") {
-                    ops.get_artifact_by_uid(&id_or_uid)?
-                } else {
-                    let id = id_or_uid.parse::<i64>().ok();
-                    match id {
-                        Some(id) => ops.get_artifact(id)?,
-                        None => None,
-                    }
-                };
-                Ok(serde_json::to_value(artifact)?)
-            }
-
-            "artifact_delete" => {
-                let artifact_id = arguments["artifact_id"].as_i64().unwrap_or(0);
-                ops.delete_artifact(artifact_id)?;
-                Ok(serde_json::json!({"artifact_id": artifact_id, "status": "deleted"}))
-            }
-
-            "artifact_health" => {
-                let report = ops.artifact_health_check()?;
-                Ok(serde_json::to_value(report)?)
             }
 
             "get_provenance" => {

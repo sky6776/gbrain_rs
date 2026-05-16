@@ -368,18 +368,22 @@ pub fn mark_shadow_projection_stale(
 }
 
 /// 标记所有投影为过期（artifact 被删除时调用）
-pub fn mark_all_projections_stale(conn: &Connection, artifact_id: i64, reason: &str) -> Result<()> {
+///
+/// 返回受影响的投影数量
+pub fn mark_all_projections_stale(conn: &Connection, artifact_id: i64, reason: &str) -> Result<u64> {
     let projections = store::find_projections_by_artifact(conn, artifact_id)
         .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
 
+    let mut count = 0u64;
     for proj in projections {
         if proj.status == "active" {
             store::mark_projection_stale(conn, proj.id, reason)
                 .map_err(|e| GBrainError::Database(format!("标记投影过期失败: {}", e)))?;
+            count += 1;
         }
     }
 
-    Ok(())
+    Ok(count)
 }
 
 /// 查找 artifact 的影子页面 slug
@@ -699,4 +703,46 @@ pub fn find_projection_by_id(
 ) -> crate::error::Result<Option<ArtifactProjection>> {
     store::find_projection_by_id(conn, id)
         .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))
+}
+
+/// 按 occurrence_id 标记关联投影为 stale（detach 操作）
+///
+/// 将指定 occurrence 下所有活跃投影标记为 stale
+pub fn mark_projections_stale_by_occurrence(
+    conn: &Connection,
+    occurrence_id: i64,
+    reason: &str,
+) -> Result<u64> {
+    // 查找该 occurrence 关联的所有活跃投影
+    let count = conn
+        .execute(
+            "UPDATE artifact_projections
+             SET status = 'stale', stale_reason = ?1, updated_at = datetime('now')
+             WHERE occurrence_id = ?2 AND status = 'active'",
+            params![reason, occurrence_id],
+        )
+        .map_err(|e| GBrainError::Database(format!("按 occurrence 标记投影过期失败: {}", e)))?
+        as u64;
+
+    Ok(count)
+}
+
+/// 恢复指定 artifact 的所有 stale 投影（restore 操作）
+///
+/// 将 artifact 下所有 stale 投影重新标记为 active
+pub fn reactivate_projections_by_artifact(
+    conn: &Connection,
+    artifact_id: i64,
+) -> Result<u64> {
+    let count = conn
+        .execute(
+            "UPDATE artifact_projections
+             SET status = 'active', stale_reason = '', updated_at = datetime('now')
+             WHERE artifact_id = ?1 AND status = 'stale'",
+            params![artifact_id],
+        )
+        .map_err(|e| GBrainError::Database(format!("恢复投影失败: {}", e)))?
+        as u64;
+
+    Ok(count)
 }

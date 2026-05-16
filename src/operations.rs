@@ -237,6 +237,15 @@ impl<'a> Operations<'a> {
         }
     }
 
+    /// 获取 Artifact 应用服务（设计文档 §8.4）
+    ///
+    /// 返回 `ArtifactService` 实例，作为统一知识操作编排入口。
+    /// CLI/MCP facade 层应优先通过此服务调用，而非直接访问 `Operations` 上的
+    /// `upload_source`/`memory_query`/`promotion_*` 等方法。
+    pub fn artifact_service(&self) -> crate::artifact::service::ArtifactService<'_> {
+        crate::artifact::service::ArtifactService::new(self.engine, self.ctx.clone(), &self.config)
+    }
+
     /// Create Operations instance that knows it's already inside a transaction.
     /// Used by `put_page_in_transaction` and `batch_put_pages` to avoid nested
     /// `BEGIN IMMEDIATE` (SQLite does not support nested transactions).

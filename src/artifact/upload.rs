@@ -646,3 +646,186 @@ fn resolve_default_library(
     info!("自动创建默认 Inbox 库: id={}", id);
     Ok(id)
 }
+
+/// 手动写入长期记忆（设计文档 §8.6）
+///
+/// 创建 text/manual artifact 并投影到 gbrain 页面。
+/// 内部步骤：
+/// 1. 将 title/content 规范化为 markdown 文本
+/// 2. 计算 hash
+/// 3. 写 artifact store
+/// 4. 创建 source artifact 和 occurrence
+/// 5. 创建 brain_page_update projection
+/// 6. 调用原 gbrain put_page 逻辑
+/// 7. 可选入 KB
+pub fn put_manual_memory(
+    conn: &Connection,
+    slug: &str,
+    content: &str,
+    title: Option<&str>,
+    _intent: Option<&str>,
+    artifact_dir: &Path,
+    _gbrain_dir: &Path,
+    config_default_library_id: Option<i64>,
+    config_promotion_policy: &str,
+    manual_memory_to_kb: bool,
+) -> Result<UploadSourceOutput> {
+    // 1. 规范化为 markdown
+    let page_title = title.unwrap_or(slug);
+    let md_content = if content.starts_with("---\n") || content.starts_with("---\r\n") {
+        content.to_string()
+    } else {
+        format!("# {}\n\n{}", page_title, content)
+    };
+    let content_bytes = md_content.as_bytes();
+
+    // 2. 计算 SHA256
+    let sha256 = compute_sha256(content_bytes);
+
+    // 3. 写入 artifact store
+    let storage_path = write_artifact_file(content_bytes, &sha256, "md", artifact_dir)?;
+    let storage_path_str = storage_path
+        .to_str()
+        .unwrap_or("unknown")
+        .to_string();
+
+    // 4. 创建/复用 source_artifacts 记录
+    let now = now_str();
+    let existing = store::find_artifact_by_sha256(conn, &sha256)?;
+    let (artifact_id, artifact_uid, is_new) = if let Some(existing) = existing {
+        debug!("复用已有 artifact: id={}, uid={}", existing.id, existing.artifact_uid);
+        (existing.id, existing.artifact_uid.clone(), false)
+    } else {
+        let artifact_uid = generate_artifact_uid(&sha256);
+        let artifact = SourceArtifact {
+            id: 0,
+            artifact_uid: artifact_uid.clone(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_seen_at: Some(now.clone()),
+            sha256: sha256.clone(),
+            original_name: format!("{}.md", slug.replace('/', "-")),
+            extension: "md".to_string(),
+            mime_type: "text/markdown".to_string(),
+            size_bytes: content_bytes.len() as i64,
+            storage_path: storage_path_str,
+            canonical_slug: slug.to_string(),
+            status: "active".to_string(),
+            metadata_json: serde_json::json!({
+                "source_kind": "manual",
+                "input_mode": "content",
+                "target_slug": slug,
+                "created_by": "artifact_put"
+            })
+            .to_string(),
+            deleted_at: None,
+            purged_at: None,
+        };
+        let id = store::insert_artifact(conn, &artifact)?;
+        info!("创建手动 artifact: id={}, uid={}, slug={}", id, artifact_uid, slug);
+        (id, artifact_uid, true)
+    };
+
+    // 5. 创建 occurrence
+    let occurrence_uid = generate_occurrence_uid(&artifact_uid);
+    let occurrence = ArtifactOccurrence {
+        id: 0,
+        occurrence_uid: occurrence_uid.clone(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        source_kind: "manual".to_string(),
+        source_uri: format!("artifact://{}", artifact_uid),
+        original_path: slug.to_string(),
+        original_name: format!("{}.md", slug.replace('/', "-")),
+        owner_ref: "cli".to_string(),
+        intent: "memory".to_string(),
+        target_slug: slug.to_string(),
+        page_slug: slug.to_string(),
+        library_id: config_default_library_id,
+        folder_id: None,
+        promotion_policy: config_promotion_policy.to_string(),
+        status: "active".to_string(),
+        metadata_json: "{}".to_string(),
+    };
+    let occurrence_id = store::insert_occurrence(conn, &occurrence)?;
+
+    // 6. 创建 brain_page_update projection
+    let proj_key = format!("page_update:{}", slug);
+    let proj_ref = format!("brain_page:{}", slug);
+    let proj = ArtifactProjection {
+        id: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        occurrence_id: Some(occurrence_id),
+        projection_type: ProjectionType::BrainPageUpdate.to_string(),
+        projection_key: proj_key.clone(),
+        projection_ref: proj_ref.clone(),
+        status: "active".to_string(),
+        version_hash: sha256.clone(),
+        stale_reason: String::new(),
+        metadata_json: "{}".to_string(),
+        superseded_by: None,
+    };
+    store::insert_projection(conn, &proj)?;
+
+    let mut projections = vec![ProjectionResult {
+        projection_type: ProjectionType::BrainPageUpdate,
+        projection_key: proj_key,
+        projection_ref: proj_ref,
+        created: is_new,
+        status: "active".to_string(),
+    }];
+
+    // 7. 可选入 KB
+    if manual_memory_to_kb {
+        if let Some(library_id) = config_default_library_id {
+            let kb_proj_key = format!("library:{}", library_id);
+            let kb_proj_ref = format!("kb_doc:{}", artifact_id);
+            let kb_proj = ArtifactProjection {
+                id: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                artifact_id,
+                occurrence_id: Some(occurrence_id),
+                projection_type: ProjectionType::KbDocument.to_string(),
+                projection_key: kb_proj_key.clone(),
+                projection_ref: kb_proj_ref.clone(),
+                status: "active".to_string(),
+                version_hash: sha256.clone(),
+                stale_reason: String::new(),
+                metadata_json: "{}".to_string(),
+                superseded_by: None,
+            };
+            store::insert_projection(conn, &kb_proj)?;
+            projections.push(ProjectionResult {
+                projection_type: ProjectionType::KbDocument,
+                projection_key: kb_proj_key,
+                projection_ref: kb_proj_ref,
+                created: is_new,
+                status: "active".to_string(),
+            });
+        }
+    }
+
+    // 构建路由计划
+    let route_plan = RoutePlan {
+        to_kb: manual_memory_to_kb && config_default_library_id.is_some(),
+        to_brain: true,
+        to_shadow: false,
+        to_file: false,
+        promotion: PromotionPolicy::AutoAcceptLowRisk,
+    };
+
+    Ok(UploadSourceOutput {
+        artifact_id,
+        artifact_uid,
+        occurrence_id,
+        occurrence_uid,
+        sha256,
+        is_new,
+        route_plan,
+        projections,
+    })
+}

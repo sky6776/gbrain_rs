@@ -787,3 +787,51 @@ fn row_to_artifact_projection(row: &Row) -> Result<ArtifactProjection, rusqlite:
         superseded_by: row.get(12)?,
     })
 }
+
+// ============================================================================
+// detach / restore / reprocess 辅助函数（设计文档 §4.1.4）
+// ============================================================================
+
+/// 查找指定 artifact 与 target_slug 关联的活跃 occurrence
+pub fn find_active_occurrences_by_artifact_and_slug(
+    conn: &Connection,
+    artifact_id: i64,
+    target_slug: &str,
+) -> Result<Vec<ArtifactOccurrence>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, occurrence_uid, created_at, updated_at,
+                artifact_id, source_kind, source_uri, original_path, original_name,
+                owner_ref, intent, target_slug, page_slug,
+                library_id, folder_id, promotion_policy,
+                status, metadata_json
+         FROM artifact_occurrences
+         WHERE artifact_id = ?1 AND target_slug = ?2 AND status = 'active'",
+    )?;
+    let mut rows = stmt.query(params![artifact_id, target_slug])?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        result.push(row_to_artifact_occurrence(row)?);
+    }
+    Ok(result)
+}
+
+/// 将 occurrence 标记为 stale（detach 操作）
+pub fn stale_occurrence(conn: &Connection, occurrence_id: i64) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE artifact_occurrences SET status = 'stale', updated_at = datetime('now') WHERE id = ?1",
+        params![occurrence_id],
+    )?;
+    Ok(())
+}
+
+/// 恢复指定 artifact 的所有已 stale/deleted 的 occurrence
+pub fn reactivate_occurrences_by_artifact(
+    conn: &Connection,
+    artifact_id: i64,
+) -> Result<u64, rusqlite::Error> {
+    Ok(conn.execute(
+        "UPDATE artifact_occurrences SET status = 'active', updated_at = datetime('now')
+         WHERE artifact_id = ?1 AND status IN ('stale', 'deleted')",
+        params![artifact_id],
+    )? as u64)
+}

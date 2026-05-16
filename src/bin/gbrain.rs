@@ -4,13 +4,21 @@
 use clap::{Parser, Subcommand};
 use gbrain_core::autopilot::Autopilot;
 use gbrain_core::config::Config;
+/// 嵌入向量生成器（admin-tools）
+#[cfg(feature = "admin-tools")]
 use gbrain_core::embedding::Embedder;
 use gbrain_core::engine::BrainEngine;
-use gbrain_core::error::{GBrainError, Result};
+use gbrain_core::error::Result;
+/// 错误类型（admin-tools）
+#[cfg(feature = "admin-tools")]
+use gbrain_core::error::GBrainError;
 use gbrain_core::lint::{lint_pages, LintOpts};
 use gbrain_core::logging;
 use gbrain_core::mcp::McpServer;
-use gbrain_core::operations::{ExtractMode, OpContext, Operations};
+use gbrain_core::operations::{OpContext, Operations};
+/// 提取模式（admin-tools）
+#[cfg(feature = "admin-tools")]
+use gbrain_core::operations::ExtractMode;
 use gbrain_core::sqlite_engine::SqliteEngine;
 use gbrain_core::types::*;
 use std::path::PathBuf;
@@ -40,13 +48,15 @@ enum Commands {
     /// Initialize a new brain
     Init,
 
-    /// Get a page by slug
+    /// 按 slug 获取页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Get {
         /// Page slug (e.g. people/alice)
         slug: String,
     },
 
-    /// Create or update a page
+    /// 创建或更新页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Put {
         /// Page slug (e.g. people/alice)
         slug: String,
@@ -68,7 +78,8 @@ enum Commands {
         page_type: Option<String>,
     },
 
-    /// Delete a page
+    /// 删除页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Delete {
         /// Page slug
         slug: String,
@@ -78,20 +89,23 @@ enum Commands {
         force: bool,
     },
 
-    /// Restore a soft-deleted page
+    /// 恢复软删除页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Restore {
         /// Page slug
         slug: String,
     },
 
-    /// Permanently purge soft-deleted pages older than the cutoff
+    /// 永久清除超过截止时间的软删除页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PurgeDeleted {
         /// Age cutoff in hours
         #[arg(long, default_value = "72")]
         older_than_hours: i64,
     },
 
-    /// List pages
+    /// 列出页面（admin-tools）
+    #[cfg(feature = "admin-tools")]
     List {
         /// Filter by page type
         #[arg(long)]
@@ -102,7 +116,8 @@ enum Commands {
         limit: usize,
     },
 
-    /// Query the brain (alias: ask)
+    /// 查询知识库（别名: ask）（admin-tools）
+    #[cfg(feature = "admin-tools")]
     #[command(alias = "ask")]
     Query {
         /// Search query
@@ -137,13 +152,15 @@ enum Commands {
         expand: bool,
     },
 
-    /// Backlink operations (list, check, fix)
+    /// 反向链接操作（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Backlinks {
         #[command(subcommand)]
         command: BacklinksCommand,
     },
 
-    /// Traverse the knowledge graph
+    /// 遍历知识图谱（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Graph {
         /// Starting page slug
         slug: String,
@@ -153,7 +170,8 @@ enum Commands {
         depth: usize,
     },
 
-    /// Resolve partial slugs
+    /// 解析部分 slug（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Resolve {
         /// Partial slug
         partial: String,
@@ -236,7 +254,8 @@ enum Commands {
         content: Option<String>,
     },
 
-    /// Export pages to markdown files
+    /// 导出页面为 markdown 文件（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Export {
         /// Output directory (default: stdout-like listing)
         #[arg(long)]
@@ -250,7 +269,8 @@ enum Commands {
         slugs: Vec<String>,
     },
 
-    /// Import markdown files from a directory
+    /// 从目录导入 markdown 文件（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Import {
         /// Directory to scan for .md files
         dir: String,
@@ -264,7 +284,8 @@ enum Commands {
         auto_link: bool,
     },
 
-    /// Generate embeddings for un-embedded chunks
+    /// 为未嵌入的块生成嵌入向量（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Embed {
         /// Batch size for embedding API calls
         #[arg(long, default_value = "20")]
@@ -274,7 +295,8 @@ enum Commands {
         slugs: Vec<String>,
     },
 
-    /// Query the knowledge graph between pages
+    /// 查询页面间知识图谱（admin-tools）
+    #[cfg(feature = "admin-tools")]
     GraphQuery {
         /// Starting page slug
         from: String,
@@ -298,13 +320,15 @@ enum Commands {
         command: CodeCommands,
     },
 
-    /// File storage operations
+    /// 文件存储操作（admin-tools）
+    #[cfg(feature = "admin-tools")]
     File {
         #[command(subcommand)]
         command: FileCommands,
     },
 
-    /// Batch extract links and/or timeline entries from all pages (mirrors TS gbrain extract)
+    /// 批量提取链接和/或时间线条目（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Extract {
         /// What to extract: links, timeline, or all
         #[arg(long, default_value = "all")]
@@ -322,28 +346,32 @@ enum Commands {
         interval: u64,
     },
 
-    /// Run KB search evaluation for a library
+    /// 运行 KB 搜索评估（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbEval {
         /// Library ID to evaluate
         #[arg(long)]
         library_id: i64,
     },
 
-    /// Backup KB database and storage
+    /// 备份 KB 数据库和存储（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbBackup {
         /// Output directory for backup
         #[arg(long)]
         output: String,
     },
 
-    /// Restore KB from backup
+    /// 从备份恢复 KB（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbRestore {
         /// Input directory containing backup
         #[arg(long)]
         input: String,
     },
 
-    /// Add a local directory as KB import source
+    /// 添加本地目录为 KB 导入源（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbSourceAdd {
         /// Library ID
         #[arg(long)]
@@ -353,20 +381,23 @@ enum Commands {
         path: String,
     },
 
-    /// Sync a KB import source
+    /// 同步 KB 导入源（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbSyncSource {
         /// Source ID to sync
         #[arg(long)]
         source_id: i64,
     },
 
-    /// KB jobs management (list/pause/resume)
+    /// KB 作业管理（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbJobs {
         #[command(subcommand)]
         command: KbJobsCommand,
     },
 
-    /// Export a KB library to a directory archive
+    /// 导出 KB 库到目录归档（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbExportLibrary {
         /// Library ID to export
         #[arg(long)]
@@ -376,7 +407,8 @@ enum Commands {
         output: String,
     },
 
-    /// Import a KB library from an export archive
+    /// 从导出归档导入 KB 库（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbImportLibrary {
         /// Input directory containing the export archive
         #[arg(long)]
@@ -386,7 +418,8 @@ enum Commands {
         new_name: Option<String>,
     },
 
-    /// Re-embed documents with a new embedding model/index
+    /// 用新嵌入模型/索引重新嵌入文档（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbReembed {
         /// Library ID to re-embed
         #[arg(long)]
@@ -396,7 +429,8 @@ enum Commands {
         embedding_index_id: Option<i64>,
     },
 
-    /// Compare two embedding indexes using eval queries
+    /// 比较两个嵌入索引（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbEvalCompare {
         /// First embedding index ID
         #[arg(long)]
@@ -406,7 +440,8 @@ enum Commands {
         index_id_2: i64,
     },
 
-    /// Check KB index health and optionally repair
+    /// 检查 KB 索引健康并可选修复（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbHealthCheck {
         /// Library ID to check
         #[arg(long)]
@@ -416,21 +451,24 @@ enum Commands {
         repair: bool,
     },
 
-    /// Rebuild a single document's index
+    /// 重建单个文档索引（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbRebuildDocument {
         /// Document ID to rebuild
         #[arg(long)]
         document_id: i64,
     },
 
-    /// Rebuild an entire library's index
+    /// 重建整个库索引（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbRebuildLibrary {
         /// Library ID to rebuild
         #[arg(long)]
         library_id: i64,
     },
 
-    /// Purge deleted KB documents older than retention period
+    /// 清除超过保留期的已删除 KB 文档（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbPurgeDeleted {
         /// Library ID (optional, purges all if not specified)
         #[arg(long)]
@@ -443,7 +481,8 @@ enum Commands {
     // ========================================================================
     // 单入口多投影融合架构 — Upload / MemoryQuery / Promotion
     // ========================================================================
-    /// Upload a source file (unified entry point for gbrain + KB + file storage)
+    /// 上传源文件（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Upload {
         /// File path to upload
         path: PathBuf,
@@ -482,7 +521,8 @@ enum Commands {
         json: bool,
     },
 
-    /// Unified memory query (alias: ask-memory)
+    /// 统一记忆查询（别名: ask-memory）（admin-tools）
+    #[cfg(feature = "admin-tools")]
     #[command(alias = "ask-memory")]
     MemoryQuery {
         /// Query text
@@ -513,7 +553,8 @@ enum Commands {
         json: bool,
     },
 
-    /// List promotion candidates
+    /// 列出晋升候选项（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionList {
         /// Filter by status: pending, approved, rejected, applied
         #[arg(long)]
@@ -536,13 +577,15 @@ enum Commands {
         json: bool,
     },
 
-    /// Get promotion candidate details
+    /// 获取晋升候选详情（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionGet {
         /// Candidate ID
         candidate_id: i64,
     },
 
-    /// Accept a promotion candidate
+    /// 接受晋升候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionAccept {
         /// Candidate ID
         candidate_id: i64,
@@ -556,7 +599,8 @@ enum Commands {
         notes: Option<String>,
     },
 
-    /// Reject a promotion candidate
+    /// 拒绝晋升候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionReject {
         /// Candidate ID
         candidate_id: i64,
@@ -570,19 +614,22 @@ enum Commands {
         notes: Option<String>,
     },
 
-    /// Apply an approved promotion candidate
+    /// 应用已批准的晋升候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionApply {
         /// Candidate ID
         candidate_id: i64,
     },
 
-    /// Auto-apply low-risk candidates for an artifact
+    /// 自动应用低风险候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionAutoApply {
         /// Artifact ID
         artifact_id: i64,
     },
 
-    /// Batch apply all pending promotion candidates (§10.5)
+    /// 批量应用所有待处理晋升候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionBatchApply {
         /// Filter by artifact ID (optional)
         #[arg(long)]
@@ -597,13 +644,15 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Rollback an applied promotion candidate (§31)
+    /// 回滚已应用的晋升候选（admin-tools）
+    #[cfg(feature = "admin-tools")]
     PromotionRollback {
         /// Candidate ID to rollback
         candidate_id: i64,
     },
 
-    /// Garbage collect orphaned projections (§31)
+    /// 垃圾回收孤立投影（admin-tools）
+    #[cfg(feature = "admin-tools")]
     GcOrphanProjections {
         /// Delete projections orphaned/superseded for more than N days
         #[arg(long, default_value = "30")]
@@ -614,7 +663,8 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Supersede an old projection with a new one (§31 version chain)
+    /// 用新投影取代旧投影（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ProjectionSupersede {
         /// Old projection ID to supersede
         old_proj_id: i64,
@@ -623,7 +673,8 @@ enum Commands {
         new_proj_id: i64,
     },
 
-    /// Query projection version chain history (§31)
+    /// 查询投影版本链历史（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ProjectionHistory {
         /// Projection key to query history for
         projection_key: String,
@@ -641,7 +692,8 @@ enum Commands {
         limit: i64,
     },
 
-    /// List source artifacts
+    /// 列出源 artifact（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ArtifactList {
         /// Maximum results
         #[arg(long, default_value = "50")]
@@ -656,22 +708,40 @@ enum Commands {
         json: bool,
     },
 
-    /// Get source artifact details
+    /// 获取源 artifact 详情（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ArtifactGet {
         /// Artifact ID or UID
         id_or_uid: String,
     },
 
-    /// Delete a source artifact (soft delete)
+    /// 删除源 artifact（软删除）（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ArtifactDelete {
         /// Artifact ID
         artifact_id: i64,
     },
 
-    /// Check artifact health
+    /// 检查 artifact 健康（admin-tools）
+    #[cfg(feature = "admin-tools")]
     ArtifactHealth,
+
+    /// Artifact 知识操作（设计文档 §4）
+    Artifact {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
+
+    /// 内部开发/调试命令（需要 admin-tools feature）
+    #[cfg(feature = "admin-tools")]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommands,
+    },
 }
 
+/// KB 作业管理子命令（admin-tools）
+#[cfg(feature = "admin-tools")]
 #[derive(Subcommand)]
 enum KbJobsCommand {
     /// List pending/processing KB jobs
@@ -692,6 +762,8 @@ enum KbJobsCommand {
     },
 }
 
+/// 文件存储子命令（admin-tools）
+#[cfg(feature = "admin-tools")]
 #[derive(Subcommand)]
 enum FileCommands {
     /// List stored files
@@ -781,7 +853,8 @@ enum ConfigCommand {
     Set { key: String, value: String },
 }
 
-/// Backlink subcommands (mirrors TS gbrain backlinks check/fix)
+/// 反向链接子命令（admin-tools）
+#[cfg(feature = "admin-tools")]
 #[derive(Subcommand)]
 enum BacklinksCommand {
     /// List backlinks for a page
@@ -799,6 +872,264 @@ enum BacklinksCommand {
         /// Page slug (omit to fix all pages)
         slug: Option<String>,
         /// Preview changes without committing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Artifact 知识操作子命令（设计文档 §4.1）
+#[derive(Debug, clap::Subcommand)]
+pub enum ArtifactCommands {
+    /// 手动写入长期记忆
+    Put {
+        /// 目标页面 slug
+        slug: String,
+        /// 页面标题
+        #[arg(long)]
+        title: Option<String>,
+        /// 直接输入内容
+        #[arg(long, group = "input")]
+        content: Option<String>,
+        /// 从文件读取内容
+        #[arg(long, group = "input")]
+        file: Option<String>,
+        /// 意图: memory(默认), evidence, promote
+        #[arg(long, default_value = "memory")]
+        intent: String,
+        /// 仅预览路由计划
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 上传文件作为知识源
+    Upload {
+        /// 本地文件路径
+        path: String,
+        /// 上传意图: auto, evidence, memory, attachment, promote
+        #[arg(long, default_value = "auto")]
+        intent: String,
+        /// 目标 gbrain 页面 slug
+        #[arg(long)]
+        target: Option<String>,
+        /// 关联页面 slug（附件）
+        #[arg(long)]
+        page: Option<String>,
+        /// KB 库 ID
+        #[arg(long)]
+        library: Option<i64>,
+        /// KB 文件夹 ID
+        #[arg(long)]
+        folder: Option<i64>,
+        /// 提升策略: none, shadow, candidate, auto-low-risk
+        #[arg(long)]
+        promotion: Option<String>,
+        /// 仅预览路由计划
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 统一知识查询
+    Query {
+        /// 查询文本
+        query: String,
+        /// 查询模式: auto, memory, evidence, timeline, graph
+        #[arg(long, default_value = "auto")]
+        mode: String,
+        /// 最大结果数
+        #[arg(long)]
+        limit: Option<usize>,
+        /// 过滤到指定页面 slug
+        #[arg(long)]
+        filter: Option<String>,
+        /// 显示来源追溯
+        #[arg(long)]
+        include_sources: bool,
+    },
+    /// 列出知识源
+    List {
+        /// 最大结果数
+        #[arg(long, default_value = "50")]
+        limit: i64,
+        /// 偏移量
+        #[arg(long, default_value = "0")]
+        offset: i64,
+    },
+    /// 获取知识源详情
+    Get {
+        /// Artifact ID 或 UID
+        id_or_uid: String,
+        /// 包含投影详情
+        #[arg(long)]
+        include_projections: bool,
+        /// 包含来源追溯
+        #[arg(long)]
+        include_sources: bool,
+    },
+    /// 软删除知识源
+    Delete {
+        /// Artifact ID 或 UID
+        id_or_uid: String,
+        /// 预览删除影响
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 移除知识源与某次使用的关联
+    Detach {
+        /// Artifact ID 或 UID
+        id_or_uid: String,
+        /// 目标页面 slug
+        #[arg(long)]
+        from: String,
+        /// 预览影响
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 恢复已软删除的知识源
+    Restore {
+        /// Artifact ID 或 UID
+        id_or_uid: String,
+        /// 预览恢复影响
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 重新处理知识源
+    Reprocess {
+        /// Artifact ID 或 UID
+        id_or_uid: String,
+        /// 预览重新处理影响
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 检查知识源一致性
+    Health,
+    /// 建议变更操作
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommands,
+    },
+}
+
+/// 建议变更子命令（设计文档 §4.1.5）
+#[derive(Debug, clap::Subcommand)]
+pub enum ReviewCommands {
+    /// 列出建议变更
+    List {
+        /// 过滤状态: pending, accepted, rejected, applied, rolled_back
+        #[arg(long)]
+        status: Option<String>,
+        /// 过滤目标页面 slug
+        #[arg(long)]
+        target: Option<String>,
+        /// 最大结果数
+        #[arg(long, default_value = "50")]
+        limit: i64,
+    },
+    /// 查看建议变更详情
+    Show {
+        /// 变更 ID
+        change_id: i64,
+    },
+    /// 应用建议变更
+    Apply {
+        /// 变更 ID
+        change_id: i64,
+    },
+    /// 拒绝建议变更
+    Reject {
+        /// 变更 ID
+        change_id: i64,
+        /// 拒绝原因
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// 回滚已应用的建议变更
+    Rollback {
+        /// 变更 ID
+        change_id: i64,
+    },
+}
+
+/// 内部开发/调试子命令（需要 admin-tools feature）
+#[cfg(feature = "admin-tools")]
+#[derive(Debug, clap::Subcommand)]
+pub enum DevCommands {
+    /// 基础连通性测试
+    Ping,
+    /// KB 调试子命令
+    Kb {
+        #[command(subcommand)]
+        command: KbDevCommands,
+    },
+    /// Brain 调试子命令
+    Brain {
+        #[command(subcommand)]
+        command: BrainDevCommands,
+    },
+    /// 投影调试子命令
+    Projection {
+        #[command(subcommand)]
+        command: ProjectionDevCommands,
+    },
+}
+
+/// KB 开发调试子命令
+#[derive(Debug, clap::Subcommand)]
+pub enum KbDevCommands {
+    /// 列出 KB 库
+    ListLibraries,
+    /// 列出 KB 文档
+    ListDocuments {
+        /// 库 ID
+        #[arg(long)]
+        library: Option<i64>,
+        /// 最大结果数
+        #[arg(long, default_value = "50")]
+        limit: i64,
+    },
+    /// 运行 KB worker 一次
+    RunWorker,
+}
+
+/// Brain 开发调试子命令
+#[derive(Debug, clap::Subcommand)]
+pub enum BrainDevCommands {
+    /// 列出页面
+    ListPages {
+        /// 最大结果数
+        #[arg(long, default_value = "50")]
+        limit: i64,
+    },
+    /// 获取页面详情
+    GetPage {
+        /// 页面 slug
+        slug: String,
+    },
+    /// 列出页面链接
+    ListLinks {
+        /// 页面 slug
+        slug: String,
+    },
+}
+
+/// 投影开发调试子命令
+#[derive(Debug, clap::Subcommand)]
+pub enum ProjectionDevCommands {
+    /// 列出投影
+    List {
+        /// 过滤 artifact ID
+        #[arg(long)]
+        artifact: Option<i64>,
+        /// 过滤状态
+        #[arg(long)]
+        status: Option<String>,
+        /// 最大结果数
+        #[arg(long, default_value = "50")]
+        limit: i64,
+    },
+    /// 运行投影 GC
+    Gc {
+        /// 过期天数
+        #[arg(long, default_value = "30")]
+        stale_days: u32,
+        /// 仅预览
         #[arg(long)]
         dry_run: bool,
     },
@@ -863,6 +1194,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!(db_path = %db_path, "Brain initialized");
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Get { slug } => match ops.get_page(&slug)? {
             Some(page) => {
                 if cli.json {
@@ -878,6 +1210,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         },
 
+        #[cfg(feature = "admin-tools")]
         Commands::Put {
             slug,
             title,
@@ -902,6 +1235,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Delete { slug, force } => {
             if !force {
                 warn!(slug = %slug, "Are you sure you want to soft-delete this page? Use --force to confirm.");
@@ -911,6 +1245,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!(slug = %slug, "Page soft-deleted");
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Restore { slug } => {
             if ops.engine.restore_page(&slug)? {
                 info!(slug = %slug, "Page restored");
@@ -919,6 +1254,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PurgeDeleted { older_than_hours } => {
             let slugs = ops.engine.purge_deleted_pages(older_than_hours)?;
             if cli.json {
@@ -931,6 +1267,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::List { page_type, limit } => {
             let filters = PageFilters {
                 page_type: page_type.as_deref().map(PageType::from_str_lossy),
@@ -953,6 +1290,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Query {
             query,
             limit,
@@ -1002,6 +1340,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Backlinks { command } => match command {
             BacklinksCommand::List { slug } => {
                 let links = ops.get_backlinks(&slug)?;
@@ -1044,6 +1383,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         },
 
+        #[cfg(feature = "admin-tools")]
         Commands::Graph { slug, depth } => {
             let nodes = ops.traverse_graph(&slug, depth)?;
             if cli.json {
@@ -1062,6 +1402,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Resolve { partial } => {
             let slugs = ops.resolve_slugs(&partial)?;
             if cli.json {
@@ -1373,6 +1714,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!("Report saved: {}", path.display());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Export {
             dir,
             page_type,
@@ -1420,6 +1762,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Import {
             dir,
             embed: do_embed,
@@ -1516,6 +1859,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Embed { batch_size, slugs } => {
             let embedded = embed_stale_chunks(
                 &ops,
@@ -1526,6 +1870,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!(embedded, "Embed complete");
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::GraphQuery {
             from,
             to,
@@ -1701,6 +2046,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         },
 
+        #[cfg(feature = "admin-tools")]
         Commands::File { command } => match command {
             FileCommands::List { slug } => {
                 let files = ops.file_list(slug.as_deref(), None)?;
@@ -1818,6 +2164,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             },
         },
 
+        #[cfg(feature = "admin-tools")]
         Commands::Extract { mode } => {
             let extract_mode = match mode.to_lowercase().as_str() {
                 "links" => ExtractMode::Links,
@@ -1839,6 +2186,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbEval { library_id } => {
             let conn = engine.connection()?;
             let queries = gbrain_core::kb::eval::list_eval_queries(conn, library_id)?;
@@ -1852,6 +2200,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
             return Ok(());
         }
+        #[cfg(feature = "admin-tools")]
         Commands::KbBackup { output } => {
             let output_dir = std::path::Path::new(&output);
             let db_path = config.db_path();
@@ -1873,6 +2222,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             println!("Backup complete: {}", dest.display());
             return Ok(());
         }
+        #[cfg(feature = "admin-tools")]
         Commands::KbRestore { input } => {
             let input_dir = std::path::Path::new(&input);
             let db_path = config.db_path();
@@ -1896,6 +2246,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             println!("Restore complete");
             return Ok(());
         }
+        #[cfg(feature = "admin-tools")]
         Commands::KbSourceAdd { library_id, path } => {
             let source_path = std::path::Path::new(&path);
             if !source_path.is_dir() {
@@ -1980,6 +2331,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             );
             return Ok(());
         }
+        #[cfg(feature = "admin-tools")]
         Commands::KbSyncSource { source_id } => {
             let kb = engine.kb_engine()?;
             let source = kb.get_source(source_id)?.ok_or_else(|| {
@@ -2139,6 +2491,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbJobs { command } => {
             let conn = engine.connection()?;
             match command {
@@ -2161,6 +2514,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbExportLibrary { library_id, output } => {
             let conn = engine.connection()?;
             let output_dir = std::path::Path::new(&output);
@@ -2184,6 +2538,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbImportLibrary { archive, new_name } => {
             let conn = engine.connection()?;
             let archive_dir = std::path::Path::new(&archive);
@@ -2208,6 +2563,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbReembed {
             library_id,
             embedding_index_id,
@@ -2222,6 +2578,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbEvalCompare {
             index_id_1,
             index_id_2,
@@ -2233,6 +2590,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbHealthCheck { library_id, repair } => {
             let conn = engine.connection()?;
             let summary = gbrain_core::kb::health::check_index_health(conn)?;
@@ -2254,6 +2612,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbRebuildDocument { document_id } => {
             let conn = engine.connection()?;
             gbrain_core::kb::health::rebuild_document_index(conn, document_id)?;
@@ -2261,6 +2620,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbRebuildLibrary { library_id } => {
             let conn = engine.connection()?;
             gbrain_core::kb::health::rebuild_library_index(conn, library_id)?;
@@ -2268,6 +2628,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             return Ok(());
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbPurgeDeleted {
             library_id,
             older_than_days,
@@ -2285,6 +2646,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
         // ========================================================================
         // 单入口多投影融合架构 — Upload / MemoryQuery / Promotion / Artifact
         // ========================================================================
+        #[cfg(feature = "admin-tools")]
         Commands::Upload {
             path,
             intent,
@@ -2379,6 +2741,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::MemoryQuery {
             query,
             strategy,
@@ -2438,6 +2801,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionList {
             status,
             candidate_type,
@@ -2465,6 +2829,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionGet { candidate_id } => {
             let candidate = ops.promotion_get_candidate(candidate_id)?;
             match candidate {
@@ -2473,6 +2838,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionAccept {
             candidate_id,
             reviewer,
@@ -2488,6 +2854,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!("Candidate {} accepted by {}", result.id, result.reviewer);
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionReject {
             candidate_id,
             reviewer,
@@ -2503,11 +2870,13 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!("Candidate {} rejected by {}", result.id, result.reviewer);
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionApply { candidate_id } => {
             let result = ops.promotion_apply_candidate(candidate_id)?;
             info!("Candidate {} applied", result.id);
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionAutoApply { artifact_id } => {
             let applied = ops.promotion_auto_apply(artifact_id)?;
             info!(
@@ -2517,6 +2886,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             );
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionBatchApply {
             artifact_id,
             risk,
@@ -2542,6 +2912,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::PromotionRollback { candidate_id } => {
             let result = ops.promotion_rollback_candidate(candidate_id)?;
             info!(
@@ -2550,6 +2921,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             );
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::GcOrphanProjections {
             stale_days,
             dry_run,
@@ -2574,6 +2946,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ProjectionSupersede {
             old_proj_id,
             new_proj_id,
@@ -2582,6 +2955,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             info!("Projection superseded: {} -> {}", old_proj_id, new_proj_id);
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ProjectionHistory {
             projection_key,
             artifact_id,
@@ -2607,6 +2981,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ArtifactList {
             limit,
             offset,
@@ -2631,6 +3006,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ArtifactGet { id_or_uid } => {
             let artifact = if id_or_uid.starts_with("art_") {
                 ops.get_artifact_by_uid(&id_or_uid)?
@@ -2657,15 +3033,516 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ArtifactDelete { artifact_id } => {
             ops.delete_artifact(artifact_id)?;
             info!("Artifact {} soft-deleted", artifact_id);
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::ArtifactHealth => {
             let report = ops.artifact_health_check()?;
             info!("{}", serde_json::to_string_pretty(&report)?);
         }
+
+        // ========================================================================
+        // Artifact 统一知识操作命名空间（设计文档 §4）
+        // ========================================================================
+        Commands::Artifact { command } => match command {
+            ArtifactCommands::Put {
+                slug,
+                title,
+                content,
+                file,
+                intent,
+                dry_run,
+            } => {
+                // 读取内容：优先从文件读取，否则使用直接输入
+                let page_content = if let Some(ref path) = file {
+                    let file_path = std::path::PathBuf::from(path);
+                    // 安全校验：文件路径必须在工作目录内
+                    gbrain_core::security::validate_upload_path(&file_path, false, &ops.ctx.working_dir)?;
+                    info!(path = %path, "从文件读取内容");
+                    std::fs::read_to_string(&file_path)?
+                } else {
+                    content.unwrap_or_default()
+                };
+
+                // 安全校验：内容不能为空
+                if page_content.is_empty() {
+                    error!("内容不能为空，请使用 --content 或 --file 参数");
+                    std::process::exit(1);
+                }
+
+                // 委托给 ArtifactService.put_memory
+                let svc = ops.artifact_service();
+                let result = svc.put_memory(
+                    &slug,
+                    &page_content,
+                    title.as_deref(),
+                    Some(intent.as_str()),
+                    dry_run,
+                )?;
+
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    if dry_run {
+                        info!("Artifact put 预览: {}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        info!("Artifact put 完成: slug={}, 结果={}", slug, serde_json::to_string_pretty(&result)?);
+                    }
+                }
+            }
+
+            ArtifactCommands::Upload {
+                path,
+                intent,
+                target,
+                page,
+                library,
+                folder,
+                promotion,
+                dry_run,
+            } => {
+                let file_path = PathBuf::from(&path);
+                if !file_path.exists() {
+                    error!(path = %path, "文件不存在");
+                    std::process::exit(1);
+                }
+
+                // 委托给现有 upload 逻辑
+                let file_content = std::fs::read(&file_path)?;
+                let original_name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let upload_intent = match intent.to_lowercase().as_str() {
+                    "auto" => gbrain_core::artifact::types::UploadIntent::Auto,
+                    "evidence" | "document" => gbrain_core::artifact::types::UploadIntent::Document,
+                    "attachment" => gbrain_core::artifact::types::UploadIntent::Attachment,
+                    "memory" => gbrain_core::artifact::types::UploadIntent::Memory,
+                    "promote" => gbrain_core::artifact::types::UploadIntent::Promote,
+                    _ => gbrain_core::artifact::types::UploadIntent::Auto,
+                };
+
+                let promotion_policy = promotion.as_ref().map(|p| match p.to_lowercase().as_str() {
+                    "none" => gbrain_core::artifact::types::PromotionPolicy::None,
+                    "shadow" => gbrain_core::artifact::types::PromotionPolicy::Shadow,
+                    "candidate" => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+                    "auto-low-risk" | "auto_accept_low_risk" => {
+                        gbrain_core::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                    }
+                    _ => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+                });
+
+                let input = gbrain_core::artifact::types::UploadSourceInput {
+                    content: file_content,
+                    path: Some(file_path.clone()),
+                    original_name,
+                    source_kind: gbrain_core::artifact::types::SourceKind::Upload,
+                    source_uri: file_path.to_string_lossy().to_string(),
+                    intent: upload_intent,
+                    target_slug: target,
+                    page_slug: page,
+                    library_id: library,
+                    folder_id: folder,
+                    promotion_policy,
+                    owner_ref: None,
+                    metadata: None,
+                    dry_run,
+                };
+
+                let svc = ops.artifact_service();
+                let result = svc.upload_file(input)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    info!(
+                        "Artifact: {} (uid={}, sha256={})",
+                        result.artifact_id, result.artifact_uid, result.sha256
+                    );
+                    info!(
+                        "Route: KB={}, Brain={}, File={}, Shadow={}",
+                        result.route_plan.to_kb,
+                        result.route_plan.to_brain,
+                        result.route_plan.to_file,
+                        result.route_plan.to_shadow
+                    );
+                    info!("Promotion: {}", result.route_plan.promotion);
+                }
+            }
+
+            ArtifactCommands::Query {
+                query,
+                mode,
+                limit,
+                filter,
+                include_sources,
+            } => {
+                // 委托给 ArtifactService.query_facade
+                let svc = ops.artifact_service();
+                let input = gbrain_core::artifact::types::ArtifactQueryInput {
+                    query,
+                    mode: Some(mode),
+                    limit,
+                    filter_slug: filter,
+                    include_sources: Some(include_sources),
+                };
+                let result = svc.query_facade(&input)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    info!("模式: {} | 总命中: {}", result.mode, result.meta.total);
+                    for m in &result.memories {
+                        info!("  记忆: {} | {} | {:.3}", m.slug, m.title, m.score);
+                    }
+                    for e in &result.evidence {
+                        info!("  证据: {} | {:.3}", e.title, e.score);
+                    }
+                    for t in &result.timeline {
+                        info!("  时间线: {} | {} | {}", t.timestamp, t.description, t.slug.as_deref().unwrap_or(""));
+                    }
+                }
+            }
+
+            ArtifactCommands::List { limit, offset } => {
+                // 委托给 ArtifactService.list_artifacts
+                let svc = ops.artifact_service();
+                let artifacts = svc.list_artifacts(limit, offset)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&artifacts)?);
+                } else {
+                    for a in &artifacts {
+                        info!(
+                            "  [{}] {} uid={} sha256={} size={} status={}",
+                            a.id,
+                            a.original_name,
+                            a.artifact_uid,
+                            &a.sha256[..16.min(a.sha256.len())],
+                            a.size_bytes,
+                            a.status
+                        );
+                    }
+                    info!("{} 知识源", artifacts.len());
+                }
+            }
+
+            ArtifactCommands::Get {
+                id_or_uid,
+                include_projections,
+                include_sources,
+            } => {
+                // 委托给 ArtifactService
+                let svc = ops.artifact_service();
+                let artifact = if id_or_uid.starts_with("art_") {
+                    svc.get_artifact_by_uid(&id_or_uid)?
+                } else {
+                    let id = id_or_uid.parse::<i64>().ok();
+                    match id {
+                        Some(id) => svc.get_artifact(id)?,
+                        None => None,
+                    }
+                };
+                match artifact {
+                    Some(a) => {
+                        info!("{}", serde_json::to_string_pretty(&a)?);
+                        if include_projections {
+                            let projections = ops.get_artifact_projections(a.id)?;
+                            for p in &projections {
+                                info!(
+                                    "  投影: {} key={} ref={} status={}",
+                                    p.projection_type, p.projection_key, p.projection_ref, p.status
+                                );
+                            }
+                        }
+                        if include_sources {
+                            let provenance = svc.get_provenance(&a.canonical_slug)?;
+                            for p in &provenance {
+                                info!(
+                                    "  来源: slug={} field={} hash={}",
+                                    p.brain_slug, p.brain_field, p.fact_hash
+                                );
+                            }
+                        }
+                    }
+                    None => warn!("知识源 '{}' 未找到", id_or_uid),
+                }
+            }
+
+            ArtifactCommands::Delete { id_or_uid, dry_run } => {
+                // 解析 ID：支持数字 ID 或 UID
+                let artifact_id = if id_or_uid.starts_with("art_") {
+                    // UID 格式，需要先查询获取 ID
+                    match ops.get_artifact_by_uid(&id_or_uid)? {
+                        Some(a) => a.id,
+                        None => {
+                            warn!("知识源 '{}' 未找到", id_or_uid);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    match id_or_uid.parse::<i64>() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            warn!("无效的知识源标识: {}", id_or_uid);
+                            return Ok(());
+                        }
+                    }
+                };
+
+                if dry_run {
+                    info!("预览: 将软删除知识源 {}", artifact_id);
+                } else {
+                    ops.delete_artifact(artifact_id)?;
+                    info!("知识源 {} 已软删除", artifact_id);
+                }
+            }
+
+            ArtifactCommands::Detach {
+                id_or_uid,
+                from,
+                dry_run,
+            } => {
+                // 委托给 ArtifactService.detach
+                let svc = ops.artifact_service();
+                let result = svc.detach(&id_or_uid, &from, dry_run)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else if dry_run {
+                    info!("预览: {}", result["description"]);
+                } else {
+                    info!(
+                        "已解除关联: artifact_id={} from_slug={} detached={}",
+                        result["artifact_id"], result["from_slug"], result["detached_occurrences"]
+                    );
+                }
+            }
+
+            ArtifactCommands::Restore { id_or_uid, dry_run } => {
+                // 委托给 ArtifactService.restore
+                let svc = ops.artifact_service();
+                let result = svc.restore(&id_or_uid, dry_run)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else if dry_run {
+                    info!("预览: {}", result["description"]);
+                } else {
+                    info!(
+                        "已恢复: artifact_id={} occurrences={} projections={}",
+                        result["artifact_id"], result["restored_occurrences"], result["restored_projections"]
+                    );
+                }
+            }
+
+            ArtifactCommands::Reprocess { id_or_uid, dry_run } => {
+                // 委托给 ArtifactService.reprocess
+                let svc = ops.artifact_service();
+                let result = svc.reprocess(&id_or_uid, dry_run)?;
+                if cli.json {
+                    info!("{}", serde_json::to_string_pretty(&result)?);
+                } else if dry_run {
+                    info!("预览: {}", result["description"]);
+                } else {
+                    info!(
+                        "已请求重新处理: artifact_id={} stale_projections={} status={}",
+                        result["artifact_id"], result["stale_projections"], result["status"]
+                    );
+                }
+            }
+
+            ArtifactCommands::Health => {
+                // 委托给 ArtifactService.health_check
+                let svc = ops.artifact_service();
+                let report = svc.health_check()?;
+                info!("{}", serde_json::to_string_pretty(&report)?);
+            }
+
+            ArtifactCommands::Review { command } => match command {
+                ReviewCommands::List {
+                    status,
+                    target,
+                    limit,
+                } => {
+                    // 委托给 ArtifactService.list_suggested_changes
+                    let svc = ops.artifact_service();
+                    let items = svc.list_suggested_changes(
+                        status.as_deref(),
+                        target.as_deref(),
+                        limit,
+                        0,
+                    )?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&items)?);
+                    } else {
+                        for item in &items {
+                            info!(
+                                "  [{}] {} target={} risk={} summary={}",
+                                item.status, item.change_id, item.target_slug, item.risk_level, item.summary
+                            );
+                        }
+                        info!("{} 建议变更", items.len());
+                    }
+                }
+                ReviewCommands::Show { change_id } => {
+                    // 委托给 ArtifactService.get_suggested_change
+                    let svc = ops.artifact_service();
+                    match svc.get_suggested_change(change_id)? {
+                        Some(item) => info!("{}", serde_json::to_string_pretty(&item)?),
+                        None => warn!("建议变更 {} 未找到", change_id),
+                    }
+                }
+                ReviewCommands::Apply { change_id } => {
+                    // 委托给 ArtifactService.apply_suggested_change
+                    let svc = ops.artifact_service();
+                    let result = svc.apply_suggested_change(change_id)?;
+                    info!("建议变更 {} 已应用", result.id);
+                }
+                ReviewCommands::Reject { change_id, reason } => {
+                    // 委托给 ArtifactService.reject_suggested_change
+                    let svc = ops.artifact_service();
+                    let input = gbrain_core::artifact::types::ReviewCandidateInput {
+                        candidate_id: change_id,
+                        action: "reject".to_string(),
+                        reviewer: "cli".to_string(),
+                        notes: reason,
+                    };
+                    let result = svc.reject_suggested_change(input)?;
+                    info!("建议变更 {} 已拒绝", result.id);
+                }
+                ReviewCommands::Rollback { change_id } => {
+                    // 委托给 ArtifactService.rollback_suggested_change
+                    let svc = ops.artifact_service();
+                    let result = svc.rollback_suggested_change(change_id)?;
+                    info!("建议变更 {} 已回滚 (原状态: {})", change_id, result.status);
+                }
+            },
+        },
+
+        // ========================================================================
+        // 内部开发/调试命令（需要 admin-tools feature）
+        // ========================================================================
+        #[cfg(feature = "admin-tools")]
+        Commands::Dev { command } => match command {
+            DevCommands::Ping => {
+                info!("Dev ping: 系统正常");
+            }
+            DevCommands::Kb { command } => match command {
+                KbDevCommands::ListLibraries => {
+                    let conn = engine.connection()?;
+                    let kb_engine = gbrain_core::kb::KbEngine::new(&conn);
+                    let libraries = kb_engine.list_libraries()?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&libraries)?);
+                    } else {
+                        for lib in &libraries {
+                            info!("  [{}] {}", lib.id, lib.name);
+                        }
+                        info!("{} 个库", libraries.len());
+                    }
+                }
+                KbDevCommands::ListDocuments { library, limit } => {
+                    let conn = engine.connection()?;
+                    let kb_engine = gbrain_core::kb::KbEngine::new(&conn);
+                    let lib_id = library.or(config.default_kb_library_id).unwrap_or(1);
+                    let docs = kb_engine.list_documents(lib_id, None, limit as usize, 0)?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&docs)?);
+                    } else {
+                        for doc in &docs {
+                            info!("  [{}] {} ext={}", doc.id, doc.original_name, doc.extension);
+                        }
+                        info!("{} 个文档", docs.len());
+                    }
+                }
+                KbDevCommands::RunWorker => {
+                    let processed = gbrain_core::kb::run_kb_worker_once(&engine, config)?;
+                    if processed {
+                        info!("KB worker: 已处理一个作业");
+                    } else {
+                        info!("KB worker: 无待处理作业");
+                    }
+                }
+            },
+            DevCommands::Brain { command } => match command {
+                BrainDevCommands::ListPages { limit } => {
+                    let filters = gbrain_core::types::PageFilters {
+                        limit: Some(limit as usize),
+                        ..Default::default()
+                    };
+                    let pages = engine.list_pages(filters)?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&pages)?);
+                    } else {
+                        for p in &pages {
+                            info!("  [{}] {} type={}", p.slug, p.title, p.page_type);
+                        }
+                        info!("{} 个页面", pages.len());
+                    }
+                }
+                BrainDevCommands::GetPage { slug } => {
+                    match engine.get_page(&slug)? {
+                        Some(page) => info!("{}", serde_json::to_string_pretty(&page)?),
+                        None => warn!("页面 '{}' 未找到", slug),
+                    }
+                }
+                BrainDevCommands::ListLinks { slug } => {
+                    let links = engine.get_links(&slug)?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&links)?);
+                    } else {
+                        for l in &links {
+                            info!("  {} -> {} type={}", l.from_slug, l.to_slug, l.link_type);
+                        }
+                        info!("{} 个链接", links.len());
+                    }
+                }
+            },
+            DevCommands::Projection { command } => match command {
+                ProjectionDevCommands::List { artifact, status, limit } => {
+                    let conn = engine.connection()?;
+                    let projections = if let Some(aid) = artifact {
+                        gbrain_core::artifact::store::find_projections_by_artifact(conn, aid)
+                            .map_err(|e| gbrain_core::error::GBrainError::Database(e.to_string()))?
+                    } else {
+                        let count = gbrain_core::artifact::store::count_active_artifacts(conn)?;
+                        let artifacts = gbrain_core::artifact::store::list_active_artifacts(conn, count.min(limit), 0)?;
+                        let mut all = Vec::new();
+                        for a in &artifacts {
+                            let projs = gbrain_core::artifact::store::find_projections_by_artifact(conn, a.id)
+                                .map_err(|e| gbrain_core::error::GBrainError::Database(e.to_string()))?;
+                            all.extend(projs);
+                        }
+                        all
+                    };
+                    let filtered: Vec<_> = projections.into_iter()
+                        .filter(|p| status.as_deref().is_none_or(|s| p.status == s))
+                        .take(limit as usize)
+                        .collect();
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&filtered)?);
+                    } else {
+                        for p in &filtered {
+                            info!("  [{}] {} key={} ref={} status={}", p.id, p.projection_type, p.projection_key, p.projection_ref, p.status);
+                        }
+                        info!("{} 个投影", filtered.len());
+                    }
+                }
+                ProjectionDevCommands::Gc { stale_days, dry_run } => {
+                    let ops = gbrain_core::operations::Operations::new(&engine, gbrain_core::operations::OpContext::default());
+                    let result = ops.gc_orphan_projections(stale_days, dry_run)?;
+                    if cli.json {
+                        info!("{}", serde_json::to_string_pretty(&result)?);
+                    } else {
+                        info!("投影 GC 完成: 孤儿={}, 删除={}, KB清理={}, 影子页面清理={}, dry_run={}",
+                            result.orphaned_count, result.deleted_count, result.kb_vector_cleaned,
+                            result.shadow_page_cleaned, dry_run);
+                    }
+                }
+            },
+        },
 
         Commands::KbWorker { once, interval } => {
             if once {
@@ -2676,7 +3553,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     info!("KB worker: no pending jobs");
                 }
                 // 同时处理 artifact promotion 作业
-                let promoted = gbrain_core::kb::run_artifact_promote_worker_once(&engine, config)?;
+                let promoted = gbrain_core::kb::run_artifact_worker_once(&engine, config)?;
                 if promoted {
                     info!("Artifact promote worker: processed one job");
                 }
@@ -2692,6 +3569,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
     Ok(())
 }
 
+/// 为未嵌入的块生成嵌入向量（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn embed_stale_chunks(
     ops: &Operations<'_>,
     config: &Config,
@@ -2777,10 +3656,14 @@ fn embed_stale_chunks(
     Ok(embedded)
 }
 
+/// 判断是否为支持的代码文件（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn is_supported_code_file(path: &std::path::Path) -> bool {
     language_from_path(path).is_some()
 }
 
+/// 根据文件扩展名推断编程语言（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn language_from_path(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
         "rs" => Some("rust"),
@@ -2796,6 +3679,8 @@ fn language_from_path(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+/// 从相对路径生成代码 slug（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn code_slug_from_relative(relative: &std::path::Path) -> String {
     let without_ext = relative.with_extension("");
     let mut segments = Vec::new();
@@ -2813,6 +3698,8 @@ fn code_slug_from_relative(relative: &std::path::Path) -> String {
     }
 }
 
+/// slug 段落转换（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn slug_segment(value: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -2828,6 +3715,8 @@ fn slug_segment(value: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// 判断导入文件是否应跳过（admin-tools 辅助函数）
+#[cfg(feature = "admin-tools")]
 fn should_skip_import_file(path: &std::path::Path) -> bool {
     const MAX_IMPORT_BYTES: u64 = 5 * 1024 * 1024;
     match std::fs::symlink_metadata(path) {

@@ -209,10 +209,13 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
     }
 }
 
-/// 运行一次 artifact promotion 作业处理循环：
+/// 运行一次 artifact 作业处理循环（设计文档 §8.8）：
 /// 认领 `artifact_promote_extract` 作业并执行 promotion extraction。
 /// 返回是否处理了一个作业。
-pub fn run_artifact_promote_worker_once(engine: &SqliteEngine, _config: &Config) -> Result<bool> {
+///
+/// 旧名 `run_artifact_worker_once` 已重命名，
+/// 对外不再暴露 "promote" 命名细节。
+pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Result<bool> {
     let conn = engine.connection()?;
     let queue = crate::jobs::JobQueue::new(conn);
 
@@ -527,7 +530,7 @@ pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs:
             Ok(true) => true,
             Ok(false) => match run_reembed_worker_once(engine, config) {
                 Ok(true) => true,
-                Ok(false) => match run_artifact_promote_worker_once(engine, config) {
+                Ok(false) => match run_artifact_worker_once(engine, config) {
                     Ok(true) => true,
                     Ok(false) => false,
                     Err(e) => {
@@ -641,7 +644,7 @@ pub fn spawn_kb_worker_pool(
                         Ok(true) => true,
                         Ok(false) => match run_reembed_worker_once(&engine, &config) {
                             Ok(true) => true,
-                            Ok(false) => match run_artifact_promote_worker_once(&engine, &config) {
+                            Ok(false) => match run_artifact_worker_once(&engine, &config) {
                                 Ok(true) => true,
                                 Ok(false) => false,
                                 Err(e) => {
