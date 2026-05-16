@@ -73,6 +73,21 @@
       "name": "code-graph",
       "path": "code-graph/SKILL.md",
       "description": "Code knowledge graph: find definitions, trace references, explore call graphs, search code chunks, reindex code pages."
+    },
+    {
+      "name": "delete-restore",
+      "path": "delete-restore/SKILL.md",
+      "description": "Soft-delete lifecycle: delete pages safely, restore accidentally deleted pages, purge old deleted content."
+    },
+    {
+      "name": "writing-mode",
+      "path": "writing-mode/SKILL.md",
+      "description": "Writing quality control: choose writing mode (Strict/Lint/Off), run lint checks, auto-fix quality issues."
+    },
+    {
+      "name": "autopilot",
+      "path": "autopilot/SKILL.md",
+      "description": "Self-maintenance daemon and health diagnostics: autopilot, doctor, integrity, orphans, health monitoring."
     }
   ],
   "resolver": "RESOLVER.md",

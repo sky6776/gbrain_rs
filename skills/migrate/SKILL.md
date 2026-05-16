@@ -7,9 +7,12 @@ triggers:
   - "import from notion"
 tools:
   - put_page
+  - get_page
   - query
   - add_link
   - add_tag
+  - get_stats
+  - get_health
   - sync_brain
 mutating: true
 ---

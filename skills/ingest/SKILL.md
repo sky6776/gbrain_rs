@@ -11,6 +11,10 @@ tools:
   - put_page
   - add_link
   - add_timeline_entry
+  - add_tag
+  - get_tags
+  - put_raw_data
+  - get_backlinks
   - upload_source
   - memory_query
   - sync_brain
@@ -254,11 +258,15 @@ Raw source: [preserved at path / uploaded to cloud]
 
 ## Tools Used
 
-- Read a page from gbrain (get_page)
-- Store/update a page in gbrain (put_page)
-- Add a timeline entry in gbrain (add_timeline_entry)
-- Link entities in gbrain (add_link)
-- List tags for a page (get_tags)
-- Tag a page in gbrain (add_tag)
-- Store raw data in gbrain (put_raw_data)
-- Check backlinks in gbrain (get_backlinks)
+- `query` — search for existing pages
+- `get_page` — read a brain page
+- `put_page` — create/update brain pages
+- `add_link` — cross-reference entities
+- `add_timeline_entry` — record events
+- `add_tag` — tag a page
+- `get_tags` — list page tags
+- `put_raw_data` — store raw API responses
+- `get_backlinks` — check who references an entity
+- `upload_source` — unified upload entry point
+- `memory_query` — cross-subsystem query
+- `sync_brain` — sync changes to index

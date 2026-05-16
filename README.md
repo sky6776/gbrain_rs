@@ -100,12 +100,12 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 |------|------|
 | `gbrain init` | 初始化新的知识库 |
 | `gbrain get <slug>` | 按 slug 读取页面 |
-| `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>]` | 创建或更新页面 |
+| `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>] [--page-type <TYPE>]` | 创建或更新页面 |
 | `gbrain delete <slug> [--force]` | 软删除页面 |
 | `gbrain restore <slug>` | 恢复软删除页面 |
 | `gbrain purge-deleted [--older-than-hours <N>]` | 永久清理旧的软删除页面 |
 | `gbrain list [--page-type <TYPE>] [--limit <N>]` | 列出页面（可筛选） |
-| `gbrain query <query> [--limit <N>] [--lang <LANG>] [--symbol-kind <KIND>]` | 混合搜索（别名: `ask`），支持代码过滤和两阶段检索 |
+| `gbrain query <query> [--limit <N>] [--detail <LEVEL>] [--lang <LANG>] [--symbol-kind <KIND>] [--near-symbol <SYMBOL>] [--walk-depth <DEPTH>] [--expand]` | 混合搜索（别名: `ask`），支持代码过滤和两阶段检索 |
 
 #### 示例
 
@@ -121,6 +121,33 @@ gbrain query "Rust 异步编程" --limit 5 --lang rust
 
 # 恢复误删页面
 gbrain restore people/alice
+
+# 更新页面内容
+gbrain put people/alice --title "Alice" --content "一位资深工程师，擅长 Rust 和系统编程，目前就职于 Acme Corp"
+
+# 从文件创建页面
+gbrain put projects/alpha --title "Project Alpha" --file ./notes/alpha.md
+
+# 创建带类型的页面
+gbrain put people/bob --title "Bob" --content "产品经理" --page-type person
+
+# 搜索代码相关内容
+gbrain query "异步运行时" --lang rust --limit 10
+
+# 搜索并获取详细信息
+gbrain query "Acme Corp" --detail high --limit 5
+
+# 两阶段代码图检索
+gbrain query "handle_request" --near-symbol "HttpHandler" --walk-depth 1
+
+# 关键词搜索（不扩展）
+gbrain query "Rust" --limit 5 --expand false
+
+# 列出特定类型的页面
+gbrain list --page-type person --limit 20
+
+# 永久清理 7 天前的删除页面
+gbrain purge-deleted --older-than-hours 168
 ```
 
 ### 搜索与图谱
@@ -146,6 +173,27 @@ gbrain graph-query people/alice --to companies/acme --depth 3
 
 # 查找 Rust 函数定义
 gbrain code def --symbol "parse_config" --lang rust
+
+# 查询图谱关系路径
+gbrain graph-query people/alice --to projects/alpha --depth 2
+
+# 按链接类型查询
+gbrain graph-query people/alice --link-type works_at --depth 1
+
+# 查找代码符号引用
+gbrain code refs --symbol "SqliteEngine" --lang rust
+
+# 搜索代码块
+gbrain code search "async fn handle" --lang rust
+
+# 查看调用者
+gbrain code callers --slug src/engine.rs --symbol "query"
+
+# 查看被调用者
+gbrain code callees --slug src/engine.rs --symbol "query"
+
+# 重建代码页索引
+gbrain code reindex src/engine.rs
 ```
 
 ### 反向链接
@@ -193,6 +241,24 @@ gbrain extract --mode all
 
 # 运行 lint 检查并自动修复
 gbrain lint --fix
+
+# 导出特定页面
+gbrain export people/alice companies/acme --dir ./backup
+
+# 按类型导出
+gbrain export --dir ./people-backup --page-type person
+
+# 仅提取链接
+gbrain extract --mode links
+
+# 仅提取时间线
+gbrain extract --mode timeline
+
+# 检查页面质量（不修复）
+gbrain lint people/alice
+
+# 预览 lint 修复
+gbrain lint --fix --dry-run
 ```
 
 ### 文件存储
@@ -216,6 +282,15 @@ gbrain file list projects/annual-report
 
 # 获取文件路径
 gbrain file url files/report.pdf
+
+# 同步目录到存储
+gbrain file sync ./documents
+
+# 验证所有文件记录
+gbrain file verify
+
+# 列出所有文件
+gbrain file list
 ```
 
 ### 健康与维护
@@ -243,6 +318,18 @@ gbrain autopilot --once
 
 # 持续自维护（每 10 分钟）
 gbrain autopilot --interval 600
+
+# 查看健康仪表盘
+gbrain health
+
+# 检查数据完整性
+gbrain integrity
+
+# 检测孤立页面
+gbrain orphans
+
+# 为特定页面生成嵌入
+gbrain embed people/alice companies/acme --batch-size 10
 ```
 
 ### 配置与其他
@@ -271,6 +358,18 @@ gbrain report --report-type maintenance --title "Weekly Check"
 
 # 启动 MCP 服务器
 gbrain serve
+
+# 获取单个配置值
+gbrain config get embedding_model
+
+# 设置写入后自动 lint
+gbrain config set post_write_lint true
+
+# 查看导入日志
+gbrain ingest-log --limit 10
+
+# 输出 MCP 工具定义
+gbrain tools-json
 ```
 
 ### KB 子系统（CLI）
@@ -336,8 +435,8 @@ gbrain kb-purge-deleted --older-than-days 30
 
 | 命令 | 说明 |
 |------|------|
-| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--promotion <POLICY>] [--dry-run]` | 上传原件（统一入口），自动路由至多投影。intent: auto/document/attachment/memory/promote；promotion: none/shadow/candidate/auto-low-risk |
-| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>]` | 统一记忆查询（别名: ask-memory）。strategy: brain_first/evidence_first/provenance/timeline_first |
+| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--page <SLUG>] [--folder-id <ID>] [--promotion <POLICY>] [--dry-run]` | 上传原件（统一入口），自动路由至多投影。intent: auto/document/attachment/memory/promote；promotion: none/shadow/candidate/auto-low-risk |
+| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>] [--include-evidence] [--include-provenance]` | 统一记忆查询（别名: ask-memory）。strategy: brain_first/evidence_first/provenance/timeline_first |
 | `gbrain artifact list [--limit <N>] [--offset <N>]` | 列出所有 Artifact |
 | `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情（支持 ID 或 UID 如 `art_ab12cd34ef56`） |
 | `gbrain artifact delete <artifact_id>` | 软删除 Artifact（标记所有投影为 stale） |
@@ -360,6 +459,30 @@ gbrain memory-query "Alice 的项目经历" --strategy evidence_first --limit 10
 
 # 查看 Artifact 详情
 gbrain artifact get art_ab12cd34ef56
+
+# 上传文件附件
+gbrain upload photo.jpg --intent attachment --page people/alice
+
+# 上传到 KB 指定文件夹
+gbrain upload report.pdf --intent document --library-id 1 --folder-id 5
+
+# 统一记忆查询 — 优先搜索 KB 证据
+gbrain memory-query "部署流程" --strategy evidence_first --limit 5
+
+# 统一记忆查询 — 追溯事实来源
+gbrain memory-query "Alice 的职位" --strategy provenance --include-provenance
+
+# 统一记忆查询 — 按时间线排序
+gbrain memory-query "最近的项目进展" --strategy timeline_first
+
+# 列出所有 Artifact
+gbrain artifact list --limit 20
+
+# 检查 Artifact 健康状态
+gbrain artifact health
+
+# 软删除 Artifact
+gbrain artifact delete 42
 ```
 
 ### 候选变更与提升（Promotion）
@@ -389,6 +512,21 @@ gbrain promotion batch-apply --risk low --dry-run
 
 # 回滚已应用的候选
 gbrain promotion rollback 42
+
+# 查看候选详情
+gbrain promotion get 42
+
+# 拒绝候选变更
+gbrain promotion reject 43 --reviewer bob --notes "信息已过时"
+
+# 应用已接受的候选
+gbrain promotion apply 42
+
+# 自动应用低风险候选
+gbrain promotion auto-apply 7
+
+# 列出已应用的候选
+gbrain promotion list --status applied
 ```
 
 ### 投影管理（Projection）
@@ -411,6 +549,95 @@ gbrain projection history kb_doc:42 --artifact-id 7 --limit 10
 # 预览清理孤立投影
 gbrain gc-orphan-projections --stale-days 30 --dry-run
 ```
+
+---
+
+## CLI 命令参数
+
+### `gbrain put`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug（如 people/alice） |
+| `--title` | string | 是 | 页面标题 |
+| `--content` | string | 否 | 页面内容（Markdown） |
+| `--file` | path | 否 | 从文件读取内容 |
+| `--page-type` | string | 否 | 页面类型（如 person、company） |
+
+### `gbrain query`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索查询 |
+| `--limit` | integer | 否 | 最大结果数（默认 20） |
+| `--detail` | string | 否 | 结果详情级别：low/medium/high（默认 medium） |
+| `--lang` | string | 否 | 按编程语言过滤代码检索 |
+| `--symbol-kind` | string | 否 | 按符号类型过滤代码检索 |
+| `--near-symbol` | string | 否 | 锚定两阶段代码图检索的起始符号 |
+| `--walk-depth` | integer | 否 | 代码图邻居遍历深度（0-2，默认 0） |
+| `--expand` | flag | 否 | 启用 LLM 查询扩展 |
+
+### `gbrain upload`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `path` | path | 是 | 文件路径 |
+| `--intent` | string | 否 | 上传意图：auto/document/attachment/memory/promote（默认 auto） |
+| `--library-id` | integer | 否 | KB 知识库 ID |
+| `--target` | string | 否 | 目标 gbrain 页面 slug（用于提升） |
+| `--page` | string | 否 | 目标页面 slug（用于文件附件） |
+| `--folder-id` | integer | 否 | KB 文件夹 ID |
+| `--promotion` | string | 否 | 提升策略：none/shadow/candidate/auto-low-risk |
+| `--dry-run` | flag | 否 | 仅返回路由计划，不实际执行 |
+| `--json` | flag | 否 | 以 JSON 格式输出 |
+
+### `gbrain memory-query`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 查询文本 |
+| `--strategy` | string | 否 | 查询策略：brain_first/evidence_first/provenance/timeline_first（默认 brain_first） |
+| `--limit` | integer | 否 | 最大结果数（默认 10） |
+| `--filter-slug` | string | 否 | 按 slug 过滤 |
+| `--include-evidence` | flag | 否 | 包含 KB 证据（默认 true） |
+| `--include-provenance` | flag | 否 | 包含溯源记录（默认 false） |
+| `--json` | flag | 否 | 以 JSON 格式输出 |
+
+### `gbrain embed`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slugs` | string[] | 否 | 指定页面 slug（空 = 所有过期内容） |
+| `--batch-size` | integer | 否 | 嵌入 API 批量大小（默认 20） |
+
+### `gbrain import`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `dir` | string | 是 | 扫描 .md 文件的目录 |
+| `--embed` | flag | 否 | 为导入内容生成嵌入 |
+| `--auto-link` | flag | 否 | 自动链接导入页面到已有页面 |
+
+### `gbrain export`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slugs` | string[] | 否 | 指定导出的页面 slug |
+| `--dir` | string | 否 | 输出目录 |
+| `--page-type` | string | 否 | 按页面类型筛选 |
+
+### `gbrain autopilot`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `--once` | flag | 否 | 运行一次后退出 |
+| `--interval` | integer | 否 | 循环间隔秒数（默认 3600） |
+
+### `gbrain purge-deleted`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `--older-than-hours` | integer | 否 | 清理多少小时前的删除页面（默认 72） |
 
 ---
 
@@ -495,6 +722,16 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "resolve_slugs", "params": { "partial": "ali" } }
 ```
 
+```json
+// 搜索并返回元数据
+{ "tool": "query", "params": { "query": "Rust 异步", "limit": 5, "include_meta": true } }
+```
+
+```json
+// 两阶段代码图检索
+{ "tool": "query", "params": { "query": "handle_request", "near_symbol": "HttpHandler", "walk_depth": 1 } }
+```
+
 ### 页面增删改查
 
 | 工具 | 说明 |
@@ -527,6 +764,16 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "list_pages", "params": { "type": "person", "limit": 10 } }
 ```
 
+```json
+// 模糊匹配读取页面
+{ "tool": "get_page", "params": { "slug": "ali", "fuzzy": true } }
+```
+
+```json
+// 获取页面内容块
+{ "tool": "get_chunks", "params": { "slug": "people/alice" } }
+```
+
 ### 标签
 
 | 工具 | 说明 |
@@ -545,6 +792,11 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 ```json
 // 列出标签
 { "tool": "get_tags", "params": { "slug": "people/alice" } }
+```
+
+```json
+// 移除标签
+{ "tool": "remove_tag", "params": { "slug": "people/alice", "tag": "engineer" } }
 ```
 
 ### 链接与图谱
@@ -572,6 +824,16 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 ```json
 // 获取反向链接
 { "tool": "get_backlinks", "params": { "slug": "people/alice" } }
+```
+
+```json
+// 移除链接
+{ "tool": "remove_link", "params": { "from": "people/alice", "to": "companies/acme", "link_type": "works_at" } }
+```
+
+```json
+// 按链接类型遍历图谱
+{ "tool": "traverse_graph", "params": { "slug": "people/alice", "depth": 3, "link_type": "works_at", "direction": "out" } }
 ```
 
 ### 时间线
@@ -608,7 +870,7 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 ```
 
 ```json
-// 回滚到指定版本
+// 回滚到指定版本（创建新版本记录）
 { "tool": "revert_version", "params": { "slug": "people/alice", "version_id": 3 } }
 ```
 
@@ -663,6 +925,16 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 ```json
 // 重建代码页索引
 { "tool": "reindex_code_page", "params": { "slug": "src/engine.rs" } }
+```
+
+```json
+// 搜索代码块
+{ "tool": "search_code_chunks", "params": { "query": "async fn handle", "lang": "rust" } }
+```
+
+```json
+// 获取代码边
+{ "tool": "get_code_edges_by_chunk", "params": { "chunk_id": 42 } }
 ```
 
 ### 文件存储
@@ -815,6 +1087,21 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "artifact_health", "params": {} }
 ```
 
+```json
+// 上传文件附件
+{ "tool": "upload_source", "params": { "path": "/path/to/photo.jpg", "intent": "attachment", "page_slug": "people/alice" } }
+```
+
+```json
+// 预览上传路由
+{ "tool": "upload_source", "params": { "path": "/path/to/report.pdf", "intent": "auto", "dry_run": true } }
+```
+
+```json
+// 记忆查询 — 追溯来源
+{ "tool": "memory_query", "params": { "query": "Alice 的职位", "strategy": "provenance", "include_provenance": true } }
+```
+
 ### 候选变更与提升（Promotion）
 
 | 工具 | 说明 |
@@ -898,12 +1185,43 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `walk_depth` | integer | 否 | 代码图邻居遍历深度（0-2） |
 | `include_meta` | boolean | 否 | 返回 `{results, meta}` 含向量/扩展详情 |
 
+### `get_page`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `fuzzy` | boolean | 否 | 启用模糊 slug 解析（默认 false） |
+
 ### `put_page`
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `slug` | string | 是 | 页面 slug |
 | `content` | string | 是 | 完整 Markdown（含 YAML frontmatter） |
+
+### `add_link`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `from` | string | 是 | 源页面 slug |
+| `to` | string | 是 | 目标页面 slug |
+| `link_type` | string | 否 | 链接类型（如 works_at、invested_in） |
+| `context` | string | 否 | 链接上下文描述 |
+
+### `list_pages`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | string | 否 | 按页面类型筛选 |
+| `tag` | string | 否 | 按标签筛选 |
+| `limit` | integer | 否 | 最大结果数（默认 50） |
+
+### `delete_page`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `confirm` | boolean | 是 | 必须为 true 以确认删除 |
 
 ### `traverse_graph`
 
@@ -1025,6 +1343,306 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `artifact_id` | integer | 否 | 按 Artifact ID 筛选 |
 | `risk` | string | 否 | 按风险等级筛选: low/medium/high |
 | `dry_run` | boolean | 否 | 仅预览，不实际应用 |
+
+### `add_tag`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `tag` | string | 是 | 标签名称 |
+
+### `remove_tag`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `tag` | string | 是 | 标签名称 |
+
+### `add_timeline_entry`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `date` | string | 是 | 日期（YYYY-MM-DD） |
+| `summary` | string | 是 | 事件摘要 |
+
+### `remove_link`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `from` | string | 是 | 源页面 slug |
+| `to` | string | 是 | 目标页面 slug |
+| `link_type` | string | 否 | 要移除的链接类型 |
+
+### `revert_version`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `version_id` | integer | 是 | 要回滚到的版本 ID |
+
+### `put_raw_data`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `source` | string | 是 | 数据来源标识 |
+| `data` | object | 是 | 原始数据对象 |
+
+### `get_raw_data`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 页面 slug |
+| `source` | string | 否 | 按来源筛选 |
+
+### `resolve_slugs`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `partial` | string | 是 | 部分 slug |
+
+### `log_ingest`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `source_type` | string | 是 | 来源类型（如 git、import、api） |
+| `source_ref` | string | 是 | 来源引用 |
+| `pages_updated` | string[] | 是 | 更新的页面 slug 列表 |
+| `summary` | string | 是 | 导入摘要 |
+
+### `kb_update_library`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 要更新的知识库 ID |
+| `name` | string | 否 | 新知识库名称 |
+| `semantic_segmentation_enabled` | boolean | 否 | 启用语义分块 |
+| `raptor_enabled` | boolean | 否 | 启用 RAPTOR 摘要树 |
+| `chunk_size` | integer | 否 | 分块大小（字符数） |
+| `chunk_overlap` | integer | 否 | 分块重叠（字符数） |
+| `embedding_provider` | string | 否 | 嵌入提供商名称 |
+| `embedding_model` | string | 否 | 嵌入模型名称 |
+| `embedding_dimensions` | integer | 否 | 嵌入向量维度 |
+| `search_profile` | string | 否 | 搜索配置名称 |
+| `rerank_enabled` | boolean | 否 | 启用重排序 |
+| `rerank_provider` | string | 否 | 重排序提供商名称 |
+| `summary_enabled` | boolean | 否 | 启用摘要 |
+| `redaction_enabled` | boolean | 否 | 启用敏感内容脱敏 |
+
+### `kb_delete_library`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 要删除的知识库 ID |
+| `confirm` | boolean | 是 | 必须为 true 以确认删除 |
+
+### `kb_upload_document`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 目标知识库 ID |
+| `file_path` | string | 是 | 本地文件路径 |
+| `folder_id` | integer | 否 | 文件夹 ID |
+
+### `kb_get_document_status`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `document_id` | integer | 是 | 文档 ID |
+
+### `kb_retry_document`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `document_id` | integer | 是 | 要重试的文档 ID |
+
+### `kb_cancel_document_job`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `document_id` | integer | 是 | 要取消的文档 ID |
+
+### `kb_delete_document`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `document_id` | integer | 是 | 要删除的文档 ID |
+| `confirm` | boolean | 是 | 必须为 true 以确认删除 |
+
+### `kb_purge_document`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `document_id` | integer | 是 | 要永久销毁的文档 ID |
+| `confirm` | boolean | 是 | 必须为 true 以确认永久销毁 |
+
+### `kb_create_folder`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 知识库 ID |
+| `name` | string | 是 | 文件夹名称 |
+| `parent_id` | integer | 否 | 父文件夹 ID（null = 根目录） |
+
+### `kb_add_eval_query`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `library_id` | integer | 是 | 知识库 ID |
+| `query` | string | 是 | 评估查询文本 |
+| `query_type` | string | 否 | 查询类型分类 |
+| `expected_document_ids` | string | 否 | 逗号分隔的期望文档 ID |
+
+### `kb_add_search_feedback`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `search_log_id` | integer | 否 | 搜索日志 ID |
+| `document_id` | integer | 否 | 被评分的文档 ID |
+| `node_id` | integer | 否 | 被评分的节点 ID |
+| `rating` | integer | 是 | 相关性评分 0-5 |
+| `comment` | string | 否 | 反馈评论 |
+
+### `code_def`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `symbol` | string | 是 | 限定或局部符号名 |
+| `lang` | string | 否 | 按编程语言过滤 |
+| `limit` | integer | 否 | 最大结果数（默认 20） |
+
+### `code_refs`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `symbol` | string | 是 | 限定或局部符号名 |
+| `lang` | string | 否 | 按编程语言过滤 |
+| `limit` | integer | 否 | 最大结果数（默认 20） |
+
+### `search_code_chunks`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 代码搜索查询 |
+| `limit` | integer | 否 | 最大结果数（默认 20） |
+| `lang` | string | 否 | 按编程语言过滤 |
+| `symbol_kind` | string | 否 | 按符号类型过滤 |
+
+### `get_callers`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 代码页面 slug |
+| `symbol` | string | 是 | 限定或局部符号名 |
+
+### `get_callees`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 代码页面 slug |
+| `symbol` | string | 是 | 限定或局部符号名 |
+
+### `get_code_edges_by_chunk`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `chunk_id` | integer | 是 | 代码块 ID |
+
+### `reindex_code_page`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 代码页面 slug |
+
+### `file_upload`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `path` | string | 是 | 本地文件路径 |
+| `page_slug` | string | 否 | 关联的页面 slug |
+
+### `promotion_get_candidate`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `candidate_id` | integer | 是 | 候选 ID |
+
+### `promotion_accept_candidate`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `candidate_id` | integer | 是 | 候选 ID |
+| `reviewer` | string | 否 | 审阅者名称 |
+| `notes` | string | 否 | 审阅备注 |
+
+### `promotion_reject_candidate`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `candidate_id` | integer | 是 | 候选 ID |
+| `reviewer` | string | 否 | 审阅者名称 |
+| `reason` | string | 否 | 拒绝原因 |
+
+### `promotion_apply_candidate`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `candidate_id` | integer | 是 | 候选 ID |
+
+### `promotion_rollback_candidate`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `candidate_id` | integer | 是 | 要回滚的候选 ID |
+
+### `gc_orphan_projections`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `stale_days` | integer | 否 | 清理超过 N 天的孤立投影（默认 30） |
+| `dry_run` | boolean | 否 | 仅预览，不实际清理 |
+
+### `projection_supersede`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `old_proj_id` | integer | 是 | 旧投影 ID |
+| `new_proj_id` | integer | 是 | 新投影 ID |
+
+### `projection_history`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `projection_key` | string | 是 | 投影键名 |
+| `artifact_id` | integer | 否 | 按 Artifact ID 过滤 |
+| `projection_type` | string | 否 | 按投影类型过滤 |
+| `limit` | integer | 否 | 最大记录数（默认 20） |
+
+### `artifact_list`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `limit` | integer | 否 | 最大结果数 |
+| `offset` | integer | 否 | 偏移量 |
+
+### `artifact_get`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'） |
+
+### `artifact_delete`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `artifact_id` | integer | 是 | Artifact ID |
+
+### `get_provenance`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `brain_slug` | string | 是 | Brain 页面 slug |
 
 ---
 
