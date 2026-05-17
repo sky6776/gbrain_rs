@@ -24,7 +24,7 @@ This skill guarantees:
 - Reports saved with timestamped filenames and frontmatter
 - Keyword routing: query → report category mapping
 - Latest report loadable by category name
-- Reports are searchable via gbrain query
+- Reports are searchable via `gbrain artifact query`
 
 ## Phases
 

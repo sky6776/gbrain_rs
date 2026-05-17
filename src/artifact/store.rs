@@ -71,6 +71,9 @@ pub fn find_artifact_by_uid(
 }
 
 /// 按 canonical_slug 查找原件
+///
+/// P2-5 修复：过滤 purged 状态，按 updated_at DESC 排序，
+/// 确保同 slug 多个 artifact 时返回最新的有效行。
 pub fn find_artifact_by_slug(
     conn: &Connection,
     slug: &str,
@@ -80,7 +83,8 @@ pub fn find_artifact_by_slug(
                 sha256, original_name, extension, mime_type, size_bytes,
                 storage_path, canonical_slug, status, metadata_json,
                 deleted_at, purged_at
-         FROM source_artifacts WHERE canonical_slug = ?1",
+         FROM source_artifacts WHERE canonical_slug = ?1 AND purged_at IS NULL
+         ORDER BY updated_at DESC LIMIT 1",
     )?;
     let mut rows = stmt.query(params![slug])?;
     match rows.next()? {
@@ -196,8 +200,8 @@ pub fn insert_occurrence(
         "INSERT INTO artifact_occurrences
             (occurrence_uid, artifact_id, source_kind, source_uri, original_path, original_name,
              owner_ref, intent, target_slug, page_slug, library_id, folder_id,
-             promotion_policy, status, metadata_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             promotion_policy, status, stale_reason, metadata_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             occ.occurrence_uid,
             occ.artifact_id,
@@ -213,6 +217,7 @@ pub fn insert_occurrence(
             occ.folder_id,
             occ.promotion_policy,
             occ.status,
+            occ.stale_reason,
             occ.metadata_json,
             occ.created_at,
             occ.updated_at,
@@ -230,7 +235,7 @@ pub fn find_occurrences_by_artifact(
         "SELECT id, occurrence_uid, created_at, updated_at,
                 artifact_id, source_kind, source_uri, original_path, original_name, owner_ref,
                 intent, target_slug, page_slug, library_id, folder_id, promotion_policy,
-                status, metadata_json
+                status, stale_reason, metadata_json
          FROM artifact_occurrences WHERE artifact_id = ?1 ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map(params![artifact_id], row_to_artifact_occurrence)?;
@@ -250,7 +255,7 @@ pub fn find_occurrence_by_id(
         "SELECT id, occurrence_uid, created_at, updated_at,
                 artifact_id, source_kind, source_uri, original_path, original_name, owner_ref,
                 intent, target_slug, page_slug, library_id, folder_id, promotion_policy,
-                status, metadata_json
+                status, stale_reason, metadata_json
          FROM artifact_occurrences WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
@@ -378,9 +383,9 @@ pub fn find_projections_by_artifact(
     artifact_id: i64,
 ) -> Result<Vec<ArtifactProjection>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT p.id, p.created_at, p.updated_at,
-                p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref,
-                p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
+        "SELECT id, created_at, updated_at, artifact_id, occurrence_id, projection_type,
+                projection_key, projection_ref, status, version_hash, stale_reason,
+                metadata_json, superseded_by
          FROM artifact_projections WHERE artifact_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![artifact_id], row_to_artifact_projection)?;
@@ -470,6 +475,34 @@ pub fn find_projection_by_key(
     }
 }
 
+/// 按 artifact_id + projection_type + projection_key 查找投影（不限状态）
+///
+/// 修复：reprocess 先标 stale 后调 create_kb_projection，
+/// find_projection_by_key 只查 active 找不到旧投影，
+/// 导致走新建 kb_documents 撞唯一索引。
+/// 此函数不限状态，让 create_kb_projection 能复用 stale 的同 artifact KB projection。
+pub fn find_projection_by_key_any_status(
+    conn: &Connection,
+    artifact_id: i64,
+    projection_type: &str,
+    projection_key: &str,
+) -> Result<Option<ArtifactProjection>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, updated_at,
+                artifact_id, occurrence_id, projection_type, projection_key, projection_ref,
+                status, version_hash, stale_reason, metadata_json, superseded_by
+         FROM artifact_projections
+         WHERE artifact_id = ?1 AND projection_type = ?2 AND projection_key = ?3
+         ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![artifact_id, projection_type, projection_key])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row_to_artifact_projection(row)?)),
+        None => Ok(None),
+    }
+}
+
 /// 标记投影为过期
 pub fn mark_projection_stale(
     conn: &Connection,
@@ -479,6 +512,24 @@ pub fn mark_projection_stale(
     conn.execute(
         "UPDATE artifact_projections SET status = 'stale', stale_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
         params![reason, id],
+    )?;
+    Ok(())
+}
+
+/// 更新投影的 version_hash（P1 修复：人工修改冲突检测）
+///
+/// brain_page_update 投影的 version_hash 存储的是上次 artifact 写入时的
+/// page content_hash，而非 artifact 的 sha256。
+/// 这样下次 artifact_put 时可以比较当前 page_hash 与上次写入时的 page_hash，
+/// 判断页面是否被人工修改过。
+pub fn update_projection_version_hash(
+    conn: &Connection,
+    id: i64,
+    version_hash: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE artifact_projections SET version_hash = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![version_hash, id],
     )?;
     Ok(())
 }
@@ -766,7 +817,8 @@ fn row_to_artifact_occurrence(row: &Row) -> Result<ArtifactOccurrence, rusqlite:
         folder_id: row.get(14)?,
         promotion_policy: row.get(15)?,
         status: row.get(16)?,
-        metadata_json: row.get(17)?,
+        stale_reason: row.get(17)?,
+        metadata_json: row.get(18)?,
     })
 }
 
@@ -803,7 +855,7 @@ pub fn find_active_occurrences_by_artifact_and_slug(
                 artifact_id, source_kind, source_uri, original_path, original_name,
                 owner_ref, intent, target_slug, page_slug,
                 library_id, folder_id, promotion_policy,
-                status, metadata_json
+                status, stale_reason, metadata_json
          FROM artifact_occurrences
          WHERE artifact_id = ?1 AND target_slug = ?2 AND status = 'active'",
     )?;
@@ -816,22 +868,61 @@ pub fn find_active_occurrences_by_artifact_and_slug(
 }
 
 /// 将 occurrence 标记为 stale（detach 操作）
-pub fn stale_occurrence(conn: &Connection, occurrence_id: i64) -> Result<(), rusqlite::Error> {
+///
+/// P1-3 修复：接收 reason 参数，detach 时写 'detached_by_user'，
+/// reprocess 时写 'reprocess_requested'，确保 restore 不会误恢复 detach 的 occurrence。
+pub fn stale_occurrence(conn: &Connection, occurrence_id: i64, reason: &str) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "UPDATE artifact_occurrences SET status = 'stale', updated_at = datetime('now') WHERE id = ?1",
-        params![occurrence_id],
+        "UPDATE artifact_occurrences SET status = 'stale', stale_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![reason, occurrence_id],
     )?;
     Ok(())
 }
 
-/// 恢复指定 artifact 的所有已 stale/deleted 的 occurrence
+/// 恢复指定 artifact 的 occurrence（delete/restore 操作）
+///
+/// P1-3 修复：只恢复因 artifact 删除而 stale 的 occurrence（stale_reason='artifact_deleted'），
+/// 不恢复因用户 detach 而标记的 occurrence（stale_reason='detached_by_user'），
+/// 也不恢复因 reprocess 而标记的 occurrence（stale_reason='reprocess_requested'）。
 pub fn reactivate_occurrences_by_artifact(
     conn: &Connection,
     artifact_id: i64,
 ) -> Result<u64, rusqlite::Error> {
+    let deleted = conn.execute(
+        "UPDATE artifact_occurrences SET status = 'active', stale_reason = '', updated_at = datetime('now')
+         WHERE artifact_id = ?1 AND status = 'deleted' AND stale_reason = 'artifact_deleted'",
+        params![artifact_id],
+    )? as u64;
+    let stale = conn.execute(
+        "UPDATE artifact_occurrences SET status = 'active', stale_reason = '', updated_at = datetime('now')
+         WHERE artifact_id = ?1 AND status = 'stale' AND stale_reason = 'artifact_deleted'",
+        params![artifact_id],
+    )? as u64;
+    Ok(deleted + stale)
+}
+
+/// 软删除指定 artifact 的所有活跃 occurrence（delete 操作调用）
+///
+/// 将 status 改为 'deleted'，设置 stale_reason='artifact_deleted'，设置 updated_at。
+/// P1-3 修复：写 stale_reason='artifact_deleted'，确保 restore 只恢复因 delete 而 stale 的 occurrence，
+/// 不恢复因 detach 而标记的 occurrence（stale_reason='detached_by_user'）。
+pub fn soft_delete_occurrences_by_artifact(
+    conn: &Connection,
+    artifact_id: i64,
+) -> Result<u64, rusqlite::Error> {
     Ok(conn.execute(
-        "UPDATE artifact_occurrences SET status = 'active', updated_at = datetime('now')
-         WHERE artifact_id = ?1 AND status IN ('stale', 'deleted')",
+        "UPDATE artifact_occurrences SET status = 'deleted', stale_reason = 'artifact_deleted', updated_at = datetime('now')
+         WHERE artifact_id = ?1 AND status = 'active'",
         params![artifact_id],
     )? as u64)
 }
+
+/// 统计所有原件总数（含 deleted，不含 purged）
+pub fn count_total_artifacts(conn: &Connection) -> Result<i64, rusqlite::Error> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM source_artifacts WHERE purged_at IS NULL",
+        [],
+        |row| row.get(0),
+    )
+}
+

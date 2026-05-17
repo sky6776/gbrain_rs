@@ -102,12 +102,70 @@ pub fn transition_document_status(
 }
 
 /// 将文档标记为软删除。默认搜索结果过滤软删除文档。
+///
+/// 修复 P2：软删除时旋转 processing_run_id，使旧 pending job 的 run_id
+/// 与新 run_id 不匹配，被 worker 的 ensure_document_run_current 校验拒绝，
+/// 避免已删除文档被旧 job 继续处理。
 pub fn soft_delete_document(conn: &Connection, document_id: i64) -> Result<()> {
+    let new_run_id = crate::kb::jobs::new_run_id();
     conn.execute(
         "UPDATE kb_documents SET deleted_at = datetime('now'), \
-         document_status = 'deleted', updated_at = datetime('now') WHERE id = ?1",
-        params![document_id],
+         document_status = 'deleted', processing_run_id = ?1, \
+         updated_at = datetime('now') WHERE id = ?2",
+        params![new_run_id, document_id],
     )?;
+    Ok(())
+}
+
+/// 恢复已软删除的 KB 文档（restore 操作）
+///
+/// 清除 deleted_at，恢复 document_status 为 queued，
+/// 同时生成新 processing_run_id（让旧 pending job 自动 stale）、
+/// 重置索引/解析/嵌入状态、入队新 KB job 并更新 job_id。
+/// 确保 KB 查询不再被 `d.deleted_at IS NULL` / `document_status != 'deleted'` 过滤掉，
+/// 且文档恢复后能真正被 worker 重新处理。
+pub fn restore_document(conn: &Connection, document_id: i64) -> Result<()> {
+    // 读取 kb_documents 信息用于入队
+    let (library_id, storage_path, extension): (i64, String, String) = conn
+        .query_row(
+            "SELECT library_id, storage_path, extension FROM kb_documents WHERE id = ?1",
+            params![document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| GBrainError::Database(format!("读取 KB 文档信息失败: {}", e)))?;
+
+    // 生成新 processing_run_id，旧 pending job 的 run_id 与此不匹配会自动 stale
+    let run_id = crate::kb::jobs::new_run_id();
+
+    // 清 deleted_at，恢复 document_status，重置索引/解析/嵌入状态
+    conn.execute(
+        "UPDATE kb_documents SET deleted_at = NULL, \
+         document_status = 'queued', index_status = 'rebuilding', \
+         processing_run_id = ?1, \
+         parsing_status = 0, parsing_progress = 0, parsing_error = '', \
+         embedding_status = 0, embedding_progress = 0, embedding_error = '', \
+         updated_at = datetime('now') WHERE id = ?2",
+        params![run_id, document_id],
+    )?;
+
+    // 入队新 KB job
+    let payload = crate::kb::jobs::KbProcessPayload {
+        kind: "kb_process_document".to_string(),
+        document_id,
+        library_id,
+        processing_run_id: run_id,
+        storage_path,
+        extension,
+    };
+    crate::kb::jobs::enqueue_kb_process_job(conn, &payload)?;
+
+    // 更新 job_id
+    let job_id = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE kb_documents SET job_id = ?1 WHERE id = ?2",
+        params![job_id.to_string(), document_id],
+    )?;
+
     Ok(())
 }
 

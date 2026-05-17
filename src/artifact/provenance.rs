@@ -339,6 +339,24 @@ pub fn mark_provenance_stale_by_kb_document(
     Ok(count as i64)
 }
 
+/// 恢复因 KB 文档删除而变 stale 的 provenance（restore 操作）
+///
+/// 只恢复 stale_reason='kb_document_deleted' 的 provenance，
+/// 不恢复 reprocess/detach 主动标记的 stale provenance。
+pub fn reactivate_provenance_by_kb_document(
+    conn: &Connection,
+    kb_document_id: i64,
+) -> Result<u64> {
+    Ok(conn
+        .execute(
+            "UPDATE provenance_ledger
+         SET status = 'active', stale_reason = '', updated_at = datetime('now')
+         WHERE kb_document_id = ?1 AND status = 'stale' AND stale_reason = 'kb_document_deleted'",
+            params![kb_document_id],
+        )
+        .map_err(|e| GBrainError::Database(format!("恢复 provenance 失败: {}", e)))? as u64)
+}
+
 /// 统计活跃 provenance 数
 pub fn count_active_provenance(conn: &Connection) -> Result<i64> {
     conn.query_row(

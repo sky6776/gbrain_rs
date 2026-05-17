@@ -15,8 +15,9 @@ tools:
   - get_tags
   - put_raw_data
   - get_backlinks
-  - upload_source
-  - memory_query
+  - artifact_put
+  - artifact_upload
+  - artifact_query
   - sync_brain
 mutating: true
 writes_pages: true
@@ -38,7 +39,7 @@ Ingest meetings, articles, media, documents, and conversations into the brain.
 
 - Every fact written to a brain page carries an inline `[Source: ...]` citation with date and provenance.
 - Every entity mention creates a back-link from the entity's page to the page mentioning them (Iron Law).
-- Raw sources are preserved for provenance with `gbrain file upload` or `put_raw_data`.
+- Raw sources are preserved for provenance with `gbrain artifact upload` or `put_raw_data`.
 - State sections are rewritten with current best understanding, never appended to.
 - Notable entities get pages or updates when the current ingestion task mentions them.
 
@@ -83,13 +84,13 @@ the signal detection loop that makes the brain compound over time.
 1. **Scan the message** for entity mentions: people, companies, concepts, original
    thinking. Fire on every message (no exceptions unless purely operational).
 2. **For each entity detected:**
-   - `gbrain query "name"` -- does a page already exist?
-   - **If yes:** load context with `gbrain get <slug>`. Use the compiled truth to
+   - `gbrain artifact query "name"` -- does a page already exist?
+   - **If yes:** load context with `gbrain artifact get <uid>`. Use the compiled truth to
      inform your response. Update the page if the message contains new information.
    - **If no:** assess notability (see `skills/_brain-filing-rules.md`). If the entity
-     is worth tracking, create a new page with `gbrain put <type/slug>` and populate
+     is worth tracking, create a new page with `gbrain artifact put <slug>` and populate
      with what you know.
-3. **After creating or updating pages:** refresh the index:
+3. **After creating or updating pages:** refresh the index (admin-tools):
    ```bash
    gbrain extract --mode all
    ```
@@ -191,17 +192,17 @@ if the post is primarily about a person/company.
 
 Every ingested item must have its raw source preserved for provenance.
 
-**Use `gbrain file upload` for file provenance:**
+**Use `gbrain artifact upload` for file provenance:**
 ```bash
-gbrain file upload <file> --page <page-slug>
+gbrain artifact upload <file> --page <page-slug>
 ```
 
 - JSON/API payloads can be stored with `put_raw_data`.
 - Large cloud-storage routing from original gbrain is not part of gbrain_rs.
 
 **Accessing stored files:**
-- `gbrain file list <page-slug>` -- list files attached to a page
-- `gbrain file url <storage-path>` -- get the local file path/URL
+- `gbrain artifact list` -- list knowledge sources
+- `gbrain artifact get <uid>` -- get artifact details with source tracing
 
 Use `put_raw_data` in gbrain to store raw API responses and metadata (JSON, not binary).
 
@@ -258,15 +259,15 @@ Raw source: [preserved at path / uploaded to cloud]
 
 ## Tools Used
 
-- `query` — search for existing pages
-- `get_page` — read a brain page
-- `put_page` — create/update brain pages
-- `add_link` — cross-reference entities
-- `add_timeline_entry` — record events
-- `add_tag` — tag a page
-- `get_tags` — list page tags
-- `put_raw_data` — store raw API responses
-- `get_backlinks` — check who references an entity
-- `upload_source` — unified upload entry point
-- `memory_query` — cross-subsystem query
-- `sync_brain` — sync changes to index
+- `artifact_query` — search for existing knowledge (unified entry point)
+- `artifact_put` — write to long-term memory (unified entry point)
+- `artifact_upload` — upload file as knowledge source
+- `artifact_get` — read knowledge source detail
+- `artifact_query` — unified knowledge query with source tracing
+- `add_link` — cross-reference entities (admin-tools)
+- `add_timeline_entry` — record events (admin-tools)
+- `add_tag` — tag a page (admin-tools)
+- `get_tags` — list page tags (admin-tools)
+- `put_raw_data` — store raw API responses (admin-tools)
+- `get_backlinks` — check who references an entity (admin-tools)
+- `sync_brain` — sync changes to index (admin-tools)

@@ -15,10 +15,14 @@ tools:
   - add_timeline_entry
   - get_backlinks
   - sync_brain
-  - upload_source
-  - memory_query
-  - kb_search
-  - kb_list_libraries
+  - artifact_put
+  - artifact_query
+  - artifact_upload
+  - artifact_list
+  - artifact_get
+  - artifact_review_list
+  - artifact_review_apply
+  - artifact_review_rollback
   - code_def
   - code_refs
   - get_callers
@@ -62,9 +66,9 @@ broken brain. See `skills/conventions/quality.md` for format.
 
 Before using ANY external API to research a person, company, or topic:
 
-1. `gbrain query "name"` — hybrid search for existing pages (keyword + vector + expansion)
-2. `gbrain query "natural question about name"` — hybrid search for context
-3. `gbrain get <slug>` — if you know the slug, read the full page
+1. `gbrain artifact query "name"` — unified knowledge query (memory + evidence + timeline)
+2. `gbrain artifact query "natural question about name" --mode memory` — brain-first search
+3. `gbrain artifact get <uid>` — read full artifact detail if needed
 4. Check backlinks: who references this entity?
 5. Check timeline: recent events involving this entity
 
@@ -85,19 +89,16 @@ pages immediately with attribution `[Source: User, YYYY-MM-DD]`.
 
 ### Phase 2.5: Structured Graph Updates (automatic)
 
-Every `put_page` call automatically extracts entity references and writes them
-to the graph (`links` table) with inferred relationship types. Stale links
-(refs no longer in the page text) are removed in the same call. This is
+Every `artifact_put` call with intent=memory/promote automatically writes brain pages
+and extracts entity references into the graph (`links` table) with inferred relationship
+types. Stale links (refs no longer in the page text) are removed. This is
 "auto-link" reconciliation.
 
-- No manual `add_link` calls needed for ordinary page writes.
+- No manual `add_link` calls needed for ordinary knowledge writes via artifact_put.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
   `founded`, `advises`, `source` (frontmatter), `mentions` (default).
-- The `put_page` MCP response includes `auto_links: { created, removed, errors }`
-  so the agent can verify outcomes.
-- To disable: `gbrain config set auto_link false`. Default is on.
 - Timeline entries with specific dates still need explicit `add_timeline_entry`
-  (or batch via `gbrain extract --mode timeline`).
+  (or batch via `gbrain extract --mode timeline` — requires admin-tools feature).
 
 ### Phase 3: On Every Outbound Response (READ → PULL → RESPOND)
 
@@ -159,17 +160,17 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 
 ## Tools Used
 
-- `query` — hybrid vector+keyword+expansion search
-- `get_page` — read a brain page
-- `put_page` — create/update brain pages
-- `add_link` — cross-reference entities
-- `add_timeline_entry` — record events
-- `get_backlinks` — check who references an entity
-- `sync_brain` — sync changes to the index
-- `upload_source` — upload source files (unified entry point)
-- `memory_query` — unified cross-subsystem query
-- `kb_search` — search KB libraries with profiles
-- `kb_list_libraries` — list KB libraries
+- `artifact_query` — unified knowledge query (memory + evidence + timeline + graph)
+- `artifact_put` — write to long-term memory (unified entry point)
+- `artifact_upload` — upload file as knowledge source
+- `artifact_list` — list all knowledge sources
+- `artifact_get` — get knowledge source details
+- `artifact_review_list` — list suggested changes
+- `artifact_review_apply` — apply a suggested change
+- `artifact_review_rollback` — undo an applied change
+- `add_timeline_entry` — record events (admin-tools)
+- `get_backlinks` — check who references an entity (admin-tools)
+- `sync_brain` — sync changes to the index (admin-tools)
 - `code_def` — find code symbol definitions
 - `code_refs` — find code symbol references
 - `get_callers` — find callers of a symbol

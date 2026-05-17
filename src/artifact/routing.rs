@@ -26,14 +26,48 @@ pub fn infer_route_plan(extension: &str, mime: &str, intent: &UploadIntent) -> R
 }
 
 /// 根据用户友好的 ArtifactIntent 推断路由计划
+///
+/// manual=true 时表示手动 put（直接写稳定页面），
+/// manual=false 时表示上传文件（走 shadow 投影）。
 pub fn infer_route_plan_from_artifact_intent(
     extension: &str,
     mime: &str,
     intent_str: &str,
+    manual: bool,
 ) -> RoutePlan {
+    // 手动 memory put：直接写稳定页面，不走 shadow
+    if manual && intent_str == "memory" {
+        return RoutePlan {
+            to_kb: true, // 由 config.artifact_manual_memory_to_kb 控制
+            to_brain: true,
+            to_shadow: false,
+            to_file: false,
+            promotion: crate::artifact::types::PromotionPolicy::AutoAcceptLowRisk,
+        };
+    }
+    // 手动 evidence put：仅 KB 证据
+    if manual && intent_str == "evidence" {
+        return RoutePlan {
+            to_kb: true,
+            to_brain: false,
+            to_shadow: false,
+            to_file: false,
+            promotion: crate::artifact::types::PromotionPolicy::Candidate,
+        };
+    }
+    // 手动 promote put：写页面 + KB + review
+    if manual && intent_str == "promote" {
+        return RoutePlan {
+            to_kb: true,
+            to_brain: true,
+            to_shadow: true,
+            to_file: false,
+            promotion: crate::artifact::types::PromotionPolicy::Candidate,
+        };
+    }
     let intent = match intent_str {
         "memory" => UploadIntent::Memory,
-        "evidence" => UploadIntent::Document, // evidence -> 内部 Document
+        "evidence" => UploadIntent::Document,
         "promote" => UploadIntent::Promote,
         "attachment" => UploadIntent::Attachment,
         _ => UploadIntent::Auto,

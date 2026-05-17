@@ -113,6 +113,21 @@ impl McpServer {
         Self { engine, config }
     }
 
+    /// 测试辅助：直接调用 MCP tools/call dispatch 路径
+    /// 不走 stdio，直接传入工具名和参数，返回 dispatch 结果。
+    /// 仅用于集成测试验证参数映射、内部工具拦截和返回包装。
+    pub fn dispatch_tool_call(
+        &mut self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let params = serde_json::json!({
+            "name": tool_name,
+            "arguments": arguments,
+        });
+        self.handle_tool_call(Some(params))
+    }
+
     /// Run the MCP server, reading JSON-RPC from stdin and writing to stdout
     pub fn run(&mut self) -> Result<()> {
         info!("MCP server starting (stdio transport)");
@@ -197,7 +212,8 @@ impl McpServer {
 
             "tools/list" => {
                 // 根据 expose_internal_tools 配置决定是否暴露内部工具
-                let tools = tool_defs::build_tool_defs_with_internal(self.config.expose_internal_tools);
+                let tools =
+                    tool_defs::build_tool_defs_with_internal(self.config.expose_internal_tools);
                 let tools_json: Vec<Value> = tools
                     .into_iter()
                     .map(|t| {
@@ -295,6 +311,16 @@ impl McpServer {
         let arguments = params.get("arguments").cloned().unwrap_or_default();
 
         debug!(tool = %tool_name, "Dispatching MCP tool call");
+
+        // 修复：硬拦截内部工具调用，防止 expose_internal_tools=false 时
+        // 仍可通过直接调用工具名绕过 tools/list 的隐藏。
+        // 之前只在 tools/list 过滤，tools/call 无条件分发，等于形同虚设。
+        if !self.config.expose_internal_tools && tool_defs::is_internal_tool(&tool_name) {
+            return Err(crate::error::GBrainError::InvalidInput(format!(
+                "工具 '{}' 是内部工具，当前未启用 expose_internal_tools，无法调用",
+                tool_name
+            )));
+        }
 
         // Validate required parameters before dispatching
         if let Some(err) = validate_params(&tool_name, &arguments) {
@@ -1705,7 +1731,19 @@ impl McpServer {
                 }
 
                 let svc = ops.artifact_service();
-                svc.put_memory(&slug, &content, title.as_deref(), intent.as_deref(), dry_run)
+                // P1 修复：force 参数允许强制覆盖已被人工修改的页面
+                let force = arguments
+                    .get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                svc.put_memory(
+                    &slug,
+                    &content,
+                    title.as_deref(),
+                    intent.as_deref(),
+                    dry_run,
+                    force,
+                )
             }
 
             // artifact_upload: 委派到 ArtifactService.upload_file（设计文档 §8.3）
@@ -1835,43 +1873,28 @@ impl McpServer {
                 Ok(serde_json::to_value(result)?)
             }
 
-            // artifact_list: 委派到现有 artifact_list handler
+            // P1-1 修复：artifact_list 改走 ArtifactService::list_artifacts DTO，
+            // 不再返回 raw SourceArtifact（含内部 id/storage_path/metadata_json 等字段）
             "artifact_list" => {
                 let limit = arguments["limit"].as_i64().unwrap_or(50);
                 let offset = arguments["offset"].as_i64().unwrap_or(0);
-                let artifacts = ops.list_artifacts(limit, offset)?;
-                Ok(serde_json::to_value(artifacts)?)
+                let svc = ops.artifact_service();
+                let items = svc.list_artifacts(limit, offset)?;
+                Ok(serde_json::to_value(items)?)
             }
 
             // artifact_get: 获取 Artifact 详情（设计文档 §4.1.1）
             "artifact_get" => {
                 let id_or_uid = arguments["id_or_uid"].as_str().unwrap_or("").to_string();
-                let include_projections = arguments["include_projections"].as_bool().unwrap_or(false);
+                let include_projections =
+                    arguments["include_projections"].as_bool().unwrap_or(false);
                 let include_sources = arguments["include_sources"].as_bool().unwrap_or(false);
 
                 let svc = ops.artifact_service();
-                let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
-                let artifact = svc.get_artifact(artifact_id)?;
+                let detail = svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
 
-                match artifact {
-                    Some(a) => {
-                        let mut result = serde_json::to_value(&a)?;
-
-                        // 可选：包含投影详情
-                        if include_projections {
-                            let conn = ops.engine.connection()?;
-                            let projections = crate::artifact::store::find_projections_by_artifact(conn, artifact_id)?;
-                            result["projections"] = serde_json::to_value(&projections)?;
-                        }
-
-                        // 可选：包含来源链（provenance）
-                        if include_sources {
-                            let provenance = svc.get_provenance(&a.canonical_slug)?;
-                            result["provenance"] = serde_json::to_value(&provenance)?;
-                        }
-
-                        Ok(result)
-                    }
+                match detail {
+                    Some(d) => Ok(serde_json::to_value(d)?),
                     None => Ok(serde_json::json!({
                         "error": format!("未找到 artifact '{}'", id_or_uid)
                     })),
@@ -1886,14 +1909,10 @@ impl McpServer {
 
                 let svc = ops.artifact_service();
                 if dry_run {
-                    // dry_run 模式：仅预览，不实际删除
-                    let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
-                    Ok(serde_json::json!({
-                        "dry_run": true,
-                        "artifact_id": artifact_id,
-                        "action": "delete",
-                        "description": format!("将软删除 artifact {} 及其关联投影和 KB 文档", artifact_id),
-                    }))
+                    // P1-5 修复：MCP dry_run 也使用 delete_artifact_dry_run 影响预览，
+                // 与 CLI 行为一致，让 MCP caller 能看到 occurrence/projection/KB/provenance 影响明细
+                let preview = svc.delete_artifact_dry_run(&id_or_uid)?;
+                Ok(serde_json::to_value(preview)?)
                 } else {
                     let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
                     svc.delete_artifact(artifact_id)?;
@@ -1908,7 +1927,9 @@ impl McpServer {
                 let dry_run = arguments["dry_run"].as_bool().unwrap_or(false);
 
                 if from_slug.is_empty() {
-                    return Err(GBrainError::InvalidInput("from (目标页面 slug) 不能为空".to_string()));
+                    return Err(GBrainError::InvalidInput(
+                        "from (目标页面 slug) 不能为空".to_string(),
+                    ));
                 }
 
                 let svc = ops.artifact_service();

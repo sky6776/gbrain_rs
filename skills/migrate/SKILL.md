@@ -59,6 +59,8 @@ Universal migration from any wiki, note tool, or brain system into GBrain.
    gbrain extract --mode links
    ```
 
+   (admin-tools)
+
    `extract links` natively parses `[[relative/path]]` and `[[relative/path|Display Text]]`
    alongside standard `[text](page.md)` markdown syntax. Ancestor-search resolution handles
    wiki KBs where authors omit one or more leading `../` prefixes. The `.md` suffix is
@@ -129,10 +131,11 @@ Verification:
 
 ## Tools Used
 
-- Store/update pages in gbrain (put_page)
-- Read pages from gbrain (get_page)
-- Link entities in gbrain (add_link)
-- Tag pages in gbrain (add_tag)
-- Get gbrain statistics (get_stats)
-- Check gbrain health (get_health)
-- Search gbrain (query)
+- Write pages to gbrain (artifact_put — unified entry point)
+- Read pages from gbrain (artifact_query, artifact_get)
+- Upload files as knowledge sources (artifact_upload)
+- Link entities in gbrain (add_link — admin-tools)
+- Tag pages in gbrain (add_tag — admin-tools)
+- Get gbrain statistics (get_stats — admin-tools)
+- Check gbrain health (artifact_health)
+- Search gbrain (artifact_query)

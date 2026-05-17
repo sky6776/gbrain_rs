@@ -1540,6 +1540,7 @@ CREATE TABLE IF NOT EXISTS artifact_occurrences (
     promotion_policy TEXT NOT NULL DEFAULT 'candidate',
 
     status TEXT NOT NULL DEFAULT 'active',
+    stale_reason TEXT NOT NULL DEFAULT '',
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -1563,20 +1564,16 @@ CREATE TABLE IF NOT EXISTS artifact_projections (
     status TEXT NOT NULL DEFAULT 'active',
     version_hash TEXT NOT NULL DEFAULT '',
     stale_reason TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT NOT NULL DEFAULT '{}'
-
-    -- 修复：移除 UNIQUE(artifact_id, projection_type, projection_key, status) 约束，
-    -- 改用 partial unique index（仅 status='active' 时唯一）。
-    -- 旧约束在 insert_projection 先插新 active 再标旧 active 为 superseded 时会撞唯一约束，
-    -- 导致重复上传同一文档失败。partial index 允许先标旧行 superseded 再插新 active。
-    -- 历史行（superseded/stale/orphaned）不参与唯一约束，可自由共存。
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    superseded_by INTEGER REFERENCES artifact_projections(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifact_proj_artifact ON artifact_projections(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_proj_occurrence ON artifact_projections(occurrence_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_proj_type ON artifact_projections(projection_type);
 CREATE INDEX IF NOT EXISTS idx_artifact_proj_ref ON artifact_projections(projection_ref);
--- 修复：partial unique index，仅 status='active' 时保证同一 key 唯一。
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_superseded ON artifact_projections(superseded_by);
+-- partial unique index：仅 status='active' 时保证同一 key 唯一。
 -- 历史行（superseded/stale/orphaned）不参与唯一约束，可自由共存。
 -- 这允许 insert_projection 先标旧行 superseded 再插新 active，不会撞约束。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_proj_active_unique

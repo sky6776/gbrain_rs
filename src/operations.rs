@@ -249,7 +249,7 @@ impl<'a> Operations<'a> {
     /// Create Operations instance that knows it's already inside a transaction.
     /// Used by `put_page_in_transaction` and `batch_put_pages` to avoid nested
     /// `BEGIN IMMEDIATE` (SQLite does not support nested transactions).
-    fn with_config_in_transaction(
+    pub(crate) fn with_config_in_transaction(
         engine: &'a SqliteEngine,
         ctx: OpContext,
         config: Config,
@@ -1416,6 +1416,7 @@ impl<'a> Operations<'a> {
                 &self.engine.gbrain_dir(),
                 self.config.default_kb_library_id,
                 &self.config.upload_default_promotion_policy,
+                self.config.artifact_auto_create_inbox_library,
             )
         })
     }
@@ -1709,6 +1710,14 @@ impl<'a> Operations<'a> {
     }
 
     /// 软删除 Artifact
+    /// 删除 artifact — admin-only 内部方法
+    ///
+    /// CLI 和 MCP 应使用 ArtifactService::delete_artifact，
+    /// 此方法仅用于 admin-tools 命令和向后兼容。
+    ///
+    /// P2-4 修复：同步软删除关联的 occurrences（与 ArtifactService::delete_artifact 一致），
+    /// 避免旧路径留下 active occurrence 指向 deleted artifact 的状态。
+    #[deprecated(note = "请使用 ArtifactService::delete_artifact")]
     pub fn delete_artifact(&self, artifact_id: i64) -> crate::error::Result<()> {
         use crate::artifact::projection;
         use crate::artifact::store;
@@ -1721,13 +1730,13 @@ impl<'a> Operations<'a> {
             // 标记所有投影为 stale
             projection::mark_all_projections_stale(conn, artifact_id, "artifact_deleted")?;
 
-            // 修复：软删除关联的 kb_documents，设置 deleted_at。
-            // 否则唯一索引 idx_kb_docs_library_hash（WHERE deleted_at IS NULL AND purged_at IS NULL）
-            // 仍会包含已删除行，导致同 hash 重传撞唯一约束。
+            // P2-4 修复：软删除关联的 occurrences，写 stale_reason='artifact_deleted'
+            store::soft_delete_occurrences_by_artifact(conn, artifact_id)
+                .map_err(|e| crate::error::GBrainError::Database(e.to_string()))?;
+
+            // 软删除关联的 kb_documents，设置 deleted_at
             let kb_doc_ids = projection::find_all_kb_document_ids(conn, artifact_id)?;
             for kb_doc_id in kb_doc_ids {
-                // 修复：关键清理失败直接返回错误，让事务回滚，
-                // 避免 artifact 已删但 KB 文档/provenance 未清理的半成功状态
                 crate::kb::lifecycle::soft_delete_document(conn, kb_doc_id)?;
                 crate::artifact::provenance::mark_provenance_stale_by_kb_document(
                     conn,

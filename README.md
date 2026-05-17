@@ -20,11 +20,11 @@ cargo build --release
 # 2. 初始化知识库
 gbrain init
 
-# 3. 创建页面
-gbrain put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
+# 3. 写入长期记忆
+gbrain artifact put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
 
-# 4. 搜索
-gbrain query "谁是 Alice"
+# 4. 查询知识
+gbrain artifact query "谁是 Alice"
 
 # 5. 启动 MCP 服务器（供 AI 智能体使用）
 gbrain serve
@@ -94,11 +94,67 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 | `--json` | 以 JSON 格式输出 |
 | `--dry-run` | 预览操作，不实际执行 |
 
-### 核心
+### 核心（默认 CLI — artifact 统一知识操作）
 
 | 命令 | 说明 |
 |------|------|
 | `gbrain init` | 初始化新的知识库 |
+| `gbrain artifact put <slug> [--title <TITLE>] [--content <TEXT> \| --file <PATH>] [--intent <INTENT>] [--dry-run] [--force]` | 写入长期记忆（意图: memory/evidence/promote） |
+| `gbrain artifact upload <path> [--intent <INTENT>] [--target <SLUG>]` | 上传文件作为知识源 |
+| `gbrain artifact query <query> [--mode <MODE>] [--limit <N>] [--filter <SLUG>] [--include-sources]` | 统一知识查询（模式: auto/memory/evidence/timeline/graph） |
+| `gbrain artifact list [--limit <N>]` | 列出所有 Artifact |
+| `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情 |
+| `gbrain artifact delete <id_or_uid>` | 软删除 Artifact |
+| `gbrain artifact detach <id_or_uid> --from <slug>` | 解除 Artifact 与页面的关联 |
+| `gbrain artifact restore <id_or_uid>` | 恢复已删除的 Artifact |
+| `gbrain artifact reprocess <id_or_uid>` | 重新处理 Artifact 的投影 |
+| `gbrain artifact review list [--status <STATUS>]` | 列出建议变更 |
+| `gbrain artifact review apply <change_id>` | 应用建议变更 |
+| `gbrain artifact review reject <change_id>` | 拒绝建议变更 |
+| `gbrain artifact review rollback <change_id>` | 回滚已应用的建议变更 |
+| `gbrain serve` | 作为 MCP stdio 服务器运行 |
+| `gbrain tools-json` | 以 JSON 输出 MCP 工具定义 |
+| `gbrain config show/get/set` | 配置管理 |
+| `gbrain doctor [--fast]` | 综合诊断 |
+| `gbrain health` | 健康仪表盘 |
+
+#### 示例
+
+```bash
+# 初始化知识库
+gbrain init
+
+# 写入长期记忆（默认意图 memory）
+gbrain artifact put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
+
+# 查询知识
+gbrain artifact query "谁是 Alice"
+
+# 上传文档自动路由
+gbrain artifact upload report.pdf --intent document
+
+# 预览写入路由（不实际执行）
+gbrain artifact put people/bob --content "产品经理" --dry-run
+
+# 强制覆盖已被人工修改的页面
+gbrain artifact put people/alice --content "更新内容" --force
+
+# 列出建议变更
+gbrain artifact review list --status pending
+
+# 应用建议变更
+gbrain artifact review apply 1
+
+# 启动 MCP 服务器
+gbrain serve
+```
+
+### 页面操作（需 admin-tools feature）
+
+> 以下命令需要 `--features admin-tools` 编译才可用。普通用户请使用 `gbrain artifact put/query` 替代。
+
+| 命令 | 说明 |
+|------|------|
 | `gbrain get <slug>` | 按 slug 读取页面 |
 | `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>] [--page-type <TYPE>]` | 创建或更新页面 |
 | `gbrain delete <slug> [--force]` | 软删除页面 |
@@ -110,9 +166,6 @@ gbrain install                 # 安装到 ~/.gbrain/bin/
 #### 示例
 
 ```bash
-# 初始化知识库
-gbrain init
-
 # 创建页面
 gbrain put people/alice --title "Alice" --content "一位工程师，擅长 Rust 和系统编程"
 
@@ -150,7 +203,9 @@ gbrain list --page-type person --limit 20
 gbrain purge-deleted --older-than-hours 168
 ```
 
-### 搜索与图谱
+### 搜索与图谱（需 admin-tools feature）
+
+> 以下命令需要 `--features admin-tools` 编译才可用。
 
 | 命令 | 说明 |
 |------|------|
@@ -196,7 +251,9 @@ gbrain code callees --slug src/engine.rs --symbol "query"
 gbrain code reindex src/engine.rs
 ```
 
-### 反向链接
+### 反向链接（需 admin-tools feature）
+
+> 以下命令需要 `--features admin-tools` 编译才可用。
 
 | 命令 | 说明 |
 |------|------|
@@ -217,7 +274,9 @@ gbrain backlinks check
 gbrain backlinks fix people/alice
 ```
 
-### 数据管理
+### 数据管理（需 admin-tools feature）
+
+> 以下命令需要 `--features admin-tools` 编译才可用。
 
 | 命令 | 说明 |
 |------|------|
@@ -261,7 +320,9 @@ gbrain lint people/alice
 gbrain lint --fix --dry-run
 ```
 
-### 文件存储
+### 文件存储（需 admin-tools feature）
+
+> 以下命令需要 `--features admin-tools` 编译才可用。
 
 | 命令 | 说明 |
 |------|------|
@@ -372,7 +433,7 @@ gbrain ingest-log --limit 10
 gbrain tools-json
 ```
 
-### KB 子系统（CLI）
+### KB 子系统（内部/高级 — 需 expose_internal_tools=true）（CLI）
 
 | 命令 | 说明 |
 |------|------|
@@ -431,16 +492,20 @@ gbrain kb-rebuild-document --document-id 42
 gbrain kb-purge-deleted --older-than-days 30
 ```
 
-### 单入口多投影融合（Artifact）
+### 单入口多投影融合（Artifact — 旧入口，已弃用，请使用 artifact_*）
 
-| 命令 | 说明 |
-|------|------|
-| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--page <SLUG>] [--folder-id <ID>] [--promotion <POLICY>] [--dry-run]` | 上传原件（统一入口），自动路由至多投影。intent: auto/document/attachment/memory/promote；promotion: none/shadow/candidate/auto-low-risk |
-| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>] [--include-evidence] [--include-provenance]` | 统一记忆查询（别名: ask-memory）。strategy: brain_first/evidence_first/provenance/timeline_first |
-| `gbrain artifact list [--limit <N>] [--offset <N>]` | 列出所有 Artifact |
-| `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情（支持 ID 或 UID 如 `art_ab12cd34ef56`） |
-| `gbrain artifact delete <artifact_id>` | 软删除 Artifact（标记所有投影为 stale） |
-| `gbrain artifact health` | 检查 Artifact 投影一致性与健康状态 |
+> **已弃用**：以下 CLI 命令已由统一的 `gbrain artifact ...` 命令替代。
+> 新用户请使用 `gbrain artifact put/upload/query/list/get/delete/detach/restore` 等命令。
+> 旧命令需要 `admin-tools` feature 才可用。
+
+| 命令 | 说明 | 替代命令 |
+|------|------|----------|
+| `gbrain upload <path> [--intent <INTENT>] ...` | 上传原件（旧入口） | `gbrain artifact upload` |
+| `gbrain memory-query <query> ...` | 统一记忆查询（旧入口） | `gbrain artifact query` |
+| `gbrain artifact list [--limit <N>] [--offset <N>]` | 列出所有 Artifact | `gbrain artifact list`（不变） |
+| `gbrain artifact get <id_or_uid>` | 获取 Artifact 详情 | `gbrain artifact get`（不变） |
+| `gbrain artifact delete <artifact_id>` | 软删除 Artifact | `gbrain artifact delete`（不变） |
+| `gbrain artifact health` | 检查 Artifact 健康状态 | `gbrain artifact health`（不变） |
 
 #### 示例
 
@@ -485,7 +550,7 @@ gbrain artifact health
 gbrain artifact delete 42
 ```
 
-### 候选变更与提升（Promotion）
+### 候选变更与提升（内部/高级 — 需 expose_internal_tools=true）（Promotion）
 
 | 命令 | 说明 |
 |------|------|
@@ -529,7 +594,7 @@ gbrain promotion auto-apply 7
 gbrain promotion list --status applied
 ```
 
-### 投影管理（Projection）
+### 投影管理（内部/高级 — 需 expose_internal_tools=true）（Projection）
 
 | 命令 | 说明 |
 |------|------|
@@ -695,9 +760,67 @@ CLI 直接使用 `remote=false`，跳过远程安全限制。
 
 ## MCP 工具
 
-gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
+gbrain 默认只暴露 Artifact 统一知识操作 facade 工具（`artifact_*`），通过 stdio 上的 JSON-RPC 2.0 协议供 AI 智能体集成使用。
 
-### 搜索
+设置 `GBRAIN_EXPOSE_INTERNAL_TOOLS=true` 或启动参数 `--expose-internal-tools` 可暴露内部工具（`kb_*`、`promotion_*`、`projection_*` 等）。
+
+### Artifact 统一知识操作（默认暴露）
+
+| 工具 | 说明 |
+|------|------|
+| `artifact_put` | 写入手动记忆（slug + content + intent） |
+| `artifact_upload` | 上传文件作为知识源（支持 PDF/DOCX/MD 等） |
+| `artifact_query` | 统一知识查询（支持 memory/evidence/timeline/graph 模式） |
+| `artifact_list` | 列出知识源 |
+| `artifact_get` | 获取知识源详情（含 occurrences/projections/sources） |
+| `artifact_delete` | 软删除知识源（dry-run 支持影响预览） |
+| `artifact_detach` | 解除知识源与特定页面的关联 |
+| `artifact_restore` | 恢复已删除的知识源 |
+| `artifact_reprocess` | 重新处理知识源的所有投影 |
+| `artifact_health` | 知识源健康检查 |
+| `artifact_review_list` | 列出建议变更 |
+| `artifact_review_get` | 获取建议变更详情 |
+| `artifact_review_apply` | 应用建议变更 |
+| `artifact_review_reject` | 拒绝建议变更 |
+| `artifact_review_rollback` | 回滚已应用的建议变更 |
+
+#### 示例
+
+```json
+// 写入手动记忆
+{ "tool": "artifact_put", "params": { "slug": "rust-async", "content": "Rust 异步编程使用 async/await 语法...", "intent": "memory" } }
+```
+
+```json
+// 统一知识查询（含来源追溯）
+{ "tool": "artifact_query", "params": { "query": "Rust 异步编程", "mode": "auto", "include_sources": true } }
+```
+
+```json
+// 获取知识源详情
+{ "tool": "artifact_get", "params": { "id_or_uid": "art_abc123", "include_sources": true, "include_projections": true } }
+```
+
+```json
+// 上传文件
+{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "memory", "library_id": 1 } }
+```
+
+```json
+// 列出建议变更
+{ "tool": "artifact_review_list", "params": { "status": "pending" } }
+```
+
+### 内部工具（需 expose_internal_tools=true）
+
+以下工具仅在 `GBRAIN_EXPOSE_INTERNAL_TOOLS=true` 时可用：
+
+- **gbrain 页面操作**: `query`, `get_page`, `put_page`, `delete_page`, `list_pages`, `add_tag`, `remove_link`, `get_links`, `traverse_graph`, `add_timeline_entry`, `get_timeline`, `get_stats`, `get_health`, `get_versions`, `resolve_slugs`, `find_by_title_fuzzy`, `get_chunks`
+- **KB 子系统**: `kb_list_libraries`, `kb_upload_document`, `kb_search`, `kb_get_document_status`, `kb_delete_document`, `kb_purge_document`, `kb_check_index_health`, `kb_backup`, `kb_restore`
+- **内部知识操作**: `upload_source`, `memory_query`, `get_provenance`
+- **审核/投影内部**: `promotion_list_candidates`, `promotion_apply_candidate`, `promotion_rollback_candidate`, `gc_orphan_projections`, `projection_supersede`, `projection_history`
+
+### 搜索（内部）
 
 | 工具 | 说明 |
 |------|------|
@@ -1002,7 +1125,7 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "get_health", "params": {} }
 ```
 
-### KB 子系统
+### KB 子系统（内部/高级 — 需 expose_internal_tools=true）
 
 | 工具 | 说明 |
 |------|------|
@@ -1053,17 +1176,21 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "kb_backup", "params": { "output": "/path/to/backup" } }
 ```
 
-### 单入口多投影融合（Artifact）
+### 单入口多投影融合（Artifact — 旧入口，已弃用，请使用 artifact_*）
 
-| 工具 | 说明 |
-|------|------|
-| `upload_source` | 上传原件（统一入口），自动创建 Artifact、KB 投影、影子页面和文件附件 |
-| `memory_query` | 统一记忆查询，同时搜索 gbrain 策展知识和 KB 文档证据，4 种策略自动选择 |
-| `artifact_list` | 列出所有 Artifact |
-| `artifact_get` | 获取 Artifact 详情（支持 ID 或 UID） |
-| `artifact_delete` | 软删除 Artifact（标记所有投影为 stale） |
-| `artifact_health` | 检查 Artifact 投影一致性与健康状态 |
-| `get_provenance` | 获取页面的溯源记录（追踪事实来源） |
+> **已弃用**：以下工具已由统一的 `artifact_*` facade 工具替代。
+> 新用户请使用上方"Artifact 统一知识操作"章节中的工具。
+> 旧工具仅在 `GBRAIN_EXPOSE_INTERNAL_TOOLS=true` 时可用。
+
+| 工具 | 说明 | 替代工具 |
+|------|------|----------|
+| `upload_source` | 上传原件（旧入口） | `artifact_upload` |
+| `memory_query` | 统一记忆查询（旧入口） | `artifact_query` |
+| `artifact_list` | 列出所有 Artifact | `artifact_list`（不变） |
+| `artifact_get` | 获取 Artifact 详情 | `artifact_get`（不变） |
+| `artifact_delete` | 软删除 Artifact | `artifact_delete`（不变） |
+| `artifact_health` | 检查 Artifact 健康状态 | `artifact_health`（不变） |
+| `get_provenance` | 获取溯源记录 | `artifact_get` + `include_sources=true` |
 
 #### 示例
 
@@ -1102,7 +1229,7 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "memory_query", "params": { "query": "Alice 的职位", "strategy": "provenance", "include_provenance": true } }
 ```
 
-### 候选变更与提升（Promotion）
+### 候选变更与提升（内部/高级 — 需 expose_internal_tools=true）（Promotion）
 
 | 工具 | 说明 |
 |------|------|
@@ -1141,7 +1268,7 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 { "tool": "promotion_rollback_candidate", "params": { "candidate_id": 42 } }
 ```
 
-### 投影管理（Projection）
+### 投影管理（内部/高级 — 需 expose_internal_tools=true）（Projection）
 
 | 工具 | 说明 |
 |------|------|
@@ -1169,6 +1296,125 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 ---
 
 ## MCP 工具参数
+
+### `artifact_put`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `slug` | string | 是 | 目标页面 slug（如 people/alice） |
+| `content` | string | 否 | 直接输入的文本内容（与 file 二选一） |
+| `file` | string | 否 | 本地文件路径（与 content 二选一） |
+| `title` | string | 否 | 页面标题（可选，默认从 slug 推断） |
+| `intent` | string | 否 | 意图: memory / evidence / promote（默认 memory） |
+| `dry_run` | boolean | 否 | 仅返回路由计划，不实际写入 |
+
+### `artifact_upload`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `path` | string | 是 | 本地文件路径 |
+| `intent` | string | 否 | 上传意图: auto / evidence / memory / attachment / promote（默认 auto） |
+| `target_slug` | string | 否 | 目标 gbrain 页面 slug（用于生成建议变更） |
+| `page_slug` | string | 否 | 关联页面 slug（用于附件） |
+| `library_id` | integer | 否 | KB 库 ID（可选，默认自动选择 Inbox） |
+| `folder_id` | integer | 否 | KB 文件夹 ID |
+| `promotion` | string | 否 | 提升策略: none / shadow / candidate / auto-low-risk |
+| `dry_run` | boolean | 否 | 仅返回路由计划，不实际写入 |
+
+### `artifact_query`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 查询文本 |
+| `mode` | string | 否 | 查询模式: auto / memory / evidence / timeline / graph（默认 auto） |
+| `limit` | integer | 否 | 最大结果数 |
+| `filter_slug` | string | 否 | 过滤到指定页面 slug |
+| `include_sources` | boolean | 否 | 显示来源追溯（artifact 来源和引用） |
+
+### `artifact_list`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `limit` | integer | 否 | 最大结果数（默认 50） |
+| `offset` | integer | 否 | 偏移量 |
+
+### `artifact_get`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'） |
+| `include_projections` | boolean | 否 | 包含投影详情 |
+| `include_sources` | boolean | 否 | 包含来源追溯 |
+
+### `artifact_delete`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID |
+| `dry_run` | boolean | 否 | 预览删除影响，不实际执行 |
+
+### `artifact_detach`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID |
+| `from` | string | 是 | 目标页面 slug |
+| `dry_run` | boolean | 否 | 预览影响，不实际执行 |
+
+### `artifact_restore`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID |
+| `dry_run` | boolean | 否 | 预览恢复影响，不实际执行 |
+
+### `artifact_reprocess`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `id_or_uid` | string | 是 | Artifact ID 或 UID |
+| `dry_run` | boolean | 否 | 预览重新处理影响，不实际执行 |
+
+### `artifact_health`
+
+无参数。
+
+### `artifact_review_list`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `status` | string | 否 | 过滤状态: pending / accepted / rejected / applied / rolled_back |
+| `target_slug` | string | 否 | 过滤目标页面 slug |
+| `limit` | integer | 否 | 最大结果数 |
+
+### `artifact_review_get`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `change_id` | integer | 是 | 变更 ID |
+
+### `artifact_review_apply`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `change_id` | integer | 是 | 变更 ID |
+
+### `artifact_review_reject`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `change_id` | integer | 是 | 变更 ID |
+| `reason` | string | 否 | 拒绝原因 |
+
+### `artifact_review_rollback`
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `change_id` | integer | 是 | 变更 ID |
+
+---
+
+## 内部工具参数（需 expose_internal_tools=true）
 
 ### `query`
 
@@ -1619,25 +1865,6 @@ gbrain 提供 74 个 MCP 工具，通过 stdio 上的 JSON-RPC 2.0 协议供 AI 
 | `projection_type` | string | 否 | 按投影类型过滤 |
 | `limit` | integer | 否 | 最大记录数（默认 20） |
 
-### `artifact_list`
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `limit` | integer | 否 | 最大结果数 |
-| `offset` | integer | 否 | 偏移量 |
-
-### `artifact_get`
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `id_or_uid` | string | 是 | Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'） |
-
-### `artifact_delete`
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `artifact_id` | integer | 是 | Artifact ID |
-
 ### `get_provenance`
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -1706,7 +1933,7 @@ KB RAPTOR: GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPEN
 | `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI 转录 API 密钥 | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI 转录基础 URL | — |
 
-### KB 子系统
+### KB 子系统（内部/高级 — 需 expose_internal_tools=true）
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
@@ -1844,7 +2071,7 @@ cargo clippy                  # 代码检查
 8. 意图类型提升（实体/时间/事件）
 9. 6 层去重（slug top-3 → 跨源去重 → 文本相似度 → 类型多样性 → 每页上限 → compiled_truth 保证）
 
-### KB 子系统架构
+### KB 子系统（内部/高级 — 需 expose_internal_tools=true）架构
 
 异步五阶段文档处理管线:
 

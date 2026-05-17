@@ -145,6 +145,7 @@ pub fn upload_source(
     _gbrain_dir: &Path,
     config_default_library_id: Option<i64>,
     config_default_promotion_policy: &str,
+    auto_create_inbox: bool,
 ) -> Result<UploadSourceOutput> {
     // 1. 计算 SHA256
     let sha256 = compute_sha256(&input.content);
@@ -292,6 +293,7 @@ pub fn upload_source(
         // 修复：使用最终决定的 promotion（可能是 intent 推断的或用户显式指定的）
         promotion_policy: route_plan.promotion.to_string(),
         status: "active".to_string(),
+        stale_reason: String::new(),
         metadata_json: input
             .metadata
             .as_ref()
@@ -323,7 +325,7 @@ pub fn upload_source(
     // 4. 不存在则自动创建 Inbox
     if route_plan.to_kb {
         let resolved_library_id =
-            resolve_default_library(conn, input.library_id, config_default_library_id)?;
+            resolve_default_library(conn, input.library_id, config_default_library_id, auto_create_inbox)?;
         let proj_key = format!("library:{}", resolved_library_id);
         // 使用 projection::create_kb_projection 创建 KB 投影和 kb_document
         // 它会自动更新 projection_ref 为实际的 kb_document:{id}
@@ -593,11 +595,12 @@ pub fn create_shadow_page_content(
 /// 1. 用户显式 library_id（已传入）
 /// 2. config: default_kb_library_id
 /// 3. 名为 Default 或 Inbox 的 library
-/// 4. 不存在则自动创建 Inbox
+/// 4. auto_create_inbox=true 时自动创建 Inbox，否则返回错误
 fn resolve_default_library(
     conn: &Connection,
     explicit_library_id: Option<i64>,
     config_default_library_id: Option<i64>,
+    auto_create_inbox: bool,
 ) -> Result<i64> {
     // 1. 用户显式传入
     if let Some(id) = explicit_library_id {
@@ -619,8 +622,7 @@ fn resolve_default_library(
         }
     }
 
-    // 3-4. 从 kb_libraries 表查找或创建默认库
-    // 先尝试查找名为 "Inbox" 或 "Default" 的库
+    // 3. 从 kb_libraries 表查找名为 "Inbox" 或 "Default" 的库
     let existing: Option<i64> = conn
         .query_row(
             "SELECT id FROM kb_libraries WHERE name IN ('Inbox', 'Default') AND deleted_at IS NULL ORDER BY name LIMIT 1",
@@ -633,7 +635,13 @@ fn resolve_default_library(
         return Ok(id);
     }
 
-    // 没有找到，自动创建 Inbox 库
+    // 4. 没有找到默认库：根据 auto_create_inbox 配置决定是否自动创建
+    if !auto_create_inbox {
+        return Err(GBrainError::InvalidInput(
+            "未找到默认 KB 库且 artifact_auto_create_inbox_library=false，请先创建 KB 库或配置 default_kb_library_id".to_string(),
+        ));
+    }
+
     let now = now_str();
     conn.execute(
         "INSERT INTO kb_libraries (name, created_at, updated_at)
@@ -650,26 +658,34 @@ fn resolve_default_library(
 /// 手动写入长期记忆（设计文档 §8.6）
 ///
 /// 创建 text/manual artifact 并投影到 gbrain 页面。
-/// 内部步骤：
+/// P1-2 修复：接收 route_plan 参数，根据 plan 决定创建哪些投影，
+/// 而不是固定走 manual memory 路径。确保 dry-run 预览与实际写入一致。
+///
+/// 步骤：
 /// 1. 将 title/content 规范化为 markdown 文本
 /// 2. 计算 hash
 /// 3. 写 artifact store
 /// 4. 创建 source artifact 和 occurrence
-/// 5. 创建 brain_page_update projection
-/// 6. 调用原 gbrain put_page 逻辑
-/// 7. 可选入 KB
+/// 5. 根据 route_plan 创建投影（brain_page_update / shadow / KB / file）
+/// 6. 可选入 KB
 pub fn put_manual_memory(
     conn: &Connection,
     slug: &str,
     content: &str,
     title: Option<&str>,
-    _intent: Option<&str>,
+    intent: Option<&str>,
     artifact_dir: &Path,
     _gbrain_dir: &Path,
     config_default_library_id: Option<i64>,
-    config_promotion_policy: &str,
+    // P1-2 修复后不再使用 config_promotion_policy，occurrence 的 promotion_policy
+    // 改为从 route_plan.promotion 获取，确保与 dry-run 预览一致
+    _config_promotion_policy: &str,
     manual_memory_to_kb: bool,
+    auto_create_inbox: bool,
+    route_plan: &RoutePlan,
 ) -> Result<UploadSourceOutput> {
+    // 解析意图
+    let resolved_intent = intent.unwrap_or("memory");
     // 1. 规范化为 markdown
     let page_title = title.unwrap_or(slug);
     let md_content = if content.starts_with("---\n") || content.starts_with("---\r\n") {
@@ -684,16 +700,25 @@ pub fn put_manual_memory(
 
     // 3. 写入 artifact store
     let storage_path = write_artifact_file(content_bytes, &sha256, "md", artifact_dir)?;
-    let storage_path_str = storage_path
-        .to_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let storage_path_str = storage_path.to_str().unwrap_or("unknown").to_string();
 
     // 4. 创建/复用 source_artifacts 记录
+    // 修复：复用已软删除的 artifact 时需要 reactivation，
+    // 否则新 occurrence/projection 会挂到 deleted artifact 上，
+    // 列表查不到，GC 又把它当孤儿投影处理
     let now = now_str();
     let existing = store::find_artifact_by_sha256(conn, &sha256)?;
     let (artifact_id, artifact_uid, is_new) = if let Some(existing) = existing {
-        debug!("复用已有 artifact: id={}, uid={}", existing.id, existing.artifact_uid);
+        debug!(
+            "复用已有 artifact: id={}, uid={}",
+            existing.id, existing.artifact_uid
+        );
+        if existing.status == "deleted" {
+            store::reactivate_artifact(conn, existing.id)?;
+            info!("重新激活已删除 artifact: id={}", existing.id);
+        } else {
+            store::touch_artifact(conn, existing.id)?;
+        }
         (existing.id, existing.artifact_uid.clone(), false)
     } else {
         let artifact_uid = generate_artifact_uid(&sha256);
@@ -722,7 +747,10 @@ pub fn put_manual_memory(
             purged_at: None,
         };
         let id = store::insert_artifact(conn, &artifact)?;
-        info!("创建手动 artifact: id={}, uid={}, slug={}", id, artifact_uid, slug);
+        info!(
+            "创建手动 artifact: id={}, uid={}, slug={}",
+            id, artifact_uid, slug
+        );
         (id, artifact_uid, true)
     };
 
@@ -739,83 +767,225 @@ pub fn put_manual_memory(
         original_path: slug.to_string(),
         original_name: format!("{}.md", slug.replace('/', "-")),
         owner_ref: "cli".to_string(),
-        intent: "memory".to_string(),
+        intent: resolved_intent.to_string(),
         target_slug: slug.to_string(),
         page_slug: slug.to_string(),
         library_id: config_default_library_id,
         folder_id: None,
-        promotion_policy: config_promotion_policy.to_string(),
+        // P1-2 修复：occurrence 的 promotion_policy 应与最终 route plan 对齐，
+        // 而非使用配置默认值。否则 dry-run 预览与实际 worker 行为不一致。
+        promotion_policy: route_plan.promotion.to_string(),
         status: "active".to_string(),
+        stale_reason: String::new(),
         metadata_json: "{}".to_string(),
     };
     let occurrence_id = store::insert_occurrence(conn, &occurrence)?;
 
-    // 6. 创建 brain_page_update projection
-    let proj_key = format!("page_update:{}", slug);
-    let proj_ref = format!("brain_page:{}", slug);
-    let proj = ArtifactProjection {
-        id: 0,
-        created_at: now.clone(),
-        updated_at: now.clone(),
-        artifact_id,
-        occurrence_id: Some(occurrence_id),
-        projection_type: ProjectionType::BrainPageUpdate.to_string(),
-        projection_key: proj_key.clone(),
-        projection_ref: proj_ref.clone(),
-        status: "active".to_string(),
-        version_hash: sha256.clone(),
-        stale_reason: String::new(),
-        metadata_json: "{}".to_string(),
-        superseded_by: None,
-    };
-    store::insert_projection(conn, &proj)?;
+    // 6. 根据 route_plan 创建投影
+    // P1-2 修复：不再固定创建 brain_page_update，
+    // 根据 route_plan 决定创建哪些投影，确保 intent 路由与实际写入一致
+    let mut projections = Vec::new();
 
-    let mut projections = vec![ProjectionResult {
-        projection_type: ProjectionType::BrainPageUpdate,
-        projection_key: proj_key,
-        projection_ref: proj_ref,
-        created: is_new,
-        status: "active".to_string(),
-    }];
+    // brain_page_update 投影 — 仅当 route_plan.to_brain=true 时创建
+    if route_plan.to_brain {
+        let proj_key = format!("page_update:{}", slug);
+        let proj_ref = format!("brain_page:{}", slug);
+        let proj = ArtifactProjection {
+            id: 0,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            artifact_id,
+            occurrence_id: Some(occurrence_id),
+            projection_type: ProjectionType::BrainPageUpdate.to_string(),
+            projection_key: proj_key.clone(),
+            projection_ref: proj_ref.clone(),
+            status: "active".to_string(),
+            version_hash: sha256.clone(),
+            stale_reason: String::new(),
+            metadata_json: "{}".to_string(),
+            superseded_by: None,
+        };
+        store::insert_projection(conn, &proj)?;
+        projections.push(ProjectionResult {
+            projection_type: ProjectionType::BrainPageUpdate,
+            projection_key: proj_key,
+            projection_ref: proj_ref,
+            created: is_new,
+            status: "active".to_string(),
+        });
+    }
 
-    // 7. 可选入 KB
-    if manual_memory_to_kb {
-        if let Some(library_id) = config_default_library_id {
-            let kb_proj_key = format!("library:{}", library_id);
-            let kb_proj_ref = format!("kb_doc:{}", artifact_id);
-            let kb_proj = ArtifactProjection {
+    // shadow page 投影 — 仅当 route_plan.to_shadow=true 时创建
+    // P1/P2 修复：manual promote 不仅要创建 shadow projection，
+    // 还要实际写入 shadow page 到 pages 表，否则后续 review apply
+    // 调用 update_shadow_page_section 时会因 page 不存在而返回 PageNotFound
+    if route_plan.to_shadow {
+        let shadow_slug = format!("documents/{}", slug);
+        if validate_page_slug(&shadow_slug).is_ok() {
+            let proj_key = format!("slug:{}", shadow_slug);
+            let proj_ref = format!("slug:{}", shadow_slug);
+            let proj = ArtifactProjection {
                 id: 0,
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 artifact_id,
                 occurrence_id: Some(occurrence_id),
-                projection_type: ProjectionType::KbDocument.to_string(),
-                projection_key: kb_proj_key.clone(),
-                projection_ref: kb_proj_ref.clone(),
+                projection_type: ProjectionType::BrainShadowPage.to_string(),
+                projection_key: proj_key.clone(),
+                projection_ref: proj_ref.clone(),
                 status: "active".to_string(),
-                version_hash: sha256.clone(),
+                version_hash: String::new(),
                 stale_reason: String::new(),
                 metadata_json: "{}".to_string(),
                 superseded_by: None,
             };
-            store::insert_projection(conn, &kb_proj)?;
+            store::insert_projection(conn, &proj)?;
             projections.push(ProjectionResult {
-                projection_type: ProjectionType::KbDocument,
-                projection_key: kb_proj_key,
-                projection_ref: kb_proj_ref,
+                projection_type: ProjectionType::BrainShadowPage,
+                projection_key: proj_key,
+                projection_ref: proj_ref,
                 created: is_new,
                 status: "active".to_string(),
             });
+
+            // 实际写入 shadow page 内容到 pages 表
+            let artifact_ref = store::find_artifact_by_id(conn, artifact_id)
+                .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?
+                .ok_or_else(|| {
+                    GBrainError::PageNotFound(format!("artifact {} 不存在", artifact_id))
+                })?;
+            let (title, frontmatter, body) =
+                create_shadow_page_content(&artifact_ref, &occurrence, None);
+            let title_tokens = crate::nlp::chinese::tokenize_content(&title);
+            let truth_tokens = crate::nlp::chinese::tokenize_content(&body);
+            let content_hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(title.as_bytes());
+                hasher.update(body.as_bytes());
+                format!("{:x}", hasher.finalize())
+            };
+            // P1 修复：同 slug 不同内容更新时，shadow page 需要更新 frontmatter/body/chunks，
+            // 而非 INSERT OR IGNORE 跳过。否则新 artifact 的 active shadow projection
+            // 指向旧 page 内容，破坏 source tracing 和 review apply 语义。
+            //
+            // 重要：不能使用 INSERT OR REPLACE，因为它对已存在行是 DELETE+INSERT，
+            // 会导致 page_id 变化，级联删除 page_versions/tags/timeline/raw_data/chunks，
+            // 以及 vec_chunks 向量孤儿行。
+            // 改为先检查页面是否存在，存在则 UPDATE（保留 page_id），不存在则 INSERT。
+            let existing_page_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
+                    rusqlite::params![shadow_slug],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            if let Some(page_id) = existing_page_id {
+                // 页面已存在 → 先创建版本快照，再原地 UPDATE（保留 page_id）
+                let _ = conn.execute(
+                    "INSERT INTO page_versions (page_id, slug, page_type, title, compiled_truth, frontmatter, created_at)
+                     VALUES (?1, ?2, 'source', (SELECT title FROM pages WHERE id = ?1),
+                             (SELECT compiled_truth FROM pages WHERE id = ?1),
+                             (SELECT frontmatter FROM pages WHERE id = ?1),
+                     datetime('now'))",
+                    rusqlite::params![page_id, shadow_slug],
+                );
+                conn.execute(
+                    "UPDATE pages SET title = ?1, compiled_truth = ?2, frontmatter = ?3,
+                     content_hash = ?4, title_tokens = ?5, compiled_truth_tokens = ?6,
+                     updated_at = datetime('now')
+                     WHERE id = ?7",
+                    rusqlite::params![title, body, frontmatter, content_hash, title_tokens, truth_tokens, page_id],
+                ).map_err(|e| GBrainError::Database(format!("更新手动 put shadow page 失败: {}", e)))?;
+            } else {
+                // 页面不存在 → INSERT 新行
+                conn.execute(
+                    "INSERT INTO pages (slug, title, compiled_truth, page_type, frontmatter, content_hash, title_tokens, compiled_truth_tokens, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'source', ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+                    rusqlite::params![shadow_slug, title, body, frontmatter, content_hash, title_tokens, truth_tokens],
+                ).map_err(|e| GBrainError::Database(format!("插入手动 put shadow page 失败: {}", e)))?;
+            }
+
+            // 重建 chunks：先收集旧 chunk ids，清理 vec_chunks/chunk_embeddings，再删除旧 chunks，最后插入新 chunk
+            let page_id_for_chunk: i64 = conn
+                .query_row(
+                    "SELECT id FROM pages WHERE slug = ?1",
+                    rusqlite::params![shadow_slug],
+                    |row| row.get(0),
+                )
+                .map_err(|e| GBrainError::Database(format!("查询 shadow page id 失败: {}", e)))?;
+
+            // 清理向量索引（vec_chunks 和 chunk_embeddings）
+            let _ = conn.execute(
+                "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
+                rusqlite::params![page_id_for_chunk],
+            );
+            let _ = conn.execute(
+                "DELETE FROM chunk_embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
+                rusqlite::params![page_id_for_chunk],
+            );
+            // 删除旧 chunks
+            conn.execute(
+                "DELETE FROM chunks WHERE page_id = ?1",
+                rusqlite::params![page_id_for_chunk],
+            ).map_err(|e| GBrainError::Database(format!("清理手动 put shadow page 旧 chunk 失败: {}", e)))?;
+
+            let chunk_text = if body.chars().count() > 800 {
+                format!("{}...", body.chars().take(800).collect::<String>())
+            } else {
+                body.clone()
+            };
+            let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk_text);
+            let token_count = chunk_text_tokens.split_whitespace().count() as i64;
+            conn.execute(
+                "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
+                 VALUES (?1, 0, ?2, ?3, ?4, 'body', datetime('now'))",
+                rusqlite::params![page_id_for_chunk, chunk_text, chunk_text_tokens, token_count],
+            ).map_err(|e| GBrainError::Database(format!("创建手动 put shadow page chunk 失败: {}", e)))?;
         }
     }
 
-    // 构建路由计划
-    let route_plan = RoutePlan {
-        to_kb: manual_memory_to_kb && config_default_library_id.is_some(),
-        to_brain: true,
-        to_shadow: false,
-        to_file: false,
-        promotion: PromotionPolicy::AutoAcceptLowRisk,
+    // 7. KB 投影 — 仅当 route_plan.to_kb=true 时创建
+    // P1-2 修复：KB 入库由 route_plan.to_kb 控制，不再由 manual_memory_to_kb 单独决定
+    let resolved_library_id = if route_plan.to_kb && manual_memory_to_kb {
+        Some(resolve_default_library(conn, None, config_default_library_id, auto_create_inbox)?)
+    } else {
+        None
+    };
+
+    if let Some(library_id) = resolved_library_id {
+        let kb_proj_ref = crate::artifact::projection::create_kb_projection(
+            conn,
+            artifact_id,
+            occurrence_id,
+            library_id,
+        )?;
+        let kb_doc_id = kb_proj_ref
+            .strip_prefix("kb_document:")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        projections.push(ProjectionResult {
+            projection_type: ProjectionType::KbDocument,
+            projection_key: format!("library:{}", library_id),
+            projection_ref: kb_proj_ref,
+            created: is_new,
+            status: "active".to_string(),
+        });
+        info!(
+            "手动 put KB 投影: artifact_id={}, kb_doc_id={}",
+            artifact_id, kb_doc_id
+        );
+    }
+
+    // P1-2 修复：返回实际使用的 route_plan，而不是固定的 manual memory plan
+    // to_kb 由 route_plan.to_kb 和 resolved_library_id 共同决定
+    let actual_route_plan = RoutePlan {
+        to_kb: route_plan.to_kb && resolved_library_id.is_some(),
+        to_brain: route_plan.to_brain,
+        to_shadow: route_plan.to_shadow,
+        to_file: route_plan.to_file,
+        promotion: route_plan.promotion.clone(),
     };
 
     Ok(UploadSourceOutput {
@@ -825,7 +995,7 @@ pub fn put_manual_memory(
         occurrence_uid,
         sha256,
         is_new,
-        route_plan,
+        route_plan: actual_route_plan,
         projections,
     })
 }

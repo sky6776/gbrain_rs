@@ -17,7 +17,10 @@ pub fn list_suggested_changes(
     offset: i64,
 ) -> Result<Vec<ArtifactReviewItem>> {
     let candidates = promotion::list_candidates(conn, status, None, target_slug, limit, offset)?;
-    Ok(candidates.into_iter().map(candidate_to_review_item).collect())
+    Ok(candidates
+        .into_iter()
+        .map(candidate_to_review_item)
+        .collect())
 }
 
 /// 获取建议变更详情
@@ -30,10 +33,7 @@ pub fn get_suggested_change(
 }
 
 /// 应用建议变更
-pub fn apply_suggested_change(
-    conn: &Connection,
-    change_id: i64,
-) -> Result<PromotionCandidate> {
+pub fn apply_suggested_change(conn: &Connection, change_id: i64) -> Result<PromotionCandidate> {
     promotion::apply_candidate(conn, change_id)
 }
 
@@ -46,10 +46,7 @@ pub fn reject_suggested_change(
 }
 
 /// 回滚已应用的建议变更
-pub fn rollback_suggested_change(
-    conn: &Connection,
-    change_id: i64,
-) -> Result<PromotionCandidate> {
+pub fn rollback_suggested_change(conn: &Connection, change_id: i64) -> Result<PromotionCandidate> {
     promotion::rollback_candidate(conn, change_id)
 }
 
@@ -64,7 +61,7 @@ fn candidate_to_review_item(c: PromotionCandidate) -> ArtifactReviewItem {
         evidence: if c.evidence_json.is_empty() {
             None
         } else {
-            Some(c.evidence_json.clone())
+            serde_json::from_str::<serde_json::Value>(&c.evidence_json).ok()
         },
         created_at: Some(c.created_at.clone()),
     }

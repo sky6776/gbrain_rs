@@ -362,9 +362,10 @@ impl Config {
             config.artifact_default_intent = intent;
         }
         // 当 artifact_put 需要写入 KB 但没有 Inbox 库时，是否自动创建
-        config.artifact_auto_create_inbox_library = std::env::var("GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(config.artifact_auto_create_inbox_library);
+        config.artifact_auto_create_inbox_library =
+            std::env::var("GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(config.artifact_auto_create_inbox_library);
         // artifact_put 的 memory 意图是否写入 KB（默认 true，设为 false 则仅写入 gbrain 页面）
         config.artifact_manual_memory_to_kb = std::env::var("GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB")
             .map(|v| v != "false" && v != "0")

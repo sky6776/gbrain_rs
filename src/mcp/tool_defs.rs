@@ -39,8 +39,9 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
             ParamDef { name: "content", description: "直接输入的文本内容（与 file 二选一）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "file", description: "本地文件路径（与 content 二选一）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "title", description: "页面标题（可选，默认从 slug 推断）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
-            ParamDef { name: "intent", description: "意图: memory(默认, 进KB+shadow+低风险自动应用), evidence(仅KB证据), promote(明确提升)", required: false, param_type: ParamType::String, enum_values: Some(&["memory", "evidence", "promote"]), items_type: None },
+            ParamDef { name: "intent", description: "意图: memory(默认, 稳定brain页面+可选KB+低风险自动应用), evidence(仅KB证据), promote(影子页面+KB+建议变更)", required: false, param_type: ParamType::String, enum_values: Some(&["memory", "evidence", "promote"]), items_type: None },
             ParamDef { name: "dry_run", description: "仅返回路由计划，不实际写入", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "force", description: "强制覆盖已被人工修改的页面（默认不覆盖，返回冲突信息）", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
 
@@ -854,4 +855,12 @@ pub fn get_artifact_facade_defs() -> &'static [OperationDef] {
 /// 获取内部操作定义
 pub fn get_internal_defs() -> &'static [OperationDef] {
     INTERNAL_DEFS
+}
+
+/// 判断工具名是否属于内部工具
+///
+/// 修复：用于在 tools/call 入口硬拦截，防止 expose_internal_tools=false 时
+/// 仍可通过直接调用工具名绕过 tools/list 的隐藏。
+pub fn is_internal_tool(name: &str) -> bool {
+    INTERNAL_DEFS.iter().any(|op| op.name == name)
 }

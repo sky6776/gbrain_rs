@@ -10,43 +10,54 @@ when and how to use them. This file is that knowledge.
 Your tool inventory includes these through gbrain_rs MCP, or equivalent CLI
 commands:
 
+**Artifact Facade (default — use these first):**
+
+| Tool | Use for |
+|------|---------|
+| `artifact_put` | Write manual memory / promote shadow pages (unified entry point) |
+| `artifact_upload` | Upload a file as knowledge source |
+| `artifact_query` | Unified knowledge query with source tracing (memory + evidence + timeline) |
+| `artifact_list` | List all knowledge sources |
+| `artifact_get` | Get knowledge source details |
+| `artifact_review_list` | List suggested changes |
+| `artifact_review_apply` | Apply a suggested change |
+| `artifact_review_rollback` | Undo an applied change |
+| `artifact_delete` | Soft-delete a knowledge source |
+| `artifact_restore` | Restore a deleted knowledge source |
+| `artifact_health` | Check knowledge source consistency |
+
+**Admin-Tools (legacy — require `admin-tools` feature):**
+
 | Tool | Use for |
 |------|---------|
 | `query` | Hybrid search (keyword + vector + expansion), best quality when embeddings are available |
 | `get_page` | Direct page read when you know the slug |
+| `put_page` | Create or update a brain page |
+| `add_timeline_entry` | Add a dated event |
+| `add_link` | Add a relationship edge |
 | `get_links` | Outgoing links from a page |
 | `get_backlinks` | Who references this entity |
 | `get_timeline` | Dated events for an entity |
 | `resolve_slugs` | Fuzzy slug resolution |
 | `traverse_graph` | Walk the relationship graph |
-| `put_page` | Create or update a brain page |
-| `add_timeline_entry` | Add a dated event |
-| `add_link` | Add a relationship edge |
-| `upload_source` | Upload a source file (unified entry point) |
-| `memory_query` | Unified memory query across gbrain + KB |
-| `kb_search` | Search across KB libraries with profiles |
-| `kb_list_libraries` | List KB libraries and their stats |
 | `code_def` | Find code symbol definitions |
 | `code_refs` | Find code symbol references |
 | `get_callers` | Who calls this function |
-| `get_callees` | What this function calls |
-| `artifact_get` | Get artifact details |
-| `get_provenance` | Trace fact origins on a page |
 
 Tool names vary by transport. MCP uses short names; CLI commands are usually
 `gbrain <command>`. Use whichever your environment provides.
 
 ## The Lookup Chain (MANDATORY ORDER)
 
-1. **`query`** first — hybrid search (keyword + vector + expansion), zero API cost when embeddings are local
-2. **`query`** with `expand=false` for keyword-only mode — fast, no LLM expansion
-3. **`get_page`** if you found a slug — read the full compiled truth
-4. **`memory_query`** for cross-subsystem search — brain + KB evidence in one call
-5. **`kb_search`** for document-heavy queries — search KB libraries with profile selection
+1. **`artifact_query`** first — unified knowledge query (memory + evidence + timeline + source tracing)
+2. **`artifact_query`** with `mode=memory` for brain-first search — curated knowledge only
+3. **`artifact_query`** with `mode=evidence` for document-heavy queries — KB evidence first
+4. **`query`** (admin-tools) for hybrid search when you need keyword+vector+expansion
+5. **`get_page`** (admin-tools) if you found a slug — read the full compiled truth
 6. **`code_def`** / **`code_refs`** for code symbol lookups — precise graph queries
-7. **External APIs only after steps 1-6 return nothing useful**
+7. **External APIs only after steps 1-3 return nothing useful**
 
-Never skip to external APIs without completing steps 1-2. The brain has
+Never skip to external APIs without completing steps 1-3. The brain has
 thousands of pages. The answer is almost always there.
 
 ## Rules
@@ -56,7 +67,7 @@ thousands of pages. The answer is almost always there.
   what the user said in meetings, conversations, and notes. External sources
   are supplementary.
 - **After bulk brain page writes:** refresh extracted graph/timeline data with
-  `gbrain extract --mode all`, or call MCP `sync_brain` when syncing a directory.
+  `gbrain extract --mode all` (admin-tools), or call MCP `sync_brain` when syncing a directory (admin-tools).
 - **Every brain page reference in output** should use a clickable link format
   appropriate to the deployment (GitHub URL, local path, or slug).
 - **Never use `memory_search` for entity lookups.** Memory tools search

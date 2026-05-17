@@ -20,11 +20,11 @@ cargo build --release
 # 2. Initialize a knowledge base
 gbrain init
 
-# 3. Create a page
-gbrain put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
+# 3. Write to long-term memory
+gbrain artifact put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
 
-# 4. Search
-gbrain query "who is Alice"
+# 4. Query knowledge
+gbrain artifact query "who is Alice"
 
 # 5. Start MCP server (for AI agent integration)
 gbrain serve
@@ -94,11 +94,67 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `--json` | Output as JSON |
 | `--dry-run` | Preview operations without executing |
 
-### Core
+### Core (Default CLI — Artifact Unified Knowledge Operations)
 
 | Command | Description |
 |---------|-------------|
 | `gbrain init` | Initialize a new knowledge base |
+| `gbrain artifact put <slug> [--title <TITLE>] [--content <TEXT> \| --file <PATH>] [--intent <INTENT>] [--dry-run] [--force]` | Write to long-term memory (intent: memory/evidence/promote) |
+| `gbrain artifact upload <path> [--intent <INTENT>] [--target <SLUG>]` | Upload file as knowledge source |
+| `gbrain artifact query <query> [--mode <MODE>] [--limit <N>] [--filter <SLUG>] [--include-sources]` | Unified knowledge query (mode: auto/memory/evidence/timeline/graph) |
+| `gbrain artifact list [--limit <N>]` | List all Artifacts |
+| `gbrain artifact get <id_or_uid>` | Get Artifact detail |
+| `gbrain artifact delete <id_or_uid>` | Soft-delete an Artifact |
+| `gbrain artifact detach <id_or_uid> --from <slug>` | Detach Artifact from page |
+| `gbrain artifact restore <id_or_uid>` | Restore a deleted Artifact |
+| `gbrain artifact reprocess <id_or_uid>` | Reprocess Artifact projections |
+| `gbrain artifact review list [--status <STATUS>]` | List suggested changes |
+| `gbrain artifact review apply <change_id>` | Apply a suggested change |
+| `gbrain artifact review reject <change_id>` | Reject a suggested change |
+| `gbrain artifact review rollback <change_id>` | Rollback an applied suggested change |
+| `gbrain serve` | Run as MCP stdio server |
+| `gbrain tools-json` | Output MCP tool definitions as JSON |
+| `gbrain config show/get/set` | Configuration management |
+| `gbrain doctor [--fast]` | Comprehensive diagnostics |
+| `gbrain health` | Health dashboard |
+
+#### Examples
+
+```bash
+# Initialize a knowledge base
+gbrain init
+
+# Write to long-term memory (default intent: memory)
+gbrain artifact put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
+
+# Query knowledge
+gbrain artifact query "who is Alice"
+
+# Upload document with auto-routing
+gbrain artifact upload report.pdf --intent document
+
+# Preview write routing (dry-run)
+gbrain artifact put people/bob --content "Product manager" --dry-run
+
+# Force overwrite a human-modified page
+gbrain artifact put people/alice --content "Updated content" --force
+
+# List suggested changes
+gbrain artifact review list --status pending
+
+# Apply a suggested change
+gbrain artifact review apply 1
+
+# Start MCP server
+gbrain serve
+```
+
+### Page Operations (Requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile. Regular users should use `gbrain artifact put/query` instead.
+
+| Command | Description |
+|---------|-------------|
 | `gbrain get <slug>` | Read a page by slug |
 | `gbrain put <slug> --title <TITLE> [--content <TEXT> \| --file <PATH>] [--page-type <TYPE>]` | Create or update a page |
 | `gbrain delete <slug> [--force]` | Soft-delete a page |
@@ -110,9 +166,6 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 #### Examples
 
 ```bash
-# Initialize a knowledge base
-gbrain init
-
 # Create a page
 gbrain put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
 
@@ -150,7 +203,9 @@ gbrain list --page-type person --limit 20
 gbrain purge-deleted --older-than-hours 168
 ```
 
-### Search & Graph
+### Search & Graph (Requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile.
 
 | Command | Description |
 |---------|-------------|
@@ -196,7 +251,9 @@ gbrain code callees --slug src/engine.rs --symbol "query"
 gbrain code reindex src/engine.rs
 ```
 
-### Backlinks
+### Backlinks (Requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile.
 
 | Command | Description |
 |---------|-------------|
@@ -217,7 +274,9 @@ gbrain backlinks check
 gbrain backlinks fix people/alice
 ```
 
-### Data Management
+### Data Management (Requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile.
 
 | Command | Description |
 |---------|-------------|
@@ -261,7 +320,9 @@ gbrain lint people/alice
 gbrain lint --fix --dry-run
 ```
 
-### File Storage
+### File Storage (Requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile.
 
 | Command | Description |
 |---------|-------------|
@@ -372,7 +433,7 @@ gbrain ingest-log --limit 10
 gbrain tools-json
 ```
 
-### KB Subsystem
+### KB Subsystem (Internal/Advanced — requires expose_internal_tools=true)
 
 | Command | Description |
 |---------|-------------|
@@ -417,16 +478,20 @@ gbrain kb-health-check
 gbrain kb-purge-deleted --older-than-days 30
 ```
 
-### Single-Entry Multi-Projection Fusion (Artifact)
+### Single-Entry Multi-Projection Fusion (Artifact — Legacy Entry, DEPRECATED, use artifact_* instead)
 
-| Command | Description |
-|---------|-------------|
-| `gbrain upload <path> [--intent <INTENT>] [--library-id <ID>] [--target <SLUG>] [--page <SLUG>] [--folder-id <ID>] [--promotion <POLICY>] [--dry-run]` | Upload a source file (unified entry point), auto-route to multiple projections. intent: auto/document/attachment/memory/promote; promotion: none/shadow/candidate/auto-low-risk |
-| `gbrain memory-query <query> [--strategy <STRATEGY>] [--limit <N>] [--filter-slug <SLUG>] [--include-evidence] [--include-provenance]` | Unified memory query (alias: ask-memory). strategy: brain_first/evidence_first/provenance/timeline_first |
-| `gbrain artifact list [--limit <N>] [--offset <N>]` | List all artifacts |
-| `gbrain artifact get <id_or_uid>` | Get artifact details (supports ID or UID like `art_ab12cd34ef56`) |
-| `gbrain artifact delete <artifact_id>` | Soft delete artifact (marks all projections as stale) |
-| `gbrain artifact health` | Check artifact projection consistency and health |
+> **DEPRECATED**: The CLI commands below have been replaced by the unified `gbrain artifact ...` commands.
+> New users should use `gbrain artifact put/upload/query/list/get/delete/detach/restore`.
+> Legacy commands require the `admin-tools` feature.
+
+| Command | Description | Replacement |
+|---------|-------------|-------------|
+| `gbrain upload <path> [--intent <INTENT>] ...` | Upload a source file (legacy entry) | `gbrain artifact upload` |
+| `gbrain memory-query <query> ...` | Unified memory query (legacy entry) | `gbrain artifact query` |
+| `gbrain artifact list [--limit <N>] [--offset <N>]` | List all artifacts | `gbrain artifact list` (unchanged) |
+| `gbrain artifact get <id_or_uid>` | Get artifact details | `gbrain artifact get` (unchanged) |
+| `gbrain artifact delete <artifact_id>` | Soft delete artifact | `gbrain artifact delete` (unchanged) |
+| `gbrain artifact health` | Check artifact health | `gbrain artifact health` (unchanged) |
 
 #### Examples
 
@@ -459,7 +524,7 @@ gbrain artifact health
 gbrain artifact delete 42
 ```
 
-### Candidate Changes & Promotion
+### Candidate Changes & Promotion (Internal/Advanced — requires expose_internal_tools=true)
 
 | Command | Description |
 |---------|-------------|
@@ -494,7 +559,7 @@ gbrain promotion auto-apply 7
 gbrain promotion list --status applied
 ```
 
-### Projection Management
+### Projection Management (Internal/Advanced — requires expose_internal_tools=true)
 
 | Command | Description |
 |---------|-------------|
@@ -647,9 +712,67 @@ CLI uses `remote=false` directly, bypassing remote security restrictions.
 
 ## MCP Tools
 
-gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdio.
+gbrain exposes only Artifact unified knowledge operation facade tools (`artifact_*`) by default, via JSON-RPC 2.0 over stdio.
 
-### Search
+Set `GBRAIN_EXPOSE_INTERNAL_TOOLS=true` or use `--expose-internal-tools` to expose internal tools (`kb_*`, `promotion_*`, `projection_*`, etc.).
+
+### Artifact Unified Knowledge Operations (default)
+
+| Tool | Description |
+|------|-------------|
+| `artifact_put` | Write manual memory (slug + content + intent) |
+| `artifact_upload` | Upload file as knowledge source (PDF/DOCX/MD etc.) |
+| `artifact_query` | Unified knowledge query (memory/evidence/timeline/graph modes) |
+| `artifact_list` | List knowledge sources |
+| `artifact_get` | Get knowledge source details (with occurrences/projections/sources) |
+| `artifact_delete` | Soft-delete knowledge source (dry-run for impact preview) |
+| `artifact_detach` | Remove association between source and a specific page |
+| `artifact_restore` | Restore a soft-deleted knowledge source |
+| `artifact_reprocess` | Reprocess all projections of a knowledge source |
+| `artifact_health` | Knowledge source health check |
+| `artifact_review_list` | List suggested changes |
+| `artifact_review_get` | Get suggested change details |
+| `artifact_review_apply` | Apply a suggested change |
+| `artifact_review_reject` | Reject a suggested change |
+| `artifact_review_rollback` | Roll back an applied suggested change |
+
+#### Examples
+
+```json
+// Write manual memory
+{ "tool": "artifact_put", "params": { "slug": "rust-async", "content": "Rust async programming uses async/await syntax...", "intent": "memory" } }
+```
+
+```json
+// Unified knowledge query with source tracing
+{ "tool": "artifact_query", "params": { "query": "Rust async programming", "mode": "auto", "include_sources": true } }
+```
+
+```json
+// Get knowledge source details
+{ "tool": "artifact_get", "params": { "id_or_uid": "art_abc123", "include_sources": true, "include_projections": true } }
+```
+
+```json
+// Upload file
+{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "memory", "library_id": 1 } }
+```
+
+```json
+// List suggested changes
+{ "tool": "artifact_review_list", "params": { "status": "pending" } }
+```
+
+### Internal Tools (requires expose_internal_tools=true)
+
+The following tools are only available when `GBRAIN_EXPOSE_INTERNAL_TOOLS=true`:
+
+- **gbrain page operations**: `query`, `get_page`, `put_page`, `delete_page`, `list_pages`, `add_tag`, `remove_link`, `get_links`, `traverse_graph`, `add_timeline_entry`, `get_timeline`, `get_stats`, `get_health`, `get_versions`, `resolve_slugs`, `find_by_title_fuzzy`, `get_chunks`
+- **KB subsystem**: `kb_list_libraries`, `kb_upload_document`, `kb_search`, `kb_get_document_status`, `kb_delete_document`, `kb_purge_document`, `kb_check_index_health`, `kb_backup`, `kb_restore`
+- **Internal knowledge operations**: `upload_source`, `memory_query`, `get_provenance`
+- **Review/projection internals**: `promotion_list_candidates`, `promotion_apply_candidate`, `promotion_rollback_candidate`, `gc_orphan_projections`, `projection_supersede`, `projection_history`
+
+### Search (internal)
 
 | Tool | Description |
 |------|-------------|
@@ -959,7 +1082,7 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "get_health", "params": {} }
 ```
 
-### KB Subsystem
+### KB Subsystem (Internal/Advanced — requires expose_internal_tools=true)
 
 | Tool | Description |
 |------|-------------|
@@ -1010,17 +1133,21 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "kb_backup", "params": { "output": "/path/to/backup" } }
 ```
 
-### Single-Entry Multi-Projection Fusion (Artifact)
+### Single-Entry Multi-Projection Fusion (Artifact — Legacy Entry, DEPRECATED, use artifact_* instead)
 
-| Tool | Description |
-|------|-------------|
-| `upload_source` | Upload a source file (unified entry point), auto-create Artifact, KB projection, shadow page, and file attachment |
-| `memory_query` | Unified memory query, searches both gbrain curated knowledge and KB document evidence, 4 strategies auto-selected |
-| `artifact_list` | List all artifacts |
-| `artifact_get` | Get artifact details (supports ID or UID) |
-| `artifact_delete` | Soft delete artifact (marks all projections as stale) |
-| `artifact_health` | Check artifact projection consistency and health |
-| `get_provenance` | Get provenance records for a brain page (trace where facts came from) |
+> **DEPRECATED**: The tools below have been replaced by the unified `artifact_*` facade tools.
+> New users should use the "Artifact Unified Knowledge Operations" section above.
+> Legacy tools are only available when `GBRAIN_EXPOSE_INTERNAL_TOOLS=true`.
+
+| Tool | Description | Replacement |
+|------|-------------|-------------|
+| `upload_source` | Upload a source file (legacy entry) | `artifact_upload` |
+| `memory_query` | Unified memory query (legacy entry) | `artifact_query` |
+| `artifact_list` | List all artifacts | `artifact_list` (unchanged) |
+| `artifact_get` | Get artifact details | `artifact_get` (unchanged) |
+| `artifact_delete` | Soft delete artifact | `artifact_delete` (unchanged) |
+| `artifact_health` | Check artifact health | `artifact_health` (unchanged) |
+| `get_provenance` | Get provenance records | `artifact_get` + `include_sources=true` |
 
 #### Examples
 
@@ -1059,7 +1186,7 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "memory_query", "params": { "query": "Alice's position", "strategy": "provenance", "include_provenance": true } }
 ```
 
-### Candidate Changes & Promotion
+### Candidate Changes & Promotion (Internal/Advanced — requires expose_internal_tools=true)
 
 | Tool | Description |
 |------|-------------|
@@ -1098,7 +1225,7 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 { "tool": "promotion_rollback_candidate", "params": { "candidate_id": 42 } }
 ```
 
-### Projection Management
+### Projection Management (Internal/Advanced — requires expose_internal_tools=true)
 
 | Tool | Description |
 |------|-------------|
@@ -1126,6 +1253,125 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 ---
 
 ## MCP Tool Parameters
+
+### `artifact_put`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Target page slug (e.g., people/alice) |
+| `content` | string | No | Direct text content (alternative to file) |
+| `file` | string | No | Local file path (alternative to content) |
+| `title` | string | No | Page title (optional, inferred from slug by default) |
+| `intent` | string | No | Intent: memory / evidence / promote (default memory) |
+| `dry_run` | boolean | No | Return routing plan only, don't write |
+
+### `artifact_upload`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Local file path |
+| `intent` | string | No | Upload intent: auto / evidence / memory / attachment / promote (default auto) |
+| `target_slug` | string | No | Target gbrain page slug (for generating suggested changes) |
+| `page_slug` | string | No | Associated page slug (for attachments) |
+| `library_id` | integer | No | KB library ID (optional, defaults to auto-selecting Inbox) |
+| `folder_id` | integer | No | KB folder ID |
+| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk |
+| `dry_run` | boolean | No | Return routing plan only, don't write |
+
+### `artifact_query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Query text |
+| `mode` | string | No | Query mode: auto / memory / evidence / timeline / graph (default auto) |
+| `limit` | integer | No | Maximum results |
+| `filter_slug` | string | No | Filter to specified page slug |
+| `include_sources` | boolean | No | Show source tracing (artifact sources and citations) |
+
+### `artifact_list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | integer | No | Max results (default 50) |
+| `offset` | integer | No | Offset |
+
+### `artifact_get`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID (e.g., '1' or 'art_ab12cd34ef56') |
+| `include_projections` | boolean | No | Include projection details |
+| `include_sources` | boolean | No | Include source tracing |
+
+### `artifact_delete`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+| `dry_run` | boolean | No | Preview deletion impact, don't execute |
+
+### `artifact_detach`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+| `from` | string | Yes | Target page slug |
+| `dry_run` | boolean | No | Preview impact, don't execute |
+
+### `artifact_restore`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+| `dry_run` | boolean | No | Preview restore impact, don't execute |
+
+### `artifact_reprocess`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+| `dry_run` | boolean | No | Preview reprocess impact, don't execute |
+
+### `artifact_health`
+
+No parameters.
+
+### `artifact_review_list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `status` | string | No | Filter by status: pending / accepted / rejected / applied / rolled_back |
+| `target_slug` | string | No | Filter by target page slug |
+| `limit` | integer | No | Maximum results |
+
+### `artifact_review_get`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | integer | Yes | Change ID |
+
+### `artifact_review_apply`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | integer | Yes | Change ID |
+
+### `artifact_review_reject`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | integer | Yes | Change ID |
+| `reason` | string | No | Rejection reason |
+
+### `artifact_review_rollback`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | integer | Yes | Change ID |
+
+---
+
+## Internal Tools Parameters (requires expose_internal_tools=true)
 
 ### `query`
 
@@ -1576,30 +1822,13 @@ gbrain provides 74 MCP tools for AI agent integration via JSON-RPC 2.0 over stdi
 | `projection_type` | string | No | Filter by projection type |
 | `limit` | integer | No | Max records (default 20) |
 
-### `artifact_list`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | integer | No | Max results |
-| `offset` | integer | No | Offset |
-
-### `artifact_get`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `id_or_uid` | string | Yes | Artifact ID or UID (e.g., '1' or 'art_ab12cd34ef56') |
-
-### `artifact_delete`
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `artifact_id` | integer | Yes | Artifact ID |
-
 ### `get_provenance`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `brain_slug` | string | Yes | Brain page slug |
+
+---
 
 ---
 
@@ -1663,7 +1892,7 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI transcription API key | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI transcription base URL | — |
 
-### KB Subsystem
+### KB Subsystem (Internal/Advanced — requires expose_internal_tools=true)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -1801,7 +2030,7 @@ Three-layer design:
 8. Intent type boost (entity/time/event)
 9. 6-layer dedup (slug top-3 → cross-source dedup → text similarity → type diversity → per-page cap → compiled_truth guarantee)
 
-### KB Subsystem Architecture
+### KB Subsystem (Internal/Advanced — requires expose_internal_tools=true) Architecture
 
 Async five-stage document processing pipeline:
 

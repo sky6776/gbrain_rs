@@ -50,7 +50,7 @@ Use this skill when:
 
 Do NOT use this skill for:
 - General brain page queries (use `query` skill)
-- Document/evidence search (use `kb_search` or `memory_query`)
+- Document/evidence search (use `artifact_query` with mode=evidence)
 - Entity lookups (use brain-ops lookup chain)
 
 ## Phases

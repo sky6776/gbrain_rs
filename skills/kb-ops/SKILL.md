@@ -2,9 +2,9 @@
 name: kb-ops
 version: 1.0.0
 description: |
-  Knowledge Base (KB) subsystem lifecycle management. Create, configure, search,
-  and maintain KB libraries with governance controls, search profiles, and
-  document processing.
+  Knowledge Base (KB) subsystem lifecycle management. **INTERNAL** — requires
+  expose_internal_tools=true. For user-facing operations, use the artifact-review
+  skill (artifact_upload, artifact_query, etc.) instead.
 triggers:
   - "create knowledge base"
   - "upload document to kb"

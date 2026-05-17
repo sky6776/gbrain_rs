@@ -1,6 +1,6 @@
 {
   "name": "gbrain-rs-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "conformance_version": "gbrain-rs",
   "description": "Skills that are usable with the current gbrain_rs CLI/MCP surface",
   "skills": [
@@ -35,6 +35,11 @@
       "description": "Ingest meeting transcripts with attendee pages, links, and timeline updates."
     },
     {
+      "name": "artifact-review",
+      "path": "artifact-review/SKILL.md",
+      "description": "Unified knowledge workflow: write memories, upload files, query with source tracing, review suggested changes, manage artifacts via artifact_* facade."
+    },
+    {
       "name": "citation-fixer",
       "path": "citation-fixer/SKILL.md",
       "description": "Audit and fix citation formatting across brain pages."
@@ -62,12 +67,12 @@
     {
       "name": "kb-ops",
       "path": "kb-ops/SKILL.md",
-      "description": "KB subsystem lifecycle management: create libraries, upload documents, search with profiles, health checks, backup/restore, evaluation."
+      "description": "[INTERNAL] KB subsystem admin: manage libraries, documents, search profiles, health, backup/restore. Requires expose_internal_tools=true. For user-facing operations, use artifact-review skill."
     },
     {
       "name": "promotion",
       "path": "promotion/SKILL.md",
-      "description": "Single-entry multi-projection fusion: upload sources, review promotion candidates, accept/reject/apply/rollback, manage artifacts and projection chains."
+      "description": "[DEPRECATED] Use artifact-review skill instead. Promotion candidates are now 'suggested changes' via artifact_review_* tools."
     },
     {
       "name": "code-graph",

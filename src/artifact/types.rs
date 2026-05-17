@@ -400,6 +400,8 @@ pub struct ArtifactOccurrence {
     pub promotion_policy: String,
 
     pub status: String,
+    /// stale 原因：detached_by_user / artifact_deleted / reprocess_requested / content_updated 等
+    pub stale_reason: String,
     pub metadata_json: String,
 }
 
@@ -1048,6 +1050,9 @@ pub struct ArtifactQueryOutput {
     pub graph: Vec<GraphRelation>,
     /// 查询元信息
     pub meta: QueryMeta,
+    /// 来源追溯（当 include_sources=true 时填充）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceRef>,
 }
 
 /// 记忆查询结果
@@ -1061,8 +1066,9 @@ pub struct MemoryResult {
     pub summary: String,
     /// 相关度分数
     pub score: f64,
-    /// 来源 artifact（可选）
-    pub source_artifact_id: Option<i64>,
+    /// 来源引用（当 include_sources=true 时填充）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceRef>,
 }
 
 /// 证据查询结果
@@ -1074,8 +1080,9 @@ pub struct EvidenceResult {
     pub snippet: String,
     /// 相关度分数
     pub score: f64,
-    /// 来源 artifact ID
-    pub source_artifact_id: Option<i64>,
+    /// 来源引用（当 include_sources=true 时填充）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<SourceRef>,
 }
 
 /// 时间线事件
@@ -1126,8 +1133,109 @@ pub struct ArtifactReviewItem {
     pub risk_level: String,
     /// 变更摘要
     pub summary: String,
-    /// 来源证据
-    pub evidence: Option<String>,
+    /// 来源证据（结构化 JSON）
+    pub evidence: Option<serde_json::Value>,
     /// 创建时间
     pub created_at: Option<String>,
+}
+
+// ============================================================================
+// 新增 facade DTO 类型（二次审计 P0/P1/P2 修复）
+// ============================================================================
+
+/// 用户友好的来源引用（替代暴露内部 provenance row）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceRef {
+    pub artifact_uid: String,
+    pub original_name: Option<String>,
+    pub quote_text: Option<String>,
+    pub confidence: f64,
+    pub brain_slug: Option<String>,
+    pub brain_field: Option<String>,
+}
+
+/// artifact_get 用户友好输出（替代直接返回 SourceArtifact row）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactDetailOutput {
+    pub uid: String,
+    pub slug: String,
+    pub original_name: Option<String>,
+    pub mime_type: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: String,
+    pub extension: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projections: Option<Vec<ArtifactProjectionSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<SourceRef>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrences: Option<Vec<ArtifactOccurrenceSummary>>,
+}
+
+/// projection 摘要（隐藏内部 projection_key/ref 细节）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactProjectionSummary {
+    pub projection_type: String,
+    pub projection_key: String,
+    pub projection_ref: Option<String>,
+    pub status: String,
+}
+
+/// occurrence 摘要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactOccurrenceSummary {
+    pub uid: String,
+    pub intent: Option<String>,
+    pub target_slug: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// review 操作用户友好输出（替代直接返回 PromotionCandidate row）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactReviewActionOutput {
+    pub change_id: i64,
+    pub target_slug: String,
+    pub candidate_type: String,
+    pub status: String,
+    pub action_description: String,
+    pub evidence: Option<serde_json::Value>,
+    pub risk_level: Option<String>,
+}
+
+/// delete dry-run 影响预览
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteImpactPreview {
+    pub artifact_id: i64,
+    pub artifact_uid: String,
+    pub artifact_status: String,
+    pub projection_count: i64,
+    pub occurrence_count: i64,
+    pub kb_document_count: i64,
+    pub provenance_count: i64,
+}
+
+/// artifact_list 列表项 DTO（隐藏内部 id/storage_path/raw metadata）
+///
+/// P2-3 修复：artifact_list 不再直接返回 SourceArtifact row，
+/// 改用此 DTO 隐藏内部字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactListItem {
+    pub uid: String,
+    pub slug: String,
+    pub original_name: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub status: String,
+    pub updated_at: String,
+}
+
+/// put 幂等/冲突检测结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutResolution {
+    pub action: String,
+    pub artifact_id: Option<i64>,
+    pub artifact_uid: Option<String>,
+    pub detail: Option<String>,
 }

@@ -11,11 +11,97 @@ use crate::kb::jobs::{new_run_id, KbProcessPayload};
 use super::store;
 use super::types::*;
 
+/// 复用已有 kb_document 并重新入队 KB job
+///
+/// 当 active 投影的 occurrence_id 不同时调用此函数：
+/// 复用旧 kb_document（同 hash = 同内容），只创建新 projection 行和 KB job，
+/// 避免撞 kb_documents 唯一索引 (library_id, content_hash)。
+fn reuse_kb_doc_and_enqueue(
+    conn: &Connection,
+    artifact_id: i64,
+    occurrence_id: i64,
+    library_id: i64,
+    kb_doc_id: i64,
+    proj_key: &str,
+) -> Result<String> {
+    let run_id = new_run_id();
+    // 修复 P1：复用已删除的 kb_document 时必须同时清 deleted_at，
+    // 否则后续查询用 d.deleted_at IS NULL 过滤时搜不到。
+    conn.execute(
+        "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
+        params![run_id, kb_doc_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("更新 KB document run_id 失败: {}", e)))?;
+
+    let artifact = store::find_artifact_by_id(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?
+        .ok_or_else(|| GBrainError::PageNotFound(format!("artifact {} 不存在", artifact_id)))?;
+
+    let payload = KbProcessPayload {
+        kind: "kb_process_document".to_string(),
+        document_id: kb_doc_id,
+        library_id,
+        processing_run_id: run_id,
+        storage_path: artifact.storage_path.clone(),
+        extension: artifact.extension.clone(),
+    };
+    let payload_json = serde_json::to_string(&payload)
+        .map_err(|e| GBrainError::Serialization(format!("序列化 KB job payload 失败: {}", e)))?;
+    conn.execute(
+        "INSERT INTO jobs (job_type, payload, status, priority, created_at)
+         VALUES ('kb_process_document', ?1, 'pending', 0, datetime('now'))",
+        params![payload_json],
+    )
+    .map_err(|e| GBrainError::Database(format!("重新入队 KB job 失败: {}", e)))?;
+    let job_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "UPDATE kb_documents SET job_id = ?1 WHERE id = ?2",
+        params![job_id.to_string(), kb_doc_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("更新 KB document job_id 失败: {}", e)))?;
+
+    let proj_ref = format!("kb_document:{}", kb_doc_id);
+    let now = now_str();
+    let proj = ArtifactProjection {
+        id: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        artifact_id,
+        occurrence_id: Some(occurrence_id),
+        projection_type: ProjectionType::KbDocument.to_string(),
+        projection_key: proj_key.to_string(),
+        projection_ref: proj_ref.clone(),
+        status: "active".to_string(),
+        version_hash: String::new(),
+        stale_reason: String::new(),
+        metadata_json: format!(
+            "{{\"kb_document_id\": {}, \"job_id\": {}}}",
+            kb_doc_id, job_id
+        ),
+        superseded_by: None,
+    };
+
+    let _proj_id = store::insert_projection(conn, &proj)
+        .map_err(|e| GBrainError::Database(format!("插入 KB 投影失败: {}", e)))?;
+
+    info!(
+        "复用 kb_document={}, 创建新投影，重新入队 KB job: job_id={}",
+        kb_doc_id, job_id
+    );
+
+    Ok(proj_ref)
+}
+
 /// 创建 KB 投影
 ///
 /// 在 artifact_projections 表中记录 artifact -> kb_document 的映射，
 /// 同时创建 kb_documents 记录（source_type='artifact'）并入队 KB 处理 job。
 /// 返回 projection_ref（格式: kb_document:{id}）。
+///
+/// 修复：reprocess 先标 stale 后调此函数，旧投影 stale 后 find_projection_by_key
+/// 只查 active 找不到，走新建 kb_documents 撞唯一索引。现在先查 active，
+/// 再查不限状态（含 stale），复用 stale 投影的 kb_document 并重新激活。
 pub fn create_kb_projection(
     conn: &Connection,
     artifact_id: i64,
@@ -24,42 +110,85 @@ pub fn create_kb_projection(
 ) -> Result<String> {
     let proj_key = format!("library:{}", library_id);
 
-    // 检查是否已存在投影 — 用 artifact_id + projection_key 去重
-    // 修复：之前只按 projection_type + projection_key 查，没有限定 artifact_id，
-    // 同一 library 下所有 artifact 的 key 都是 library:{id}，第二个文件会
-    // 复用第一个的 kb_document，不会创建自己的 KB 文档
-    let existing = store::find_projection_by_key(conn, artifact_id, "kb_document", &proj_key)
-        .map_err(|e| GBrainError::Database(format!("查找 KB 投影失败: {}", e)))?;
+    // 1. 先查 active 投影（快速路径）
+    let existing_active =
+        store::find_projection_by_key(conn, artifact_id, "kb_document", &proj_key)
+            .map_err(|e| GBrainError::Database(format!("查找 KB 投影失败: {}", e)))?;
 
-    if let Some(existing) = existing {
-        if existing.status == "active" {
-            if existing.occurrence_id == Some(occurrence_id) {
-                debug!(
-                    "KB 投影已存在且 occurrence_id 未变，跳过创建: artifact_id={}, key={}",
-                    artifact_id, proj_key
-                );
-                return Ok(existing.projection_ref.clone());
-            }
-            // 修复：occurrence_id 不同时，复用旧 kb_document（同 hash = 同内容），
-            // 只创建新 projection 行和 KB job，避免撞 kb_documents 唯一索引
-            // (library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL。
-            // 之前直接 INSERT 新 kb_document，同 hash 重传会失败，
-            // insert_projection supersede 逻辑根本执行不到。
-            if let Some(kb_doc_id) = existing
-                .projection_ref
-                .strip_prefix("kb_document:")
-                .and_then(|s| s.parse::<i64>().ok())
-            {
-                // 重新入队 KB 处理 job，让新 promotion_policy 生效
-                let run_id = new_run_id();
-                // 更新 kb_documents 的 processing_run_id 和状态为 queued
+    if let Some(existing) = existing_active {
+        if existing.occurrence_id == Some(occurrence_id) {
+            debug!(
+                "KB 投影已存在且 occurrence_id 未变，跳过创建: artifact_id={}, key={}",
+                artifact_id, proj_key
+            );
+            return Ok(existing.projection_ref.clone());
+        }
+        // occurrence_id 不同时，复用旧 kb_document（同 hash = 同内容），
+        // 只创建新 projection 行和 KB job，避免撞 kb_documents 唯一索引
+        if let Some(kb_doc_id) = existing
+            .projection_ref
+            .strip_prefix("kb_document:")
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            return reuse_kb_doc_and_enqueue(
+                conn,
+                artifact_id,
+                occurrence_id,
+                library_id,
+                kb_doc_id,
+                &proj_key,
+            );
+        }
+    }
+
+    // 2. 查 stale 状态的投影（修复 reprocess 场景：旧投影已 stale）
+    // 复用 stale 投影的 kb_document，避免撞 kb_documents 唯一索引
+    // 修复 P3：限制只查 status='stale'，不查 superseded/orphaned，
+    // 防止把历史行重新激活。superseded/orphaned 的投影不应被复活。
+    let existing_stale =
+        store::find_projection_by_key_any_status(conn, artifact_id, "kb_document", &proj_key)
+            .map_err(|e| GBrainError::Database(format!("查找 KB 投影(不限状态)失败: {}", e)))?
+            .filter(|p| p.status == "stale");
+
+    if let Some(stale_proj) = existing_stale {
+        if let Some(doc_id) = stale_proj
+            .projection_ref
+            .strip_prefix("kb_document:")
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            // 修复 P3：先确认 kb_documents 是否存在，再决定是否激活旧 projection。
+            // 如果 KB doc 已被 purge 或直接删除，激活旧 projection 会产生
+            // 指向不存在 kb_document:{id} 的 active projection。
+            // 此时不应激活旧 projection，改为走新建 kb_documents 路径。
+            let doc_exists: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM kb_documents WHERE id = ?1",
+                    rusqlite::params![doc_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+
+            if doc_exists {
+                // KB doc 存在：重新激活 stale 投影，更新 occurrence_id，清空 superseded_by
+                // 修复 P3：复活时同步清 superseded_by=NULL，避免残留旧 supersede 链
                 conn.execute(
-                    "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', updated_at = datetime('now') WHERE id = ?2",
-                    params![run_id, kb_doc_id],
+                    "UPDATE artifact_projections
+                     SET status = 'active', stale_reason = '', superseded_by = NULL,
+                         updated_at = datetime('now'), occurrence_id = ?1
+                     WHERE id = ?2",
+                    rusqlite::params![occurrence_id, stale_proj.id],
+                )
+                .map_err(|e| GBrainError::Database(format!("重新激活 KB 投影失败: {}", e)))?;
+
+                let run_id = new_run_id();
+                // 修复 P1：复用已删除的 kb_document 时必须同时清 deleted_at，
+                // 否则后续查询用 d.deleted_at IS NULL 过滤时搜不到。
+                conn.execute(
+                    "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
+                    rusqlite::params![run_id, doc_id],
                 )
                 .map_err(|e| GBrainError::Database(format!("更新 KB document run_id 失败: {}", e)))?;
 
-                // 查找 artifact 信息用于构建 job payload
                 let artifact = store::find_artifact_by_id(conn, artifact_id)
                     .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?
                     .ok_or_else(|| {
@@ -68,7 +197,7 @@ pub fn create_kb_projection(
 
                 let payload = KbProcessPayload {
                     kind: "kb_process_document".to_string(),
-                    document_id: kb_doc_id,
+                    document_id: doc_id,
                     library_id,
                     processing_run_id: run_id,
                     storage_path: artifact.storage_path.clone(),
@@ -80,52 +209,32 @@ pub fn create_kb_projection(
                 conn.execute(
                     "INSERT INTO jobs (job_type, payload, status, priority, created_at)
                      VALUES ('kb_process_document', ?1, 'pending', 0, datetime('now'))",
-                    params![payload_json],
+                    rusqlite::params![payload_json],
                 )
                 .map_err(|e| GBrainError::Database(format!("重新入队 KB job 失败: {}", e)))?;
                 let job_id = conn.last_insert_rowid();
 
-                // 更新 kb_documents 的 job_id
                 conn.execute(
                     "UPDATE kb_documents SET job_id = ?1 WHERE id = ?2",
-                    params![job_id.to_string(), kb_doc_id],
+                    rusqlite::params![job_id.to_string(), doc_id],
                 )
                 .map_err(|e| {
                     GBrainError::Database(format!("更新 KB document job_id 失败: {}", e))
                 })?;
 
-                // 创建新投影行（insert_projection 会自动标记旧行为 superseded）
-                let proj_ref = format!("kb_document:{}", kb_doc_id);
-                let now = now_str();
-                let proj = ArtifactProjection {
-                    id: 0,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                    artifact_id,
-                    occurrence_id: Some(occurrence_id),
-                    projection_type: ProjectionType::KbDocument.to_string(),
-                    projection_key: proj_key.clone(),
-                    projection_ref: proj_ref.clone(),
-                    status: "active".to_string(),
-                    version_hash: String::new(),
-                    stale_reason: String::new(),
-                    metadata_json: format!(
-                        "{{\"kb_document_id\": {}, \"job_id\": {}}}",
-                        kb_doc_id, job_id
-                    ),
-                    superseded_by: None,
-                };
-
-                let _proj_id = store::insert_projection(conn, &proj)
-                    .map_err(|e| GBrainError::Database(format!("插入 KB 投影失败: {}", e)))?;
-
                 info!(
-                    "重复上传：复用 kb_document={}, 创建新投影，重新入队 KB job: job_id={}",
-                    kb_doc_id, job_id
+                    "reprocess 复用 stale KB 投影: artifact_id={}, kb_doc_id={}, job_id={}",
+                    artifact_id, doc_id, job_id
                 );
 
-                return Ok(proj_ref);
+                return Ok(stale_proj.projection_ref);
             }
+            // KB doc 不存在（已被 purge）：不激活旧 projection，
+            // 走新建 kb_documents 路径，让下面的代码创建新的 KB doc 和投影。
+            info!(
+                "stale KB 投影的 kb_document={} 已不存在(purge)，走新建路径: artifact_id={}",
+                doc_id, artifact_id
+            );
         }
     }
 
@@ -370,7 +479,11 @@ pub fn mark_shadow_projection_stale(
 /// 标记所有投影为过期（artifact 被删除时调用）
 ///
 /// 返回受影响的投影数量
-pub fn mark_all_projections_stale(conn: &Connection, artifact_id: i64, reason: &str) -> Result<u64> {
+pub fn mark_all_projections_stale(
+    conn: &Connection,
+    artifact_id: i64,
+    reason: &str,
+) -> Result<u64> {
     let projections = store::find_projections_by_artifact(conn, artifact_id)
         .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
 
@@ -441,6 +554,34 @@ pub fn find_all_kb_document_ids(conn: &Connection, artifact_id: i64) -> Result<V
     }
 
     Ok(ids)
+}
+
+/// 查找 restore 操作应恢复的 KB document ID（dedup）
+///
+/// 修复 P2：restore 只恢复 stale_reason='artifact_deleted' 的 projection，
+/// 不恢复 detach/reprocess/superseded 主动标记的 stale 投影对应的 KB doc。
+/// 与 reactivate_projections_by_artifact 的恢复范围对齐，避免误恢复。
+/// 返回的 ID 列表已 dedup（同一 kb_document 可能被多个 projection 引用）。
+pub fn find_kb_document_ids_for_restore(conn: &Connection, artifact_id: i64) -> Result<Vec<i64>> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
+
+    // 只取 stale_reason='artifact_deleted' 的 KB projection，与 reactivate 范围对齐
+    let mut ids = std::collections::HashSet::new();
+    for proj in projections {
+        if proj.projection_type == "kb_document"
+            && proj.status == "stale"
+            && proj.stale_reason == "artifact_deleted"
+        {
+            if let Some(id_str) = proj.projection_ref.strip_prefix("kb_document:") {
+                if let Ok(id) = id_str.parse::<i64>() {
+                    ids.insert(id);
+                }
+            }
+        }
+    }
+
+    Ok(ids.into_iter().collect())
 }
 
 /// 投影垃圾回收结果
@@ -727,22 +868,20 @@ pub fn mark_projections_stale_by_occurrence(
     Ok(count)
 }
 
-/// 恢复指定 artifact 的所有 stale 投影（restore 操作）
+/// 恢复指定 artifact 的因 delete 而变 stale 的投影（restore 操作）
 ///
-/// 将 artifact 下所有 stale 投影重新标记为 active
-pub fn reactivate_projections_by_artifact(
-    conn: &Connection,
-    artifact_id: i64,
-) -> Result<u64> {
+/// 修复：只恢复 stale_reason='artifact_deleted' 的投影，
+/// 不恢复 detach/reprocess 主动标记的 stale 投影，
+/// 避免误恢复用户主动解除的关联。
+pub fn reactivate_projections_by_artifact(conn: &Connection, artifact_id: i64) -> Result<u64> {
     let count = conn
         .execute(
             "UPDATE artifact_projections
              SET status = 'active', stale_reason = '', updated_at = datetime('now')
-             WHERE artifact_id = ?1 AND status = 'stale'",
+             WHERE artifact_id = ?1 AND status = 'stale' AND stale_reason = 'artifact_deleted'",
             params![artifact_id],
         )
-        .map_err(|e| GBrainError::Database(format!("恢复投影失败: {}", e)))?
-        as u64;
+        .map_err(|e| GBrainError::Database(format!("恢复投影失败: {}", e)))? as u64;
 
     Ok(count)
 }

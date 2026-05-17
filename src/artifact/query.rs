@@ -549,9 +549,10 @@ fn parse_timeline_payload(payload: &str) -> (String, String) {
 
 /// 健康检查 — 检查 artifact 投影一致性
 pub fn check_artifact_health(conn: &Connection) -> Result<ArtifactHealthReport> {
-    let total_artifacts = store::count_active_artifacts(conn)
-        .map_err(|e| GBrainError::Database(format!("统计 artifact 失败: {}", e)))?;
-    let active_artifacts = total_artifacts;
+    let total_artifacts = store::count_total_artifacts(conn)
+        .map_err(|e| GBrainError::Database(format!("统计 artifact 总数失败: {}", e)))?;
+    let active_artifacts = store::count_active_artifacts(conn)
+        .map_err(|e| GBrainError::Database(format!("统计活跃 artifact 失败: {}", e)))?;
 
     let orphan_projections = store::find_orphan_projections(conn)
         .map_err(|e| GBrainError::Database(format!("查找孤立投影失败: {}", e)))?
@@ -593,26 +594,52 @@ pub fn check_artifact_health(conn: &Connection) -> Result<ArtifactHealthReport> 
             severity: "warning".to_string(),
             issue_type: "pending_candidates".to_string(),
             description: format!("{} 个候选变更待审核", pending_candidates),
-            suggestion: "运行 promotion list --status pending 查看并审核".to_string(),
+            suggestion: "运行 artifact review list --status pending 查看并审核".to_string(),
         });
     }
 
-    // 检查 artifact 文件完整性
-    let artifacts = store::list_active_artifacts(conn, 100, 0)
-        .map_err(|e| GBrainError::Database(format!("列出 artifact 失败: {}", e)))?;
-    for artifact in &artifacts {
-        let path = std::path::PathBuf::from(&artifact.storage_path);
-        if !path.exists() {
-            issues.push(HealthIssue {
-                severity: "error".to_string(),
-                issue_type: "missing_artifact_file".to_string(),
-                description: format!(
-                    "Artifact {} 文件不存在: {}",
-                    artifact.artifact_uid, artifact.storage_path
-                ),
-                suggestion: "检查 artifact store 目录是否完整".to_string(),
-            });
+    // 检查 artifact 文件完整性（分页全量检查）
+    let page_size = 500;
+    let mut offset = 0;
+    loop {
+        let artifacts = store::list_active_artifacts(conn, page_size, offset)
+            .map_err(|e| GBrainError::Database(format!("列出 artifact 失败: {}", e)))?;
+        if artifacts.is_empty() {
+            break;
         }
+        for artifact in &artifacts {
+            let path = std::path::PathBuf::from(&artifact.storage_path);
+            if !path.exists() {
+                issues.push(HealthIssue {
+                    severity: "error".to_string(),
+                    issue_type: "missing_artifact_file".to_string(),
+                    description: format!(
+                        "Artifact {} 文件不存在: {}",
+                        artifact.artifact_uid, artifact.storage_path
+                    ),
+                    suggestion: "检查 artifact store 目录是否完整".to_string(),
+                });
+            }
+        }
+        offset += page_size;
+    }
+
+    // 检查 KB 作业卡住（超过 24 小时仍在 queued/processing）
+    let stale_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM kb_documents WHERE document_status IN ('queued', 'processing')
+             AND updated_at < datetime('now', '-24 hours') AND deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if stale_jobs > 0 {
+        issues.push(HealthIssue {
+            severity: "warning".to_string(),
+            issue_type: "stale_kb_jobs".to_string(),
+            description: format!("{} KB 文档处理作业超过 24 小时未完成", stale_jobs),
+            suggestion: "检查 KB worker 是否正常运行".to_string(),
+        });
     }
 
     Ok(ArtifactHealthReport {

@@ -8,19 +8,20 @@ use gbrain_core::config::Config;
 #[cfg(feature = "admin-tools")]
 use gbrain_core::embedding::Embedder;
 use gbrain_core::engine::BrainEngine;
-use gbrain_core::error::Result;
 /// 错误类型（admin-tools）
 #[cfg(feature = "admin-tools")]
 use gbrain_core::error::GBrainError;
+use gbrain_core::error::Result;
 use gbrain_core::lint::{lint_pages, LintOpts};
 use gbrain_core::logging;
 use gbrain_core::mcp::McpServer;
-use gbrain_core::operations::{OpContext, Operations};
 /// 提取模式（admin-tools）
 #[cfg(feature = "admin-tools")]
 use gbrain_core::operations::ExtractMode;
+use gbrain_core::operations::{OpContext, Operations};
 use gbrain_core::sqlite_engine::SqliteEngine;
-use gbrain_core::types::*;
+#[cfg(feature = "admin-tools")]
+use gbrain_core::types::PageFilters;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
@@ -183,6 +184,13 @@ enum Commands {
     /// Get brain health
     Health,
 
+    /// 输出 MCP 工具定义 JSON（默认仅 artifact_* facade，--all 包含内部工具）
+    ToolsJson {
+        /// 包含内部工具（kb_*、promotion_*、projection_*）
+        #[arg(long)]
+        all: bool,
+    },
+
     /// P2-4: Diagnose brain health (mirrors TS gbrain doctor)
     Doctor {
         /// Fast mode — skip expensive checks
@@ -314,7 +322,8 @@ enum Commands {
         link_type: Option<String>,
     },
 
-    /// Code index and symbol graph operations
+    /// Code index and symbol graph operations（admin-tools）
+    #[cfg(feature = "admin-tools")]
     Code {
         #[command(subcommand)]
         command: CodeCommands,
@@ -335,7 +344,8 @@ enum Commands {
         mode: String,
     },
 
-    /// Run KB document processing worker (claim jobs from queue, process, complete/fail)
+    /// Run KB document processing worker（admin-tools）
+    #[cfg(feature = "admin-tools")]
     KbWorker {
         /// Run once and exit (default: loop continuously)
         #[arg(long)]
@@ -798,6 +808,7 @@ enum FileCommands {
     },
 }
 
+#[cfg(feature = "admin-tools")]
 #[derive(Subcommand)]
 enum CodeCommands {
     /// Rebuild code chunks and code edges for a page
@@ -894,11 +905,15 @@ pub enum ArtifactCommands {
         #[arg(long, group = "input")]
         file: Option<String>,
         /// 意图: memory(默认), evidence, promote
-        #[arg(long, default_value = "memory")]
-        intent: String,
+        /// P1-2 修复：改为 Option，未指定时传 None，让 artifact_default_intent 配置生效
+        #[arg(long)]
+        intent: Option<String>,
         /// 仅预览路由计划
         #[arg(long)]
         dry_run: bool,
+        /// 强制覆盖已被人工修改的页面（P1 修复：默认不覆盖人工修改的页面）
+        #[arg(long)]
+        force: bool,
     },
     /// 上传文件作为知识源
     Upload {
@@ -1455,6 +1470,23 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        Commands::ToolsJson { all } => {
+            let tools = gbrain_core::mcp::tool_defs::build_tool_defs_with_internal(
+                all || config.expose_internal_tools,
+            );
+            let tools_json: Vec<serde_json::Value> = tools
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "inputSchema": t.input_schema,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&tools_json)?);
+        }
+
         // P2-4: Doctor command — comprehensive diagnostics (mirrors TS gbrain doctor)
         Commands::Doctor { fast } => {
             info!("=== gbrain doctor ===");
@@ -1919,6 +1951,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
         }
 
+        #[cfg(feature = "admin-tools")]
         Commands::Code { command } => match command {
             CodeCommands::Reindex { slug } => {
                 let count = ops.reindex_code_page(&slug)?;
@@ -3056,12 +3089,17 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 file,
                 intent,
                 dry_run,
+                force,
             } => {
                 // 读取内容：优先从文件读取，否则使用直接输入
                 let page_content = if let Some(ref path) = file {
                     let file_path = std::path::PathBuf::from(path);
                     // 安全校验：文件路径必须在工作目录内
-                    gbrain_core::security::validate_upload_path(&file_path, false, &ops.ctx.working_dir)?;
+                    gbrain_core::security::validate_upload_path(
+                        &file_path,
+                        false,
+                        &ops.ctx.working_dir,
+                    )?;
                     info!(path = %path, "从文件读取内容");
                     std::fs::read_to_string(&file_path)?
                 } else {
@@ -3075,22 +3113,32 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 }
 
                 // 委托给 ArtifactService.put_memory
+                // P1-2 修复：intent 改为 Option，未指定时传 None，
+                // 让 artifact_default_intent 配置生效
                 let svc = ops.artifact_service();
                 let result = svc.put_memory(
                     &slug,
                     &page_content,
                     title.as_deref(),
-                    Some(intent.as_str()),
+                    intent.as_deref(),
                     dry_run,
+                    force,
                 )?;
 
                 if cli.json {
                     info!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
                     if dry_run {
-                        info!("Artifact put 预览: {}", serde_json::to_string_pretty(&result)?);
+                        info!(
+                            "Artifact put 预览: {}",
+                            serde_json::to_string_pretty(&result)?
+                        );
                     } else {
-                        info!("Artifact put 完成: slug={}, 结果={}", slug, serde_json::to_string_pretty(&result)?);
+                        info!(
+                            "Artifact put 完成: slug={}, 结果={}",
+                            slug,
+                            serde_json::to_string_pretty(&result)?
+                        );
                     }
                 }
             }
@@ -3106,19 +3154,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 dry_run,
             } => {
                 let file_path = PathBuf::from(&path);
-                if !file_path.exists() {
-                    error!(path = %path, "文件不存在");
-                    std::process::exit(1);
-                }
 
-                // 委托给现有 upload 逻辑
-                let file_content = std::fs::read(&file_path)?;
-                let original_name = file_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
+                // 安全校验：复用 MCP 的 validate_upload_source
                 let upload_intent = match intent.to_lowercase().as_str() {
                     "auto" => gbrain_core::artifact::types::UploadIntent::Auto,
                     "evidence" | "document" => gbrain_core::artifact::types::UploadIntent::Document,
@@ -3128,15 +3165,56 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     _ => gbrain_core::artifact::types::UploadIntent::Auto,
                 };
 
-                let promotion_policy = promotion.as_ref().map(|p| match p.to_lowercase().as_str() {
-                    "none" => gbrain_core::artifact::types::PromotionPolicy::None,
-                    "shadow" => gbrain_core::artifact::types::PromotionPolicy::Shadow,
-                    "candidate" => gbrain_core::artifact::types::PromotionPolicy::Candidate,
-                    "auto-low-risk" | "auto_accept_low_risk" => {
-                        gbrain_core::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                let ext_for_route = file_path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let route_plan = gbrain_core::artifact::types::infer_route_plan(
+                    &ext_for_route, "", &upload_intent,
+                );
+
+                // 根据路由决定允许的扩展名
+                let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
+                if route_plan.to_file {
+                    for extra in ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp",
+                                  "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml"] {
+                        let s = extra.to_string();
+                        if !allowed_extensions.contains(&s) { allowed_extensions.push(s); }
                     }
-                    _ => gbrain_core::artifact::types::PromotionPolicy::Candidate,
-                });
+                }
+                let max_file_bytes = config.kb_max_file_size_mb * 1024 * 1024;
+
+                let validated_path = gbrain_core::kb::security::validate_upload_source(
+                    &file_path,
+                    false,
+                    &gbrain_core::config::Config::base_dir(),
+                    max_file_bytes,
+                    &allowed_extensions,
+                )?;
+
+                let file_content = std::fs::read(&validated_path)?;
+                let ext = validated_path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let _mime = gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
+
+                let original_name = validated_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let promotion_policy =
+                    promotion.as_ref().map(|p| match p.to_lowercase().as_str() {
+                        "none" => gbrain_core::artifact::types::PromotionPolicy::None,
+                        "shadow" => gbrain_core::artifact::types::PromotionPolicy::Shadow,
+                        "candidate" => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+                        "auto-low-risk" | "auto_accept_low_risk" => {
+                            gbrain_core::artifact::types::PromotionPolicy::AutoAcceptLowRisk
+                        }
+                        _ => gbrain_core::artifact::types::PromotionPolicy::Candidate,
+                    });
 
                 let input = gbrain_core::artifact::types::UploadSourceInput {
                     content: file_content,
@@ -3203,7 +3281,12 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         info!("  证据: {} | {:.3}", e.title, e.score);
                     }
                     for t in &result.timeline {
-                        info!("  时间线: {} | {} | {}", t.timestamp, t.description, t.slug.as_deref().unwrap_or(""));
+                        info!(
+                            "  时间线: {} | {} | {}",
+                            t.timestamp,
+                            t.description,
+                            t.slug.as_deref().unwrap_or("")
+                        );
                     }
                 }
             }
@@ -3217,12 +3300,11 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 } else {
                     for a in &artifacts {
                         info!(
-                            "  [{}] {} uid={} sha256={} size={} status={}",
-                            a.id,
-                            a.original_name,
-                            a.artifact_uid,
-                            &a.sha256[..16.min(a.sha256.len())],
-                            a.size_bytes,
+                            "  [{}] {} uid={} size={} status={}",
+                            a.slug,
+                            a.original_name.as_deref().unwrap_or("-"),
+                            a.uid,
+                            a.size_bytes.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
                             a.status
                         );
                     }
@@ -3235,69 +3317,26 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 include_projections,
                 include_sources,
             } => {
-                // 委托给 ArtifactService
                 let svc = ops.artifact_service();
-                let artifact = if id_or_uid.starts_with("art_") {
-                    svc.get_artifact_by_uid(&id_or_uid)?
-                } else {
-                    let id = id_or_uid.parse::<i64>().ok();
-                    match id {
-                        Some(id) => svc.get_artifact(id)?,
-                        None => None,
-                    }
-                };
-                match artifact {
-                    Some(a) => {
-                        info!("{}", serde_json::to_string_pretty(&a)?);
-                        if include_projections {
-                            let projections = ops.get_artifact_projections(a.id)?;
-                            for p in &projections {
-                                info!(
-                                    "  投影: {} key={} ref={} status={}",
-                                    p.projection_type, p.projection_key, p.projection_ref, p.status
-                                );
-                            }
-                        }
-                        if include_sources {
-                            let provenance = svc.get_provenance(&a.canonical_slug)?;
-                            for p in &provenance {
-                                info!(
-                                    "  来源: slug={} field={} hash={}",
-                                    p.brain_slug, p.brain_field, p.fact_hash
-                                );
-                            }
-                        }
+                let detail = svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
+                match detail {
+                    Some(d) => {
+                        info!("{}", serde_json::to_string_pretty(&d)?);
                     }
                     None => warn!("知识源 '{}' 未找到", id_or_uid),
                 }
             }
 
             ArtifactCommands::Delete { id_or_uid, dry_run } => {
-                // 解析 ID：支持数字 ID 或 UID
-                let artifact_id = if id_or_uid.starts_with("art_") {
-                    // UID 格式，需要先查询获取 ID
-                    match ops.get_artifact_by_uid(&id_or_uid)? {
-                        Some(a) => a.id,
-                        None => {
-                            warn!("知识源 '{}' 未找到", id_or_uid);
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    match id_or_uid.parse::<i64>() {
-                        Ok(id) => id,
-                        Err(_) => {
-                            warn!("无效的知识源标识: {}", id_or_uid);
-                            return Ok(());
-                        }
-                    }
-                };
+                let svc = ops.artifact_service();
 
                 if dry_run {
-                    info!("预览: 将软删除知识源 {}", artifact_id);
+                    let preview = svc.delete_artifact_dry_run(&id_or_uid)?;
+                    info!("{}", serde_json::to_string_pretty(&preview)?);
                 } else {
-                    ops.delete_artifact(artifact_id)?;
-                    info!("知识源 {} 已软删除", artifact_id);
+                    let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
+                    svc.delete_artifact(artifact_id)?;
+                    info!("知识源 {} 已软删除", id_or_uid);
                 }
             }
 
@@ -3332,7 +3371,9 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 } else {
                     info!(
                         "已恢复: artifact_id={} occurrences={} projections={}",
-                        result["artifact_id"], result["restored_occurrences"], result["restored_projections"]
+                        result["artifact_id"],
+                        result["restored_occurrences"],
+                        result["restored_projections"]
                     );
                 }
             }
@@ -3368,19 +3409,19 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 } => {
                     // 委托给 ArtifactService.list_suggested_changes
                     let svc = ops.artifact_service();
-                    let items = svc.list_suggested_changes(
-                        status.as_deref(),
-                        target.as_deref(),
-                        limit,
-                        0,
-                    )?;
+                    let items =
+                        svc.list_suggested_changes(status.as_deref(), target.as_deref(), limit, 0)?;
                     if cli.json {
                         info!("{}", serde_json::to_string_pretty(&items)?);
                     } else {
                         for item in &items {
                             info!(
                                 "  [{}] {} target={} risk={} summary={}",
-                                item.status, item.change_id, item.target_slug, item.risk_level, item.summary
+                                item.status,
+                                item.change_id,
+                                item.target_slug,
+                                item.risk_level,
+                                item.summary
                             );
                         }
                         info!("{} 建议变更", items.len());
@@ -3398,7 +3439,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     // 委托给 ArtifactService.apply_suggested_change
                     let svc = ops.artifact_service();
                     let result = svc.apply_suggested_change(change_id)?;
-                    info!("建议变更 {} 已应用", result.id);
+                    info!("建议变更 {} 已应用", result.change_id);
                 }
                 ReviewCommands::Reject { change_id, reason } => {
                     // 委托给 ArtifactService.reject_suggested_change
@@ -3410,7 +3451,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         notes: reason,
                     };
                     let result = svc.reject_suggested_change(input)?;
-                    info!("建议变更 {} 已拒绝", result.id);
+                    info!("建议变更 {} 已拒绝", result.change_id);
                 }
                 ReviewCommands::Rollback { change_id } => {
                     // 委托给 ArtifactService.rollback_suggested_change
@@ -3482,12 +3523,10 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         info!("{} 个页面", pages.len());
                     }
                 }
-                BrainDevCommands::GetPage { slug } => {
-                    match engine.get_page(&slug)? {
-                        Some(page) => info!("{}", serde_json::to_string_pretty(&page)?),
-                        None => warn!("页面 '{}' 未找到", slug),
-                    }
-                }
+                BrainDevCommands::GetPage { slug } => match engine.get_page(&slug)? {
+                    Some(page) => info!("{}", serde_json::to_string_pretty(&page)?),
+                    None => warn!("页面 '{}' 未找到", slug),
+                },
                 BrainDevCommands::ListLinks { slug } => {
                     let links = engine.get_links(&slug)?;
                     if cli.json {
@@ -3501,23 +3540,36 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 }
             },
             DevCommands::Projection { command } => match command {
-                ProjectionDevCommands::List { artifact, status, limit } => {
+                ProjectionDevCommands::List {
+                    artifact,
+                    status,
+                    limit,
+                } => {
                     let conn = engine.connection()?;
                     let projections = if let Some(aid) = artifact {
                         gbrain_core::artifact::store::find_projections_by_artifact(conn, aid)
                             .map_err(|e| gbrain_core::error::GBrainError::Database(e.to_string()))?
                     } else {
                         let count = gbrain_core::artifact::store::count_active_artifacts(conn)?;
-                        let artifacts = gbrain_core::artifact::store::list_active_artifacts(conn, count.min(limit), 0)?;
+                        let artifacts = gbrain_core::artifact::store::list_active_artifacts(
+                            conn,
+                            count.min(limit),
+                            0,
+                        )?;
                         let mut all = Vec::new();
                         for a in &artifacts {
-                            let projs = gbrain_core::artifact::store::find_projections_by_artifact(conn, a.id)
-                                .map_err(|e| gbrain_core::error::GBrainError::Database(e.to_string()))?;
+                            let projs = gbrain_core::artifact::store::find_projections_by_artifact(
+                                conn, a.id,
+                            )
+                            .map_err(|e| {
+                                gbrain_core::error::GBrainError::Database(e.to_string())
+                            })?;
                             all.extend(projs);
                         }
                         all
                     };
-                    let filtered: Vec<_> = projections.into_iter()
+                    let filtered: Vec<_> = projections
+                        .into_iter()
                         .filter(|p| status.as_deref().is_none_or(|s| p.status == s))
                         .take(limit as usize)
                         .collect();
@@ -3525,13 +3577,26 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         info!("{}", serde_json::to_string_pretty(&filtered)?);
                     } else {
                         for p in &filtered {
-                            info!("  [{}] {} key={} ref={} status={}", p.id, p.projection_type, p.projection_key, p.projection_ref, p.status);
+                            info!(
+                                "  [{}] {} key={} ref={} status={}",
+                                p.id,
+                                p.projection_type,
+                                p.projection_key,
+                                p.projection_ref,
+                                p.status
+                            );
                         }
                         info!("{} 个投影", filtered.len());
                     }
                 }
-                ProjectionDevCommands::Gc { stale_days, dry_run } => {
-                    let ops = gbrain_core::operations::Operations::new(&engine, gbrain_core::operations::OpContext::default());
+                ProjectionDevCommands::Gc {
+                    stale_days,
+                    dry_run,
+                } => {
+                    let ops = gbrain_core::operations::Operations::new(
+                        &engine,
+                        gbrain_core::operations::OpContext::default(),
+                    );
                     let result = ops.gc_orphan_projections(stale_days, dry_run)?;
                     if cli.json {
                         info!("{}", serde_json::to_string_pretty(&result)?);
@@ -3544,6 +3609,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             },
         },
 
+        #[cfg(feature = "admin-tools")]
         Commands::KbWorker { once, interval } => {
             if once {
                 let processed = gbrain_core::kb::run_kb_worker_once(&engine, config)?;

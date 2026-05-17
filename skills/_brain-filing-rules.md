@@ -79,13 +79,13 @@ Every ingested item should have its raw source preserved for provenance.
 
 **Upload command:**
 ```bash
-gbrain file upload <file> --page <page-slug>
+gbrain artifact upload <file> --page <page-slug>
 ```
 
 **Accessing stored files:**
 ```bash
-gbrain file list <page-slug>
-gbrain file url <storage-path>
+gbrain artifact list
+gbrain artifact get <uid>
 ```
 
 This ensures any derived brain page can be traced back to its original source,
