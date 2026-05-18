@@ -15,13 +15,16 @@ triggers:
   - "code graph"
   - "reindex code"
 tools:
-  - code_def
-  - code_refs
-  - search_code_chunks
-  - get_callers
-  - get_callees
-  - get_code_edges_by_chunk
-  - reindex_code_page
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - code_def       # 代码定义查找
+  - code_refs      # 代码引用查找
+  - search_code_chunks # 代码块搜索
+  - get_callers    # 代码调用者查找
+  - get_callees    # 代码被调用者查找
+  - get_code_edges_by_chunk # 代码边查询
+  - reindex_code_page # 代码页重索引
+optional_internal_tools: true
 mutating: true
 writes_pages: false
 ---

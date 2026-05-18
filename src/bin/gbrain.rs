@@ -3094,14 +3094,39 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 // 读取内容：优先从文件读取，否则使用直接输入
                 let page_content = if let Some(ref path) = file {
                     let file_path = std::path::PathBuf::from(path);
-                    // 安全校验：文件路径必须在工作目录内
-                    gbrain_core::security::validate_upload_path(
+                    // P2-12 修复：artifact_put --file 使用与 put_memory 相同的 1MB 大小上限
+                    // 和文本文件专用扩展名白名单，而非 KB 上传的 50MB 上限和 KB 扩展名列表。
+                    // 之前使用 kb_max_file_size_mb（默认 50MB），导致 1MB~50MB 的文本文件
+                    // 先完整读入，再在 service 层被拒绝。
+                    let allowed_extensions: Vec<String> =
+                        gbrain_core::artifact::service::TEXT_FILE_EXTENSIONS
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                    let max_file_bytes =
+                        gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES;
+                    let validated_path = gbrain_core::kb::security::validate_upload_source(
                         &file_path,
                         false,
                         &ops.ctx.working_dir,
+                        max_file_bytes,
+                        &allowed_extensions,
                     )?;
-                    info!(path = %path, "从文件读取内容");
-                    std::fs::read_to_string(&file_path)?
+                    let ext = validated_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let raw_content = std::fs::read(&validated_path)?;
+                    let _mime =
+                        gbrain_core::kb::security::detect_and_validate_mime(&raw_content, &ext)?;
+                    // artifact_put 只接受文本内容，需要转为 String
+                    String::from_utf8(raw_content).map_err(|e| {
+                        gbrain_core::error::GBrainError::InvalidInput(format!(
+                            "文件内容不是有效 UTF-8 文本: {}",
+                            e
+                        ))
+                    })?
                 } else {
                     content.unwrap_or_default()
                 };
@@ -3165,21 +3190,28 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     _ => gbrain_core::artifact::types::UploadIntent::Auto,
                 };
 
-                let ext_for_route = file_path.extension()
+                let ext_for_route = file_path
+                    .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
                 let route_plan = gbrain_core::artifact::types::infer_route_plan(
-                    &ext_for_route, "", &upload_intent,
+                    &ext_for_route,
+                    "",
+                    &upload_intent,
                 );
 
                 // 根据路由决定允许的扩展名
                 let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
                 if route_plan.to_file {
-                    for extra in ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp",
-                                  "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml"] {
+                    for extra in [
+                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "zip", "tar", "gz",
+                        "json", "xml", "yaml", "yml", "toml",
+                    ] {
                         let s = extra.to_string();
-                        if !allowed_extensions.contains(&s) { allowed_extensions.push(s); }
+                        if !allowed_extensions.contains(&s) {
+                            allowed_extensions.push(s);
+                        }
                     }
                 }
                 let max_file_bytes = config.kb_max_file_size_mb * 1024 * 1024;
@@ -3193,11 +3225,13 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 )?;
 
                 let file_content = std::fs::read(&validated_path)?;
-                let ext = validated_path.extension()
+                let ext = validated_path
+                    .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                let _mime = gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
+                let _mime =
+                    gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
 
                 let original_name = validated_path
                     .file_name()
@@ -3304,7 +3338,9 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                             a.slug,
                             a.original_name.as_deref().unwrap_or("-"),
                             a.uid,
-                            a.size_bytes.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string()),
+                            a.size_bytes
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
                             a.status
                         );
                     }
@@ -3318,7 +3354,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 include_sources,
             } => {
                 let svc = ops.artifact_service();
-                let detail = svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
+                let detail =
+                    svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
                 match detail {
                     Some(d) => {
                         info!("{}", serde_json::to_string_pretty(&d)?);

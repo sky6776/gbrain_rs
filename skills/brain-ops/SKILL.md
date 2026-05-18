@@ -8,24 +8,28 @@ description: |
 triggers:
   - any brain read/write/lookup/citation
 tools:
-  - query
-  - get_page
-  - put_page
-  - add_link
-  - add_timeline_entry
-  - get_backlinks
-  - sync_brain
-  - artifact_put
-  - artifact_query
-  - artifact_upload
-  - artifact_list
-  - artifact_get
-  - artifact_review_list
-  - artifact_review_apply
-  - artifact_review_rollback
-  - code_def
-  - code_refs
-  - get_callers
+  - artifact_query  # 统一查询接口
+  - artifact_put    # 统一写入接口
+  - artifact_upload # 统一上传接口
+  - artifact_list   # 列表接口
+  - artifact_get    # 获取详情
+  - artifact_delete # 删除接口
+  - artifact_restore # 恢复接口
+  - artifact_review_list # 建议变更列表
+  - artifact_review_apply # 应用变更
+  - artifact_review_rollback # 回滚变更
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - add_link       # 旧链接接口
+  - add_timeline_entry # 旧时间线接口
+  - get_backlinks  # 旧反向链接接口
+  - sync_brain     # 旧同步接口
+  - code_def       # 代码定义查找
+  - code_refs      # 代码引用查找
+  - get_callers    # 代码调用者查找
+optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:

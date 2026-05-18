@@ -93,6 +93,32 @@ pub fn find_artifact_by_slug(
     }
 }
 
+/// P1-9 修复：按 canonical_slug 查找所有活跃原件
+///
+/// 冲突检测需要查找同 slug 下所有 artifact 的 brain_page_update 投影，
+/// 而非仅依赖 find_artifact_by_slug 返回的最新 artifact。
+/// 因为冲突分支的 pending artifact 没有 brain_page_update 投影，
+/// 但旧稳定 artifact 仍保留该投影作为冲突检测基线。
+pub fn find_artifacts_by_slug(
+    conn: &Connection,
+    slug: &str,
+) -> Result<Vec<SourceArtifact>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, artifact_uid, created_at, updated_at, last_seen_at,
+                sha256, original_name, extension, mime_type, size_bytes,
+                storage_path, canonical_slug, status, metadata_json,
+                deleted_at, purged_at
+         FROM source_artifacts WHERE canonical_slug = ?1 AND status = 'active' AND purged_at IS NULL
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = stmt.query_map(params![slug], row_to_source_artifact)?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 /// 插入新原件（write-if-absent 语义）
 pub fn insert_artifact(
     conn: &Connection,
@@ -377,6 +403,26 @@ pub fn insert_projection(
     Ok(conn.last_insert_rowid())
 }
 
+/// P2-11: 插入投影并返回自增 id，供 apply 时标记旧投影 superseded_by 使用
+pub fn insert_projection_returning_id(
+    conn: &Connection,
+    proj: &ArtifactProjection,
+) -> Result<i64, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO artifact_projections
+            (artifact_id, occurrence_id, projection_type, projection_key, projection_ref,
+             status, version_hash, stale_reason, metadata_json, superseded_by, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        rusqlite::params![
+            proj.artifact_id, proj.occurrence_id, proj.projection_type,
+            proj.projection_key, proj.projection_ref, proj.status,
+            proj.version_hash, proj.stale_reason, proj.metadata_json,
+            proj.superseded_by, proj.created_at, proj.updated_at
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 /// 按原件 ID 查找投影
 pub fn find_projections_by_artifact(
     conn: &Connection,
@@ -418,6 +464,46 @@ pub fn find_projection_by_ref(
         Some(row) => Ok(Some(row_to_artifact_projection(row)?)),
         None => Ok(None),
     }
+}
+
+/// P2-10 修复：按 slug 查找最新活跃 brain_page_update 投影的 version_hash
+///
+/// 冲突检测需要获取"最近一次成功写入稳定页面时的 page hash"作为基线。
+/// 旧方案遍历同 slug 所有 artifact 再取第一个非空 version_hash，
+/// 依赖 artifact 的 updated_at 间接排序，可能取到旧 hash 导致误判。
+/// 新方案直接按 artifact_projections.updated_at DESC, id DESC 排序，
+/// 确保取到最新已应用的 brain_page_update 投影。
+pub fn find_latest_page_update_hash_by_slug(
+    conn: &Connection,
+    slug: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    // brain_page_update 投影的 projection_ref 格式为 "brain_page:{slug}"
+    let projection_ref = format!("brain_page:{}", slug);
+    conn.query_row(
+        "SELECT p.version_hash
+         FROM artifact_projections p
+         JOIN source_artifacts a ON p.artifact_id = a.id
+         WHERE a.canonical_slug = ?1
+           AND a.status = 'active'
+           AND a.purged_at IS NULL
+           AND p.projection_type = 'brain_page_update'
+           AND p.projection_ref = ?2
+           AND p.status = 'active'
+           AND p.version_hash != ''
+         ORDER BY p.updated_at DESC, p.id DESC
+         LIMIT 1",
+        params![slug, projection_ref],
+        |row| row.get(0),
+    )
+    .map(Some)
+    .or_else(|e| {
+        // 查无结果时返回 None，其它错误仍返回
+        if e == rusqlite::Error::QueryReturnedNoRows {
+            Ok(None)
+        } else {
+            Err(e)
+        }
+    })
 }
 
 /// 按投影类型和引用查找投影（含历史行，按 created_at DESC 排列）
@@ -871,7 +957,11 @@ pub fn find_active_occurrences_by_artifact_and_slug(
 ///
 /// P1-3 修复：接收 reason 参数，detach 时写 'detached_by_user'，
 /// reprocess 时写 'reprocess_requested'，确保 restore 不会误恢复 detach 的 occurrence。
-pub fn stale_occurrence(conn: &Connection, occurrence_id: i64, reason: &str) -> Result<(), rusqlite::Error> {
+pub fn stale_occurrence(
+    conn: &Connection,
+    occurrence_id: i64,
+    reason: &str,
+) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE artifact_occurrences SET status = 'stale', stale_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
         params![reason, occurrence_id],
@@ -925,4 +1015,3 @@ pub fn count_total_artifacts(conn: &Connection) -> Result<i64, rusqlite::Error> 
         |row| row.get(0),
     )
 }
-

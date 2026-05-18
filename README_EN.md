@@ -41,7 +41,7 @@ No database or external services to configure — works out of the box. AI featu
 - **KB Subsystem** — Async five-stage document processing pipeline (parse → split → embed → RAPTOR → persist), RAPTOR recursive summarization tree, document upload and processing, multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext/code), semantic chunking (Savitzky-Golay smoothing + chunk_overlap overlap)
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact upload automatically routes to multiple projections (KB document / shadow page / candidate changes / file attachment / links / timeline), provenance audit ledger, candidate review & promotion workflow, version chain with rollback (Projection Supersede / Rollback), unified memory query (Memory Query, 4 strategies)
-- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server with 74 tools for AI agent integration
+- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade tools by default; full tool set available with internal tools enabled
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
@@ -571,7 +571,95 @@ gbrain promotion list --status applied
 
 ## CLI Command Parameters
 
-### `gbrain put`
+### `gbrain artifact put`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slug` | string | Yes | Target page slug (e.g., people/alice) |
+| `--title` | string | No | Page title (optional, inferred from slug by default) |
+| `--content` | string | No | Direct text content (alternative to --file) |
+| `--file` | path | No | Read content from file (alternative to --content) |
+| `--intent` | string | No | Intent: memory / evidence / promote (default memory) |
+| `--force` | flag | No | Force overwrite of human-edited pages |
+| `--dry-run` | flag | No | Return routing plan only, don't write |
+
+### `gbrain artifact upload`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | path | Yes | File path |
+| `--intent` | string | No | Upload intent: auto/document/attachment/memory/promote (default auto) |
+| `--target` | string | No | Target gbrain page slug (for promotion) |
+| `--page` | string | No | Target page slug (for file attachment) |
+| `--library-id` | integer | No | KB library ID |
+| `--folder-id` | integer | No | KB folder ID |
+| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk |
+| `--dry-run` | flag | No | Return routing plan only, don't execute |
+
+### `gbrain artifact query`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Query text |
+| `--mode` | string | No | Query mode: auto/memory/evidence/timeline/graph (default auto) |
+| `--limit` | integer | No | Max results (default 20) |
+| `--filter` | string | No | Filter by slug |
+| `--include-sources` | flag | No | Include source tracing |
+
+### `gbrain artifact list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `--limit` | integer | No | Max results |
+
+### `gbrain artifact get`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+
+### `gbrain artifact delete`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+| `--dry-run` | flag | No | Preview impact, don't delete |
+
+### `gbrain artifact restore`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id_or_uid` | string | Yes | Artifact ID or UID |
+
+### `gbrain artifact review list`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `--status` | string | No | Filter by status (pending/applied/rejected) |
+
+### `gbrain artifact review apply`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | string | Yes | Suggested change ID |
+
+### `gbrain artifact review reject`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | string | Yes | Suggested change ID |
+
+### `gbrain artifact review rollback`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `change_id` | string | Yes | Suggested change ID |
+
+### Admin/Legacy CLI Parameters (requires admin-tools feature)
+
+> The following commands require `--features admin-tools` to compile. Regular users should use `gbrain artifact put/query` instead.
+
+### `gbrain put` [ADMIN]
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -581,7 +669,7 @@ gbrain promotion list --status applied
 | `--file` | path | No | Read content from file |
 | `--page-type` | string | No | Page type (e.g., person, company) |
 
-### `gbrain query`
+### `gbrain query` [ADMIN]
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -594,7 +682,7 @@ gbrain promotion list --status applied
 | `--walk-depth` | integer | No | Code graph neighbor walk depth (0-2, default 0) |
 | `--expand` | flag | No | Enable LLM query expansion |
 
-### `gbrain upload`
+### `gbrain upload` [ADMIN]
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -608,7 +696,7 @@ gbrain promotion list --status applied
 | `--dry-run` | flag | No | Return routing plan only, don't execute |
 | `--json` | flag | No | Output as JSON |
 
-### `gbrain memory-query`
+### `gbrain memory-query` [ADMIN]
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1263,6 +1351,7 @@ The following tools are only available when `GBRAIN_EXPOSE_INTERNAL_TOOLS=true`:
 | `file` | string | No | Local file path (alternative to content) |
 | `title` | string | No | Page title (optional, inferred from slug by default) |
 | `intent` | string | No | Intent: memory / evidence / promote (default memory) |
+| `force` | boolean | No | Force overwrite of human-edited pages (default false, returns resolution=conflict on conflict) |
 | `dry_run` | boolean | No | Return routing plan only, don't write |
 
 ### `artifact_upload`

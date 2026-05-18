@@ -1,100 +1,117 @@
 {
-  "name": "gbrain-rs-skills",
-  "version": "0.2.0",
-  "conformance_version": "gbrain-rs",
-  "description": "Skills that are usable with the current gbrain_rs CLI/MCP surface",
+  "version": "1.0",
   "skills": [
     {
-      "name": "ingest",
-      "path": "ingest/SKILL.md",
-      "description": "Route text, links, notes, and meeting content to supported brain ingestion skills."
+      "id": "brain-ops",
+      "name": "Brain Operations",
+      "description": "核心脑图操作：查询、写入、链接、时间线、同步",
+      "tools": ["artifact_query", "artifact_put", "artifact_upload", "artifact_list", "artifact_get", "artifact_delete", "artifact_restore", "artifact_review_list", "artifact_review_apply", "artifact_review_rollback"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry", "get_backlinks", "sync_brain", "code_def", "code_refs", "get_callers"]
     },
     {
-      "name": "query",
-      "path": "query/SKILL.md",
-      "description": "Answer questions using gbrain_rs query, pages, graph, backlinks, and timeline."
+      "id": "citation-fixer",
+      "name": "Citation Fixer",
+      "description": "修复和标准化引用格式",
+      "tools": ["artifact_query", "artifact_put"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "list_pages"]
     },
     {
-      "name": "brain-ops",
-      "path": "brain-ops/SKILL.md",
-      "description": "Core read/write brain workflow using supported gbrain_rs tools."
+      "id": "enrich",
+      "name": "Enrich",
+      "description": "丰富和扩展现有页面内容",
+      "tools": ["artifact_put", "artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["get_page", "put_page", "query", "add_link", "add_timeline_entry", "get_backlinks"]
     },
     {
-      "name": "enrich",
-      "path": "enrich/SKILL.md",
-      "description": "Enrich person, company, concept, and source pages with links and timeline entries."
+      "id": "ingest",
+      "name": "Ingest",
+      "description": "导入外部内容到脑图",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry", "add_tag", "get_tags", "put_raw_data", "get_backlinks", "sync_brain"]
     },
     {
-      "name": "idea-ingest",
-      "path": "idea-ingest/SKILL.md",
-      "description": "Ingest links, articles, tweets, and ideas into brain pages."
+      "id": "meeting-ingestion",
+      "name": "Meeting Ingestion",
+      "description": "导入会议记录到脑图",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry"]
     },
     {
-      "name": "meeting-ingestion",
-      "path": "meeting-ingestion/SKILL.md",
-      "description": "Ingest meeting transcripts with attendee pages, links, and timeline updates."
+      "id": "query",
+      "name": "Query",
+      "description": "查询脑图内容",
+      "tools": ["artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "list_pages", "get_backlinks", "traverse_graph", "get_timeline"]
     },
     {
-      "name": "artifact-review",
-      "path": "artifact-review/SKILL.md",
-      "description": "Unified knowledge workflow: write memories, upload files, query with source tracing, review suggested changes, manage artifacts via artifact_* facade."
+      "id": "writing-mode",
+      "name": "Writing Mode",
+      "description": "专注写作模式：创建和编辑页面",
+      "tools": ["artifact_put", "artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["put_page", "get_page", "list_pages", "query"]
     },
     {
-      "name": "citation-fixer",
-      "path": "citation-fixer/SKILL.md",
-      "description": "Audit and fix citation formatting across brain pages."
+      "id": "daily-task-manager",
+      "name": "Daily Task Manager",
+      "description": "每日任务管理：查询和更新任务",
+      "tools": ["artifact_query", "artifact_put"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "add_timeline_entry"]
     },
     {
-      "name": "repo-architecture",
-      "path": "repo-architecture/SKILL.md",
-      "description": "Filing rules and directory conventions for new brain pages."
+      "id": "idea-ingest",
+      "name": "Idea Ingest",
+      "description": "导入想法到脑图",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "put_page", "file_upload"]
     },
     {
-      "name": "daily-task-manager",
-      "path": "daily-task-manager/SKILL.md",
-      "description": "Maintain a task list as a brain page."
+      "id": "migrate",
+      "name": "Migrate",
+      "description": "数据迁移和同步",
+      "tools": ["artifact_put", "artifact_query", "artifact_upload", "artifact_health"],
+      "optional_internal_tools": true,
+      "internal_tools": ["put_page", "get_page", "query", "add_link", "add_tag", "get_stats", "get_health", "sync_brain"]
     },
     {
-      "name": "reports",
-      "path": "reports/SKILL.md",
-      "description": "Save and load timestamped reports as brain pages."
+      "id": "reports",
+      "name": "Reports",
+      "description": "生成报告和摘要",
+      "tools": ["artifact_query", "artifact_put"],
+      "optional_internal_tools": true,
+      "internal_tools": ["get_page", "put_page", "query"]
     },
     {
-      "name": "migrate",
-      "path": "migrate/SKILL.md",
-      "description": "Migrate Markdown, CSV, JSON, and other note exports into gbrain_rs-supported pages."
+      "id": "repo-architecture",
+      "name": "Repo Architecture",
+      "description": "分析仓库架构",
+      "tools": ["artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["query", "get_page", "list_pages"]
     },
     {
-      "name": "kb-ops",
-      "path": "kb-ops/SKILL.md",
-      "description": "[INTERNAL] KB subsystem admin: manage libraries, documents, search profiles, health, backup/restore. Requires expose_internal_tools=true. For user-facing operations, use artifact-review skill."
+      "id": "autopilot",
+      "name": "Autopilot",
+      "description": "自动运维和健康检查",
+      "tools": ["artifact_health"],
+      "optional_internal_tools": true,
+      "internal_tools": ["get_stats", "get_health"]
     },
     {
-      "name": "promotion",
-      "path": "promotion/SKILL.md",
-      "description": "[DEPRECATED] Use artifact-review skill instead. Promotion candidates are now 'suggested changes' via artifact_review_* tools."
-    },
-    {
-      "name": "code-graph",
-      "path": "code-graph/SKILL.md",
-      "description": "Code knowledge graph: find definitions, trace references, explore call graphs, search code chunks, reindex code pages."
-    },
-    {
-      "name": "delete-restore",
-      "path": "delete-restore/SKILL.md",
-      "description": "Soft-delete lifecycle: delete pages safely, restore accidentally deleted pages, purge old deleted content."
-    },
-    {
-      "name": "writing-mode",
-      "path": "writing-mode/SKILL.md",
-      "description": "Writing quality control: choose writing mode (Strict/Lint/Off), run lint checks, auto-fix quality issues."
-    },
-    {
-      "name": "autopilot",
-      "path": "autopilot/SKILL.md",
-      "description": "Self-maintenance daemon and health diagnostics: autopilot, doctor, integrity, orphans, health monitoring."
+      "id": "code-graph",
+      "name": "Code Graph",
+      "description": "代码图谱：定义、引用、调用关系",
+      "tools": ["artifact_query"],
+      "optional_internal_tools": true,
+      "internal_tools": ["code_def", "code_refs", "search_code_chunks", "get_callers", "get_callees", "get_code_edges_by_chunk", "reindex_code_page"]
     }
-  ],
-  "resolver": "RESOLVER.md",
-  "conventions_dir": "conventions/"
+  ]
 }

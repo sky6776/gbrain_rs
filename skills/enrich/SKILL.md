@@ -12,14 +12,16 @@ triggers:
   - "who is this person"
   - "look up this company"
 tools:
-  - get_page
-  - put_page
-  - query
-  - add_link
-  - add_timeline_entry
-  - get_backlinks
-  - artifact_put
-  - artifact_query
+  - artifact_put    # 统一写入接口
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - query          # 旧查询接口
+  - add_link       # 旧链接接口
+  - add_timeline_entry # 旧时间线接口
+  - get_backlinks  # 旧反向链接接口
+optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:

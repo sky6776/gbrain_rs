@@ -1714,10 +1714,35 @@ impl McpServer {
                 } else if let Some(f) = arguments["file"].as_str() {
                     // 从文件读取内容
                     let file_path = std::path::PathBuf::from(f);
-                    // 安全校验：路径必须在 working_dir 内
-                    crate::security::validate_upload_path(&file_path, true, &ctx.working_dir)?;
-                    std::fs::read_to_string(&file_path).map_err(|e| {
+                    // P2-12 修复：artifact_put --file 使用与 put_memory 相同的 1MB 大小上限
+                    // 和文本文件专用扩展名白名单，而非 KB 上传的 50MB 上限和 KB 扩展名列表。
+                    // 之前使用 kb_max_file_size_mb（默认 50MB），导致 1MB~50MB 的文本文件
+                    // 先完整读入，再在 service 层被拒绝。
+                    let allowed_extensions: Vec<String> =
+                        crate::artifact::service::TEXT_FILE_EXTENSIONS
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                    let max_file_bytes = crate::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES;
+                    let validated_path = crate::kb::security::validate_upload_source(
+                        &file_path,
+                        true,
+                        &ctx.working_dir,
+                        max_file_bytes,
+                        &allowed_extensions,
+                    )?;
+                    let ext = validated_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let raw_content = std::fs::read(&validated_path).map_err(|e| {
                         GBrainError::FileError(format!("读取文件 {} 失败: {}", f, e))
+                    })?;
+                    let _mime = crate::kb::security::detect_and_validate_mime(&raw_content, &ext)?;
+                    // artifact_put 只接受文本内容，需要转为 String
+                    String::from_utf8(raw_content).map_err(|e| {
+                        GBrainError::InvalidInput(format!("文件内容不是有效 UTF-8 文本: {}", e))
                     })?
                 } else {
                     return Err(GBrainError::InvalidInput(
@@ -1891,7 +1916,8 @@ impl McpServer {
                 let include_sources = arguments["include_sources"].as_bool().unwrap_or(false);
 
                 let svc = ops.artifact_service();
-                let detail = svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
+                let detail =
+                    svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
 
                 match detail {
                     Some(d) => Ok(serde_json::to_value(d)?),
@@ -1910,9 +1936,9 @@ impl McpServer {
                 let svc = ops.artifact_service();
                 if dry_run {
                     // P1-5 修复：MCP dry_run 也使用 delete_artifact_dry_run 影响预览，
-                // 与 CLI 行为一致，让 MCP caller 能看到 occurrence/projection/KB/provenance 影响明细
-                let preview = svc.delete_artifact_dry_run(&id_or_uid)?;
-                Ok(serde_json::to_value(preview)?)
+                    // 与 CLI 行为一致，让 MCP caller 能看到 occurrence/projection/KB/provenance 影响明细
+                    let preview = svc.delete_artifact_dry_run(&id_or_uid)?;
+                    Ok(serde_json::to_value(preview)?)
                 } else {
                     let artifact_id = svc.resolve_artifact_id(&id_or_uid)?;
                     svc.delete_artifact(artifact_id)?;

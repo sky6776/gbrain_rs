@@ -10,7 +10,9 @@
 //! - Delete/restore lifecycle
 //! - Idempotent put
 
+use gbrain_core::artifact::promotion;
 use gbrain_core::artifact::service::ArtifactService;
+use gbrain_core::artifact::types::{CandidateType, ReviewCandidateInput, RiskLevel};
 use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::operations::OpContext;
@@ -23,7 +25,9 @@ fn make_engine() -> SqliteEngine {
     engine.init_schema().expect("init_schema");
     // Ensure jobs table exists (needed by KB document processing)
     let conn = engine.connection().expect("connection");
-    gbrain_core::jobs::JobQueue::new(&conn).init().expect("init_jobs");
+    gbrain_core::jobs::JobQueue::new(&conn)
+        .init()
+        .expect("init_jobs");
     engine
 }
 
@@ -55,15 +59,27 @@ fn tool_defs_default_only_artifact_tools() {
 
 #[test]
 fn internal_tools_blocked_when_expose_false() {
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool("upload_source"));
+    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
+        "upload_source"
+    ));
     assert!(gbrain_core::mcp::tool_defs::is_internal_tool("kb_search"));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool("promotion_list_candidates"));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool("memory_query"));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool("get_provenance"));
+    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
+        "promotion_list_candidates"
+    ));
+    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
+        "memory_query"
+    ));
+    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
+        "get_provenance"
+    ));
 
     // artifact_* tools are NOT internal
-    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool("artifact_put"));
-    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool("artifact_query"));
+    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool(
+        "artifact_put"
+    ));
+    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool(
+        "artifact_query"
+    ));
 }
 
 // --- Test 3: artifact_put creates artifact, occurrence, projection, page ---
@@ -74,19 +90,23 @@ fn artifact_put_creates_artifact_occurrence_projection_page() {
     let config = make_config();
     let svc = make_svc(&engine, &config);
 
-    let result = svc.put_memory(
-        "people/test-person",
-        "Test content about a person",
-        Some("Test Person"),
-        None,   // default intent = "memory"
-        false,  // not dry_run
-        false,  // not force
-    ).expect("put_memory should succeed");
+    let result = svc
+        .put_memory(
+            "people/test-person",
+            "Test content about a person",
+            Some("Test Person"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("put_memory should succeed");
 
     // Verify the result has artifact_id
     let obj = result.as_object().expect("result should be object");
-    assert!(obj.get("artifact_id").is_some() || obj.get("id").is_some(),
-        "result should contain artifact_id");
+    assert!(
+        obj.get("artifact_id").is_some() || obj.get("id").is_some(),
+        "result should contain artifact_id"
+    );
 
     // Verify page was created
     let page = engine.get_page("people/test-person").expect("get_page");
@@ -105,40 +125,61 @@ fn artifact_put_intent_routing() {
     let svc = make_svc(&engine, &config);
 
     // Test memory intent (default)
-    let memory_result = svc.put_memory(
-        "concepts/test-memory",
-        "Memory intent content",
-        None,
-        Some("memory"),
-        true, // dry_run
-        false, // not force
-    ).expect("dry_run memory");
+    let memory_result = svc
+        .put_memory(
+            "concepts/test-memory",
+            "Memory intent content",
+            None,
+            Some("memory"),
+            true,  // dry_run
+            false, // not force
+        )
+        .expect("dry_run memory");
     let mem_obj = memory_result.as_object().unwrap();
-    assert_eq!(mem_obj.get("intent").and_then(|v: &serde_json::Value| v.as_str()), Some("memory"));
+    assert_eq!(
+        mem_obj
+            .get("intent")
+            .and_then(|v: &serde_json::Value| v.as_str()),
+        Some("memory")
+    );
 
     // Test evidence intent
-    let evidence_result = svc.put_memory(
-        "concepts/test-evidence",
-        "Evidence intent content",
-        None,
-        Some("evidence"),
-        true, // dry_run
-        false, // not force
-    ).expect("dry_run evidence");
+    let evidence_result = svc
+        .put_memory(
+            "concepts/test-evidence",
+            "Evidence intent content",
+            None,
+            Some("evidence"),
+            true,  // dry_run
+            false, // not force
+        )
+        .expect("dry_run evidence");
     let ev_obj = evidence_result.as_object().unwrap();
-    assert_eq!(ev_obj.get("intent").and_then(|v: &serde_json::Value| v.as_str()), Some("evidence"));
+    assert_eq!(
+        ev_obj
+            .get("intent")
+            .and_then(|v: &serde_json::Value| v.as_str()),
+        Some("evidence")
+    );
 
     // Test promote intent
-    let promote_result = svc.put_memory(
-        "concepts/test-promote",
-        "Promote intent content",
-        None,
-        Some("promote"),
-        true, // dry_run
-        false, // not force
-    ).expect("dry_run promote");
+    let promote_result = svc
+        .put_memory(
+            "concepts/test-promote",
+            "Promote intent content",
+            None,
+            Some("promote"),
+            true,  // dry_run
+            false, // not force
+        )
+        .expect("dry_run promote");
     let prom_obj = promote_result.as_object().unwrap();
-    assert_eq!(prom_obj.get("intent").and_then(|v: &serde_json::Value| v.as_str()), Some("promote"));
+    assert_eq!(
+        prom_obj
+            .get("intent")
+            .and_then(|v: &serde_json::Value| v.as_str()),
+        Some("promote")
+    );
 
     // Route plans should differ
     let mem_plan = mem_obj.get("route_plan").unwrap();
@@ -146,17 +187,52 @@ fn artifact_put_intent_routing() {
     let prom_plan = prom_obj.get("route_plan").unwrap();
 
     // memory: to_brain=true, to_shadow=false
-    assert_eq!(mem_plan.get("to_brain").and_then(|v: &serde_json::Value| v.as_bool()), Some(true));
-    assert_eq!(mem_plan.get("to_shadow").and_then(|v: &serde_json::Value| v.as_bool()), Some(false));
+    assert_eq!(
+        mem_plan
+            .get("to_brain")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        mem_plan
+            .get("to_shadow")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(false)
+    );
 
     // evidence: to_brain=false, to_kb=true
-    assert_eq!(ev_plan.get("to_brain").and_then(|v: &serde_json::Value| v.as_bool()), Some(false));
-    assert_eq!(ev_plan.get("to_kb").and_then(|v: &serde_json::Value| v.as_bool()), Some(true));
+    assert_eq!(
+        ev_plan
+            .get("to_brain")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        ev_plan
+            .get("to_kb")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(true)
+    );
 
     // promote: to_brain=true, to_shadow=true, to_kb=true
-    assert_eq!(prom_plan.get("to_brain").and_then(|v: &serde_json::Value| v.as_bool()), Some(true));
-    assert_eq!(prom_plan.get("to_shadow").and_then(|v: &serde_json::Value| v.as_bool()), Some(true));
-    assert_eq!(prom_plan.get("to_kb").and_then(|v: &serde_json::Value| v.as_bool()), Some(true));
+    assert_eq!(
+        prom_plan
+            .get("to_brain")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        prom_plan
+            .get("to_shadow")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        prom_plan
+            .get("to_kb")
+            .and_then(|v: &serde_json::Value| v.as_bool()),
+        Some(true)
+    );
 }
 
 // --- Test 5: artifact_query include_sources ---
@@ -168,7 +244,15 @@ fn artifact_query_include_sources_returns_citations() {
     let svc = make_svc(&engine, &config);
 
     // First, put some content
-    svc.put_memory("people/query-test", "Query test content about someone", Some("Query Test"), None, false, false).expect("put_memory");
+    svc.put_memory(
+        "people/query-test",
+        "Query test content about someone",
+        Some("Query Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory");
 
     // Query with include_sources=true
     let input = gbrain_core::artifact::types::ArtifactQueryInput {
@@ -193,7 +277,16 @@ fn artifact_get_include_sources_queries_by_artifact_id() {
     let svc = make_svc(&engine, &config);
 
     // Put content
-    let put_result = svc.put_memory("people/get-test", "Get test content", Some("Get Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/get-test",
+            "Get test content",
+            Some("Get Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     // Extract artifact_id from put result
     let artifact_id = put_result
@@ -203,11 +296,13 @@ fn artifact_get_include_sources_queries_by_artifact_id() {
         .expect("should have artifact_id");
 
     // Get detail with sources
-    let detail = svc.get_artifact_detail(
-        &artifact_id.to_string(),
-        true,  // include_projections
-        true,  // include_sources
-    ).expect("get_artifact_detail");
+    let detail = svc
+        .get_artifact_detail(
+            &artifact_id.to_string(),
+            true, // include_projections
+            true, // include_sources
+        )
+        .expect("get_artifact_detail");
 
     assert!(detail.is_some(), "should find artifact by id");
     let detail = detail.unwrap();
@@ -225,7 +320,16 @@ fn artifact_delete_marks_occurrences_projections_kb_docs_provenance() {
     let svc = make_svc(&engine, &config);
 
     // Put content
-    let put_result = svc.put_memory("people/delete-test", "Delete test content", Some("Delete Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/delete-test",
+            "Delete test content",
+            Some("Delete Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -237,11 +341,9 @@ fn artifact_delete_marks_occurrences_projections_kb_docs_provenance() {
     svc.delete_artifact(artifact_id).expect("delete_artifact");
 
     // Verify artifact is deleted
-    let detail = svc.get_artifact_detail(
-        &artifact_id.to_string(),
-        true,
-        false,
-    ).expect("get_artifact_detail after delete");
+    let detail = svc
+        .get_artifact_detail(&artifact_id.to_string(), true, false)
+        .expect("get_artifact_detail after delete");
     if let Some(d) = detail {
         assert_eq!(d.status, "deleted", "artifact should be soft-deleted");
     }
@@ -256,7 +358,16 @@ fn artifact_restore_only_restores_artifact_deleted_state() {
     let svc = make_svc(&engine, &config);
 
     // Put content
-    let put_result = svc.put_memory("people/restore-test", "Restore test content", Some("Restore Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/restore-test",
+            "Restore test content",
+            Some("Restore Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -268,18 +379,17 @@ fn artifact_restore_only_restores_artifact_deleted_state() {
     svc.delete_artifact(artifact_id).expect("delete_artifact");
 
     // Restore
-    let restore_result = svc.restore(&artifact_id.to_string(), false)
+    let restore_result = svc
+        .restore(&artifact_id.to_string(), false)
         .expect("restore");
     let restore_obj = restore_result.as_object().unwrap();
     assert!(restore_obj.get("restored_occurrences").is_some());
     assert!(restore_obj.get("restored_projections").is_some());
 
     // Verify artifact is active again
-    let detail = svc.get_artifact_detail(
-        &artifact_id.to_string(),
-        true,
-        false,
-    ).expect("get_artifact_detail after restore");
+    let detail = svc
+        .get_artifact_detail(&artifact_id.to_string(), true, false)
+        .expect("get_artifact_detail after restore");
     if let Some(d) = detail {
         assert_eq!(d.status, "active", "artifact should be restored to active");
     }
@@ -294,15 +404,34 @@ fn artifact_put_idempotent_same_content() {
     let svc = make_svc(&engine, &config);
 
     // First put
-    let result1 = svc.put_memory("people/idempotent-test", "Same content", Some("Idempotent Test"), None, false, false).expect("put_memory 1");
+    let result1 = svc
+        .put_memory(
+            "people/idempotent-test",
+            "Same content",
+            Some("Idempotent Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory 1");
 
     // Second put with same content
-    let result2 = svc.put_memory("people/idempotent-test", "Same content", Some("Idempotent Test"), None, false, false).expect("put_memory 2");
+    let result2 = svc
+        .put_memory(
+            "people/idempotent-test",
+            "Same content",
+            Some("Idempotent Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory 2");
 
     // Second put should return no_op resolution
     let obj2 = result2.as_object().unwrap();
     assert_eq!(
-        obj2.get("resolution").and_then(|v: &serde_json::Value| v.as_str()),
+        obj2.get("resolution")
+            .and_then(|v: &serde_json::Value| v.as_str()),
         Some("no_op"),
         "same content should return no_op"
     );
@@ -324,19 +453,48 @@ fn artifact_put_different_content_updates() {
     let svc = make_svc(&engine, &config);
 
     // First put
-    svc.put_memory("people/update-test", "Original content", Some("Update Test"), None, false, false).expect("put_memory 1");
+    svc.put_memory(
+        "people/update-test",
+        "Original content",
+        Some("Update Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory 1");
 
     // Second put with different content
-    let result2 = svc.put_memory("people/update-test", "Updated content", Some("Update Test"), None, false, false).expect("put_memory 2");
+    let result2 = svc
+        .put_memory(
+            "people/update-test",
+            "Updated content",
+            Some("Update Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory 2");
 
     // Should NOT be no_op since content changed
     let obj2 = result2.as_object().unwrap();
-    let resolution = obj2.get("resolution").and_then(|v: &serde_json::Value| v.as_str());
-    assert_ne!(resolution, Some("no_op"), "different content should not be no_op");
+    let resolution = obj2
+        .get("resolution")
+        .and_then(|v: &serde_json::Value| v.as_str());
+    assert_ne!(
+        resolution,
+        Some("no_op"),
+        "different content should not be no_op"
+    );
 
     // Page should be updated
-    let page = engine.get_page("people/update-test").expect("get_page").unwrap();
-    assert!(page.compiled_truth.contains("Updated"), "page content should be updated");
+    let page = engine
+        .get_page("people/update-test")
+        .expect("get_page")
+        .unwrap();
+    assert!(
+        page.compiled_truth.contains("Updated"),
+        "page content should be updated"
+    );
 }
 
 // --- P1-1 语义测试: artifact_put --dry-run 零副作用 ---
@@ -348,14 +506,16 @@ fn artifact_put_dry_run_zero_side_effects() {
     let svc = make_svc(&engine, &config);
 
     // dry-run 不应创建 artifact 或 page
-    let result = svc.put_memory(
-        "people/dry-run-test",
-        "Dry run content",
-        Some("Dry Run Test"),
-        None,
-        true, // dry_run
-        false, // not force
-    ).expect("dry_run put_memory");
+    let result = svc
+        .put_memory(
+            "people/dry-run-test",
+            "Dry run content",
+            Some("Dry Run Test"),
+            None,
+            true,  // dry_run
+            false, // not force
+        )
+        .expect("dry_run put_memory");
 
     let obj = result.as_object().unwrap();
     assert_eq!(obj.get("dry_run").and_then(|v| v.as_bool()), Some(true));
@@ -366,8 +526,9 @@ fn artifact_put_dry_run_zero_side_effects() {
 
     // artifact 不应存在
     let conn = engine.connection().expect("connection");
-    let artifact = gbrain_core::artifact::store::find_artifact_by_slug(&conn, "people/dry-run-test")
-        .expect("find_artifact_by_slug");
+    let artifact =
+        gbrain_core::artifact::store::find_artifact_by_slug(&conn, "people/dry-run-test")
+            .expect("find_artifact_by_slug");
     assert!(artifact.is_none(), "dry-run 不应创建 artifact");
 }
 
@@ -380,10 +541,21 @@ fn artifact_put_evidence_intent_no_brain_page() {
     let svc = make_svc(&engine, &config);
 
     // evidence intent: to_brain=false, 不应写 gbrain page
-    let _result = svc.put_memory("people/evidence-test-doc", "Evidence content for KB only", Some("Evidence Doc"), Some("evidence"), false, false).expect("put_memory evidence");
+    let _result = svc
+        .put_memory(
+            "people/evidence-test-doc",
+            "Evidence content for KB only",
+            Some("Evidence Doc"),
+            Some("evidence"),
+            false,
+            false,
+        )
+        .expect("put_memory evidence");
 
     // gbrain page 不应存在（evidence 不写 page）
-    let page = engine.get_page("people/evidence-test-doc").expect("get_page");
+    let page = engine
+        .get_page("people/evidence-test-doc")
+        .expect("get_page");
     assert!(page.is_none(), "evidence intent 不应创建 gbrain page");
 }
 
@@ -396,7 +568,16 @@ fn detach_then_restore_does_not_restore_detached_occurrence() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    let put_result = svc.put_memory("people/detach-test", "Content for detach test", Some("Detach Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/detach-test",
+            "Content for detach test",
+            Some("Detach Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -405,7 +586,8 @@ fn detach_then_restore_does_not_restore_detached_occurrence() {
         .expect("should have artifact_id");
 
     // detach
-    let detach_result = svc.detach(&artifact_id.to_string(), "people/detach-test", false)
+    let detach_result = svc
+        .detach(&artifact_id.to_string(), "people/detach-test", false)
         .expect("detach");
     let detach_obj = detach_result.as_object().unwrap();
     assert!(detach_obj.get("detached_occurrences").is_some());
@@ -414,12 +596,14 @@ fn detach_then_restore_does_not_restore_detached_occurrence() {
     svc.delete_artifact(artifact_id).expect("delete_artifact");
 
     // restore
-    let restore_result = svc.restore(&artifact_id.to_string(), false)
+    let restore_result = svc
+        .restore(&artifact_id.to_string(), false)
         .expect("restore");
     let restore_obj = restore_result.as_object().unwrap();
     // restore 应只恢复因 delete 而标记的 occurrence，不应恢复 detach 的
     // detached_occurrences 的 stale_reason='detached_by_user' 不应被恢复
-    let restored_occ = restore_obj.get("restored_occurrences")
+    let restored_occ = restore_obj
+        .get("restored_occurrences")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     // detach 创建的 occurrence 已被 detach 标记为 stale，
@@ -437,7 +621,16 @@ fn mcp_artifact_delete_dry_run_returns_impact_preview() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    let put_result = svc.put_memory("people/mcp-delete-test", "Content for MCP delete test", Some("MCP Delete Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/mcp-delete-test",
+            "Content for MCP delete test",
+            Some("MCP Delete Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -446,13 +639,26 @@ fn mcp_artifact_delete_dry_run_returns_impact_preview() {
         .expect("should have artifact_id");
 
     // dry_run 应返回 DeleteImpactPreview
-    let preview = svc.delete_artifact_dry_run(&artifact_id.to_string())
+    let preview = svc
+        .delete_artifact_dry_run(&artifact_id.to_string())
         .expect("delete_artifact_dry_run");
 
-    assert!(preview.projection_count >= 0, "preview 应包含 projection_count");
-    assert!(preview.occurrence_count >= 0, "preview 应包含 occurrence_count");
-    assert!(preview.kb_document_count >= 0, "preview 应包含 kb_document_count");
-    assert!(preview.provenance_count >= 0, "preview 应包含 provenance_count");
+    assert!(
+        preview.projection_count >= 0,
+        "preview 应包含 projection_count"
+    );
+    assert!(
+        preview.occurrence_count >= 0,
+        "preview 应包含 occurrence_count"
+    );
+    assert!(
+        preview.kb_document_count >= 0,
+        "preview 应包含 kb_document_count"
+    );
+    assert!(
+        preview.provenance_count >= 0,
+        "preview 应包含 provenance_count"
+    );
 }
 
 // --- P2-3 语义测试: artifact_list 不暴露 raw DB row ---
@@ -464,7 +670,15 @@ fn artifact_list_returns_dto_not_raw_row() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    svc.put_memory("people/list-dto-test", "Content for list DTO test", Some("List DTO Test"), None, false, false).expect("put_memory");
+    svc.put_memory(
+        "people/list-dto-test",
+        "Content for list DTO test",
+        Some("List DTO Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory");
 
     // list 应返回 ArtifactListItem
     let items = svc.list_artifacts(10, 0).expect("list_artifacts");
@@ -487,15 +701,29 @@ fn artifact_list_dto_json_no_internal_fields() {
     let config = make_config();
     let svc = make_svc(&engine, &config);
 
-    svc.put_memory("people/list-json-test", "Content for list JSON test", Some("List JSON Test"), None, false, false).expect("put_memory");
+    svc.put_memory(
+        "people/list-json-test",
+        "Content for list JSON test",
+        Some("List JSON Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory");
 
     let items = svc.list_artifacts(10, 0).expect("list_artifacts");
     let json = serde_json::to_value(&items).expect("serialize list");
     let json_str = serde_json::to_string(&items).expect("serialize list to string");
 
     // JSON 不应包含内部字段
-    assert!(!json_str.contains("storage_path"), "DTO JSON 不应包含 storage_path");
-    assert!(!json_str.contains("metadata_json"), "DTO JSON 不应包含 metadata_json");
+    assert!(
+        !json_str.contains("storage_path"),
+        "DTO JSON 不应包含 storage_path"
+    );
+    assert!(
+        !json_str.contains("metadata_json"),
+        "DTO JSON 不应包含 metadata_json"
+    );
     assert!(!json_str.contains("sha256"), "DTO JSON 不应包含 sha256");
     // 注意：id 可能作为数字出现，但 ArtifactListItem 结构体不含 id 字段
     // 检查 JSON 对象不含 "id" key
@@ -503,8 +731,14 @@ fn artifact_list_dto_json_no_internal_fields() {
         for item in arr {
             let obj = item.as_object().unwrap();
             assert!(!obj.contains_key("id"), "DTO JSON 不应包含 id key");
-            assert!(!obj.contains_key("storage_path"), "DTO JSON 不应包含 storage_path key");
-            assert!(!obj.contains_key("metadata_json"), "DTO JSON 不应包含 metadata_json key");
+            assert!(
+                !obj.contains_key("storage_path"),
+                "DTO JSON 不应包含 storage_path key"
+            );
+            assert!(
+                !obj.contains_key("metadata_json"),
+                "DTO JSON 不应包含 metadata_json key"
+            );
             assert!(!obj.contains_key("sha256"), "DTO JSON 不应包含 sha256 key");
         }
     }
@@ -522,32 +756,39 @@ fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
     let svc = make_svc(&engine, &config);
 
     // put with intent=memory (dry_run to get route_plan)
-    let result = svc.put_memory(
-        "people/promotion-policy-test",
-        "Content for promotion policy test",
-        Some("Promotion Policy Test"),
-        Some("memory"),
-        true, // dry_run
-        false, // not force
-    ).expect("dry_run put_memory");
+    let result = svc
+        .put_memory(
+            "people/promotion-policy-test",
+            "Content for promotion policy test",
+            Some("Promotion Policy Test"),
+            Some("memory"),
+            true,  // dry_run
+            false, // not force
+        )
+        .expect("dry_run put_memory");
 
     let obj = result.as_object().unwrap();
     let route_plan = obj.get("route_plan").unwrap();
     let promotion = route_plan.get("promotion").and_then(|v| v.as_str());
 
     // memory intent 的 route plan promotion 应为 auto_accept_low_risk
-    assert_eq!(promotion, Some("auto_accept_low_risk"),
-        "memory intent route plan promotion 应为 auto_accept_low_risk");
+    assert_eq!(
+        promotion,
+        Some("auto_accept_low_risk"),
+        "memory intent route plan promotion 应为 auto_accept_low_risk"
+    );
 
     // 实际写入后检查 occurrence 的 promotion_policy
-    let real_result = svc.put_memory(
-        "people/promotion-policy-real",
-        "Content for promotion policy real test",
-        Some("Promotion Policy Real"),
-        Some("memory"),
-        false, // not dry_run
-        false, // not force
-    ).expect("put_memory");
+    let real_result = svc
+        .put_memory(
+            "people/promotion-policy-real",
+            "Content for promotion policy real test",
+            Some("Promotion Policy Real"),
+            Some("memory"),
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("put_memory");
 
     let artifact_id = real_result
         .get("artifact_id")
@@ -556,13 +797,16 @@ fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
         .expect("should have artifact_id");
 
     let conn = engine.connection().expect("connection");
-    let occurrences = gbrain_core::artifact::store::find_occurrences_by_artifact(&conn, artifact_id)
-        .expect("find_occurrences");
+    let occurrences =
+        gbrain_core::artifact::store::find_occurrences_by_artifact(&conn, artifact_id)
+            .expect("find_occurrences");
     assert!(!occurrences.is_empty(), "应有 occurrence");
 
     let occ = &occurrences[0];
-    assert_eq!(occ.promotion_policy, "auto_accept_low_risk",
-        "occurrence promotion_policy 应与 route plan 的 auto_accept_low_risk 对齐");
+    assert_eq!(
+        occ.promotion_policy, "auto_accept_low_risk",
+        "occurrence promotion_policy 应与 route plan 的 auto_accept_low_risk 对齐"
+    );
 }
 
 // --- P1/P2 修复验证: manual promote 创建 shadow page ---
@@ -575,14 +819,16 @@ fn artifact_put_promote_creates_shadow_page() {
     let config = make_config();
     let svc = make_svc(&engine, &config);
 
-    let result = svc.put_memory(
-        "people/promote-shadow-test",
-        "Content for promote shadow page test",
-        Some("Promote Shadow Test"),
-        Some("promote"),
-        false, // not dry_run
-        false, // not force
-    ).expect("put_memory promote");
+    let result = svc
+        .put_memory(
+            "people/promote-shadow-test",
+            "Content for promote shadow page test",
+            Some("Promote Shadow Test"),
+            Some("promote"),
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("put_memory promote");
 
     let artifact_id = result
         .get("artifact_id")
@@ -593,16 +839,24 @@ fn artifact_put_promote_creates_shadow_page() {
     // 检查 shadow page 是否存在
     let shadow_slug = "documents/people/promote-shadow-test";
     let page = engine.get_page(shadow_slug).expect("get_page");
-    assert!(page.is_some(), "promote intent 应创建 shadow page: {}", shadow_slug);
+    assert!(
+        page.is_some(),
+        "promote intent 应创建 shadow page: {}",
+        shadow_slug
+    );
 
     // 检查 shadow projection 是否存在
     let conn = engine.connection().expect("connection");
-    let projections = gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id)
-        .expect("find_projections");
-    let has_shadow = projections.iter().any(|p|
-        p.projection_type == "brain_shadow_page" && p.status == "active"
+    let projections =
+        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id)
+            .expect("find_projections");
+    let has_shadow = projections
+        .iter()
+        .any(|p| p.projection_type == "brain_shadow_page" && p.status == "active");
+    assert!(
+        has_shadow,
+        "promote intent 应创建 brain_shadow_page projection"
     );
-    assert!(has_shadow, "promote intent 应创建 brain_shadow_page projection");
 }
 
 // --- P2-4 修复验证: artifact_query include_sources=false 时 evidence 不返回 sources ---
@@ -615,7 +869,15 @@ fn artifact_query_include_sources_false_evidence_no_sources() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    svc.put_memory("people/evidence-source-test", "Content for evidence source test", Some("Evidence Source Test"), Some("evidence"), false, false).expect("put_memory evidence");
+    svc.put_memory(
+        "people/evidence-source-test",
+        "Content for evidence source test",
+        Some("Evidence Source Test"),
+        Some("evidence"),
+        false,
+        false,
+    )
+    .expect("put_memory evidence");
 
     // Query with include_sources=false
     let input = gbrain_core::artifact::types::ArtifactQueryInput {
@@ -628,13 +890,17 @@ fn artifact_query_include_sources_false_evidence_no_sources() {
     let result = svc.query_facade(&input).expect("query_facade");
 
     // 顶层 sources 应为空
-    assert!(result.sources.is_empty(),
-        "include_sources=false 时顶层 sources 应为空");
+    assert!(
+        result.sources.is_empty(),
+        "include_sources=false 时顶层 sources 应为空"
+    );
 
     // evidence 的 sources 也应为空
     for ev in &result.evidence {
-        assert!(ev.sources.is_empty(),
-            "include_sources=false 时 evidence sources 也应为空");
+        assert!(
+            ev.sources.is_empty(),
+            "include_sources=false 时 evidence sources 也应为空"
+        );
     }
 }
 
@@ -653,16 +919,32 @@ fn mcp_dispatch_artifact_list_returns_dto() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    svc.put_memory("people/mcp-list-test", "Content for MCP list dispatch test", Some("MCP List Test"), None, false, false).expect("put_memory");
+    svc.put_memory(
+        "people/mcp-list-test",
+        "Content for MCP list dispatch test",
+        Some("MCP List Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory");
 
     // 通过 ArtifactService facade 获取 list（模拟 MCP dispatch 路径）
-    let items = svc.list_artifacts(10, 0).expect("list_artifacts via facade");
+    let items = svc
+        .list_artifacts(10, 0)
+        .expect("list_artifacts via facade");
     assert!(!items.is_empty(), "应至少有一个 artifact");
 
     // 验证 DTO 不含内部字段
     let json_str = serde_json::to_string(&items).expect("serialize");
-    assert!(!json_str.contains("storage_path"), "MCP dispatch 不应暴露 storage_path");
-    assert!(!json_str.contains("metadata_json"), "MCP dispatch 不应暴露 metadata_json");
+    assert!(
+        !json_str.contains("storage_path"),
+        "MCP dispatch 不应暴露 storage_path"
+    );
+    assert!(
+        !json_str.contains("metadata_json"),
+        "MCP dispatch 不应暴露 metadata_json"
+    );
     assert!(!json_str.contains("sha256"), "MCP dispatch 不应暴露 sha256");
 
     // 验证 DTO 含用户友好字段
@@ -682,7 +964,16 @@ fn mcp_dispatch_artifact_delete_dry_run_returns_preview() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    let put_result = svc.put_memory("people/mcp-delete-dry-test", "Content for MCP delete dry-run dispatch test", Some("MCP Delete Dry Test"), None, false, false).expect("put_memory");
+    let put_result = svc
+        .put_memory(
+            "people/mcp-delete-dry-test",
+            "Content for MCP delete dry-run dispatch test",
+            Some("MCP Delete Dry Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -691,18 +982,34 @@ fn mcp_dispatch_artifact_delete_dry_run_returns_preview() {
         .expect("should have artifact_id");
 
     // 通过 ArtifactService facade 获取 dry-run preview（模拟 MCP dispatch 路径）
-    let preview = svc.delete_artifact_dry_run(&artifact_id.to_string())
+    let preview = svc
+        .delete_artifact_dry_run(&artifact_id.to_string())
         .expect("delete_artifact_dry_run via facade");
 
     // 验证 DeleteImpactPreview 结构
-    assert!(preview.projection_count >= 0, "preview 应包含 projection_count");
-    assert!(preview.occurrence_count >= 0, "preview 应包含 occurrence_count");
-    assert!(!preview.artifact_uid.is_empty(), "preview 应包含 artifact_uid");
-    assert_eq!(preview.artifact_status, "active", "preview artifact_status 应为 active");
+    assert!(
+        preview.projection_count >= 0,
+        "preview 应包含 projection_count"
+    );
+    assert!(
+        preview.occurrence_count >= 0,
+        "preview 应包含 occurrence_count"
+    );
+    assert!(
+        !preview.artifact_uid.is_empty(),
+        "preview 应包含 artifact_uid"
+    );
+    assert_eq!(
+        preview.artifact_status, "active",
+        "preview artifact_status 应为 active"
+    );
 
     // 验证 preview 序列化不含内部 id/storage_path
     let preview_json = serde_json::to_string(&preview).expect("serialize preview");
-    assert!(!preview_json.contains("storage_path"), "preview 不应暴露 storage_path");
+    assert!(
+        !preview_json.contains("storage_path"),
+        "preview 不应暴露 storage_path"
+    );
 }
 
 // --- MCP dispatch 测试: artifact_query include_sources=false 不返回 sources ---
@@ -716,7 +1023,15 @@ fn mcp_dispatch_artifact_query_no_sources() {
     let svc = make_svc(&engine, &config);
 
     // 创建 artifact
-    svc.put_memory("people/mcp-query-source-test", "Content for MCP query source dispatch test", Some("MCP Query Source Test"), Some("evidence"), false, false).expect("put_memory evidence");
+    svc.put_memory(
+        "people/mcp-query-source-test",
+        "Content for MCP query source dispatch test",
+        Some("MCP Query Source Test"),
+        Some("evidence"),
+        false,
+        false,
+    )
+    .expect("put_memory evidence");
 
     // 通过 ArtifactService facade 查询（模拟 MCP dispatch 路径）
     let input = gbrain_core::artifact::types::ArtifactQueryInput {
@@ -726,14 +1041,20 @@ fn mcp_dispatch_artifact_query_no_sources() {
         filter_slug: None,
         include_sources: Some(false),
     };
-    let result = svc.query_facade(&input).expect("query_facade via MCP dispatch");
+    let result = svc
+        .query_facade(&input)
+        .expect("query_facade via MCP dispatch");
 
     // 验证 MCP dispatch 路径的 include_sources=false 语义
-    assert!(result.sources.is_empty(),
-        "MCP dispatch: include_sources=false 时顶层 sources 应为空");
+    assert!(
+        result.sources.is_empty(),
+        "MCP dispatch: include_sources=false 时顶层 sources 应为空"
+    );
     for ev in &result.evidence {
-        assert!(ev.sources.is_empty(),
-            "MCP dispatch: include_sources=false 时 evidence sources 也应为空");
+        assert!(
+            ev.sources.is_empty(),
+            "MCP dispatch: include_sources=false 时 evidence sources 也应为空"
+        );
     }
 }
 
@@ -746,19 +1067,46 @@ fn mcp_tool_defs_default_only_artifact_facade() {
 
     // 应包含所有 artifact_* facade 工具
     let artifact_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert!(artifact_names.contains(&"artifact_put"), "应包含 artifact_put");
-    assert!(artifact_names.contains(&"artifact_upload"), "应包含 artifact_upload");
-    assert!(artifact_names.contains(&"artifact_query"), "应包含 artifact_query");
-    assert!(artifact_names.contains(&"artifact_list"), "应包含 artifact_list");
-    assert!(artifact_names.contains(&"artifact_get"), "应包含 artifact_get");
-    assert!(artifact_names.contains(&"artifact_delete"), "应包含 artifact_delete");
-    assert!(artifact_names.contains(&"artifact_review_list"), "应包含 artifact_review_list");
-    assert!(artifact_names.contains(&"artifact_review_apply"), "应包含 artifact_review_apply");
+    assert!(
+        artifact_names.contains(&"artifact_put"),
+        "应包含 artifact_put"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_upload"),
+        "应包含 artifact_upload"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_query"),
+        "应包含 artifact_query"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_list"),
+        "应包含 artifact_list"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_get"),
+        "应包含 artifact_get"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_delete"),
+        "应包含 artifact_delete"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_review_list"),
+        "应包含 artifact_review_list"
+    );
+    assert!(
+        artifact_names.contains(&"artifact_review_apply"),
+        "应包含 artifact_review_apply"
+    );
 
     // 不应包含任何内部工具
     for def in &defs {
-        assert!(def.name.starts_with("artifact_"),
-            "默认 tools-json 不应包含非 artifact_* 工具: {}", def.name);
+        assert!(
+            def.name.starts_with("artifact_"),
+            "默认 tools-json 不应包含非 artifact_* 工具: {}",
+            def.name
+        );
     }
 }
 
@@ -796,7 +1144,16 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
     let svc = make_svc(&engine, &config);
 
     // 第一次 promote put
-    let result1 = svc.put_memory("people/promote-update-test", "Original promote content", Some("Promote Update Test"), Some("promote"), false, false).expect("put_memory promote 1");
+    let result1 = svc
+        .put_memory(
+            "people/promote-update-test",
+            "Original promote content",
+            Some("Promote Update Test"),
+            Some("promote"),
+            false,
+            false,
+        )
+        .expect("put_memory promote 1");
 
     let artifact_id_1 = result1
         .get("artifact_id")
@@ -806,34 +1163,66 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
 
     // 验证第一次 put 的 shadow projection 为 active
     let conn = engine.connection().expect("connection");
-    let projections1 = gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
-        .expect("find_projections");
-    let shadow_active_1 = projections1.iter().any(|p|
-        p.projection_type == "brain_shadow_page" && p.status == "active"
+    let projections1 =
+        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
+            .expect("find_projections");
+    let shadow_active_1 = projections1
+        .iter()
+        .any(|p| p.projection_type == "brain_shadow_page" && p.status == "active");
+    assert!(
+        shadow_active_1,
+        "第一次 promote 应有 active shadow projection"
     );
-    assert!(shadow_active_1, "第一次 promote 应有 active shadow projection");
+
+    // P3-8 修复：记录第一次 put 后的 shadow page_id，
+    // 用于后续断言同 slug 更新后 page_id 不变（避免 INSERT OR REPLACE 导致 page_id 变化）
+    let shadow_slug = "documents/people/promote-update-test";
+    let shadow_page_id_before: i64 = conn
+        .query_row(
+            "SELECT id FROM pages WHERE slug = ?1",
+            rusqlite::params![shadow_slug],
+            |row| row.get(0),
+        )
+        .expect("查询第一次 put 后 shadow page id");
 
     // 第二次同 slug 不同内容 promote put
-    let result2 = svc.put_memory("people/promote-update-test", "Updated promote content", Some("Promote Update Test"), Some("promote"), false, false).expect("put_memory promote 2");
+    let result2 = svc
+        .put_memory(
+            "people/promote-update-test",
+            "Updated promote content",
+            Some("Promote Update Test"),
+            Some("promote"),
+            false,
+            false,
+        )
+        .expect("put_memory promote 2");
 
     // 验证旧 artifact 的 shadow projection 变 stale
-    let projections1_after = gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
-        .expect("find_projections after update");
-    let shadow_stale_1 = projections1_after.iter().any(|p|
-        p.projection_type == "brain_shadow_page" && p.status == "stale"
+    let projections1_after =
+        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
+            .expect("find_projections after update");
+    let shadow_stale_1 = projections1_after.iter().any(|p| {
+        p.projection_type == "brain_shadow_page"
+            && p.status == "stale"
             && p.stale_reason == "content_updated"
+    });
+    assert!(
+        shadow_stale_1,
+        "同 slug 更新后旧 shadow projection 应标记为 stale (content_updated)"
     );
-    assert!(shadow_stale_1, "同 slug 更新后旧 shadow projection 应标记为 stale (content_updated)");
 
     // 验证旧 artifact 的 brain_page_update 也变 stale
-    let page_update_stale_1 = projections1_after.iter().any(|p|
-        p.projection_type == "brain_page_update" && p.status == "stale"
+    let page_update_stale_1 = projections1_after.iter().any(|p| {
+        p.projection_type == "brain_page_update"
+            && p.status == "stale"
             && p.stale_reason == "content_updated"
+    });
+    assert!(
+        page_update_stale_1,
+        "同 slug 更新后旧 brain_page_update 也应标记为 stale"
     );
-    assert!(page_update_stale_1, "同 slug 更新后旧 brain_page_update 也应标记为 stale");
 
     // 验证 shadow page 内容已更新（指向新 artifact）
-    let shadow_slug = "documents/people/promote-update-test";
     let page = engine.get_page(shadow_slug).expect("get_page").unwrap();
     // shadow page 的 frontmatter 应包含新 artifact UID
     let artifact_id_2 = result2
@@ -842,9 +1231,66 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
         .and_then(|v| v.as_i64())
         .expect("should have artifact_id for second put");
     let artifact2 = gbrain_core::artifact::store::find_artifact_by_id(&conn, artifact_id_2)
-        .expect("find_artifact_by_id").unwrap();
-    assert!(page.frontmatter.as_ref().map_or(false, |fm| fm.contains(&artifact2.artifact_uid)),
-        "shadow page frontmatter 应包含新 artifact UID");
+        .expect("find_artifact_by_id")
+        .unwrap();
+    assert!(
+        page.frontmatter
+            .as_ref()
+            .map_or(false, |fm| fm.contains(&artifact2.artifact_uid)),
+        "shadow page frontmatter 应包含新 artifact UID"
+    );
+
+    // P3 修复：断言 page_versions 版本快照存在
+    // 同 slug promote 更新后，page_id 应不变，page_versions 应新增一条快照
+    let shadow_page_id: i64 = conn
+        .query_row(
+            "SELECT id FROM pages WHERE slug = ?1",
+            rusqlite::params![shadow_slug],
+            |row| row.get(0),
+        )
+        .expect("查询 shadow page id");
+
+    // P3-8 修复：断言同 slug 更新后 page_id 不变
+    // INSERT OR REPLACE 会 DELETE+INSERT 导致 page_id 变化，
+    // 当前实现改为 UPDATE 保留 page_id，此断言锁死该关键条件
+    assert_eq!(
+        shadow_page_id, shadow_page_id_before,
+        "P3-8 修复：同 slug promote 更新后 shadow page_id 应不变，\
+         更新前: {}, 更新后: {}（可能使用了 INSERT OR REPLACE）",
+        shadow_page_id_before, shadow_page_id
+    );
+
+    // 断言 page_versions 至少有一条快照记录
+    let version_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM page_versions WHERE page_id = ?1",
+            rusqlite::params![shadow_page_id],
+            |row| row.get(0),
+        )
+        .expect("查询 page_versions 数量");
+    assert!(
+        version_count >= 1,
+        "同 slug promote 更新后 page_versions 应至少有一条快照记录，实际: {}",
+        version_count
+    );
+
+    // 断言快照内容包含第一次写入的关键信息（artifact UID）
+    // shadow page 内容由 create_shadow_page_content 生成，包含 artifact UID
+    let snapshot_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM page_versions WHERE page_id = ?1 ORDER BY snapshot_at DESC LIMIT 1",
+            rusqlite::params![shadow_page_id],
+            |row| row.get(0),
+        ).expect("查询最新快照内容");
+    // 第一次写入的 artifact UID 应出现在快照中（旧版本的 shadow page）
+    let artifact1 = gbrain_core::artifact::store::find_artifact_by_id(&conn, artifact_id_1)
+        .expect("find_artifact_by_id")
+        .unwrap();
+    assert!(
+        snapshot_content.contains(&artifact1.artifact_uid),
+        "page_versions 快照应包含第一次写入的 artifact UID，实际内容不含 {}",
+        artifact1.artifact_uid
+    );
 }
 
 // ============================================================================
@@ -853,8 +1299,6 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
 // 没有经过 McpServer::handle_tool_call 的参数映射、内部工具拦截和返回包装。
 // 以下测试通过 McpServer::dispatch_tool_call 真正走 MCP dispatch 路径。
 // ============================================================================
-
-use gbrain_core::mcp::tool_defs;
 
 fn make_mcp_server() -> gbrain_core::mcp::McpServer {
     let engine = make_engine();
@@ -868,21 +1312,32 @@ fn mcp_tools_call_artifact_put() {
     let mut server = make_mcp_server();
 
     // 通过 MCP dispatch 调用 artifact_put
-    let result = server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-put-test",
-        "content": "Content via MCP tools/call",
-        "title": "MCP Put Test",
-        "intent": "memory"
-    })).expect("dispatch artifact_put");
+    let result = server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-put-test",
+                "content": "Content via MCP tools/call",
+                "title": "MCP Put Test",
+                "intent": "memory"
+            }),
+        )
+        .expect("dispatch artifact_put");
 
     // 验证返回值包含 artifact_id
-    assert!(result.get("artifact_id").is_some() || result.get("id").is_some(),
-        "artifact_put dispatch 应返回 artifact_id");
-    assert!(result.get("artifact_uid").is_some(),
-        "artifact_put dispatch 应返回 artifact_uid");
+    assert!(
+        result.get("artifact_id").is_some() || result.get("id").is_some(),
+        "artifact_put dispatch 应返回 artifact_id"
+    );
+    assert!(
+        result.get("artifact_uid").is_some(),
+        "artifact_put dispatch 应返回 artifact_uid"
+    );
     // 验证返回值包含路由计划
-    assert!(result.get("route_plan").is_some(),
-        "artifact_put dispatch 应返回 route_plan");
+    assert!(
+        result.get("route_plan").is_some(),
+        "artifact_put dispatch 应返回 route_plan"
+    );
 }
 
 // --- MCP tools/call 测试: artifact_list 通过 dispatch 返回 DTO ---
@@ -892,25 +1347,41 @@ fn mcp_tools_call_artifact_list_returns_dto() {
     let mut server = make_mcp_server();
 
     // 先创建 artifact
-    server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-list-dispatch-test",
-        "content": "Content for MCP list dispatch",
-        "title": "MCP List Dispatch Test"
-    })).expect("dispatch artifact_put");
+    server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-list-dispatch-test",
+                "content": "Content for MCP list dispatch",
+                "title": "MCP List Dispatch Test"
+            }),
+        )
+        .expect("dispatch artifact_put");
 
     // 通过 MCP dispatch 调用 artifact_list
-    let result = server.dispatch_tool_call("artifact_list", serde_json::json!({
-        "limit": 10,
-        "offset": 0
-    })).expect("dispatch artifact_list");
+    let result = server
+        .dispatch_tool_call(
+            "artifact_list",
+            serde_json::json!({
+                "limit": 10,
+                "offset": 0
+            }),
+        )
+        .expect("dispatch artifact_list");
 
     // 验证返回值是数组且不含内部字段
     let items = result.as_array().expect("artifact_list 应返回数组");
     assert!(!items.is_empty(), "应至少有一个 artifact");
 
     let json_str = serde_json::to_string(&result).expect("serialize");
-    assert!(!json_str.contains("storage_path"), "MCP dispatch 不应暴露 storage_path");
-    assert!(!json_str.contains("metadata_json"), "MCP dispatch 不应暴露 metadata_json");
+    assert!(
+        !json_str.contains("storage_path"),
+        "MCP dispatch 不应暴露 storage_path"
+    );
+    assert!(
+        !json_str.contains("metadata_json"),
+        "MCP dispatch 不应暴露 metadata_json"
+    );
     assert!(!json_str.contains("sha256"), "MCP dispatch 不应暴露 sha256");
 }
 
@@ -921,29 +1392,43 @@ fn mcp_tools_call_artifact_query() {
     let mut server = make_mcp_server();
 
     // 先创建 artifact
-    server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-query-dispatch-test",
-        "content": "Content for MCP query dispatch test",
-        "title": "MCP Query Dispatch Test",
-        "intent": "evidence"
-    })).expect("dispatch artifact_put");
+    server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-query-dispatch-test",
+                "content": "Content for MCP query dispatch test",
+                "title": "MCP Query Dispatch Test",
+                "intent": "evidence"
+            }),
+        )
+        .expect("dispatch artifact_put");
 
     // 通过 MCP dispatch 调用 artifact_query，include_sources=false
-    let result = server.dispatch_tool_call("artifact_query", serde_json::json!({
-        "query": "MCP query dispatch",
-        "mode": "auto",
-        "limit": 10,
-        "include_sources": false
-    })).expect("dispatch artifact_query");
+    let result = server
+        .dispatch_tool_call(
+            "artifact_query",
+            serde_json::json!({
+                "query": "MCP query dispatch",
+                "mode": "auto",
+                "limit": 10,
+                "include_sources": false
+            }),
+        )
+        .expect("dispatch artifact_query");
 
     // 验证 include_sources=false 时 sources 为空
     let sources = result.get("sources").and_then(|v| v.as_array());
-    assert!(sources.is_none() || sources.map_or(true, |s| s.is_empty()),
-        "MCP dispatch: include_sources=false 时顶层 sources 应为空");
+    assert!(
+        sources.is_none() || sources.map_or(true, |s| s.is_empty()),
+        "MCP dispatch: include_sources=false 时顶层 sources 应为空"
+    );
 
     // 验证 evidence 存在
-    assert!(result.get("evidence").is_some(),
-        "artifact_query dispatch 应返回 evidence 字段");
+    assert!(
+        result.get("evidence").is_some(),
+        "artifact_query dispatch 应返回 evidence 字段"
+    );
 }
 
 // --- MCP tools/call 测试: artifact_delete dry_run 通过 dispatch 返回预览 ---
@@ -953,11 +1438,16 @@ fn mcp_tools_call_artifact_delete_dry_run() {
     let mut server = make_mcp_server();
 
     // 先创建 artifact
-    let put_result = server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-delete-dispatch-test",
-        "content": "Content for MCP delete dispatch test",
-        "title": "MCP Delete Dispatch Test"
-    })).expect("dispatch artifact_put");
+    let put_result = server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-delete-dispatch-test",
+                "content": "Content for MCP delete dispatch test",
+                "title": "MCP Delete Dispatch Test"
+            }),
+        )
+        .expect("dispatch artifact_put");
 
     let artifact_id = put_result
         .get("artifact_id")
@@ -966,22 +1456,36 @@ fn mcp_tools_call_artifact_delete_dry_run() {
         .expect("should have artifact_id");
 
     // 通过 MCP dispatch 调用 artifact_delete --dry-run
-    let result = server.dispatch_tool_call("artifact_delete", serde_json::json!({
-        "id_or_uid": artifact_id.to_string(),
-        "dry_run": true
-    })).expect("dispatch artifact_delete dry_run");
+    let result = server
+        .dispatch_tool_call(
+            "artifact_delete",
+            serde_json::json!({
+                "id_or_uid": artifact_id.to_string(),
+                "dry_run": true
+            }),
+        )
+        .expect("dispatch artifact_delete dry_run");
 
     // 验证返回 DeleteImpactPreview 结构
-    assert!(result.get("artifact_uid").is_some(),
-        "dry_run preview 应包含 artifact_uid");
-    assert!(result.get("projection_count").is_some(),
-        "dry_run preview 应包含 projection_count");
-    assert!(result.get("occurrence_count").is_some(),
-        "dry_run preview 应包含 occurrence_count");
+    assert!(
+        result.get("artifact_uid").is_some(),
+        "dry_run preview 应包含 artifact_uid"
+    );
+    assert!(
+        result.get("projection_count").is_some(),
+        "dry_run preview 应包含 projection_count"
+    );
+    assert!(
+        result.get("occurrence_count").is_some(),
+        "dry_run preview 应包含 occurrence_count"
+    );
 
     // 验证不含内部字段
     let json_str = serde_json::to_string(&result).expect("serialize");
-    assert!(!json_str.contains("storage_path"), "preview 不应暴露 storage_path");
+    assert!(
+        !json_str.contains("storage_path"),
+        "preview 不应暴露 storage_path"
+    );
 }
 
 // --- MCP tools/call 测试: 内部工具在 expose_internal_tools=false 时被拦截 ---
@@ -991,24 +1495,42 @@ fn mcp_tools_call_internal_tools_blocked() {
     let mut server = make_mcp_server();
 
     // 尝试通过 MCP dispatch 调用内部工具 query
-    let result = server.dispatch_tool_call("query", serde_json::json!({
-        "query": "test"
-    }));
+    let result = server.dispatch_tool_call(
+        "query",
+        serde_json::json!({
+            "query": "test"
+        }),
+    );
 
-    assert!(result.is_err(), "expose_internal_tools=false 时调用 query 应被拦截");
+    assert!(
+        result.is_err(),
+        "expose_internal_tools=false 时调用 query 应被拦截"
+    );
     let err_msg = format!("{}", result.unwrap_err());
-    assert!(err_msg.contains("内部工具") || err_msg.contains("expose_internal_tools"),
-        "错误信息应说明是内部工具拦截: {}", err_msg);
+    assert!(
+        err_msg.contains("内部工具") || err_msg.contains("expose_internal_tools"),
+        "错误信息应说明是内部工具拦截: {}",
+        err_msg
+    );
 
     // 尝试调用 kb_search
-    let result2 = server.dispatch_tool_call("kb_search", serde_json::json!({
-        "query": "test"
-    }));
-    assert!(result2.is_err(), "expose_internal_tools=false 时调用 kb_search 应被拦截");
+    let result2 = server.dispatch_tool_call(
+        "kb_search",
+        serde_json::json!({
+            "query": "test"
+        }),
+    );
+    assert!(
+        result2.is_err(),
+        "expose_internal_tools=false 时调用 kb_search 应被拦截"
+    );
 
     // 尝试调用 promotion_list_candidates
     let result3 = server.dispatch_tool_call("promotion_list_candidates", serde_json::json!({}));
-    assert!(result3.is_err(), "expose_internal_tools=false 时调用 promotion_list_candidates 应被拦截");
+    assert!(
+        result3.is_err(),
+        "expose_internal_tools=false 时调用 promotion_list_candidates 应被拦截"
+    );
 }
 
 // --- MCP tools/call 测试: 参数校验 — 缺少必填参数返回错误 ---
@@ -1018,18 +1540,27 @@ fn mcp_tools_call_missing_required_params() {
     let mut server = make_mcp_server();
 
     // artifact_put 缺少 slug
-    let result = server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "content": "some content"
-    }));
+    let result = server.dispatch_tool_call(
+        "artifact_put",
+        serde_json::json!({
+            "content": "some content"
+        }),
+    );
     assert!(result.is_err(), "缺少 slug 应返回错误");
     let err_msg = format!("{}", result.unwrap_err());
-    assert!(err_msg.contains("slug") || err_msg.contains("必填"),
-        "错误信息应提到 slug 必填: {}", err_msg);
+    assert!(
+        err_msg.contains("slug") || err_msg.contains("必填"),
+        "错误信息应提到 slug 必填: {}",
+        err_msg
+    );
 
     // artifact_put 缺少 content 和 file
-    let result2 = server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/test"
-    }));
+    let result2 = server.dispatch_tool_call(
+        "artifact_put",
+        serde_json::json!({
+            "slug": "people/test"
+        }),
+    );
     assert!(result2.is_err(), "缺少 content 和 file 应返回错误");
 }
 
@@ -1040,25 +1571,1582 @@ fn mcp_tools_call_artifact_put_force_param() {
     let mut server = make_mcp_server();
 
     // 第一次写入
-    server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-force-test",
-        "content": "Original content",
-        "title": "MCP Force Test"
-    })).expect("dispatch artifact_put first");
+    server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-force-test",
+                "content": "Original content",
+                "title": "MCP Force Test"
+            }),
+        )
+        .expect("dispatch artifact_put first");
 
     // 模拟人工修改：直接修改页面内容
     // 注意：McpServer 的 engine 是私有的，无法直接修改页面。
     // 但我们可以测试 force=true 参数不会报错（即使无冲突也正常通过）
 
     // 第二次写入同 slug，force=true
-    let result = server.dispatch_tool_call("artifact_put", serde_json::json!({
-        "slug": "people/mcp-force-test",
-        "content": "Updated content with force",
-        "title": "MCP Force Test",
-        "force": true
-    })).expect("dispatch artifact_put with force=true");
+    let result = server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-force-test",
+                "content": "Updated content with force",
+                "title": "MCP Force Test",
+                "force": true
+            }),
+        )
+        .expect("dispatch artifact_put with force=true");
 
     // 验证正常返回（不报冲突）
-    assert!(result.get("artifact_id").is_some() || result.get("id").is_some(),
-        "force=true 时应正常写入并返回 artifact_id");
+    assert!(
+        result.get("artifact_id").is_some() || result.get("id").is_some(),
+        "force=true 时应正常写入并返回 artifact_id"
+    );
+}
+
+// ============================================================================
+// P2 修复: 真实人工修改冲突检测测试
+// 之前只测试 force=true 参数传递，没有模拟真实人工修改场景。
+// 以下测试：第一次 put → 模拟人工修改页面 → 第二次 put 默认返回 conflict →
+// 页面内容仍是人工修改后的 → force=true 可覆盖。
+// ============================================================================
+
+#[test]
+fn artifact_put_conflict_detection_on_human_edit() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 第一次 artifact_put：写入初始内容
+    let result1 = svc
+        .put_memory(
+            "people/conflict-test",
+            "Original content",
+            Some("Conflict Test Person"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第一次 put_memory 应成功");
+
+    assert!(
+        result1.get("artifact_id").is_some() || result1.get("id").is_some(),
+        "第一次 put 应返回 artifact_id"
+    );
+
+    // 模拟人工修改：直接通过 SQL 更新页面的 compiled_truth 和 content_hash
+    // 使 content_hash 与上次 artifact 写入时记录的 version_hash 不同
+    let conn = engine.connection().expect("connection");
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited content', content_hash = 'fake_human_edit_hash' WHERE slug = 'people/conflict-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put（默认 force=false）：应检测到冲突，返回 resolution=conflict
+    let result2 = svc
+        .put_memory(
+            "people/conflict-test",
+            "New content from second put",
+            Some("Conflict Test Person Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force — 应触发冲突检测
+        )
+        .expect("第二次 put_memory 应返回结果（不报错，而是返回 conflict resolution）");
+
+    // 断言：返回 resolution=conflict
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict"),
+        "人工修改后默认 put 应返回 resolution=conflict"
+    );
+
+    // P2 修复验证：冲突分支应自动创建 suggested change
+    assert!(
+        result2.get("change_id").and_then(|v| v.as_i64()).is_some(),
+        "冲突分支应返回 change_id（suggested change ID）"
+    );
+    assert_eq!(
+        result2.get("review_status").and_then(|v| v.as_str()),
+        Some("pending"),
+        "冲突分支应返回 review_status: pending"
+    );
+    assert!(
+        result2
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("suggested change"),
+        "detail 应提示新内容已保存为 suggested change"
+    );
+
+    // 断言：页面内容仍是人工修改后的内容，未被覆盖
+    let page_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/conflict-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+    assert_eq!(
+        page_content, "Human edited content",
+        "冲突时页面内容应保持人工修改后的内容，未被覆盖"
+    );
+
+    // P1-8 修复验证：冲突分支不应创建 active brain_page_update 投影
+    // 冲突分支没有写入稳定页面，不应有指向稳定页的 active brain_page_update 投影
+    let conflict_artifact_id = result2
+        .get("artifact_id")
+        .or_else(|| result2.get("id"))
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 artifact_id");
+    let conflict_projections =
+        gbrain_core::artifact::store::find_projections_by_artifact(&conn, conflict_artifact_id)
+            .expect("查询冲突 artifact 投影");
+    let has_active_brain_page_update = conflict_projections
+        .iter()
+        .any(|p| p.projection_type == "brain_page_update" && p.status == "active");
+    assert!(
+        !has_active_brain_page_update,
+        "P1-8 修复：冲突分支不应创建 active brain_page_update 投影，实际发现 {:?}",
+        conflict_projections
+            .iter()
+            .filter(|p| p.projection_type == "brain_page_update")
+            .collect::<Vec<_>>()
+    );
+
+    // P1-8 修复验证：冲突 suggested change 使用 PageUpdate 类型，
+    // accept + apply 后应正确写入用户提交的新内容
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // 先 accept 厷取审核通过，再 apply 应用变更
+    let _accept_result = svc
+        .list_suggested_changes(Some("pending"), None, 10, 0)
+        .expect("列出 pending suggested changes");
+    // 直接通过 SQL 更新候选状态为 accepted（模拟审核流程）
+    conn.execute(
+        "UPDATE promotion_candidates SET status = 'accepted', reviewer = 'test_user', updated_at = datetime('now') WHERE id = ?1",
+        rusqlite::params![change_id],
+    ).expect("更新候选状态为 accepted");
+
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply 冲突 suggested change 应成功");
+    let after_apply_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/conflict-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 apply 后页面内容");
+    // P3-10 修复：精确断言 replace 行为，而非宽松的 contains。
+    // 如果 replace 退化成 append，页面会同时包含旧内容和新内容，
+    // contains 断言仍会通过，无法检测到退化。
+    assert_eq!(
+        after_apply_content, "New content from second put",
+        "P3-10 修复：replace 后页面应精确等于新内容，不应包含旧内容，实际: {}",
+        after_apply_content
+    );
+    assert!(
+        !after_apply_content.contains("Human edited content"),
+        "P3-10 修复：replace 后页面不应包含被替换的旧内容 'Human edited content'，实际: {}",
+        after_apply_content
+    );
+}
+
+#[test]
+fn artifact_put_force_overrides_conflict() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 第一次 artifact_put：写入初始内容
+    let result1 = svc
+        .put_memory(
+            "people/force-conflict-test",
+            "Original content",
+            Some("Force Conflict Test"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第一次 put_memory 应成功");
+
+    assert!(
+        result1.get("artifact_id").is_some() || result1.get("id").is_some(),
+        "第一次 put 应返回 artifact_id"
+    );
+
+    // 模拟人工修改
+    let conn = engine.connection().expect("connection");
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited content', content_hash = 'fake_human_edit_hash' WHERE slug = 'people/force-conflict-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put（force=true）：应强制覆盖，不返回 conflict
+    let result2 = svc
+        .put_memory(
+            "people/force-conflict-test",
+            "Force updated content",
+            Some("Force Conflict Test Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            true,  // force=true — 应跳过冲突检测，强制覆盖
+        )
+        .expect("force=true 时 put_memory 应成功");
+
+    // 断言：返回 resolution 不是 conflict
+    let resolution = result2.get("resolution").and_then(|v| v.as_str());
+    assert_ne!(
+        resolution,
+        Some("conflict"),
+        "force=true 时不应返回 conflict"
+    );
+    assert!(
+        result2.get("artifact_id").is_some() || result2.get("id").is_some(),
+        "force=true 时应正常写入并返回 artifact_id"
+    );
+
+    // 断言：页面内容已被 force 覆盖为新内容
+    let page_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/force-conflict-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+    assert_eq!(
+        page_content, "Force updated content",
+        "force=true 时页面内容应被覆盖为新内容"
+    );
+}
+
+/// P1-9 修复验证：冲突后 pending suggested change 未 apply 时，
+/// 再次同 slug artifact_put 不应覆盖人工编辑页面，也不应返回误导性的 no_op。
+#[test]
+fn artifact_put_after_conflict_preserves_human_edit() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 第一次 artifact_put：写入初始内容
+    let result1 = svc
+        .put_memory(
+            "people/conflict-baseline-test",
+            "Original content",
+            Some("Conflict Baseline Test"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第一次 put_memory 应成功");
+
+    assert!(
+        result1.get("artifact_id").is_some() || result1.get("id").is_some(),
+        "第一次 put 应返回 artifact_id"
+    );
+
+    // 模拟人工修改页面
+    let conn = engine.connection().expect("connection");
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited content', content_hash = 'fake_human_edit_hash' WHERE slug = 'people/conflict-baseline-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突，返回 pending suggested change
+    let result2 = svc
+        .put_memory(
+            "people/conflict-baseline-test",
+            "Second put content",
+            Some("Conflict Baseline Test Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第二次 put_memory 应成功");
+
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict"),
+        "第二次 put 应返回 conflict resolution"
+    );
+
+    // 不 apply suggested change，直接第三次 artifact_put
+    // P1-9 修复：第三次 put 不应覆盖人工编辑页面，
+    // 也不应返回 no_op（因为页面内容与第三次提交的内容不同）
+    let result3 = svc
+        .put_memory(
+            "people/conflict-baseline-test",
+            "Third put content",
+            Some("Conflict Baseline Test Third"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第三次 put_memory 应成功");
+
+    // 断言：第三次 put 不应返回 no_op（内容不同）
+    let resolution3 = result3.get("resolution").and_then(|v| v.as_str());
+    assert_ne!(
+        resolution3,
+        Some("no_op"),
+        "P1-9 修复：冲突后再次 put 不同内容不应返回 no_op"
+    );
+
+    // 断言：页面内容仍为人工编辑内容（未被第三次 put 覆盖）
+    let page_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/conflict-baseline-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+    assert_eq!(
+        page_content, "Human edited content",
+        "P1-9 修复：冲突后未 apply 时，再次 put 不应覆盖人工编辑页面，实际: {}",
+        page_content
+    );
+}
+
+/// P2-9 修复验证：apply suggested change 后，新 brain_page_update.version_hash
+/// 应为页面 content_hash（而非空字符串），使后续冲突检测基线完整。
+/// 测试场景：apply 后再人工编辑页面，再次 artifact_put 应返回 conflict。
+#[test]
+fn artifact_put_after_apply_detects_new_human_edit() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 第一次 artifact_put：写入初始内容
+    let result1 = svc
+        .put_memory(
+            "people/apply-baseline-test",
+            "Original content",
+            Some("Apply Baseline Test"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第一次 put_memory 应成功");
+
+    assert!(
+        result1.get("artifact_id").is_some() || result1.get("id").is_some(),
+        "第一次 put 应返回 artifact_id"
+    );
+
+    // 模拟人工修改页面，触发冲突
+    let conn = engine.connection().expect("connection");
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited content', content_hash = 'fake_human_edit_hash' WHERE slug = 'people/apply-baseline-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突，返回 pending suggested change
+    let result2 = svc
+        .put_memory(
+            "people/apply-baseline-test",
+            "Second put content",
+            Some("Apply Baseline Test Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第二次 put_memory 应成功");
+
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict"),
+        "第二次 put 应返回 conflict resolution"
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // P1-9 修复：apply_suggested_change 对 pending 变更自动执行 accept+apply
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("P1-9 修复：apply pending suggested change 应自动 accept+apply 成功");
+
+    // P2-9 修复验证：apply 后新 brain_page_update.version_hash 应为页面 content_hash
+    // 查询 apply 后创建的 brain_page_update 投影
+    let projections: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ap.projection_type, ap.version_hash
+             FROM artifact_projections ap
+             JOIN source_artifacts sa ON ap.artifact_id = sa.id
+             WHERE sa.canonical_slug = 'people/apply-baseline-test'
+               AND ap.status = 'active'
+               AND ap.projection_type = 'brain_page_update'",
+            )
+            .expect("prepare");
+        let rows = stmt
+            .query_map(rusqlite::params![], |row| {
+                let proj_type: String = row.get(0)?;
+                let vhash: String = row.get(1)?;
+                Ok((proj_type, vhash))
+            })
+            .expect("query_map");
+        rows.collect::<Result<Vec<_>, _>>().expect("collect")
+    };
+    // 应至少有一个 active brain_page_update 且 version_hash 非空
+    let has_non_empty_vhash = projections.iter().any(|(_, vhash)| !vhash.is_empty());
+    assert!(
+        has_non_empty_vhash,
+        "P2-9 修复：apply 后 brain_page_update.version_hash 应非空，实际: {:?}",
+        projections
+    );
+
+    // 模拟第二次人工修改页面
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Second human edit', content_hash = 'second_human_edit_hash' WHERE slug = 'people/apply-baseline-test'",
+        rusqlite::params![],
+    ).expect("模拟第二次人工修改页面");
+
+    // 第三次 artifact_put：P2-9 修复后应检测到新的冲突
+    let result3 = svc
+        .put_memory(
+            "people/apply-baseline-test",
+            "Third put content",
+            Some("Apply Baseline Test Third"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第三次 put_memory 应成功");
+
+    assert_eq!(
+        result3.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict"),
+        "P2-9 修复：apply 后再人工编辑页面，再次 put 应返回 conflict，实际: {:?}",
+        result3.get("resolution")
+    );
+}
+
+/// P1-10 修复验证：冲突后不 apply，再次提交与 pending 完全相同的内容，
+/// 应继续返回 conflict（而非 no_op），且页面不变。
+/// 之前 no_op 排在 conflict 前面，导致冲突后重复提交同一内容时
+/// 系统返回 no_op，但稳定页面仍是人工编辑内容，用户误以为内容已存在。
+#[test]
+fn artifact_put_after_conflict_same_content_returns_conflict() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 第一次 artifact_put：写入初始内容
+    let result1 = svc
+        .put_memory(
+            "people/conflict-same-content-test",
+            "Original content",
+            Some("Conflict Same Content Test"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第一次 put_memory 应成功");
+
+    assert!(
+        result1.get("artifact_id").is_some() || result1.get("id").is_some(),
+        "第一次 put 应返回 artifact_id"
+    );
+
+    // 模拟人工修改页面
+    let conn = engine.connection().expect("connection");
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited content', content_hash = 'fake_human_edit_hash' WHERE slug = 'people/conflict-same-content-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突，返回 pending suggested change
+    let result2 = svc
+        .put_memory(
+            "people/conflict-same-content-test",
+            "Second put content",
+            Some("Conflict Same Content Test Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第二次 put_memory 应成功");
+
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict"),
+        "第二次 put 应返回 conflict resolution"
+    );
+
+    // P1-10 核心测试：不 apply suggested change，再次提交与第二次完全相同的内容
+    // 之前会返回 no_op（因为最新 pending artifact 的 sha256 与提交内容相同），
+    // 修复后应继续返回 conflict（因为页面仍处于人工修改冲突状态）
+    let result3 = svc
+        .put_memory(
+            "people/conflict-same-content-test",
+            "Second put content", // 与第二次提交完全相同的内容
+            Some("Conflict Same Content Test Updated"),
+            None,  // default intent = "memory"
+            false, // not dry_run
+            false, // not force
+        )
+        .expect("第三次 put_memory 应成功");
+
+    // 断言：第三次 put 应返回 conflict，绝不能返回 no_op
+    let resolution3 = result3.get("resolution").and_then(|v| v.as_str());
+    assert_eq!(
+        resolution3,
+        Some("conflict"),
+        "P1-10 修复：冲突后再次提交相同内容应返回 conflict，而非 no_op，实际: {:?}",
+        resolution3
+    );
+
+    // 断言：页面内容仍为人工编辑内容（未被覆盖）
+    let page_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/conflict-same-content-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+    assert_eq!(
+        page_content, "Human edited content",
+        "P1-10 修复：冲突后再次提交相同内容，页面应保持人工编辑内容，实际: {}",
+        page_content
+    );
+}
+
+/// P1-11 修复验证：apply 后新 brain_page_update 的 projection_ref
+/// 必须为 "brain_page:{slug}" 格式，与 baseline 查询一致。
+/// 之前写成 "slug:{slug}"，导致 apply 后的投影无法被
+/// find_latest_page_update_hash_by_slug 查到，后续冲突检测基线丢失。
+#[test]
+fn apply_projection_ref_matches_baseline_query() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 第一次 artifact_put：写入初始内容
+    let _result1 = svc
+        .put_memory(
+            "people/apply-projref-test",
+            "Original content",
+            Some("Apply ProjRef Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("第一次 put_memory 应成功");
+
+    // 模拟人工修改页面
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited', content_hash = 'human_hash_1' WHERE slug = 'people/apply-projref-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突
+    let result2 = svc
+        .put_memory(
+            "people/apply-projref-test",
+            "Second put content",
+            Some("Apply ProjRef Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第二次 put_memory 应成功");
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict")
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // apply suggested change
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply pending suggested change 应成功");
+
+    // P1-11 核心断言：apply 后新投影的 projection_ref 必须为 "brain_page:{slug}"
+    let proj_ref: String = conn
+        .query_row(
+            "SELECT ap.projection_ref FROM artifact_projections ap
+         JOIN source_artifacts sa ON ap.artifact_id = sa.id
+         WHERE sa.canonical_slug = 'people/apply-projref-test'
+           AND ap.projection_type = 'brain_page_update'
+           AND ap.status = 'active'
+         ORDER BY ap.updated_at DESC, ap.id DESC LIMIT 1",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 apply 后投影的 projection_ref");
+    assert_eq!(proj_ref, "brain_page:people/apply-projref-test",
+        "P1-11 修复：apply 后投影 projection_ref 应为 'brain_page:people/apply-projref-test'，实际: {}", proj_ref);
+
+    // P1-11 核心断言：baseline 查询能查到 apply 后的投影
+    let baseline_hash = gbrain_core::artifact::store::find_latest_page_update_hash_by_slug(
+        &conn,
+        "people/apply-projref-test",
+    )
+    .expect("baseline 查询不应报错");
+    assert!(
+        baseline_hash.is_some() && !baseline_hash.as_ref().unwrap().is_empty(),
+        "P1-11 修复：apply 后 baseline 查询应返回非空 hash，实际: {:?}",
+        baseline_hash
+    );
+}
+
+/// P1-11 修复验证：apply 后未发生人工修改时，再次 artifact_put
+/// 不应误判 conflict。之前 projection_ref 不一致导致 baseline 查询
+/// 找不到 apply 后的投影，只能用旧 hash，从而误判。
+#[test]
+fn apply_then_put_without_human_edit_no_false_conflict() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 第一次 artifact_put：写入初始内容
+    let _result1 = svc
+        .put_memory(
+            "people/apply-no-false-conflict-test",
+            "Original content",
+            Some("Apply No False Conflict Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("第一次 put_memory 应成功");
+
+    // 模拟人工修改页面
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited', content_hash = 'human_hash_2' WHERE slug = 'people/apply-no-false-conflict-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突
+    let result2 = svc
+        .put_memory(
+            "people/apply-no-false-conflict-test",
+            "Second put content",
+            Some("Apply No False Conflict Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第二次 put_memory 应成功");
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict")
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // apply suggested change — 页面被替换为新内容
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply pending suggested change 应成功");
+
+    // P1-11 核心测试：不做任何人工修改，再次 put 同内容应为幂等
+    let result3 = svc
+        .put_memory(
+            "people/apply-no-false-conflict-test",
+            "Second put content", // 与 apply 后页面内容一致
+            Some("Apply No False Conflict Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第三次 put_memory 应成功");
+
+    let resolution3 = result3.get("resolution").and_then(|v| v.as_str());
+    assert_ne!(
+        resolution3,
+        Some("conflict"),
+        "P1-11 修复：apply 后未人工修改，再次 put 同内容不应误判 conflict，实际: {:?}",
+        resolution3
+    );
+}
+
+/// P2-11 修复验证：apply 后旧 brain_page_update 投影应被标记为 superseded，
+/// 不应存在多个 active 的同 slug brain_page_update 投影。
+#[test]
+fn apply_supersedes_old_page_update_projection() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 第一次 artifact_put：写入初始内容
+    let _result1 = svc
+        .put_memory(
+            "people/apply-supersede-test",
+            "Original content",
+            Some("Apply Supersede Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("第一次 put_memory 应成功");
+
+    // 模拟人工修改页面
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited', content_hash = 'human_hash_3' WHERE slug = 'people/apply-supersede-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突
+    let result2 = svc
+        .put_memory(
+            "people/apply-supersede-test",
+            "Second put content",
+            Some("Apply Supersede Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第二次 put_memory 应成功");
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict")
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // apply suggested change
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply pending suggested change 应成功");
+
+    // P2-11 核心断言：同 slug 只应有一个 active brain_page_update 投影
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifact_projections ap
+         JOIN source_artifacts sa ON ap.artifact_id = sa.id
+         WHERE sa.canonical_slug = 'people/apply-supersede-test'
+           AND ap.projection_type = 'brain_page_update'
+           AND ap.status = 'active'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 active 投影数");
+    assert_eq!(
+        active_count, 1,
+        "P2-11 修复：apply 后同 slug 只应有 1 个 active brain_page_update 投影，实际: {}",
+        active_count
+    );
+
+    // P2-11 核心断言：旧投影应被标记为 superseded
+    let superseded_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifact_projections ap
+         JOIN source_artifacts sa ON ap.artifact_id = sa.id
+         WHERE sa.canonical_slug = 'people/apply-supersede-test'
+           AND ap.projection_type = 'brain_page_update'
+           AND ap.status = 'superseded'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 superseded 投影数");
+    assert!(
+        superseded_count >= 1,
+        "P2-11 修复：apply 后旧 brain_page_update 应被标记为 superseded，实际 superseded 数: {}",
+        superseded_count
+    );
+}
+
+// ============================================================================
+// P3-12 修复: artifact_put --file 与 rollback 投影一致性回归测试
+// ============================================================================
+
+/// P2-12 修复验证：artifact_put 内容超过 1MB 应被拒绝。
+/// put_memory 的内容上限为 1MB，artifact_put --file 预检也应使用相同上限。
+#[test]
+fn artifact_put_content_exceeds_1mb_rejected() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    // 构造超过 1MB 的内容
+    let max_bytes = gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES;
+    let oversized_content = "x".repeat(max_bytes + 1);
+
+    let result = svc.put_memory(
+        "people/oversized-test",
+        &oversized_content,
+        Some("Oversized Test"),
+        None,
+        false,
+        false,
+    );
+
+    assert!(result.is_err(), "P2-12 修复：超过 1MB 的内容应被拒绝");
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("超过上限") || err_msg.contains("exceeds"),
+        "P2-12 修复：错误信息应说明超出上限，实际: {}",
+        err_msg
+    );
+}
+
+/// P2-12 修复验证：artifact_put --file 的文本文件扩展名白名单。
+/// pdf/docx/xlsx 等二进制格式不应通过 artifact_put --file，
+/// 它们应走 artifact_upload 路径。
+#[test]
+fn artifact_put_file_text_only_allowlist() {
+    // 验证 TEXT_FILE_EXTENSIONS 不包含二进制格式
+    let text_exts = gbrain_core::artifact::service::TEXT_FILE_EXTENSIONS;
+    assert!(
+        !text_exts.contains(&"pdf"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 不应包含 pdf"
+    );
+    assert!(
+        !text_exts.contains(&"docx"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 不应包含 docx"
+    );
+    assert!(
+        !text_exts.contains(&"xlsx"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 不应包含 xlsx"
+    );
+
+    // 验证 TEXT_FILE_EXTENSIONS 包含常见文本格式
+    assert!(
+        text_exts.contains(&"txt"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 应包含 txt"
+    );
+    assert!(
+        text_exts.contains(&"md"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 应包含 md"
+    );
+    assert!(
+        text_exts.contains(&"json"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 应包含 json"
+    );
+    assert!(
+        text_exts.contains(&"yaml"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 应包含 yaml"
+    );
+    assert!(
+        text_exts.contains(&"csv"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 应包含 csv"
+    );
+
+    // 验证 MAX_PUT_MEMORY_CONTENT_BYTES 为 1MB
+    assert_eq!(
+        gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES,
+        1024 * 1024,
+        "P2-12 修复：MAX_PUT_MEMORY_CONTENT_BYTES 应为 1MB"
+    );
+}
+
+/// P1-12 修复验证：rollback 后 apply 创建的 brain_page_update 投影
+/// 不应继续为 active，应被标记为 stale (stale_reason='rolled_back')。
+#[test]
+fn rollback_stales_applied_page_update_projection() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 第一次 artifact_put：写入初始内容
+    let _result1 = svc
+        .put_memory(
+            "people/rollback-proj-test",
+            "Original content",
+            Some("Rollback Proj Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("第一次 put_memory 应成功");
+
+    // 模拟人工修改页面，触发冲突
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited', content_hash = 'human_hash_rollback' WHERE slug = 'people/rollback-proj-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突
+    let result2 = svc
+        .put_memory(
+            "people/rollback-proj-test",
+            "Second put content",
+            Some("Rollback Proj Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第二次 put_memory 应成功");
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict")
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // apply suggested change
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply pending suggested change 应成功");
+
+    // 确认 apply 后有 active brain_page_update 投影
+    let active_before_rollback: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifact_projections ap
+         JOIN source_artifacts sa ON ap.artifact_id = sa.id
+         WHERE sa.canonical_slug = 'people/rollback-proj-test'
+           AND ap.projection_type = 'brain_page_update'
+           AND ap.status = 'active'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 apply 后 active 投影数");
+    assert!(
+        active_before_rollback >= 1,
+        "apply 后应有至少 1 个 active brain_page_update 投影，实际: {}",
+        active_before_rollback
+    );
+
+    // rollback suggested change
+    let _rollback_result = svc
+        .rollback_suggested_change(change_id)
+        .expect("rollback suggested change 应成功");
+
+    // P1-12 核心断言：rollback 后 apply 创建的投影不应继续为 active
+    let _active_after_rollback: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifact_projections ap
+         JOIN source_artifacts sa ON ap.artifact_id = sa.id
+         WHERE sa.canonical_slug = 'people/rollback-proj-test'
+           AND ap.projection_type = 'brain_page_update'
+           AND ap.status = 'active'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 rollback 后 active 投影数");
+    // rollback 后不应有 apply 创建的 active 投影
+    // 注意：第一次 put 的投影可能仍为 active（如果它未被 superseded）
+    // 关键是 apply 创建的投影（metadata_json 含 candidate_id）不应为 active
+    let rolled_back_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifact_projections
+         WHERE projection_type = 'brain_page_update'
+           AND projection_ref = 'brain_page:people/rollback-proj-test'
+           AND status = 'stale'
+           AND stale_reason = 'rolled_back'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询 rolled_back 投影数");
+    assert!(
+        rolled_back_count >= 1,
+        "P1-12 修复：rollback 后 apply 创建的投影应被标记为 stale (rolled_back)，实际: {}",
+        rolled_back_count
+    );
+}
+
+/// P1-12 修复验证：rollback 后下一次 artifact_put 不应因已回滚投影的
+/// 旧 version_hash 出现错误冲突判断。
+#[test]
+fn rollback_then_put_no_false_conflict_from_rolled_back_projection() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 第一次 artifact_put：写入初始内容
+    let _result1 = svc
+        .put_memory(
+            "people/rollback-conflict-test",
+            "Original content",
+            Some("Rollback Conflict Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("第一次 put_memory 应成功");
+
+    // 模拟人工修改页面，触发冲突
+    conn.execute(
+        "UPDATE pages SET compiled_truth = 'Human edited', content_hash = 'human_hash_rc' WHERE slug = 'people/rollback-conflict-test'",
+        rusqlite::params![],
+    ).expect("模拟人工修改页面");
+
+    // 第二次 artifact_put：应检测到冲突
+    let result2 = svc
+        .put_memory(
+            "people/rollback-conflict-test",
+            "Second put content",
+            Some("Rollback Conflict Test Updated"),
+            None,
+            false,
+            false,
+        )
+        .expect("第二次 put_memory 应成功");
+    assert_eq!(
+        result2.get("resolution").and_then(|v| v.as_str()),
+        Some("conflict")
+    );
+
+    let change_id = result2
+        .get("change_id")
+        .and_then(|v| v.as_i64())
+        .expect("冲突分支应返回 change_id");
+
+    // apply suggested change
+    let _apply_result = svc
+        .apply_suggested_change(change_id)
+        .expect("apply pending suggested change 应成功");
+
+    // rollback suggested change — 页面恢复到 apply 前状态
+    let _rollback_result = svc
+        .rollback_suggested_change(change_id)
+        .expect("rollback suggested change 应成功");
+
+    // P1-12 核心测试：rollback 后，baseline 查询不应返回已回滚投影的 hash
+    let baseline_hash = gbrain_core::artifact::store::find_latest_page_update_hash_by_slug(
+        &conn,
+        "people/rollback-conflict-test",
+    )
+    .expect("baseline 查询不应报错");
+
+    // baseline_hash 应为第一次 put 的 hash（旧投影被恢复为 active），
+    // 或为 None（如果旧投影未被恢复，也没有其它 active 投影）
+    // 关键是不应返回 apply 时创建的、已回滚的投影 hash
+    // 如果 baseline_hash 指向已回滚内容，后续冲突检测会误判
+    let page_hash: String = conn
+        .query_row(
+            "SELECT content_hash FROM pages WHERE slug = 'people/rollback-conflict-test'",
+            rusqlite::params![],
+            |row| row.get(0),
+        )
+        .expect("查询页面 content_hash");
+
+    // 如果 baseline_hash 存在，它应与当前页面 content_hash 一致
+    // （因为 rollback 恢复了页面内容，旧投影也应恢复为 active）
+    if let Some(ref bh) = baseline_hash {
+        assert_eq!(
+            bh, &page_hash,
+            "P1-12 修复：rollback 后 baseline hash 应与当前页面 content_hash 一致，\
+             baseline: {}, page: {}（baseline 可能指向已回滚内容）",
+            bh, page_hash
+        );
+    }
+}
+
+// ============================================================================
+// P3 修复: artifact_put --file MCP dispatch 层文件路径回归测试
+// ============================================================================
+
+/// P3 修复验证：通过 MCP dispatch artifact_put --file 传入 .md/.txt 文件应成功。
+/// 此前只有 put_memory 的 content 路径测试，缺少真实文件 dispatch 测试。
+#[test]
+fn mcp_artifact_put_file_accepts_text_extensions() {
+    let mut server = make_mcp_server();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).expect("创建临时目录");
+
+    // 测试 .md 文件
+    let md_path = dir.path().join("test_input.md");
+    std::fs::write(&md_path, "# Hello\n\nSome markdown content").expect("写入 md 文件");
+    let md_result = server.dispatch_tool_call(
+        "artifact_put",
+        serde_json::json!({
+            "slug": "people/mcp-file-md-test",
+            "file": md_path.to_str().unwrap(),
+            "title": "MCP File MD Test"
+        }),
+    );
+    assert!(
+        md_result.is_ok(),
+        ".md 文件通过 artifact_put --file dispatch 应成功，错误: {:?}",
+        md_result.err()
+    );
+    let md_val = md_result.unwrap();
+    assert!(
+        md_val.get("artifact_id").is_some() || md_val.get("id").is_some(),
+        ".md 文件 dispatch 应返回 artifact_id"
+    );
+
+    // 测试 .txt 文件
+    let txt_path = dir.path().join("test_input.txt");
+    std::fs::write(&txt_path, "Plain text content").expect("写入 txt 文件");
+    let txt_result = server.dispatch_tool_call(
+        "artifact_put",
+        serde_json::json!({
+            "slug": "people/mcp-file-txt-test",
+            "file": txt_path.to_str().unwrap(),
+            "title": "MCP File TXT Test"
+        }),
+    );
+    assert!(
+        txt_result.is_ok(),
+        ".txt 文件通过 artifact_put --file dispatch 应成功，错误: {:?}",
+        txt_result.err()
+    );
+    let txt_val = txt_result.unwrap();
+    assert!(
+        txt_val.get("artifact_id").is_some() || txt_val.get("id").is_some(),
+        ".txt 文件 dispatch 应返回 artifact_id"
+    );
+}
+
+/// P3 修复验证：通过 MCP dispatch artifact_put --file 传入 .pdf/.docx/.xlsx
+/// 应在 validate_upload_source 阶段被扩展名白名单拒绝，
+/// 不会进入 String::from_utf8 转换。
+#[test]
+fn mcp_artifact_put_file_rejects_binary_extensions() {
+    let mut server = make_mcp_server();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).expect("创建临时目录");
+
+    for ext in &["pdf", "docx", "xlsx"] {
+        let file_path = dir.path().join(format!("test.{}", ext));
+        std::fs::write(&file_path, b"fake binary content").expect("写入二进制文件");
+
+        let result = server.dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": format!("people/mcp-file-reject-{}", ext),
+                "file": file_path.to_str().unwrap(),
+                "title": format!("MCP File Reject {}", ext)
+            }),
+        );
+
+        assert!(
+            result.is_err(),
+            ".{} 文件应被 artifact_put --file dispatch 拒绝",
+            ext
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.to_lowercase().contains("not allowed")
+                || err_msg.to_lowercase().contains("extension")
+                || err_msg.contains("不允许"),
+            ".{} 拒绝原因应说明扩展名不允许，实际: {}",
+            ext, err_msg
+        );
+    }
+}
+
+/// P3 修复验证：通过 MCP dispatch artifact_put --file 传入超过 1MB 的文件
+/// 应在 validate_upload_source 阶段被大小检查拒绝，不会进入文件读取。
+#[test]
+fn mcp_artifact_put_file_rejects_oversized() {
+    let mut server = make_mcp_server();
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).expect("创建临时目录");
+
+    let file_path = dir.path().join("oversized.md");
+    // 使用 set_len 创建超过 1MB 的稀疏文件，避免实际写入 1MB+ 数据
+    let f = std::fs::File::create(&file_path).expect("创建 oversized 文件");
+    f.set_len(
+        (gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES + 1) as u64,
+    )
+    .expect("设置 oversized 文件长度");
+    drop(f);
+
+    let result = server.dispatch_tool_call(
+        "artifact_put",
+        serde_json::json!({
+            "slug": "people/mcp-file-oversized",
+            "file": file_path.to_str().unwrap(),
+            "title": "MCP File Oversized"
+        }),
+    );
+
+    assert!(
+        result.is_err(),
+        "超过 1MB 的文件应被 artifact_put --file dispatch 拒绝"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.to_lowercase().contains("exceed")
+            || err_msg.to_lowercase().contains("超过上限")
+            || err_msg.to_lowercase().contains("maximum"),
+        "超大文件拒绝原因应说明超出上限，实际: {}",
+        err_msg
+    );
+}
+
+// ============================================================================
+// P2 修复: 非 page_update 类型候选 rollback 回归测试
+// ============================================================================
+
+/// P2 修复验证：fact_claim 候选 apply 后 rollback 成功，
+/// 页面恢复到 apply 前内容，candidate 状态变为 rolled_back。
+#[test]
+fn rollback_fact_claim_restores_page_content() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 创建初始页面（含 artifact）
+    let _result1 = svc
+        .put_memory(
+            "people/fact-claim-rollback-test",
+            "Initial page content",
+            Some("Fact Claim Rollback Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory 初始页面应成功");
+
+    // 获取 artifact_id
+    let artifact_id: i64 = conn
+        .query_row(
+            "SELECT id FROM source_artifacts WHERE canonical_slug = 'people/fact-claim-rollback-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("获取 artifact_id");
+
+    // 记录应用前页面内容
+    let content_before: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/fact-claim-rollback-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("查询初始页面内容");
+
+    // 创建 fact_claim 候选
+    let candidate_id = promotion::create_candidate(
+        &conn,
+        artifact_id,
+        None, // occurrence_id
+        None, // kb_document_id
+        None, // kb_node_id
+        CandidateType::FactClaim,
+        "people/fact-claim-rollback-test",
+        "compiled_truth",
+        "测试事实声明",
+        r#"{"subject_slug":"people/fact-claim-rollback-test","predicate":"测试属性","object_text":"这是一个测试事实声明值"}"#,
+        "{}",
+        0.9,
+        RiskLevel::Low,
+    )
+    .expect("创建 fact_claim 候选应成功");
+
+    // 接受候选
+    promotion::review_candidate(
+        &conn,
+        &ReviewCandidateInput {
+            candidate_id,
+            action: "accept".to_string(),
+            reviewer: "test".to_string(),
+            notes: Some("测试用接受".to_string()),
+        },
+    )
+    .expect("接受候选应成功");
+
+    // 应用候选
+    let applied = promotion::apply_candidate(&conn, candidate_id).expect("应用候选应成功");
+    assert_eq!(applied.status, "applied");
+
+    // 验证页面内容已变更（包含 facts 条目）
+    let content_after_apply: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/fact-claim-rollback-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("查询应用后页面内容");
+    assert!(
+        content_after_apply.contains("测试事实声明值"),
+        "应用后页面应包含 fact_claim 内容，实际: {}",
+        content_after_apply
+    );
+
+    // 回滚候选
+    let rolled_back = promotion::rollback_candidate(&conn, candidate_id).expect("回滚候选应成功");
+    assert_eq!(rolled_back.status, "rolled_back");
+
+    // 验证页面内容恢复
+    let content_after_rollback: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/fact-claim-rollback-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("查询回滚后页面内容");
+    assert_eq!(
+        content_before, content_after_rollback,
+        "回滚后页面内容应与 apply 前一致"
+    );
+}
+
+/// P2 修复验证：page_create 候选 apply 后 rollback 应软删除新建页面，
+/// 不应出现"状态 rolled_back 但页面仍 active"的不一致。
+#[test]
+fn rollback_page_create_soft_deletes_page() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 先创建一个 artifact（page_create 候选需要 artifact_id）
+    // 使用 put_memory 创建不相关的页面来获得 artifact
+    let _result = svc
+        .put_memory(
+            "people/dummy-for-page-create-test",
+            "Dummy content",
+            Some("Dummy Page"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory dummy 应成功");
+
+    let artifact_id: i64 = conn
+        .query_row(
+            "SELECT id FROM source_artifacts WHERE canonical_slug = 'people/dummy-for-page-create-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("获取 artifact_id");
+
+    let new_page_slug = "people/page-create-rollback-test";
+
+    // 确认页面不存在
+    let page_exists_before: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pages WHERE slug = ?1",
+            rusqlite::params![new_page_slug],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    assert!(!page_exists_before, "测试前页面不应存在");
+
+    // 创建 page_create 候选
+    let candidate_id = promotion::create_candidate(
+        &conn,
+        artifact_id,
+        None,
+        None,
+        None,
+        CandidateType::PageCreate,
+        new_page_slug,
+        "compiled_truth",
+        "新建页面标题",
+        r#"{"title":"新建页面标题","content":"这是新建页面的内容"}"#,
+        "{}",
+        0.8,
+        RiskLevel::Low,
+    )
+    .expect("创建 page_create 候选应成功");
+
+    // 接受并应用
+    promotion::review_candidate(
+        &conn,
+        &ReviewCandidateInput {
+            candidate_id,
+            action: "accept".to_string(),
+            reviewer: "test".to_string(),
+            notes: Some("测试用接受".to_string()),
+        },
+    )
+    .expect("接受 page_create 候选应成功");
+
+    let applied = promotion::apply_candidate(&conn, candidate_id).expect("应用 page_create 应成功");
+    assert_eq!(applied.status, "applied");
+
+    // 验证页面已创建
+    let page_exists_after_apply: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
+            rusqlite::params![new_page_slug],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    assert!(
+        page_exists_after_apply,
+        "page_create apply 后页面应存在且未删除"
+    );
+
+    // 回滚
+    let rolled_back = promotion::rollback_candidate(&conn, candidate_id)
+        .expect("回滚 page_create 应成功");
+    assert_eq!(rolled_back.status, "rolled_back");
+
+    // 验证页面已被软删除
+    let page_active_after_rollback: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
+            rusqlite::params![new_page_slug],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    assert!(
+        !page_active_after_rollback,
+        "P2 修复：page_create rollback 后页面不应仍为 active"
+    );
+
+    let page_has_deleted_at: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pages WHERE slug = ?1 AND deleted_at IS NOT NULL",
+            rusqlite::params![new_page_slug],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    assert!(
+        page_has_deleted_at,
+        "P2 修复：page_create rollback 后页面应设置 deleted_at"
+    );
+}
+
+/// P2 修复验证：同一 slug 连续 apply 两个候选后，
+/// rollback 较早候选应被最新 applied 防护拒绝，且页面/投影不变。
+#[test]
+fn rollback_older_fact_claim_rejected_after_newer_applied() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    // 创建初始页面
+    let _result1 = svc
+        .put_memory(
+            "people/older-rollback-rejected-test",
+            "Initial page content",
+            Some("Older Rollback Rejected Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory 应成功");
+
+    let artifact_id: i64 = conn
+        .query_row(
+            "SELECT id FROM source_artifacts WHERE canonical_slug = 'people/older-rollback-rejected-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("获取 artifact_id");
+
+    let slug = "people/older-rollback-rejected-test";
+
+    // 第一个 fact_claim 候选
+    let candidate_1_id = promotion::create_candidate(
+        &conn,
+        artifact_id,
+        None,
+        None,
+        None,
+        CandidateType::FactClaim,
+        slug,
+        "compiled_truth",
+        "第一个事实声明",
+        r#"{"subject_slug":"people/older-rollback-rejected-test","predicate":"属性1","object_text":"值1"}"#,
+        "{}",
+        0.9,
+        RiskLevel::Low,
+    )
+    .expect("创建第一个候选");
+
+    promotion::review_candidate(
+        &conn,
+        &ReviewCandidateInput {
+            candidate_id: candidate_1_id,
+            action: "accept".to_string(),
+            reviewer: "test".to_string(),
+            notes: Some("接受第一个候选".to_string()),
+        },
+    )
+    .expect("接受第一个候选");
+
+    let _applied1 = promotion::apply_candidate(&conn, candidate_1_id).expect("应用第一个候选");
+
+    // 第二个 fact_claim 候选
+    let candidate_2_id = promotion::create_candidate(
+        &conn,
+        artifact_id,
+        None,
+        None,
+        None,
+        CandidateType::FactClaim,
+        slug,
+        "compiled_truth",
+        "第二个事实声明",
+        r#"{"subject_slug":"people/older-rollback-rejected-test","predicate":"属性2","object_text":"值2"}"#,
+        "{}",
+        0.9,
+        RiskLevel::Low,
+    )
+    .expect("创建第二个候选");
+
+    promotion::review_candidate(
+        &conn,
+        &ReviewCandidateInput {
+            candidate_id: candidate_2_id,
+            action: "accept".to_string(),
+            reviewer: "test".to_string(),
+            notes: Some("接受第二个候选".to_string()),
+        },
+    )
+    .expect("接受第二个候选");
+
+    let _applied2 = promotion::apply_candidate(&conn, candidate_2_id).expect("应用第二个候选");
+
+    // 记录两个候选应用后的页面内容
+    let content_before_rollback: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = ?1",
+            rusqlite::params![slug],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+
+    // 尝试回滚较早的候选 → 应失败
+    let rollback_result = promotion::rollback_candidate(&conn, candidate_1_id);
+    assert!(
+        rollback_result.is_err(),
+        "P2 修复：rollback 较早候选应被拒绝，因为不是最新 applied 候选"
+    );
+    let err_msg = format!("{}", rollback_result.unwrap_err());
+    assert!(
+        err_msg.contains("不是") || err_msg.contains("最新"),
+        "错误消息应说明不是最新 applied 候选，实际: {}",
+        err_msg
+    );
+
+    // 验证较早候选状态未变
+    let c1_status: String = conn
+        .query_row(
+            "SELECT status FROM promotion_candidates WHERE id = ?1",
+            rusqlite::params![candidate_1_id],
+            |row| row.get(0),
+        )
+        .expect("查询候选1状态");
+    assert_eq!(c1_status, "applied", "较早候选状态应仍为 applied");
+
+    // 验证页面内容未变
+    let content_after_rollback: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = ?1",
+            rusqlite::params![slug],
+            |row| row.get(0),
+        )
+        .expect("查询页面内容");
+    assert_eq!(
+        content_before_rollback, content_after_rollback,
+        "回滚被拒绝后页面内容不应发生变化"
+    );
 }

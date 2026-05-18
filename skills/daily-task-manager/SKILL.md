@@ -11,10 +11,14 @@ triggers:
   - "task list"
   - "defer task"
 tools:
-  - query
-  - get_page
-  - put_page
-  - add_timeline_entry
+  - artifact_query  # 统一查询接口
+  - artifact_put    # 统一写入接口
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - add_timeline_entry # 旧时间线接口
+optional_internal_tools: true
 mutating: true
 ---
 

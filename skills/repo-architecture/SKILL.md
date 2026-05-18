@@ -10,9 +10,12 @@ triggers:
   - "create new page"
   - "which directory"
 tools:
-  - query
-  - get_page
-  - list_pages
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - list_pages     # 旧列表接口
+optional_internal_tools: true
 mutating: false
 ---
 

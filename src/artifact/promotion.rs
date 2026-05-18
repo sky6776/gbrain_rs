@@ -7,7 +7,7 @@
 //! 4. apply 时写入 gbrain page 并记录 provenance
 
 use rusqlite::{params, Connection, Row};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{GBrainError, Result};
 
@@ -661,6 +661,28 @@ pub fn rollback_candidate(conn: &Connection, candidate_id: i64) -> Result<Promot
         )));
     }
 
+    // P1 修复：校验当前 candidate 是否为该 slug 最新的 applied candidate。
+    // 同一 slug 多次 apply 后，较早 candidate 的投影已被 superseded，
+    // 回滚较早 candidate 会导致页面恢复旧内容但 active 投影仍指向新版本。
+    let latest_applied_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM promotion_candidates
+             WHERE target_slug = ?1 AND status = 'applied'
+             ORDER BY updated_at DESC, id DESC
+             LIMIT 1",
+            params![candidate.target_slug],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(latest_id) = latest_applied_id {
+        if latest_id != candidate.id {
+            return Err(GBrainError::InvalidInput(format!(
+                "候选 {} 不是 slug '{}' 的最新 applied 候选（最新为 {}），请先回滚更新的变更",
+                candidate.id, candidate.target_slug, latest_id
+            )));
+        }
+    }
+
     // 修复：用 savepoint 保护整个回滚流程的三步操作：
     // (1) 标记 provenance 为 stale，(2) 恢复影子页面，(3) 更新候选状态。
     // 任何一步失败时回滚所有写入，避免 provenance 已 stale 但候选仍 applied 的不一致状态。
@@ -709,8 +731,28 @@ fn rollback_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidat
         &format!("rollback: 候选 {} 回滚", candidate.id),
     )?;
 
-    // 2. 尝试恢复影子页面到应用前的版本
-    rollback_shadow_page_update(conn, candidate)?;
+    let candidate_type = candidate
+        .candidate_type
+        .parse()
+        .unwrap_or(CandidateType::FactClaim);
+
+    // 2. 按候选类型执行回滚
+    if candidate_type == CandidateType::PageCreate {
+        // page_create 回滚：删除候选创建的新页面。
+        // apply_page_create_candidate 直接 INSERT INTO pages 不存在页面，
+        // 无 page_versions 历史可恢复，必须直接处理页面生命周期。
+        rollback_page_create(conn, candidate)?;
+    } else {
+        // 尝试恢复影子页面到应用前的版本
+        rollback_shadow_page_update(conn, candidate)?;
+
+        // P1-12 修复：rollback 时同步处理 apply 创建的 brain_page_update 投影。
+        // 仅 PageUpdate 类型会创建 brain_page_update 投影（见 apply_page_update_candidate），
+        // 其它类型不创建该投影，无条件调用会导致找不到投影返回错误。
+        if candidate_type == CandidateType::PageUpdate {
+            rollback_page_update_projections(conn, candidate)?;
+        }
+    }
 
     // 3. 更新候选状态为 rolled_back
     // 修复：将回滚信息附加到 review_notes 而非覆盖，
@@ -743,6 +785,127 @@ fn rollback_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidat
             .to_string(),
     ) {
         warn!("记录 promotion_rolled_back 事件失败: {}", e);
+    }
+
+    Ok(())
+}
+
+/// 回滚页面创建候选 — 软删除候选新建的页面
+///
+/// apply_page_create_candidate 会 INSERT INTO pages 创建一个全新页面，
+/// 没有 page_versions 历史可恢复。因此 page_create 回滚必须直接处理页面生命周期。
+///
+/// 安全约束：
+/// - 页面创建后未被修改（created_at == updated_at）时，直接软删除。
+/// - 页面已被后续修改时，拒绝回滚，提示人工审查。
+fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Result<()> {
+    let slug = &candidate.target_slug;
+
+    // P1修复：查询页面完整字段（含 page_type/timeline/frontmatter），用于内容比较替代时间戳比较
+    let page_info = conn.query_row(
+        "SELECT title, compiled_truth, content_hash, page_type, timeline, frontmatter, deleted_at \
+         FROM pages WHERE slug = ?1",
+        rusqlite::params![slug],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        },
+    );
+
+    match page_info {
+        Ok((_title, _content, _hash, _pt, _tl, _fm, Some(_deleted_at))) => {
+            // 页面已被删除，与 rollback 目标一致，无需操作
+            info!("页面 {} 已被删除，跳过 page_create 回滚的页面清理", slug);
+        }
+        Ok((current_title, current_content, current_hash, current_page_type, current_timeline, current_frontmatter, None)) => {
+            // P1修复：不再依赖秒级时间戳，比较当前页面各字段与候选创建时的内容
+            // 包含 title/content/hash/page_type/timeline/frontmatter，防止仅 metadata 被修改时误删
+            let payload: serde_json::Value =
+                serde_json::from_str(&candidate.proposed_payload).unwrap_or(serde_json::json!({}));
+            // P2修复：title fallback 与 apply_page_create_candidate 保持一致
+            let orig_title = payload
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&candidate.title);
+            let orig_content = payload
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            // page_create 初始化时的默认值：page_type='note', timeline='', frontmatter=''
+            let orig_page_type = payload
+                .get("page_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("note");
+            let orig_timeline = payload
+                .get("timeline")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let orig_frontmatter = payload
+                .get("frontmatter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let orig_hash = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(orig_title.as_bytes());
+                hasher.update(orig_content.as_bytes());
+                format!("{:x}", hasher.finalize())
+            };
+
+            if current_title != orig_title
+                || current_content != orig_content
+                || current_hash.as_deref() != Some(&orig_hash)
+                || current_page_type != orig_page_type
+                || current_timeline != orig_timeline
+                || current_frontmatter != orig_frontmatter
+            {
+                return Err(GBrainError::InvalidInput(format!(
+                    "页面 {} 自创建后被修改，无法安全回滚 page_create 候选 {}。请人工审查后手动处理。",
+                    slug, candidate.id
+                )));
+            }
+            // 软删除页面（与 SqliteEngine::delete_page 保持一致）
+            let now = now_str();
+            conn.execute(
+                "UPDATE pages SET deleted_at = ?1, updated_at = ?1 WHERE slug = ?2",
+                rusqlite::params![now, slug],
+            )
+            .map_err(|e| {
+                GBrainError::Database(format!(
+                    "回滚 page_create 软删除页面 {} 失败: {}",
+                    slug, e
+                ))
+            })?;
+            // 清理 slug 关联的链接和文件引用
+            conn.execute(
+                "DELETE FROM links WHERE from_slug = ?1 OR to_slug = ?1",
+                rusqlite::params![slug],
+            )
+            .map_err(|e| GBrainError::Database(format!("清理页面链接失败: {}", e)))?;
+            conn.execute(
+                "DELETE FROM files WHERE page_slug = ?1",
+                rusqlite::params![slug],
+            )
+            .map_err(|e| GBrainError::Database(format!("清理页面文件引用失败: {}", e)))?;
+            info!("page_create 回滚：已软删除页面 {}", slug);
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // 页面不存在，可能是已被其他途径删除
+            info!("页面 {} 不存在，跳过 page_create 回滚的页面删除", slug);
+        }
+        Err(e) => {
+            return Err(GBrainError::Database(format!(
+                "回滚 page_create 查询页面 {} 状态失败: {}",
+                slug, e
+            )));
+        }
     }
 
     Ok(())
@@ -803,6 +966,106 @@ fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate
         // 对于简单追加式更新，可以移除候选添加的行
         debug!("候选 {} 无版本历史可恢复，尝试移除追加内容", candidate.id);
         remove_candidate_content_from_page(conn, candidate)?;
+    }
+
+    Ok(())
+}
+
+/// P1-12 修复：rollback 时同步处理 apply 创建的 brain_page_update 投影。
+///
+/// apply 时会：(1) 创建 active brain_page_update 投影 (metadata_json 含 candidate_id)
+///            (2) 将同 slug 旧 active 投影标记为 superseded (superseded_by = 新投影 id)
+/// rollback 必须反向操作：
+///   - 将 apply 创建的投影标记为 stale (stale_reason = 'rolled_back')
+///   - 将被 superseded 的旧投影恢复为 active
+///   - 将旧投影的 version_hash 更新为当前页面的 content_hash
+///     （因为 rollback 已恢复页面内容，旧投影的 hash 需与页面一致，
+///      否则后续冲突检测基线错误）
+/// 否则已回滚内容仍被 active 投影引用，后续冲突检测基线错误。
+fn rollback_page_update_projections(
+    conn: &Connection,
+    candidate: &PromotionCandidate,
+) -> Result<()> {
+    let slug = &candidate.target_slug;
+    let proj_ref = format!("brain_page:{}", slug);
+
+    // 1. 查找 apply 时创建的 brain_page_update 投影（metadata_json 含 candidate_id）
+    // P2 修复：使用 Rust 侧 serde_json 精确比较 candidate_id，替代 LIKE 模糊匹配。
+    // LIKE '%"candidate_id": 12%' 会误匹配 {"candidate_id": 123}，导致错误地
+    // stale 另一个 candidate 的投影。
+    let applied_proj_id: Option<i64> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, metadata_json FROM artifact_projections
+                 WHERE projection_type = 'brain_page_update'
+                   AND projection_ref = ?1
+                   AND status = 'active'",
+            )
+            .map_err(|e| GBrainError::Database(format!("查询 active 投影失败: {}", e)))?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map(rusqlite::params![proj_ref], |row| {
+                Ok((row.get(0)?, row.get::<_, String>(1).unwrap_or_default()))
+            })
+            .map_err(|e| GBrainError::Database(format!("遍历投影行失败: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows.iter().find_map(|(id, meta_json)| {
+            serde_json::from_str::<serde_json::Value>(meta_json)
+                .ok()
+                .and_then(|v| v.get("candidate_id")?.as_i64())
+                .and_then(|cid| if cid == candidate.id { Some(*id) } else { None })
+        })
+    };
+
+    if let Some(proj_id) = applied_proj_id {
+        // 2. 将 apply 创建的投影标记为 stale
+        let now = now_str();
+        conn.execute(
+            "UPDATE artifact_projections SET status = 'stale', stale_reason = 'rolled_back', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, proj_id],
+        ).map_err(|e| GBrainError::Database(format!("标记回滚投影 stale 失败: {}", e)))?;
+
+        // 3. 获取当前页面的 content_hash，用于更新旧投影的 version_hash
+        let current_page_hash: Option<String> = conn
+            .query_row(
+                "SELECT content_hash FROM pages WHERE slug = ?1",
+                rusqlite::params![slug],
+                |row| row.get(0),
+            )
+            .ok();
+
+        // 4. 查找被该投影 superseded 的旧投影，恢复为 active
+        // 这些旧投影在 apply 时被标记为 superseded_by = proj_id
+        // 同时更新 version_hash 为当前页面的 content_hash
+        let restored_count = if let Some(ref page_hash) = current_page_hash {
+            conn.execute(
+                "UPDATE artifact_projections SET status = 'active', stale_reason = '', superseded_by = NULL, version_hash = ?1, updated_at = ?2 WHERE superseded_by = ?3 AND projection_type = 'brain_page_update' AND projection_ref = ?4",
+                rusqlite::params![page_hash, now, proj_id, proj_ref],
+            ).map_err(|e| GBrainError::Database(format!("恢复旧投影 active 失败: {}", e)))?
+        } else {
+            conn.execute(
+                "UPDATE artifact_projections SET status = 'active', stale_reason = '', superseded_by = NULL, updated_at = ?1 WHERE superseded_by = ?2 AND projection_type = 'brain_page_update' AND projection_ref = ?3",
+                rusqlite::params![now, proj_id, proj_ref],
+            ).map_err(|e| GBrainError::Database(format!("恢复旧投影 active 失败: {}", e)))?
+        };
+
+        info!(
+            "候选 {} 回滚投影处理: 停用投影 id={}, 恢复旧投影数={}, 页面hash={:?}",
+            candidate.id, proj_id, restored_count, current_page_hash
+        );
+    } else {
+        // P1 修复：找不到 apply 创建的 active 投影时返回错误，
+        // 避免"页面已恢复但投影未同步"的半逻辑成功。
+        // 若候选状态为 applied 但无对应 active 投影，
+        // 说明数据已不一致，不应继续标记 candidate 为 rolled_back。
+        error!(
+            "候选 {} 回滚时未找到对应 active brain_page_update 投影 (slug={})",
+            candidate.id, slug
+        );
+        return Err(GBrainError::Database(format!(
+            "回滚候选 {} 失败：未找到对应的 active brain_page_update 投影 (slug={})",
+            candidate.id, slug
+        )));
     }
 
     Ok(())
@@ -1465,10 +1728,51 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
     ).map_err(|e| GBrainError::Database(format!("创建页面失败: {}", e)))?;
 
     if rows == 0 {
-        return Err(GBrainError::InvalidInput(format!(
-            "页面 {} 已存在，无法创建（候选可能应使用 page_update 类型）",
-            slug
-        )));
+        // P2修复：INSERT OR IGNORE 未插入时，检查 slug 是否被软删除页面占用
+        // 软删除行仍占用 UNIQUE 约束，但应允许新 page_create 候选复用恢复
+        let deleted_at: Option<String> = match conn.query_row(
+            "SELECT deleted_at FROM pages WHERE slug = ?1",
+            params![slug],
+            |row| row.get(0),
+        ) {
+            Ok(val) => val,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                return Err(GBrainError::Database(format!(
+                    "查询页面 {} 状态失败: {}",
+                    slug, e
+                )));
+            }
+        };
+        match deleted_at {
+            Some(_) => {
+                // P2修复：页面已被软删除，复用该行恢复为 active 页面
+                // 显式清空 frontmatter/timeline/timeline_tokens，防止旧页面残留混入新 page_create
+                conn.execute(
+                    "UPDATE pages SET title=?1, compiled_truth=?2, page_type='note', \
+                     title_tokens=?3, compiled_truth_tokens=?4, content_hash=?5, \
+                     updated_at=?6, deleted_at=NULL, \
+                     frontmatter='', timeline='', timeline_tokens='' WHERE slug=?7",
+                    params![
+                        title, content, title_tokens, truth_tokens, content_hash, now, slug
+                    ],
+                )
+                .map_err(|e| {
+                    GBrainError::Database(format!("恢复软删除页面 {} 失败: {}", slug, e))
+                })?;
+                info!(
+                    "页面创建候选已应用（恢复软删除页面）: slug={}",
+                    slug
+                );
+                return Ok(());
+            }
+            None => {
+                return Err(GBrainError::InvalidInput(format!(
+                    "页面 {} 已存在，无法创建（候选可能应使用 page_update 类型）",
+                    slug
+                )));
+            }
+        }
     }
 
     info!("页面创建候选已应用: slug={}", slug);
@@ -1476,6 +1780,9 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
 }
 
 /// 应用页面更新候选 — 更新已有 gbrain 页面，并创建 brain_page_update 投影
+///
+/// P2-9 修复：读取 payload.mode 字段，replace 时直接替换页面内容，
+/// append 时追加 section。之前 mode 字段被忽略，实际总是追加。
 fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate) -> Result<()> {
     let payload: serde_json::Value =
         serde_json::from_str(&candidate.proposed_payload).unwrap_or(serde_json::json!({}));
@@ -1485,9 +1792,38 @@ fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate
         .and_then(|v| v.as_str())
         .unwrap_or(&candidate.target_field);
     let value = payload.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    // P2-9 修复：读取 mode 字段，默认 append（向后兼容）
+    let mode = payload
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("append");
 
     let slug = &candidate.target_slug;
-    update_shadow_page_section(conn, slug, field, value)?;
+
+    // P2-9 修复：根据 mode 决定更新策略
+    if mode == "replace" && field == "compiled_truth" {
+        // replace + compiled_truth → 直接替换页面全部内容
+        // 先创建版本快照用于 rollback
+        conn.execute(
+            "INSERT INTO page_versions (page_id, compiled_truth, frontmatter, title, page_type)
+             SELECT id, compiled_truth, frontmatter, title, page_type FROM pages WHERE slug = ?1",
+            rusqlite::params![slug],
+        )
+        .ok(); // page_versions 表可能不存在（旧 schema），忽略错误
+
+        conn.execute(
+            "UPDATE pages SET compiled_truth = ?1, updated_at = datetime('now') WHERE slug = ?2",
+            rusqlite::params![value, slug],
+        )
+        .map_err(|e| GBrainError::Database(format!("替换页面内容失败: {}", e)))?;
+
+        // 同步 tokens/hash/chunks
+        sync_page_tokens_and_hash(conn, slug)?;
+        rebuild_chunks_for_page(conn, slug)?;
+    } else {
+        // append 或其它 field → 走现有追加 section 逻辑
+        update_shadow_page_section(conn, slug, field, value)?;
+    }
 
     // 创建 brain_page_update 投影记录
     let artifact_uid = super::store::find_artifact_by_id(conn, candidate.artifact_id)
@@ -1506,8 +1842,25 @@ fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate
             .unwrap_or_default(),
     );
     let proj_key = format!("page_update:{}:{}", slug, fact_hash);
-    let proj_ref = format!("slug:{}", slug);
+    // P1-11 修复：projection_ref 必须使用 "brain_page:{slug}" 格式，
+    // 与 upload.rs 创建投影和 store.rs baseline 查询保持一致。
+    // 之前写成 "slug:{slug}"，导致 apply 后的投影无法被
+    // find_latest_page_update_hash_by_slug 查到，后续冲突检测基线丢失。
+    let proj_ref = format!("brain_page:{}", slug);
     let now = now_str();
+    // P2-9 修复：version_hash 应为当前页面的 content_hash，
+    // 而非空字符串。空 version_hash 会导致后续冲突检测基线丢失，
+    // 下次同 slug artifact_put 无法检测页面是否被人工修改。
+    let page_content_hash: String = conn
+        .query_row(
+            "SELECT content_hash FROM pages WHERE slug = ?1",
+            rusqlite::params![slug],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
     let proj = ArtifactProjection {
         id: 0,
         created_at: now.clone(),
@@ -1516,17 +1869,56 @@ fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate
         occurrence_id: candidate.occurrence_id,
         projection_type: ProjectionType::BrainPageUpdate.to_string(),
         projection_key: proj_key,
-        projection_ref: proj_ref,
+        projection_ref: proj_ref.clone(),
         status: "active".to_string(),
-        version_hash: String::new(),
+        version_hash: page_content_hash,
         stale_reason: String::new(),
         metadata_json: format!("{{\"candidate_id\": {}}}", candidate.id),
         superseded_by: None,
     };
-    super::store::insert_projection(conn, &proj)
+    let new_proj_id = super::store::insert_projection_returning_id(conn, &proj)
         .map_err(|e| GBrainError::Database(format!("插入 brain_page_update 投影失败: {}", e)))?;
 
-    info!("页面更新候选已应用: slug={}, field={}", slug, field);
+    // P2-11 修复：apply 新 brain_page_update 后，将同 slug 旧 active
+    // brain_page_update 标记为 superseded，指向新投影。
+    // 设计文档 §5.6 版本策略要求同 slug 不同内容时旧投影进入
+    // superseded/stale，否则会出现多个 active 稳定页投影，
+    // 与"同 slug 旧投影 stale/superseded"的设计语义不一致。
+    let old_proj_ref = format!("brain_page:{}", slug);
+    let old_active_projections: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, status FROM artifact_projections
+             WHERE projection_type = 'brain_page_update'
+               AND projection_ref = ?1
+               AND status = 'active'
+               AND id != ?2",
+            )
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![old_proj_ref, new_proj_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row.map_err(|e| GBrainError::Database(e.to_string()))?);
+        }
+        result
+    };
+    for (old_id, _old_status) in &old_active_projections {
+        conn.execute(
+            "UPDATE artifact_projections SET status = 'superseded', stale_reason = 'content_updated', superseded_by = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![new_proj_id, old_id],
+        ).map_err(|e| GBrainError::Database(format!("标记旧投影 superseded 失败: {}", e)))?;
+    }
+
+    info!(
+        "页面更新候选已应用: slug={}, field={}, 旧投影superseded数={}",
+        slug,
+        field,
+        old_active_projections.len()
+    );
     Ok(())
 }
 

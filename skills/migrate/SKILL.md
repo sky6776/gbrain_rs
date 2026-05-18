@@ -6,14 +6,20 @@ triggers:
   - "import from obsidian"
   - "import from notion"
 tools:
-  - put_page
-  - get_page
-  - query
-  - add_link
-  - add_tag
-  - get_stats
-  - get_health
-  - sync_brain
+  - artifact_put    # 统一写入接口
+  - artifact_query  # 统一查询接口
+  - artifact_upload # 统一上传接口
+  - artifact_health # 健康检查接口
+internal_tools:
+  - put_page       # 旧页面写入
+  - get_page       # 旧页面获取
+  - query          # 旧查询接口
+  - add_link       # 旧链接接口
+  - add_tag        # 旧标签接口
+  - get_stats      # 旧统计接口
+  - get_health     # 旧健康接口
+  - sync_brain     # 旧同步接口
+optional_internal_tools: true
 mutating: true
 ---
 

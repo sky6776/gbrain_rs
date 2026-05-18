@@ -6,19 +6,21 @@ triggers:
   - "save this to brain"
   - "process this meeting"
 tools:
-  - query
-  - get_page
-  - put_page
-  - add_link
-  - add_timeline_entry
-  - add_tag
-  - get_tags
-  - put_raw_data
-  - get_backlinks
-  - artifact_put
-  - artifact_upload
-  - artifact_query
-  - sync_brain
+  - artifact_put    # 统一写入接口
+  - artifact_upload # 统一上传接口
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - add_link       # 旧链接接口
+  - add_timeline_entry # 旧时间线接口
+  - add_tag        # 旧标签接口
+  - get_tags       # 旧标签查询
+  - put_raw_data   # 旧原始数据接口
+  - get_backlinks  # 旧反向链接接口
+  - sync_brain     # 旧同步接口
+optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:

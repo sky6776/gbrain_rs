@@ -14,8 +14,11 @@ triggers:
   - "brain health"
   - "diagnose"
 tools:
-  - get_stats
-  - get_health
+  - artifact_health # 健康检查接口
+internal_tools:
+  - get_stats      # 旧统计接口
+  - get_health     # 旧健康接口
+optional_internal_tools: true
 mutating: true
 writes_pages: false
 ---

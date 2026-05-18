@@ -1123,7 +1123,7 @@ pub struct QueryMeta {
 /// 建议变更条目 — promotion 的用户友好包装（设计文档 §6）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactReviewItem {
-    /// 变更 ID（内部 candidate_id）
+    /// 变更 ID
     pub change_id: i64,
     /// 目标页面 slug
     pub target_slug: String,
@@ -1174,13 +1174,56 @@ pub struct ArtifactDetailOutput {
     pub occurrences: Option<Vec<ArtifactOccurrenceSummary>>,
 }
 
-/// projection 摘要（隐藏内部 projection_key/ref 细节）
+/// projection 摘要（用户友好字段，不暴露内部 projection_key/ref）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactProjectionSummary {
+    /// 投影类型（如 brain_page_update、brain_shadow_page）
     pub projection_type: String,
-    pub projection_key: String,
-    pub projection_ref: Option<String>,
+    /// 投影目标描述（语义映射后的用户友好值，替代内部 projection_key）
+    pub target: String,
+    /// 投影目标引用（语义映射后的用户友好值，替代内部 projection_ref）
+    pub target_ref: Option<String>,
+    /// 投影状态
     pub status: String,
+}
+
+/// P3-8 修复：将内部 projection_key/projection_ref 语义映射为用户友好描述
+///
+/// 映射规则：
+/// - brain_page_update + page_update:{slug} -> target:"stable_page", target_ref: slug
+/// - brain_shadow_page + slug:{slug} -> target:"draft_shadow_page", target_ref: slug
+/// - kb_document + library:{id} -> target:"searchable_evidence", target_ref: None（不暴露 library id）
+/// - file_attachment -> target: 原始 key（保留，因为文件路径本身有语义）
+/// - 其它 -> target: 原始 key（兜底）
+pub fn map_projection_to_friendly(
+    projection_type: &str,
+    projection_key: &str,
+    projection_ref: &str,
+) -> (String, Option<String>) {
+    match projection_type {
+        // brain_page_update: page_update:{slug}:{hash} 或 page_update:{slug}
+        "brain_page_update" => {
+            // 从 projection_key 提取 slug（page_update: 之后的第一个段）
+            let slug = projection_key
+                .strip_prefix("page_update:")
+                .and_then(|s| s.split(':').next())
+                .unwrap_or(projection_key);
+            ("stable_page".to_string(), Some(slug.to_string()))
+        }
+        // brain_shadow_page: slug:documents/{slug}
+        "brain_shadow_page" => {
+            let slug = projection_key
+                .strip_prefix("slug:")
+                .unwrap_or(projection_key);
+            ("draft_shadow_page".to_string(), Some(slug.to_string()))
+        }
+        // kb_document: library:{id} — 不暴露 library id
+        "kb_document" => ("searchable_evidence".to_string(), None),
+        // file_attachment: page:{slug}:file:{name} — 保留原始 key 有语义
+        "file_attachment" => (projection_key.to_string(), Some(projection_ref.to_string())),
+        // 兜底：保留原始值
+        _ => (projection_key.to_string(), Some(projection_ref.to_string())),
+    }
 }
 
 /// occurrence 摘要
@@ -1198,7 +1241,8 @@ pub struct ArtifactOccurrenceSummary {
 pub struct ArtifactReviewActionOutput {
     pub change_id: i64,
     pub target_slug: String,
-    pub candidate_type: String,
+    /// 变更类型（如 fact_claim、document_summary 等）
+    pub change_type: String,
     pub status: String,
     pub action_description: String,
     pub evidence: Option<serde_json::Value>,

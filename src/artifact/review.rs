@@ -33,7 +33,27 @@ pub fn get_suggested_change(
 }
 
 /// 应用建议变更
+///
+/// P1-9 修复：对 pending 变更执行 accept+apply 一体化流程。
+/// 公开 facade artifact_review_apply 没有 accept 命令，
+/// 但内部 apply_candidate 要求候选状态必须是 accepted。
+/// 修复：如果候选状态是 pending，先自动 accept 再 apply，
+/// 使普通用户通过 artifact_review_apply 即可应用 pending suggested change。
 pub fn apply_suggested_change(conn: &Connection, change_id: i64) -> Result<PromotionCandidate> {
+    // P1-9 修复：如果候选是 pending 状态，先自动 accept
+    let candidate = promotion::find_candidate_by_id(conn, change_id)?.ok_or_else(|| {
+        crate::error::GBrainError::PageNotFound(format!("候选 {} 不存在", change_id))
+    })?;
+
+    if candidate.status == "pending" {
+        // 自动 accept：将状态改为 accepted，记录审核人和备注
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        conn.execute(
+            "UPDATE promotion_candidates SET status = 'accepted', reviewer = 'auto_via_apply', review_notes = '通过 artifact_review_apply 自动接受', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, change_id],
+        ).map_err(|e| crate::error::GBrainError::Database(format!("自动接受候选失败: {}", e)))?;
+    }
+
     promotion::apply_candidate(conn, change_id)
 }
 

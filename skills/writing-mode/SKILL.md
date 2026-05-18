@@ -11,10 +11,14 @@ triggers:
   - "check page quality"
   - "fix lint issues"
 tools:
-  - put_page
-  - get_page
-  - list_pages
-  - query
+  - artifact_put    # 统一写入接口
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - put_page       # 旧页面写入
+  - get_page       # 旧页面获取
+  - list_pages     # 旧列表接口
+  - query          # 旧查询接口
+optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:

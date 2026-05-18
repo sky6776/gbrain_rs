@@ -343,10 +343,7 @@ pub fn mark_provenance_stale_by_kb_document(
 ///
 /// 只恢复 stale_reason='kb_document_deleted' 的 provenance，
 /// 不恢复 reprocess/detach 主动标记的 stale provenance。
-pub fn reactivate_provenance_by_kb_document(
-    conn: &Connection,
-    kb_document_id: i64,
-) -> Result<u64> {
+pub fn reactivate_provenance_by_kb_document(conn: &Connection, kb_document_id: i64) -> Result<u64> {
     Ok(conn
         .execute(
             "UPDATE provenance_ledger

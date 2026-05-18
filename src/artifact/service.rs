@@ -4,18 +4,35 @@
 //! KB、gbrain、file attachment 等内部模块不直接对外暴露。
 
 use crate::artifact::projection;
+use crate::artifact::promotion;
 use crate::artifact::provenance;
 use crate::artifact::query;
 use crate::artifact::store;
 use crate::artifact::types::{
-    ArtifactHealthReport, ArtifactListItem, ArtifactQueryInput, ArtifactQueryOutput, ArtifactReviewActionOutput,
-    DeleteImpactPreview, ReviewCandidateInput, SourceArtifact,
-    UnifiedQueryInput, UnifiedQueryResult, UploadSourceInput, UploadSourceOutput,
+    ArtifactHealthReport, ArtifactListItem, ArtifactQueryInput, ArtifactQueryOutput,
+    ArtifactReviewActionOutput, CandidateType, DeleteImpactPreview, ReviewCandidateInput,
+    RiskLevel, RoutePlan, SourceArtifact, UnifiedQueryInput, UnifiedQueryResult, UploadSourceInput,
+    UploadSourceOutput,
 };
 use crate::config::Config;
 use crate::error::{GBrainError, Result};
 use crate::operations::OpContext;
 use crate::sqlite_engine::SqliteEngine;
+
+/// P2-12 修复：artifact_put --file 的内容大小上限常量（1MB），
+/// 与 put_memory 的内容长度限制保持一致。
+/// 之前 artifact_put --file 使用 kb_max_file_size_mb（默认 50MB），
+/// 导致 1MB~50MB 的文本文件先完整读入，再在 service 层被拒绝。
+pub const MAX_PUT_MEMORY_CONTENT_BYTES: usize = 1024 * 1024;
+
+/// P2-12 修复：artifact_put --file 文本文件专用扩展名白名单。
+/// artifact_put 语义是"把文件内容作为手动长期记忆写入"，
+/// 只接受纯文本格式，不接受 pdf/docx/xlsx 等 KB 文档类型
+/// （这些应走 artifact_upload 路径）。
+pub const TEXT_FILE_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "rst", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "html",
+    "htm",
+];
 
 /// Artifact 应用服务 — 统一知识操作编排入口
 pub struct ArtifactService<'a> {
@@ -48,13 +65,12 @@ impl<'a> ArtifactService<'a> {
         dry_run: bool,
         force: bool,
     ) -> Result<serde_json::Value> {
-        // 安全校验：内容长度限制
-        let max_content_size = 1024 * 1024; // 1MB
-        if content.len() > max_content_size {
+        // 安全校验：内容长度限制（P2-12 修复：使用常量而非硬编码）
+        if content.len() > MAX_PUT_MEMORY_CONTENT_BYTES {
             return Err(GBrainError::InvalidInput(format!(
                 "内容长度 {} 超过上限 {} 字节",
                 content.len(),
-                max_content_size
+                MAX_PUT_MEMORY_CONTENT_BYTES
             )));
         }
 
@@ -66,7 +82,10 @@ impl<'a> ArtifactService<'a> {
 
         // 根据意图推断路由计划（manual=true 表示手动 put）
         let route_plan = crate::artifact::routing::infer_route_plan_from_artifact_intent(
-            "md", "text/markdown", resolved_intent, true,
+            "md",
+            "text/markdown",
+            resolved_intent,
+            true,
         );
 
         // P1-1 修复：幂等/冲突检测必须在 dry_run 判断之前完成，
@@ -94,10 +113,10 @@ impl<'a> ArtifactService<'a> {
             .map_err(|e| GBrainError::Database(e.to_string()))?;
 
         // P1 修复：人工修改冲突检测（设计文档 §5.6）
-        // 当 route_plan.to_brain=true 且页面已存在时，
-        // 读取当前页面的 content_hash，与上次 artifact 写入时记录的
-        // brain_page_update 投影的 version_hash 比较。
-        // 如果不同，说明页面被人工修改过，不应无提示覆盖。
+        // P1-9 修复：冲突检测应查找同 slug 下所有 artifact 的活跃 brain_page_update 投影，
+        // 而非仅依赖 find_artifact_by_slug 返回的"最新 artifact"。
+        // 因为冲突分支的 pending artifact 没有 brain_page_update 投影（to_brain=false），
+        // 但旧稳定 artifact 仍保留该投影作为冲突检测基线。
         // force=true 时跳过冲突检测，允许强制覆盖。
         let page_conflict_detected = if route_plan.to_brain && !force {
             // 查询当前页面的 content_hash
@@ -110,25 +129,13 @@ impl<'a> ArtifactService<'a> {
                 .ok()
                 .flatten();
 
-            // 查询上次 artifact 写入时记录的 page hash（存储在 brain_page_update 投影的 version_hash）
-            // version_hash 存储的是上次写入时的 page content_hash（非 artifact sha256），
-            // 如果 version_hash 为空，说明是旧数据（修复前），无法判断冲突。
-            let last_artifact_page_hash: Option<String> = existing
-                .as_ref()
-                .and_then(|a| {
-                    let projections = store::find_projections_by_artifact(conn, a.id).ok()?;
-                    projections
-                        .into_iter()
-                        .filter(|p| p.status == "active" && p.projection_type == "brain_page_update")
-                        .filter_map(|p| {
-                            if p.version_hash.is_empty() {
-                                None
-                            } else {
-                                Some(p.version_hash)
-                            }
-                        })
-                        .next()
-                });
+            // P2-10 修复：直接按 slug 查找最新活跃 brain_page_update 投影的 version_hash，
+            // 按 artifact_projections.updated_at DESC, id DESC 排序，
+            // 确保取到最近一次成功写入稳定页面时的 page hash 作为基线。
+            // 旧方案遍历同 slug 所有 artifact 再取第一个非空 version_hash，
+            // 依赖 artifact 的 updated_at 间接排序，可能取到旧 hash 导致误判冲突或漏判冲突。
+            let last_artifact_page_hash = store::find_latest_page_update_hash_by_slug(conn, slug)
+                .map_err(|e| GBrainError::Database(e.to_string()))?;
 
             match (page_hash, last_artifact_page_hash) {
                 (Some(current), Some(last)) => current != last,
@@ -141,9 +148,17 @@ impl<'a> ArtifactService<'a> {
             false
         };
 
+        // P1-10 修复：conflict 优先级高于 no_op。
+        // 冲突后如果用户再次提交与 pending artifact 完全相同的内容，
+        // 系统不应返回 no_op（因为稳定页面仍是人工编辑后的内容，
+        // 并没有应用这份 pending 内容，用户会误以为内容已存在/无需处理）。
+        // 只有当页面当前 hash 与该 artifact 已应用 projection 的 version_hash 匹配时，
+        // 才能安全返回 no_op（说明页面内容确实与 artifact 所反映的一致）。
         let resolution = match &existing {
-            Some(a) if a.sha256 == content_sha256 && a.status == "active" => "no_op",
+            // 冲突状态优先：页面被人工修改过，即使内容相同也不能返回 no_op
             Some(a) if a.status == "active" && page_conflict_detected => "conflict",
+            // 无冲突 + 内容相同 → 安全的幂等 no_op
+            Some(a) if a.sha256 == content_sha256 && a.status == "active" => "no_op",
             Some(a) if a.status == "active" => "update",
             _ => "create",
         };
@@ -186,24 +201,34 @@ impl<'a> ArtifactService<'a> {
                 .map_err(|e| GBrainError::Database(e.to_string()))?;
 
             // P1-1 修复 + P1 冲突检测：在事务内完成幂等/更新/冲突/创建写入
+            // P1-10 修复：事务内 conflict 优先级高于 no_op，与只读阶段 resolution 计算一致。
+            // 冲突状态下即使内容相同也不能返回 no_op，否则用户会误以为页面已包含该内容。
             match existing_in_txn {
-                Some(ref a) if a.sha256 == content_sha256 && a.status == "active" => {
-                    // 相同内容 → 幂等 no-op：touch last_seen_at，返回现有信息
-                    store::touch_artifact(conn, a.id)
-                        .map_err(|e| GBrainError::Database(e.to_string()))?;
-                    return Ok(serde_json::json!({
-                        "resolution": "no_op",
-                        "artifact_id": a.id,
-                        "artifact_uid": a.artifact_uid,
-                        "slug": slug,
-                        "detail": "内容完全相同，幂等返回已有 artifact",
-                    }));
-                }
+                // 冲突状态优先
                 Some(ref a) if a.status == "active" && page_conflict_detected => {
                     // P1 修复：人工修改冲突 — 页面被人工修改过，不应无提示覆盖。
                     // 设计文档 §5.6 要求：默认生成 review change，而不是直接覆盖。
-                    // 当前实现：返回冲突信息，不覆盖页面，由调用方决定如何处理
-                    // （可通过 --force 参数强制覆盖，或通过 artifact_review_* 创建 suggested change）。
+                    // 当前实现：仍创建 artifact/occurrence 保存新内容，基于该 artifact
+                    // 创建 promotion_candidates（suggested change），目标页为当前 slug，
+                    // 风险等级至少 medium。返回 change_id / review_status: "pending"，
+                    // 同时继续保证默认不覆盖页面。
+                    //
+                    // P1-8 修复：冲突分支不应创建 active brain_page_update 投影。
+                    // 原始 route_plan.to_brain=true 会让 put_manual_memory 创建
+                    // brain_page_update 投影，但冲突分支没有写入稳定页面，
+                    // 该投影的 version_hash 是 artifact sha256 而非 page content_hash，
+                    // 误导后续生命周期逻辑认为页面已被更新。
+                    // 修复：冲突分支使用 to_brain=false 的 route_plan，
+                    // 只保存 artifact/occurrence/KB/shadow，不创建 brain_page_update。
+                    // 只有 artifact_review_apply 真正写入页面后才创建该投影。
+                    let conflict_route_plan = RoutePlan {
+                        to_kb: route_plan.to_kb,
+                        to_brain: false, // 冲突分支不写稳定页面，不创建 brain_page_update 投影
+                        to_shadow: route_plan.to_shadow,
+                        to_file: route_plan.to_file,
+                        promotion: route_plan.promotion.clone(),
+                    };
+
                     let current_page_hash: Option<String> = conn
                         .query_row(
                             "SELECT content_hash FROM pages WHERE slug = ?1 AND deleted_at IS NULL",
@@ -212,20 +237,103 @@ impl<'a> ArtifactService<'a> {
                         )
                         .ok()
                         .flatten();
+
+                    // P1-9 修复：冲突分支不应 stale 旧 artifact 的 brain_page_update 投影。
+                    // 旧 artifact 的 brain_page_update.version_hash 是冲突检测的稳定基线，
+                    // stale 后后续同 slug put 会找不到基线，导致人工修改保护失效。
+                    // 只 stale brain_shadow_page（冲突分支会创建新的 shadow）。
+                    let old_projections = store::find_projections_by_artifact(conn, a.id)
+                        .map_err(|e| GBrainError::Database(e.to_string()))?;
+                    for p in old_projections {
+                        if p.status == "active" && p.projection_type == "brain_shadow_page" {
+                            store::mark_projection_stale(conn, p.id, "content_updated")
+                                .map_err(|e| GBrainError::Database(e.to_string()))?;
+                        }
+                    }
+
+                    // 创建新 artifact/occurrence 保存用户提交的新内容
+                    // P1-8 修复：使用 conflict_route_plan（to_brain=false），
+                    // 不创建 brain_page_update 投影
+                    let manual_output = crate::artifact::upload::put_manual_memory(
+                        conn,
+                        slug,
+                        content,
+                        title,
+                        Some(resolved_intent),
+                        &artifact_dir,
+                        &self.engine.gbrain_dir(),
+                        self.config.default_kb_library_id,
+                        &self.config.upload_default_promotion_policy,
+                        self.config.artifact_manual_memory_to_kb,
+                        self.config.artifact_auto_create_inbox_library,
+                        &conflict_route_plan,
+                    )?;
+
+                    // 基于新 artifact 创建 suggested change（promotion_candidate）
+                    // P1-8 修复：使用 PageUpdate 类型替代 FactClaim，
+                    // PageUpdate 的 apply handler 读取 payload.field 和 payload.value，
+                    // 与当前 payload 格式对齐，apply 后能正确写入用户提交的新内容。
+                    // FactClaim 的 apply handler 读取 subject_slug/predicate/object_text，
+                    // 与当前 payload 的 slug/content/title 不匹配，apply 后只追加空行。
+                    let proposed_payload = serde_json::json!({
+                        "field": "compiled_truth",
+                        "value": content,
+                        "mode": "replace",
+                    }).to_string();
+                    // P2-10 修复：last_artifact_hash 使用专用查询获取最新已应用投影的 version_hash，
+                    // 与冲突检测基线和 evidence 内部记录保持一致。
+                    // 旧方案基于 existing（可能是 pending conflict artifact）查找，
+                    // 当 existing 没有 brain_page_update 时返回 null，
+                    // 导致冲突响应与 evidence 内部记录不一致。
+                    let last_artifact_hash_for_evidence = store::find_latest_page_update_hash_by_slug(conn, slug)
+                        .map_err(|e| GBrainError::Database(e.to_string()))?;
+                    let evidence = serde_json::json!({
+                        "conflict_reason": "human_edit_detected",
+                        "current_page_hash": current_page_hash,
+                        "last_artifact_hash": last_artifact_hash_for_evidence,
+                    }).to_string();
+
+                    let change_id = promotion::create_candidate(
+                        conn,
+                        manual_output.artifact_id,
+                        Some(manual_output.occurrence_id),
+                        None,
+                        None,
+                        CandidateType::PageUpdate, // P1-8 修复：使用 PageUpdate 替代 FactClaim
+                        slug,
+                        "compiled_truth",
+                        &format!("人工修改冲突 — 建议更新 {}", slug),
+                        &proposed_payload,
+                        &evidence,
+                        0.7,
+                        RiskLevel::Medium,
+                    ).map_err(|e| GBrainError::Database(format!("创建冲突候选变更失败: {}", e)))?;
+
                     return Ok(serde_json::json!({
                         "resolution": "conflict",
+                        "artifact_id": manual_output.artifact_id,
+                        "artifact_uid": manual_output.artifact_uid,
+                        "slug": slug,
+                        "change_id": change_id,
+                        "review_status": "pending",
+                        "detail": "页面已被人工修改，新内容已保存为 suggested change，等待审核。使用 --force 可强制覆盖，或通过 artifact_review_apply 应用变更。",
+                        "current_page_hash": current_page_hash,
+                        // P2-10 修复：复用 last_artifact_hash_for_evidence，
+                        // 与 evidence 内部记录保持一致，避免返回 null
+                        "last_artifact_hash": last_artifact_hash_for_evidence,
+                    }));
+                }
+                // P1-10 修复：no_op 在 conflict 之后匹配，确保冲突状态下不会误返回 no_op
+                Some(ref a) if a.sha256 == content_sha256 && a.status == "active" => {
+                    // 相同内容 + 无冲突 → 幂等 no-op：touch last_seen_at，返回现有信息
+                    store::touch_artifact(conn, a.id)
+                        .map_err(|e| GBrainError::Database(e.to_string()))?;
+                    return Ok(serde_json::json!({
+                        "resolution": "no_op",
                         "artifact_id": a.id,
                         "artifact_uid": a.artifact_uid,
                         "slug": slug,
-                        "detail": "页面已被人工修改，无法无提示覆盖。请使用 --force 强制覆盖，或通过 artifact_review_* 创建 suggested change。",
-                        "current_page_hash": current_page_hash,
-                        "last_artifact_hash": existing.as_ref().and_then(|a| {
-                            let projections = store::find_projections_by_artifact(conn, a.id).ok()?;
-                            projections.into_iter()
-                                .filter(|p| p.status == "active" && p.projection_type == "brain_page_update")
-                                .filter_map(|p| if p.version_hash.is_empty() { None } else { Some(p.version_hash) })
-                                .next()
-                        }),
+                        "detail": "内容完全相同，幂等返回已有 artifact",
                     }));
                 }
                 Some(ref a) if a.status == "active" => {
@@ -386,8 +494,8 @@ impl<'a> ArtifactService<'a> {
         };
 
         // P2-2: used_vector 反映实际搜索策略
-        let used_vector = !internal_result.brain_hits.is_empty()
-            || !internal_result.evidence_hits.is_empty();
+        let used_vector =
+            !internal_result.brain_hits.is_empty() || !internal_result.evidence_hits.is_empty();
 
         // 转换为用户友好的输出格式
         Ok(ArtifactQueryOutput {
@@ -418,15 +526,15 @@ impl<'a> ArtifactService<'a> {
                     // P2-4 修复：evidence 的 fallback source 也受 include_sources 控制，
                     // 当 include_sources=false 时不应返回任何 source 信息
                     let hit_sources: Vec<crate::artifact::types::SourceRef> = if include_sources {
-                        e
-                            .artifact
+                        e.artifact
                             .as_ref()
                             .map(|a| {
-                                let from_provenance: Vec<crate::artifact::types::SourceRef> = all_sources
-                                    .iter()
-                                    .filter(|s| s.artifact_uid == a.artifact_uid)
-                                    .cloned()
-                                    .collect();
+                                let from_provenance: Vec<crate::artifact::types::SourceRef> =
+                                    all_sources
+                                        .iter()
+                                        .filter(|s| s.artifact_uid == a.artifact_uid)
+                                        .cloned()
+                                        .collect();
                                 // 如果 provenance 已有此 artifact 的来源，直接用
                                 if !from_provenance.is_empty() {
                                     from_provenance
@@ -567,11 +675,20 @@ impl<'a> ArtifactService<'a> {
                     Some(
                         projs
                             .into_iter()
-                            .map(|p| crate::artifact::types::ArtifactProjectionSummary {
-                                projection_type: p.projection_type,
-                                projection_key: p.projection_key,
-                                projection_ref: Some(p.projection_ref),
-                                status: p.status,
+                            .map(|p| {
+                                // P3-8 修复：使用语义映射替代直接赋值 projection_key/projection_ref
+                                let (target, target_ref) =
+                                    crate::artifact::types::map_projection_to_friendly(
+                                        &p.projection_type,
+                                        &p.projection_key,
+                                        &p.projection_ref,
+                                    );
+                                crate::artifact::types::ArtifactProjectionSummary {
+                                    projection_type: p.projection_type,
+                                    target,
+                                    target_ref,
+                                    status: p.status,
+                                }
                             })
                             .collect(),
                     )
@@ -639,14 +756,17 @@ impl<'a> ArtifactService<'a> {
         store::list_active_artifacts(conn, limit, offset)
             .map_err(|e| GBrainError::Database(e.to_string()))
             .map(|artifacts| {
-                artifacts.into_iter().map(|a| ArtifactListItem {
-                    uid: a.artifact_uid,
-                    slug: a.canonical_slug,
-                    original_name: Some(a.original_name),
-                    size_bytes: Some(a.size_bytes),
-                    status: a.status,
-                    updated_at: a.updated_at,
-                }).collect()
+                artifacts
+                    .into_iter()
+                    .map(|a| ArtifactListItem {
+                        uid: a.artifact_uid,
+                        slug: a.canonical_slug,
+                        original_name: Some(a.original_name),
+                        size_bytes: Some(a.size_bytes),
+                        status: a.status,
+                        updated_at: a.updated_at,
+                    })
+                    .collect()
             })
     }
 
@@ -691,10 +811,10 @@ impl<'a> ArtifactService<'a> {
         let occurrence_count = store::find_occurrences_by_artifact(conn, artifact_id)
             .map_err(|e| GBrainError::Database(e.to_string()))?
             .len() as i64;
-        let kb_document_count = projection::find_all_kb_document_ids(conn, artifact_id)?
-            .len() as i64;
-        let provenance_count = provenance::find_provenance_by_artifact(conn, artifact_id)?
-            .len() as i64;
+        let kb_document_count =
+            projection::find_all_kb_document_ids(conn, artifact_id)?.len() as i64;
+        let provenance_count =
+            provenance::find_provenance_by_artifact(conn, artifact_id)?.len() as i64;
         Ok(DeleteImpactPreview {
             artifact_id,
             artifact_uid: artifact.artifact_uid,
@@ -881,8 +1001,10 @@ impl<'a> ArtifactService<'a> {
             let old_projections = store::find_projections_by_artifact(conn, artifact_id)
                 .map_err(|e| GBrainError::Database(e.to_string()))?;
             // 按 (occurrence_id, projection_type) 分组，只保留 active 的
-            let mut old_by_occ: std::collections::HashMap<(Option<i64>, String), Vec<&crate::artifact::types::ArtifactProjection>> =
-                std::collections::HashMap::new();
+            let mut old_by_occ: std::collections::HashMap<
+                (Option<i64>, String),
+                Vec<&crate::artifact::types::ArtifactProjection>,
+            > = std::collections::HashMap::new();
             for p in &old_projections {
                 if p.status == "active" {
                     old_by_occ
@@ -1017,7 +1139,7 @@ fn candidate_to_review_action_output(
     crate::artifact::types::ArtifactReviewActionOutput {
         change_id: c.id,
         target_slug: c.target_slug,
-        candidate_type: c.candidate_type,
+        change_type: c.candidate_type,
         status: c.status,
         action_description,
         evidence,

@@ -10,9 +10,13 @@ triggers:
   - "what's the latest briefing"
   - "show me the pulse"
 tools:
-  - get_page
-  - put_page
-  - query
+  - artifact_query  # 统一查询接口
+  - artifact_put    # 统一写入接口
+internal_tools:
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - query          # 旧查询接口
+optional_internal_tools: true
 mutating: true
 ---
 

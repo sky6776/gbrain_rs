@@ -12,15 +12,15 @@ triggers:
   - "think about this"
   - "put this in brain"
 tools:
-  - query
-  - get_page
-  - put_page
-  - add_link
-  - add_timeline_entry
-  - artifact_put
-  - artifact_upload
-  - artifact_query
-  - file_upload
+  - artifact_put    # 统一写入接口
+  - artifact_upload # 统一上传接口
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - put_page       # 旧页面写入
+  - file_upload    # 旧文件上传接口
+optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:

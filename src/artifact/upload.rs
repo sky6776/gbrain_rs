@@ -324,8 +324,12 @@ pub fn upload_source(
     // 3. 名为 Default 或 Inbox 的 library
     // 4. 不存在则自动创建 Inbox
     if route_plan.to_kb {
-        let resolved_library_id =
-            resolve_default_library(conn, input.library_id, config_default_library_id, auto_create_inbox)?;
+        let resolved_library_id = resolve_default_library(
+            conn,
+            input.library_id,
+            config_default_library_id,
+            auto_create_inbox,
+        )?;
         let proj_key = format!("library:{}", resolved_library_id);
         // 使用 projection::create_kb_projection 创建 KB 投影和 kb_document
         // 它会自动更新 projection_ref 为实际的 kb_document:{id}
@@ -415,22 +419,26 @@ pub fn upload_source(
             ).map_err(|e| GBrainError::Database(format!("写入影子页面失败: {}", e)))?;
 
             if rows_affected > 0 {
-                // 新建页面时同步创建基础 chunk，确保 BrainFirst 搜索能找到
-                // 修复：补齐 chunk_text_tokens/token_count/chunk_source，
-                // 与 sqlite_engine.rs put_chunks 路径一致，确保中文 FTS 召回完整
-                let chunk_text = if body.chars().count() > 800 {
-                    format!("{}...", body.chars().take(800).collect::<String>())
-                } else {
-                    body.clone()
-                };
-                let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk_text);
-                let token_count = chunk_text_tokens.split_whitespace().count() as i64;
-                conn.execute(
-                    "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
-                     VALUES ((SELECT id FROM pages WHERE slug = ?1), 0, ?2, ?3, ?4, 'body', datetime('now'))",
-                    rusqlite::params![slug, chunk_text, chunk_text_tokens, token_count],
-                )
-                .map_err(|e| GBrainError::Database(format!("创建影子页面 chunk 失败: {}", e)))?;
+                // P3 修复：使用 chunker 对全文分块，而非只取前 800 字插入单个 chunk。
+                // shadow page 超过 800 字后，后续内容不会进入 chunk 索引，
+                // 导致长文档后半段的事实无法被搜索命中。
+                let chunks = crate::chunker::chunk_text(
+                    &body,
+                    None,
+                    None,
+                    crate::types::ChunkSource::CompiledTruth,
+                );
+                for chunk in &chunks {
+                    let chunk_text_tokens =
+                        crate::nlp::chinese::tokenize_content(&chunk.chunk_text);
+                    let token_count = chunk_text_tokens.split_whitespace().count() as i64;
+                    conn.execute(
+                        "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
+                         VALUES ((SELECT id FROM pages WHERE slug = ?1), ?2, ?3, ?4, ?5, 'body', datetime('now'))",
+                        rusqlite::params![slug, chunk.chunk_index, chunk.chunk_text, chunk_text_tokens, token_count],
+                    )
+                    .map_err(|e| GBrainError::Database(format!("创建影子页面 chunk 失败: {}", e)))?;
+                }
             } else {
                 // 页面已存在，只更新 frontmatter 和 content_hash（不覆盖 compiled content）
                 debug!("shadow page 已存在，补充 frontmatter: {}", slug);
@@ -883,21 +891,32 @@ pub fn put_manual_memory(
 
             if let Some(page_id) = existing_page_id {
                 // 页面已存在 → 先创建版本快照，再原地 UPDATE（保留 page_id）
-                let _ = conn.execute(
-                    "INSERT INTO page_versions (page_id, slug, page_type, title, compiled_truth, frontmatter, created_at)
-                     VALUES (?1, ?2, 'source', (SELECT title FROM pages WHERE id = ?1),
-                             (SELECT compiled_truth FROM pages WHERE id = ?1),
-                             (SELECT frontmatter FROM pages WHERE id = ?1),
-                     datetime('now'))",
-                    rusqlite::params![page_id, shadow_slug],
-                );
+                // P1 修复：page_versions 表只有 (page_id, compiled_truth, frontmatter, title, page_type, snapshot_at)，
+                // 之前用了不存在的 slug/created_at 列导致快照静默丢失。改为与 schema 对齐的 SELECT 形式，
+                // 与 promotion.rs:1556 和 sqlite_engine.rs:3003 保持一致。
+                conn.execute(
+                    "INSERT INTO page_versions (page_id, compiled_truth, frontmatter, title, page_type)
+                     SELECT id, compiled_truth, frontmatter, title, page_type FROM pages WHERE id = ?1",
+                    rusqlite::params![page_id],
+                ).map_err(|e| GBrainError::Database(format!("创建 shadow page 版本快照失败: {}", e)))?;
                 conn.execute(
                     "UPDATE pages SET title = ?1, compiled_truth = ?2, frontmatter = ?3,
                      content_hash = ?4, title_tokens = ?5, compiled_truth_tokens = ?6,
                      updated_at = datetime('now')
                      WHERE id = ?7",
-                    rusqlite::params![title, body, frontmatter, content_hash, title_tokens, truth_tokens, page_id],
-                ).map_err(|e| GBrainError::Database(format!("更新手动 put shadow page 失败: {}", e)))?;
+                    rusqlite::params![
+                        title,
+                        body,
+                        frontmatter,
+                        content_hash,
+                        title_tokens,
+                        truth_tokens,
+                        page_id
+                    ],
+                )
+                .map_err(|e| {
+                    GBrainError::Database(format!("更新手动 put shadow page 失败: {}", e))
+                })?;
             } else {
                 // 页面不存在 → INSERT 新行
                 conn.execute(
@@ -929,27 +948,41 @@ pub fn put_manual_memory(
             conn.execute(
                 "DELETE FROM chunks WHERE page_id = ?1",
                 rusqlite::params![page_id_for_chunk],
-            ).map_err(|e| GBrainError::Database(format!("清理手动 put shadow page 旧 chunk 失败: {}", e)))?;
+            )
+            .map_err(|e| {
+                GBrainError::Database(format!("清理手动 put shadow page 旧 chunk 失败: {}", e))
+            })?;
 
-            let chunk_text = if body.chars().count() > 800 {
-                format!("{}...", body.chars().take(800).collect::<String>())
-            } else {
-                body.clone()
-            };
-            let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk_text);
-            let token_count = chunk_text_tokens.split_whitespace().count() as i64;
-            conn.execute(
-                "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
-                 VALUES (?1, 0, ?2, ?3, ?4, 'body', datetime('now'))",
-                rusqlite::params![page_id_for_chunk, chunk_text, chunk_text_tokens, token_count],
-            ).map_err(|e| GBrainError::Database(format!("创建手动 put shadow page chunk 失败: {}", e)))?;
+            // P3 修复：使用 chunker 对全文分块，而非只取前 800 字插入单个 chunk。
+            // shadow page 超过 800 字后，后续内容不会进入 chunk 索引，
+            // 导致长文档后半段的事实无法被搜索命中。
+            let chunks = crate::chunker::chunk_text(
+                &body,
+                None,
+                None,
+                crate::types::ChunkSource::CompiledTruth,
+            );
+            for chunk in &chunks {
+                let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk.chunk_text);
+                let token_count = chunk_text_tokens.split_whitespace().count() as i64;
+                conn.execute(
+                    "INSERT INTO chunks (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'body', datetime('now'))",
+                    rusqlite::params![page_id_for_chunk, chunk.chunk_index, chunk.chunk_text, chunk_text_tokens, token_count],
+                ).map_err(|e| GBrainError::Database(format!("创建手动 put shadow page chunk 失败: {}", e)))?;
+            }
         }
     }
 
     // 7. KB 投影 — 仅当 route_plan.to_kb=true 时创建
     // P1-2 修复：KB 入库由 route_plan.to_kb 控制，不再由 manual_memory_to_kb 单独决定
     let resolved_library_id = if route_plan.to_kb && manual_memory_to_kb {
-        Some(resolve_default_library(conn, None, config_default_library_id, auto_create_inbox)?)
+        Some(resolve_default_library(
+            conn,
+            None,
+            config_default_library_id,
+            auto_create_inbox,
+        )?)
     } else {
         None
     };

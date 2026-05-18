@@ -19,13 +19,15 @@ triggers:
   - "connections"
   - "graph query"
 tools:
-  - query
-  - artifact_query
-  - get_page
-  - list_pages
-  - get_backlinks
-  - traverse_graph
-  - get_timeline
+  - artifact_query  # 统一查询接口
+internal_tools:
+  - query          # 旧查询接口
+  - get_page       # 旧页面获取
+  - list_pages     # 旧列表接口
+  - get_backlinks  # 旧反向链接接口
+  - traverse_graph # 旧图遍历接口
+  - get_timeline   # 旧时间线接口
+optional_internal_tools: true
 mutating: false
 ---
 
