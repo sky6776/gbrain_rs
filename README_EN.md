@@ -73,8 +73,10 @@ After initialization, the `~/.gbrain/` directory structure is:
 ~/.gbrain/
   brain.db           # SQLite database (FTS5 + sqlite-vec)
   config.json        # Runtime config (generated via gbrain config set)
-  artifacts/          # Artifact original file storage (named by SHA256)
-  files/             # Uploaded file storage
+  bin/               # Executable copy (copied during gbrain init)
+  artifacts/         # Artifact original file storage (named by SHA256)
+  kb/                # KB subsystem storage
+    files/           # KB document files (organized by library ID)
   cache/             # Cache directory
   logs/              # Log files
     gbrain.log
@@ -117,14 +119,12 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 # Initialize a knowledge base
 gbrain init
 
+# ===== Write =====
 # Write to long-term memory (default intent: memory)
 gbrain put people/alice --title "Alice" --content "An engineer skilled in Rust and systems programming"
 
-# Query knowledge
-gbrain query "who is Alice"
-
-# Upload document with auto-routing
-gbrain upload report.pdf --intent evidence
+# Write from file
+gbrain put docs/guide --file ./guide.md --intent memory
 
 # Preview write routing (dry-run)
 gbrain put people/bob --content "Product manager" --dry-run
@@ -132,7 +132,96 @@ gbrain put people/bob --content "Product manager" --dry-run
 # Force overwrite a human-modified page
 gbrain put people/alice --content "Updated content" --force
 
-# Start MCP server
+# ===== Upload =====
+# Upload document with auto-routing
+gbrain upload report.pdf --intent evidence
+
+# Upload and associate with a specific page
+gbrain upload note.txt --page people/alice --intent attachment
+
+# Upload to specific KB library and folder
+gbrain upload paper.pdf --library 1 --folder 2 --intent evidence
+
+# Upload with promotion policy
+gbrain upload document.md --intent memory --promotion auto-low-risk
+
+# Preview upload routing
+gbrain upload data.csv --dry-run
+
+# ===== Query =====
+# Unified knowledge query
+gbrain query "who is Alice"
+
+# Query by mode
+gbrain query "Rust async" --mode memory
+gbrain query "market analysis" --mode evidence --limit 10
+gbrain query "recent updates" --mode timeline
+
+# Filter to a specific page
+gbrain query "performance optimization" --filter tech/rust
+
+# Include source tracing
+gbrain query "project A progress" --include-sources
+
+# ===== View =====
+# List knowledge sources
+gbrain list --limit 20
+
+# Get knowledge source details
+gbrain get 1
+gbrain get art_ab12cd34ef56 --include-projections --include-sources
+
+# ===== Lifecycle Management =====
+# Soft-delete a knowledge source
+gbrain delete 5
+
+# Preview deletion impact
+gbrain delete 5 --dry-run
+
+# Detach a source from a page
+gbrain detach 5 --from people/alice
+
+# Restore a deleted source
+gbrain restore 5
+
+# Reprocess a source
+gbrain reprocess 5
+
+# Health check
+gbrain health
+
+# ===== Review =====
+# List suggested changes
+gbrain review list --status pending
+
+# Filter by status and target
+gbrain review list --status applied --target people/alice
+
+# View suggested change details
+gbrain review show 1
+
+# Apply a suggested change
+gbrain review apply 1
+
+# Reject a suggested change
+gbrain review reject 2 --reason "Information outdated"
+
+# Rollback an applied change
+gbrain review rollback 1
+
+# ===== Config =====
+# View all configuration
+gbrain config show
+
+# Get single config value
+gbrain config get embedding_model
+
+# Set a config value
+gbrain config set chunk_size 800
+gbrain config set log_level debug
+
+# ===== MCP Server =====
+# Start MCP stdio server
 gbrain serve
 ```
 
@@ -156,29 +245,39 @@ gbrain review list --status pending
 gbrain review apply 1
 ```
 
-### Config & Misc
+### `gbrain config`
 
-| Command | Description |
-|---------|-------------|
-| `gbrain config show` | Show all config values |
-| `gbrain config get <key>` | Get a config value |
-| `gbrain config set <key> <value>` | Set a config value |
+| Subcommand | Description |
+|------------|-------------|
+| `gbrain config show` | Show all common config values |
+| `gbrain config get <key>` | Get a single config value |
+| `gbrain config set <key> <value>` | Set a config value (auto-saves to config.json) |
 
-#### Examples
+**Available config keys:**
 
-```bash
-# View all configuration
-gbrain config show
-
-# Set embedding model
-gbrain config set embedding_model text-embedding-3-large
-
-# Get single config value
-gbrain config get embedding_model
-
-# Start MCP server
-gbrain serve
-```
+| Key | Type | Description | Default |
+|-----|------|-------------|---------|
+| `embedding_model` | string | Embedding model name | `text-embedding-3-large` |
+| `embedding_dimensions` | integer | Embedding vector dimensions | `1536` |
+| `expansion_model` | string | Query expansion LLM model | `gpt-4o-mini` |
+| `chunker_model` | string | LLM chunking model | `gpt-4o-mini` |
+| `chunk_size` | integer | Chunk size (characters) | `500` |
+| `chunk_overlap` | integer | Chunk overlap (characters) | `50` |
+| `log_level` | string | Log level (trace/debug/info/warn/error) | `info` |
+| `log_to_file` | boolean | Enable file logging | `true` |
+| `log_to_console` | boolean | Enable console logging | `true` |
+| `auto_link` | boolean | Auto-extract links on write | `true` |
+| `auto_timeline` | boolean | Auto-extract timeline on write | `true` |
+| `post_write_lint` | boolean | Run lint after write | `false` |
+| `kb_enabled` | boolean | Enable KB subsystem | `true` |
+| `kb_raptor_model` | string | KB RAPTOR LLM model | `gpt-4o-mini` |
+| `kb_max_file_size_mb` | integer | KB max file size (MB) | `50` |
+| `kb_worker_enabled` | boolean | Enable KB background worker | `true` |
+| `kb_worker_poll_interval_secs` | integer | KB worker poll interval (seconds) | `30` |
+| `upload_default_promotion_policy` | string | Upload default promotion policy: none/shadow/candidate/auto-low-risk | `candidate` |
+| `artifact_default_intent` | string | Artifact default intent: memory/evidence/promote | `memory` |
+| `artifact_auto_create_inbox_library` | boolean | Auto-create Inbox library when missing | `true` |
+| `artifact_manual_memory_to_kb` | boolean | Write memory intent to KB | `true` |
 
 ---
 
@@ -201,12 +300,12 @@ gbrain serve
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | path | Yes | File path |
-| `--intent` | string | No | Upload intent: auto/evidence/memory/attachment/promote (document is an alias for evidence, default: auto) |
+| `--intent` | string | No | Upload intent: auto(automatic routing), evidence(alias document), memory, attachment, promote (default auto) |
 | `--target` | string | No | Target gbrain page slug (for promotion) |
 | `--page` | string | No | Target page slug (for file attachment) |
 | `--library` | integer | No | KB library ID |
 | `--folder` | integer | No | KB folder ID |
-| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk |
+| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk(alias auto) |
 | `--dry-run` | flag | No | Return routing plan only, don't execute |
 
 ### `gbrain query`
@@ -215,7 +314,7 @@ gbrain serve
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Query text |
 | `--mode` | string | No | Query mode: auto/memory/evidence/timeline (default auto) |
-| `--limit` | integer | No | Max results (default 20) |
+| `--limit` | integer | No | Max results |
 | `--filter` | string | No | Filter by slug |
 | `--include-sources` | flag | No | Include source tracing |
 
@@ -374,29 +473,112 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 
 #### Examples
 
-```json
+```jsonc
+// ===== Write =====
 // Write manual memory
 { "tool": "artifact_put", "params": { "slug": "rust-async", "content": "Rust async programming uses async/await syntax...", "intent": "memory" } }
+
+// Write from file
+{ "tool": "artifact_put", "params": { "slug": "docs/guide", "file": "/path/to/guide.md", "intent": "evidence" } }
+
+// Preview routing plan
+{ "tool": "artifact_put", "params": { "slug": "test", "content": "...", "dry_run": true } }
+
+// Force overwrite
+{ "tool": "artifact_put", "params": { "slug": "people/alice", "content": "Updated content", "force": true } }
 ```
 
-```json
-// Unified knowledge query with source tracing
-{ "tool": "artifact_query", "params": { "query": "Rust async programming", "mode": "auto", "include_sources": true } }
+```jsonc
+// ===== Upload =====
+// Upload document (auto-routing)
+{ "tool": "artifact_upload", "params": { "path": "/path/to/report.pdf", "intent": "auto" } }
+
+// Upload as evidence
+{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "evidence", "library_id": 1, "folder_id": 2 } }
+
+// Upload and generate suggested changes
+{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "promote", "target_slug": "people/alice", "promotion": "candidate" } }
+
+// Upload as attachment
+{ "tool": "artifact_upload", "params": { "path": "/path/to/image.png", "intent": "attachment", "page_slug": "people/alice" } }
+
+// Preview upload routing
+{ "tool": "artifact_upload", "params": { "path": "/path/to/data.csv", "dry_run": true } }
 ```
 
-```json
-// Get knowledge source details
+```jsonc
+// ===== Query =====
+// Unified knowledge query
+{ "tool": "artifact_query", "params": { "query": "Rust async programming", "mode": "auto", "limit": 10 } }
+
+// Query with source tracing
+{ "tool": "artifact_query", "params": { "query": "Rust async programming", "mode": "memory", "include_sources": true } }
+
+// Query KB evidence
+{ "tool": "artifact_query", "params": { "query": "market analysis", "mode": "evidence" } }
+
+// Query by timeline
+{ "tool": "artifact_query", "params": { "query": "recent activity", "mode": "timeline" } }
+
+// Filter to a specific page
+{ "tool": "artifact_query", "params": { "query": "performance optimization", "filter_slug": "tech/rust" } }
+```
+
+```jsonc
+// ===== View =====
+// List knowledge sources
+{ "tool": "artifact_list", "params": { "limit": 20, "offset": 0 } }
+
+// Get knowledge source details (with projections and sources)
 { "tool": "artifact_get", "params": { "id_or_uid": "art_abc123", "include_sources": true, "include_projections": true } }
+
+// Get by ID
+{ "tool": "artifact_get", "params": { "id_or_uid": "1" } }
 ```
 
-```json
-// Upload file
-{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "memory", "library_id": 1 } }
+```jsonc
+// ===== Lifecycle Management =====
+// Preview deletion impact
+{ "tool": "artifact_delete", "params": { "id_or_uid": "5", "dry_run": true } }
+
+// Soft-delete
+{ "tool": "artifact_delete", "params": { "id_or_uid": "5" } }
+
+// Detach from a page
+{ "tool": "artifact_detach", "params": { "id_or_uid": "5", "from": "people/alice" } }
+
+// Restore deleted source
+{ "tool": "artifact_restore", "params": { "id_or_uid": "5" } }
+
+// Preview restore impact
+{ "tool": "artifact_restore", "params": { "id_or_uid": "5", "dry_run": true } }
+
+// Reprocess source
+{ "tool": "artifact_reprocess", "params": { "id_or_uid": "5" } }
+
+// Health check
+{ "tool": "artifact_health", "params": {} }
 ```
 
-```json
-// List suggested changes
+```jsonc
+// ===== Review =====
+// List pending suggested changes
 { "tool": "artifact_review_list", "params": { "status": "pending" } }
+
+// Filter by status and target
+{ "tool": "artifact_review_list", "params": { "status": "applied", "target_slug": "people/alice", "limit": 50 } }
+
+// View suggested change details
+{ "tool": "artifact_review_get", "params": { "change_id": 1 } }
+
+// Apply a suggested change
+{ "tool": "artifact_review_apply", "params": { "change_id": 1 } }
+
+// Reject a suggested change
+{ "tool": "artifact_review_reject", "params": { "change_id": 2, "reason": "Information outdated" } }
+
+// Rollback an applied change
+{ "tool": "artifact_review_rollback", "params": { "change_id": 1 } }
 ```
 
 ---
@@ -420,12 +602,12 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Local file path |
-| `intent` | string | No | Upload intent: auto / evidence / memory / attachment / promote (default auto) |
+| `intent` | string | No | Upload intent: auto / evidence(alias document) / memory / attachment / promote (default auto) |
 | `target_slug` | string | No | Target gbrain page slug (for generating suggested changes) |
 | `page_slug` | string | No | Associated page slug (for attachments) |
 | `library_id` | integer | No | KB library ID (optional, defaults to auto-selecting Inbox) |
 | `folder_id` | integer | No | KB folder ID |
-| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk |
+| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk(alias auto) |
 | `dry_run` | boolean | No | Return routing plan only, don't write |
 
 ### `artifact_query`
@@ -519,6 +701,11 @@ No parameters.
 |-----------|------|----------|-------------|
 | `change_id` | integer | Yes | Change ID |
 
+### Known Limitations
+
+- **`artifact_query` mode=graph** is not yet implemented. Code graph queries (symbol definitions/references/call relationships) are not available through the artifact facade.
+- **KB internal tools** (`kb_list_libraries`, `kb_upload_document`, `kb_search`, etc.) require `expose_internal_tools=true` and are hidden by default. For user-facing operations, use the `artifact_*` facade tools instead.
+
 ---
 
 ## Environment Variables
@@ -544,7 +731,6 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 |----------|-------------|---------|
 | `GBRAIN_DIR` | Data storage root directory | `~/.gbrain` |
 | `GBRAIN_DB_PATH` | Database file path | `$GBRAIN_DIR/brain.db` |
-| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | `$GBRAIN_DIR/artifacts` |
 
 ### Embeddings
 
@@ -580,6 +766,33 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_TRANSCRIPTION_GROQ_BASE_URL` | Groq transcription base URL | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI transcription API key | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI transcription base URL | — |
+
+### KB Subsystem
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GBRAIN_KB_ENABLED` | Enable KB subsystem | `true` |
+| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Falls back to `GBRAIN_EXPANSION_API_KEY` |
+| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL` |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | `gpt-4o-mini` |
+| `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | `50` |
+| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv` |
+| `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |
+| `GBRAIN_KB_WORKER_ENABLED` | Enable KB background worker | `true` |
+| `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | `30` |
+| `GBRAIN_KB_SYNONYMS_FILE` | Synonyms file path (for search query expansion) | — |
+| `GBRAIN_KB_ALIASES_FILE` | Alias mapping file path (for search query expansion) | — |
+
+### Artifact Fusion Architecture
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | `$GBRAIN_DIR/artifacts` |
+| `GBRAIN_DEFAULT_KB_LIBRARY_ID` | Default KB library ID | — |
+| `GBRAIN_UPLOAD_PROMOTION_POLICY` | Upload default promotion policy: none/shadow/candidate/auto-low-risk | `candidate` |
+| `GBRAIN_ARTIFACT_DEFAULT_INTENT` | Artifact default intent: memory/evidence/promote | `memory` |
+| `GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY` | Auto-create Inbox library when missing | `true` |
+| `GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB` | Write memory intent to KB (set to `false` to write gbrain pages only) | `true` |
 
 ### Logging
 
