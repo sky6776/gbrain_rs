@@ -183,9 +183,7 @@ pub fn build_tool_defs() -> Vec<ToolDef> {
 
 /// 获取操作定义
 pub fn get_operation_def(name: &str) -> Option<&'static OperationDef> {
-    ARTIFACT_FACADE_DEFS
-        .iter()
-        .find(|op| op.name == name)
+    ARTIFACT_FACADE_DEFS.iter().find(|op| op.name == name)
 }
 
 /// 获取所有操作定义

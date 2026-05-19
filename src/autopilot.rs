@@ -191,7 +191,8 @@ pub fn spawn_autopilot_thread(db_path: std::path::PathBuf, config: Config, inter
     std::thread::Builder::new()
         .name("autopilot".to_string())
         .spawn(move || {
-            let mut engine = crate::sqlite_engine::SqliteEngine::with_config(&db_path, config.clone());
+            let mut engine =
+                crate::sqlite_engine::SqliteEngine::with_config(&db_path, config.clone());
             if let Err(e) = engine.connect() {
                 tracing::warn!(error = %e, "Autopilot: 数据库连接失败");
                 return;

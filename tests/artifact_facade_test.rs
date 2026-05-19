@@ -2643,7 +2643,8 @@ fn mcp_artifact_put_file_rejects_binary_extensions() {
                 || err_msg.to_lowercase().contains("extension")
                 || err_msg.contains("不允许"),
             ".{} 拒绝原因应说明扩展名不允许，实际: {}",
-            ext, err_msg
+            ext,
+            err_msg
         );
     }
 }
@@ -2658,10 +2659,8 @@ fn mcp_artifact_put_file_rejects_oversized() {
     let file_path = dir.path().join("oversized.md");
     // 使用 set_len 创建超过 1MB 的稀疏文件，避免实际写入 1MB+ 数据
     let f = std::fs::File::create(&file_path).expect("创建 oversized 文件");
-    f.set_len(
-        (gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES + 1) as u64,
-    )
-    .expect("设置 oversized 文件长度");
+    f.set_len((gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES + 1) as u64)
+        .expect("设置 oversized 文件长度");
     drop(f);
 
     let result = server.dispatch_tool_call(
@@ -2885,8 +2884,8 @@ fn rollback_page_create_soft_deletes_page() {
     );
 
     // 回滚
-    let rolled_back = promotion::rollback_candidate(&conn, candidate_id)
-        .expect("回滚 page_create 应成功");
+    let rolled_back =
+        promotion::rollback_candidate(&conn, candidate_id).expect("回滚 page_create 应成功");
     assert_eq!(rolled_back.status, "rolled_back");
 
     // 验证页面已被软删除

@@ -826,7 +826,15 @@ fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Re
             // 页面已被删除，与 rollback 目标一致，无需操作
             info!("页面 {} 已被删除，跳过 page_create 回滚的页面清理", slug);
         }
-        Ok((current_title, current_content, current_hash, current_page_type, current_timeline, current_frontmatter, None)) => {
+        Ok((
+            current_title,
+            current_content,
+            current_hash,
+            current_page_type,
+            current_timeline,
+            current_frontmatter,
+            None,
+        )) => {
             // P1修复：不再依赖秒级时间戳，比较当前页面各字段与候选创建时的内容
             // 包含 title/content/hash/page_type/timeline/frontmatter，防止仅 metadata 被修改时误删
             let payload: serde_json::Value =
@@ -862,7 +870,11 @@ fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Re
                 .as_object()
                 .and_then(|obj| obj.get("tags"))
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             let orig_hash = {
                 use sha2::{Digest, Sha256};
@@ -898,10 +910,7 @@ fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Re
                 rusqlite::params![now, slug],
             )
             .map_err(|e| {
-                GBrainError::Database(format!(
-                    "回滚 page_create 软删除页面 {} 失败: {}",
-                    slug, e
-                ))
+                GBrainError::Database(format!("回滚 page_create 软删除页面 {} 失败: {}", slug, e))
             })?;
             // 清理 slug 关联的链接和文件引用
             conn.execute(
@@ -1755,7 +1764,11 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
         .as_object()
         .and_then(|obj| obj.get("tags"))
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let content_hash = {
         use sha2::{Digest, Sha256};
@@ -1812,17 +1825,23 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
                      updated_at=?7, deleted_at=NULL, \
                      frontmatter=?8, timeline=?9, timeline_tokens=?10 WHERE slug=?11",
                     params![
-                        title, content, page_type, title_tokens, truth_tokens, content_hash, now,
-                        frontmatter, timeline, timeline_tokens, slug
+                        title,
+                        content,
+                        page_type,
+                        title_tokens,
+                        truth_tokens,
+                        content_hash,
+                        now,
+                        frontmatter,
+                        timeline,
+                        timeline_tokens,
+                        slug
                     ],
                 )
                 .map_err(|e| {
                     GBrainError::Database(format!("恢复软删除页面 {} 失败: {}", slug, e))
                 })?;
-                info!(
-                    "页面创建候选已应用（恢复软删除页面）: slug={}",
-                    slug
-                );
+                info!("页面创建候选已应用（恢复软删除页面）: slug={}", slug);
                 return Ok(());
             }
             None => {

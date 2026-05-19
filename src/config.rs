@@ -330,15 +330,15 @@ impl Config {
         if let Ok(dir) = std::env::var("GBRAIN_KB_STORAGE_DIR") {
             config.kb_storage_dir = Some(dir);
         }
-        config.kb_worker_enabled = parse_env_bool("GBRAIN_KB_WORKER_ENABLED")
-            .unwrap_or(config.kb_worker_enabled);
+        config.kb_worker_enabled =
+            parse_env_bool("GBRAIN_KB_WORKER_ENABLED").unwrap_or(config.kb_worker_enabled);
         if let Ok(secs) = std::env::var("GBRAIN_KB_WORKER_POLL_INTERVAL") {
             if let Ok(s) = secs.parse() {
                 config.kb_worker_poll_interval_secs = s;
             }
         }
-        config.autopilot_enabled = parse_env_bool("GBRAIN_AUTOPILOT_ENABLED")
-            .unwrap_or(config.autopilot_enabled);
+        config.autopilot_enabled =
+            parse_env_bool("GBRAIN_AUTOPILOT_ENABLED").unwrap_or(config.autopilot_enabled);
         if let Ok(secs) = std::env::var("GBRAIN_AUTOPILOT_INTERVAL") {
             let s: u64 = match secs.parse() {
                 Ok(v) => v,
@@ -354,10 +354,7 @@ impl Config {
                 }
             };
             if s < 60 {
-                tracing::warn!(
-                    "GBRAIN_AUTOPILOT_INTERVAL={}s < 60s，clamp 到 60s",
-                    s
-                );
+                tracing::warn!("GBRAIN_AUTOPILOT_INTERVAL={}s < 60s，clamp 到 60s", s);
                 config.autopilot_interval_secs = 60;
             } else {
                 config.autopilot_interval_secs = s;
@@ -618,9 +615,7 @@ impl Config {
             "artifact_auto_create_inbox_library" => {
                 Some(self.artifact_auto_create_inbox_library.to_string())
             }
-            "artifact_manual_memory_to_kb" => {
-                Some(self.artifact_manual_memory_to_kb.to_string())
-            }
+            "artifact_manual_memory_to_kb" => Some(self.artifact_manual_memory_to_kb.to_string()),
             // SQLite engine 专用 key，不在 Config 中
             "writer.lint_on_put_page" => None,
             _ => None,
@@ -719,7 +714,7 @@ impl Config {
                     ));
                 }
                 self.artifact_default_intent = value.to_string()
-            },
+            }
             "artifact_auto_create_inbox_library" => {
                 self.artifact_auto_create_inbox_library = parse_bool(key, value)?
             }

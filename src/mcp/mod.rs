@@ -55,7 +55,11 @@ struct JsonRpcError {
 /// MCP 分页参数安全边界：limit <= 0 视为未指定，回退到 default；
 /// limit 超过 max 则 clamp 到 max，防止远程调用绕过限制全量 dump。
 fn normalize_limit(limit: i64, default: i64, max: i64) -> i64 {
-    if limit <= 0 { default } else { limit.min(max) }
+    if limit <= 0 {
+        default
+    } else {
+        limit.min(max)
+    }
 }
 
 /// offset 不能为负数，否则可能导致 SQL 行为异常或绕过安全限制。
@@ -489,13 +493,12 @@ impl McpServer {
                     .unwrap_or("unknown")
                     .to_string();
 
-                let promotion_policy: Option<crate::artifact::types::PromotionPolicy> =
-                    arguments
-                        .get("promotion")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.parse())
-                        .transpose()
-                        .map_err(|e| crate::error::GBrainError::InvalidInput(e))?;
+                let promotion_policy: Option<crate::artifact::types::PromotionPolicy> = arguments
+                    .get("promotion")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.parse())
+                    .transpose()
+                    .map_err(|e| crate::error::GBrainError::InvalidInput(e))?;
 
                 let input = crate::artifact::types::UploadSourceInput {
                     content,

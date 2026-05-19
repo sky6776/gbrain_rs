@@ -39,9 +39,9 @@ pub fn infer_route_plan_from_artifact_intent(
     // 修复前先做原始字符串比较，导致 FromStr 接受的别名（如 document）和
     // 大小写变体（如 Memory）绕过手动 put 路由，错误落入上传路由。
     if manual {
-        let intent: UploadIntent = intent_str.parse().map_err(|e| {
-            format!("手动 put 不支持该 intent: {}", e)
-        })?;
+        let intent: UploadIntent = intent_str
+            .parse()
+            .map_err(|e| format!("手动 put 不支持该 intent: {}", e))?;
         match intent {
             UploadIntent::Memory => {
                 return Ok(RoutePlan {

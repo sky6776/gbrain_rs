@@ -49,7 +49,6 @@ enum Commands {
     // ========================================================================
     // 以下为 Artifact 知识操作命令（原 artifact put/upload/query/list/get/delete 等）
     // ========================================================================
-
     /// 手动写入长期记忆（原 artifact put）
     Put {
         /// 目标页面 slug
@@ -308,9 +307,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     .to_lowercase();
 
                 // 使用 FromStr 严格解析，拼写错误直接报错而非静默退回 Auto
-                let upload_intent: gbrain_core::artifact::types::UploadIntent = intent
-                    .parse()
-                    .unwrap_or_else(|e| {
+                let upload_intent: gbrain_core::artifact::types::UploadIntent =
+                    intent.parse().unwrap_or_else(|e| {
                         error!("{}", e);
                         std::process::exit(1);
                     });
@@ -326,9 +324,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
                 if route_plan.to_file {
                     for extra in [
-                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff", "tif",
-                        "zip", "tar", "gz",
-                        "json", "xml", "yaml", "yml", "toml",
+                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
+                        "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
                     ] {
                         let s = extra.to_string();
                         if !allowed_extensions.contains(&s) {
@@ -424,8 +421,9 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                             if !cli.dry_run {
                                 // 确保 ~/.gbrain/ 目录存在
                                 let _ = std::fs::create_dir_all(Config::base_dir());
-                                config.save()
-                                    .map_err(|e| GBrainError::Config(format!("保存 config.json 失败: {}", e)))?;
+                                config.save().map_err(|e| {
+                                    GBrainError::Config(format!("保存 config.json 失败: {}", e))
+                                })?;
                             }
                             info!("{} = {}", key, value);
                             return Ok(());
@@ -457,13 +455,21 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 // 显示 config.json 中的常用字段后直接返回，
                 // 不再落入 DB 连接路径，避免 fresh install 下创建数据库
                 for key in &[
-                    "embedding_model", "embedding_dimensions",
-                    "expansion_model", "chunker_model",
-                    "chunk_size", "chunk_overlap",
-                    "auto_link", "auto_timeline", "post_write_lint",
-                    "upload_default_promotion_policy", "artifact_default_intent",
-                    "kb_max_file_size_mb", "kb_worker_enabled",
-                    "autopilot_enabled", "autopilot_interval_secs",
+                    "embedding_model",
+                    "embedding_dimensions",
+                    "expansion_model",
+                    "chunker_model",
+                    "chunk_size",
+                    "chunk_overlap",
+                    "auto_link",
+                    "auto_timeline",
+                    "post_write_lint",
+                    "upload_default_promotion_policy",
+                    "artifact_default_intent",
+                    "kb_max_file_size_mb",
+                    "kb_worker_enabled",
+                    "autopilot_enabled",
+                    "autopilot_interval_secs",
                 ] {
                     if let Some(val) = config.get_field(key) {
                         info!("{} = {}", key, val);
@@ -634,8 +640,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                let max_file_bytes =
-                    gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES;
+                let max_file_bytes = gbrain_core::artifact::service::MAX_PUT_MEMORY_CONTENT_BYTES;
                 let validated_path = gbrain_core::kb::security::validate_upload_source(
                     &file_path,
                     false,
@@ -727,20 +732,16 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 .unwrap_or("")
                 .to_lowercase();
 
-            let route_plan = gbrain_core::artifact::types::infer_route_plan(
-                &ext_for_route,
-                "",
-                &upload_intent,
-            );
+            let route_plan =
+                gbrain_core::artifact::types::infer_route_plan(&ext_for_route, "", &upload_intent);
 
             // 根据路由决定允许的扩展名
             let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
             if route_plan.to_file {
                 // P2修复：补齐 avif/ico/tiff/tif，与 IMAGE_EXTENSIONS 和 MCP upload 白名单保持一致
                 for extra in [
-                    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff", "tif",
-                    "zip", "tar", "gz",
-                    "json", "xml", "yaml", "yml", "toml",
+                    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
+                    "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
                 ] {
                     let s = extra.to_string();
                     if !allowed_extensions.contains(&s) {
@@ -764,8 +765,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            let _mime =
-                gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
+            let _mime = gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
 
             let original_name = validated_path
                 .file_name()
