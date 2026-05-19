@@ -10,11 +10,13 @@ cron scheduling, GStack PDF generation, or external research connectors.
 | Trigger | Skill |
 |---------|-------|
 | Any brain read/write/lookup/citation workflow | `skills/brain-ops/SKILL.md` |
+| Unified artifact operations: write, upload, query, review, lifecycle | `skills/artifact-review/SKILL.md` |
 | "What do we know about", "tell me about", "search for", "who is", "background on", "notes on" | `skills/query/SKILL.md` |
 | "Who knows who", "relationship between", "connections", "graph query" | `skills/query/SKILL.md` |
 | Creating or enriching a person/company/concept/source page | `skills/enrich/SKILL.md` |
 | Where should this page go? Filing rules | `skills/repo-architecture/SKILL.md` |
 | Fix citations, citation audit, check citation format | `skills/citation-fixer/SKILL.md` |
+| Writing quality control, lint, dry-run preview, intent selection | `skills/writing-mode/SKILL.md` |
 
 ## Ingestion
 
@@ -31,6 +33,16 @@ cron scheduling, GStack PDF generation, or external research connectors.
 |---------|-------|
 | Add, complete, defer, remove, or review tasks | `skills/daily-task-manager/SKILL.md` |
 | Save or load reports | `skills/reports/SKILL.md` |
+| Health check, review suggested changes, brain maintenance | `skills/autopilot/SKILL.md` |
+| Delete, restore, detach artifacts safely | `skills/delete-restore/SKILL.md` |
+
+## Advanced
+
+| Trigger | Skill |
+|---------|-------|
+| Code symbol lookup, reference tracing, call graph exploration | `skills/code-graph/SKILL.md` |
+| KB library management, document processing, KB search, backup/restore | `skills/kb-ops/SKILL.md` |
+| Promotion candidates / suggested changes (deprecated, use artifact-review) | `skills/promotion/SKILL.md` |
 
 ## Conventions
 

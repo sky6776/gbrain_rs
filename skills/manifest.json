@@ -1,11 +1,53 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "skills": [
+    {
+      "id": "artifact-review",
+      "name": "Artifact Review",
+      "description": "统一 Artifact 知识操作：写入、上传、查询、审核变更、生命周期管理",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query", "artifact_list", "artifact_get", "artifact_delete", "artifact_detach", "artifact_restore", "artifact_reprocess", "artifact_health", "artifact_review_list", "artifact_review_get", "artifact_review_apply", "artifact_review_reject", "artifact_review_rollback"]
+    },
     {
       "id": "brain-ops",
       "name": "Brain Operations",
       "description": "核心脑图操作：查询、写入、链接、时间线、同步",
       "tools": ["artifact_query", "artifact_put", "artifact_upload", "artifact_list", "artifact_get", "artifact_delete", "artifact_restore", "artifact_review_list", "artifact_review_apply", "artifact_review_rollback"]
+    },
+    {
+      "id": "query",
+      "name": "Query",
+      "description": "查询脑图内容，3 层搜索 + 引用追溯",
+      "tools": ["artifact_query"]
+    },
+    {
+      "id": "enrich",
+      "name": "Enrich",
+      "description": "丰富和扩展现有页面内容，分层充实人物/公司页面",
+      "tools": ["artifact_put", "artifact_query"]
+    },
+    {
+      "id": "ingest",
+      "name": "Ingest",
+      "description": "导入外部内容到脑图（路由到专用摄入技能）",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
+    },
+    {
+      "id": "idea-ingest",
+      "name": "Idea Ingest",
+      "description": "导入链接、文章、推文、想法到脑图",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
+    },
+    {
+      "id": "meeting-ingestion",
+      "name": "Meeting Ingestion",
+      "description": "导入会议记录到脑图，含参会者富化和实体传播",
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
+    },
+    {
+      "id": "migrate",
+      "name": "Migrate",
+      "description": "数据迁移和同步（Obsidian/Notion/Logseq/CSV/JSON/Roam）",
+      "tools": ["artifact_put", "artifact_query", "artifact_upload", "artifact_health"]
     },
     {
       "id": "citation-fixer",
@@ -14,34 +56,16 @@
       "tools": ["artifact_query", "artifact_put"]
     },
     {
-      "id": "enrich",
-      "name": "Enrich",
-      "description": "丰富和扩展现有页面内容",
-      "tools": ["artifact_put", "artifact_query"]
-    },
-    {
-      "id": "ingest",
-      "name": "Ingest",
-      "description": "导入外部内容到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
-    },
-    {
-      "id": "meeting-ingestion",
-      "name": "Meeting Ingestion",
-      "description": "导入会议记录到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
-    },
-    {
-      "id": "query",
-      "name": "Query",
-      "description": "查询脑图内容",
-      "tools": ["artifact_query"]
-    },
-    {
       "id": "writing-mode",
       "name": "Writing Mode",
-      "description": "专注写作模式：创建和编辑页面",
-      "tools": ["artifact_put", "artifact_query"]
+      "description": "专注写作模式：质量校验、lint 检查、dry-run 预览",
+      "tools": ["artifact_put", "artifact_query", "artifact_list", "artifact_get"]
+    },
+    {
+      "id": "delete-restore",
+      "name": "Delete & Restore",
+      "description": "软删除生命周期管理：删除、恢复、解除关联",
+      "tools": ["artifact_delete", "artifact_restore", "artifact_detach", "artifact_health", "artifact_list", "artifact_get"]
     },
     {
       "id": "daily-task-manager",
@@ -50,34 +74,40 @@
       "tools": ["artifact_query", "artifact_put"]
     },
     {
-      "id": "idea-ingest",
-      "name": "Idea Ingest",
-      "description": "导入想法到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
-    },
-    {
-      "id": "migrate",
-      "name": "Migrate",
-      "description": "数据迁移和同步",
-      "tools": ["artifact_put", "artifact_query", "artifact_upload", "artifact_health"]
-    },
-    {
       "id": "reports",
       "name": "Reports",
-      "description": "生成报告和摘要",
+      "description": "保存和加载带时间戳的报告",
       "tools": ["artifact_query", "artifact_put"]
     },
     {
       "id": "repo-architecture",
       "name": "Repo Architecture",
-      "description": "分析仓库架构",
+      "description": "脑图归档规则：按主标题确定文件目录",
       "tools": ["artifact_query"]
     },
     {
       "id": "autopilot",
       "name": "Autopilot",
-      "description": "自动运维和健康检查",
-      "tools": ["artifact_health"]
+      "description": "自动运维和健康检查，审核建议变更并维护知识库",
+      "tools": ["artifact_health", "artifact_review_list", "artifact_review_get", "artifact_review_apply", "artifact_review_reject", "artifact_list"]
+    },
+    {
+      "id": "code-graph",
+      "name": "Code Graph",
+      "description": "代码知识图谱：符号定义、引用追踪、调用图探索（内部工具，mode=graph 尚未实现）",
+      "tools": ["artifact_query"]
+    },
+    {
+      "id": "kb-ops",
+      "name": "KB Operations",
+      "description": "KB 子系统生命周期管理：库/文档/搜索/备份（内部工具，需 expose_internal_tools=true）",
+      "tools": ["kb_list_libraries", "kb_create_library", "kb_update_library", "kb_delete_library", "kb_upload_document", "kb_get_document_status", "kb_retry_document", "kb_cancel_document_job", "kb_delete_document", "kb_list_documents", "kb_search", "kb_create_folder", "kb_purge_document", "kb_check_index_health", "kb_repair_index", "kb_backup", "kb_restore", "kb_add_eval_query", "kb_add_search_feedback"]
+    },
+    {
+      "id": "promotion",
+      "name": "Promotion (Deprecated)",
+      "description": "已弃用——请使用 artifact-review 技能。建议变更现通过 artifact_review_* 工具暴露。",
+      "tools": ["artifact_review_list", "artifact_review_get", "artifact_review_apply", "artifact_review_reject", "artifact_review_rollback"]
     }
   ]
 }
