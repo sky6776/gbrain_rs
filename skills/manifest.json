@@ -94,8 +94,8 @@
     {
       "id": "code-graph",
       "name": "Code Graph",
-      "description": "代码知识图谱：符号定义、引用追踪、调用图探索（内部工具，mode=graph 尚未实现）",
-      "tools": ["artifact_query"]
+      "description": "代码知识图谱：符号定义、引用追踪、调用图探索。代码图谱功能已内建于 KB 文档处理管线；MCP 层 mode=graph 尚未实现，当前仅 artifact_query 通用搜索可用",
+      "tools": ["artifact_query", "artifact_upload"]
     }
   ]
 }

@@ -1,9 +1,13 @@
 ---
 name: code-graph
-version: 1.0.0
+version: 1.1.0
 description: |
   Code knowledge graph operations. Find symbol definitions, trace references,
-  explore call graphs, search code chunks, and reindex code pages.
+  explore call graphs, and search code chunks. Code graph features (symbol
+  definitions, references, call relationships) are built into the KB document
+  processing pipeline and activated automatically during document upload.
+  The unified artifact_query facade (mode=graph) for code graph queries is
+  planned but not yet implemented.
 triggers:
   - "find definition"
   - "code definition"
@@ -15,7 +19,7 @@ triggers:
   - "code graph"
   - "reindex code"
 tools:
-  - artifact_query  # 统一查询接口
+  - artifact_query  # 统一查询接口（当前 code graph 查询仅此入口可用）
 mutating: true
 writes_pages: false
 ---
@@ -23,90 +27,125 @@ writes_pages: false
 # Code Graph Skill
 
 Navigate and query the code knowledge graph — a structured index of code symbols,
-their definitions, references, and call relationships.
+their definitions, references, and call relationships built via Tree-sitter AST
+chunking + regex symbol indexing.
 
 ## Contract
 
 This skill guarantees:
-- Symbol lookups use `artifact_query` with code-aware parameters
-- Call relationships are explored through the graph store via `artifact_query`
-- Search results include language and symbol kind context
-- All queries go through the unified `artifact_query` facade（统一对外接口）
+- Code graph features are built into the KB document processing pipeline — code files 
+  uploaded via `artifact_upload` are automatically AST-chunked and symbol-indexed
+- `artifact_query` with `filter_slug=<code_page>` can narrow results to specific 
+  code pages (general search, not dedicated graph traversal)
+- For programmatic access, the `gbrain_core` library exposes internal engine-level 
+  functions (`code_def`, `code_refs`, `get_callers_of`, `get_callees_of`) via the 
+  `Operations` struct — these are not MCP tools but can be used in Rust code
+- `artifact_query mode=graph` is planned for the artifact facade (see §8.2 
+  of design doc) but NOT yet implemented — graph-specific queries are not yet 
+  available through MCP
 
 ## When to Use
 
 Use this skill when:
-- Finding where a function/type/constant is defined
-- Tracing who calls a function (callers) or what a function calls (callees)
-- Searching for code by keyword or symbol text
-- Understanding call relationships between modules
+- Understanding what code graph capabilities exist in gbrain
+- Uploading code files to be indexed by the KB pipeline
+- Narrowing artifact_query results to code-related pages via `filter_slug`
+- Planning to use the Rust library API for code graph operations
 
 Do NOT use this skill for:
-- General brain page queries（直接使用 `artifact_query`，无需特定 mode）
-- Document/evidence search（使用 `artifact_query` with mode=evidence）
-- Entity lookups（使用 brain-ops lookup chain）
+- General brain page queries (use brain-ops skill directly)
+- Document/evidence search (use `artifact_query` with mode=evidence)
+- Entity lookups (use brain-ops lookup chain)
+
+## Current State (v1.1)
+
+### Available through MCP facade (artifact_query):
+- `artifact_query` with `filter_slug=<code_page>` — narrow to code pages
+- `artifact_query` with `include_sources=true` — show source tracing for code results
+
+### Available through library API (not MCP):
+The `gbrain_core::Operations` struct exposes:
+- `find_code_definitions(symbol, language)` — find where a symbol is defined
+- `get_callers_of(slug, symbol)` — find callers of a symbol (in-edges)
+- `get_callees_of(slug, symbol)` — find callees of a symbol (out-edges)
+- `get_edges_by_chunk(chunk_id)` — view all edges for a specific chunk
+
+### Pipeline integration:
+Code knowledge graph features are built into the KB document processing pipeline:
+1. **AST chunking** — Tree-sitter parses code into structural chunks
+2. **Symbol indexing** — regex extracts symbol definitions, references, and call edges
+3. **Two-pass search expansion** — hybrid search pipeline optionally expands results 
+   through code edges (walk_depth: 0-2) for structural context
+
+### Planned:
+- `artifact_query mode=graph` — unified artifact facade entry for code graph queries
+  (design doc §8.2)
 
 ## Phases
 
-代码图谱操作暂未通过 `artifact_query` 统一入口对外暴露——`artifact_query mode=graph` 尚未实现。
-请使用内部 `code_def`/`code_refs`/`get_callers` 工具进行代码符号定义、引用和调用关系查询。
-未来 `mode=graph` 实现后将统一到 artifact facade（设计文档 §8.2）。
+### Phase 1: Upload code files for indexing
 
-### Phase 1: 符号定义查找
+Upload code files via `artifact_upload` — the KB pipeline automatically:
+1. Detects the language via file extension
+2. Runs Tree-sitter AST chunking
+3. Extracts symbols and call edges via regex
+4. Builds the code graph index during document processing
 
-使用 `code_def` 查找符号定义：
+```jsonc
+// Upload a Rust source file
+{ "tool": "artifact_upload", "params": { "path": "/path/to/lib.rs", "intent": "auto" } }
+```
 
-1. 提供符号名（可含限定名），可选按语言过滤。
-2. 结果包含定义所在的 chunk、文件路径和上下文。
-3. 对于歧义符号（多文件同名），通过 `filter_slug` 缩小范围。
+### Phase 2: Search code content (general search)
 
-### Phase 2: 引用追踪
+Use `artifact_query` to search code-related content:
 
-使用 `code_refs` 查找所有引用某符号的代码片段：
+```jsonc
+// Search for a symbol or keyword in code pages
+{ "tool": "artifact_query", "params": { "query": "handle_request", "mode": "memory" } }
 
-1. 提供符号名和可选的语言过滤。
-2. 结果展示每个提及该符号的 chunk——import、调用、类型注解。
-3. 结合定义查找和引用追踪构建完整的「定义 + 所有使用」图景。
+// Narrow to a specific code page
+{ "tool": "artifact_query", "params": { "query": "async fn", "filter_slug": "src/lib", "mode": "memory" } }
+```
 
-### Phase 3: 调用图探索
+### Phase 3: Library-level code graph operations
 
-使用 `get_callers` 进行有向调用图遍历：
+For Rust crate consumers using `gbrain_core` directly:
 
-- 查找调用者（"谁调用了这个函数？"）——入边
-- 查找被调用者（"这个函数调用了什么？"）——出边
-- 通过迭代结果追踪多跳调用链
+```rust
+let ops = Operations::new(&engine, ctx, config);
+let definitions = ops.find_code_definitions("handle_request", Some("rust"))?;
+let callers = ops.get_callers_of("src/lib", "handle_request")?;
+let callees = ops.get_callees_of("src/lib", "handle_request")?;
+```
 
-### Phase 4: 代码片段搜索
+## Supported Languages
 
-使用内部代码搜索工具进行基于关键词的代码搜索：
-
-1. 提供查询字符串（关键词、符号片段或概念）。
-2. 可选按语言或符号类型过滤。
-3. 结果返回带有语言上下文的匹配 chunk。
-
-### Phase 5: 图谱边检查
-
-使用 `get_callers` 查看特定代码片段的所有调用图边：
-
-1. 提供前次搜索或定义结果中的 chunk 标识。
-2. 返回该 chunk 的所有入边和出边。
-
-## 与 Brain Query 的集成
-
-代码图谱暂未集成到 `artifact_query`——`mode=graph` 尚未实现。
-当前代码图谱操作需通过内部工具单独执行：
-
-- `code_def` + `code_refs` — 定义查找 + 引用追踪
-- `get_callers` — 调用关系遍历
-- `artifact_query` with `filter_slug=<code_page>` — 限定到特定代码页面（通用查询）
-- `artifact_query` with `include_sources=true` — 显示来源追溯（通用查询）
+| Language | Tree-sitter Binding |
+|----------|-------------------|
+| Rust | `tree-sitter-rust` |
+| TypeScript | `tree-sitter-typescript` |
+| JavaScript | `tree-sitter-javascript` |
+| Python | `tree-sitter-python` |
+| Go | `tree-sitter-go` |
+| Java | `tree-sitter-java` |
+| C | `tree-sitter-c` |
+| C++ | `tree-sitter-cpp` |
 
 ## Anti-Patterns
 
-- **不要通过函数名猜测调用关系。** 使用 `code_refs`/`get_callers` 追踪实际边，而非名称模式。
-- **不要跳过代码图谱直接文本搜索。** 内部代码工具对符号查找更精确。
-- **不要在重构后不刷新数据。** 过期的代码边会产生错误的调用链。
+- **Expecting `artifact_query mode=graph` to work.** This mode is planned but not yet implemented. Use general search with `filter_slug` for now.
+- **Guessing call relationships from function names.** Use the library API (`get_callers_of`/`get_callees_of`) for actual edge traversal in Rust code.
+- **Uploading code without Tree-sitter support.** Only the 8 listed languages are supported for AST chunking; unsupported languages fall back to generic text chunking.
+- **Not reindexing after refactoring.** Code edges can become stale after refactoring; re-upload the updated files.
 
 ## Tools Used
 
-- `artifact_query` — 统一知识查询（含代码图谱检索能力）
+- `artifact_query` — unified knowledge query (current code graph entry through artifact facade)
+- `artifact_upload` — upload code files to trigger KB pipeline indexing
+
+Internal library API (Rust only, not MCP):
+- `Operations::find_code_definitions` — symbol definition lookup
+- `Operations::get_callers_of` — caller traversal (in-edges)
+- `Operations::get_callees_of` — callee traversal (out-edges)
+- `Operations::get_edges_by_chunk` — chunk-level edge inspection

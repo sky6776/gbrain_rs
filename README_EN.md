@@ -74,10 +74,10 @@ After initialization, the `~/.gbrain/` directory structure is:
   brain.db           # SQLite database (FTS5 + sqlite-vec)
   config.json        # Runtime config (generated via gbrain config set)
   bin/               # Executable copy (copied during gbrain init)
-  artifacts/         # Artifact original file storage (named by SHA256)
-  kb/                # KB subsystem storage
-    files/           # KB document files (organized by library ID)
+  artifacts/         # Artifact original file storage (named by SHA256; KB documents reference this store)
+  kb/                # KB subsystem metadata storage
   cache/             # Cache directory
+  kb_files/          # KB file storage (only active when GBRAIN_KB_STORAGE_DIR is customized)
   logs/              # Log files
     gbrain.log
 ```
@@ -278,9 +278,11 @@ gbrain review apply 1
 
 | Subcommand | Description |
 |------------|-------------|
-| `gbrain config show` | Show all common config values |
-| `gbrain config get <key>` | Get a single config value |
+| `gbrain config show` | Show common config values (quick overview of 15 core items) |
+| `gbrain config get <key>` | Get a single config value (supports all 23 keys listed below) |
 | `gbrain config set <key> <value>` | Set a config value (auto-saves to config.json) |
+
+> **Note:** `config show` only displays the 15 most used core keys; `config get <key>` can access all 23 config items listed in the table below.
 
 **Available config keys:**
 
@@ -321,9 +323,9 @@ gbrain review apply 1
 | `slug` | string | Yes | Target page slug (e.g., people/alice) |
 | `--title` | string | No | Page title (optional, inferred from slug by default) |
 | `--content` | string | No | Direct text content (alternative to --file) |
-| `--file` | path | No | Read content from file (alternative to --content) |
-| `--intent` | string | No | Intent: memory / evidence / promote (default memory) |
-| `--force` | flag | No | Force overwrite of human-edited pages |
+| `--file` | path | No | Read content from text file (alternative to --content; txt/md/csv/json/yaml etc., max 1MB) |
+| `--intent` | string | No | Intent: memory(default, stable brain page+optional KB+auto-apply low-risk), evidence(KB only), promote(shadow page+KB+candidates) |
+| `--force` | flag | No | Force overwrite of human-edited pages (default returns conflict) |
 | `--dry-run` | flag | No | Return routing plan only, don't write |
 
 ### `gbrain upload`
@@ -642,9 +644,9 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 |-----------|------|----------|-------------|
 | `slug` | string | Yes | Target page slug (e.g., people/alice) |
 | `content` | string | No | Direct text content (alternative to file) |
-| `file` | string | No | Local file path (alternative to content) |
+| `file` | string | No | Local text file path (alternative to content; txt/md/csv/json/yaml etc., max 1MB) |
 | `title` | string | No | Page title (optional, inferred from slug by default) |
-| `intent` | string | No | Intent: memory / evidence / promote (default memory) |
+| `intent` | string | No | Intent: memory(default, stable brain page+optional KB+auto-apply low-risk) / evidence(KB only) / promote(shadow page+KB+candidates) |
 | `force` | boolean | No | Force overwrite of human-edited pages (default false, returns resolution=conflict on conflict) |
 | `dry_run` | boolean | No | Return routing plan only, don't write |
 
@@ -943,6 +945,7 @@ cargo test --test engine_test # Engine integration tests
 cargo test --test search_test # Search integration tests
 cargo test --test fuzzy_test  # Fuzzy matching tests
 cargo test --test dedup_test  # Deduplication tests
+cargo test --test artifact_facade_test  # Artifact facade integration tests
 cargo clippy                  # Lint
 ```
 
