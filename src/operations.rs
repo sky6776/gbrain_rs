@@ -1708,47 +1708,6 @@ impl<'a> Operations<'a> {
             limit,
         )
     }
-
-    /// 软删除 Artifact
-    /// 删除 artifact — admin-only 内部方法
-    ///
-    /// CLI 和 MCP 应使用 ArtifactService::delete_artifact。
-    ///
-    /// P2-4 修复：同步软删除关联的 occurrences（与 ArtifactService::delete_artifact 一致），
-    /// 避免旧路径留下 active occurrence 指向 deleted artifact 的状态。
-    #[deprecated(note = "请使用 ArtifactService::delete_artifact")]
-    pub fn delete_artifact(&self, artifact_id: i64) -> crate::error::Result<()> {
-        use crate::artifact::projection;
-        use crate::artifact::store;
-
-        // 写入操作失效查询缓存
-        self.query_cache.invalidate_all();
-
-        self.engine.transaction_with_engine(|engine| {
-            let conn = engine.connection()?;
-            // 标记所有投影为 stale
-            projection::mark_all_projections_stale(conn, artifact_id, "artifact_deleted")?;
-
-            // P2-4 修复：软删除关联的 occurrences，写 stale_reason='artifact_deleted'
-            store::soft_delete_occurrences_by_artifact(conn, artifact_id)
-                .map_err(|e| crate::error::GBrainError::Database(e.to_string()))?;
-
-            // 软删除关联的 kb_documents，设置 deleted_at
-            let kb_doc_ids = projection::find_all_kb_document_ids(conn, artifact_id)?;
-            for kb_doc_id in kb_doc_ids {
-                crate::kb::lifecycle::soft_delete_document(conn, kb_doc_id)?;
-                crate::artifact::provenance::mark_provenance_stale_by_kb_document(
-                    conn,
-                    kb_doc_id,
-                    "kb_document_deleted",
-                )?;
-            }
-
-            // 软删除 artifact
-            store::soft_delete_artifact(conn, artifact_id)?;
-            Ok(())
-        })
-    }
 }
 
 /// Collect non-markdown files from a directory, skipping hidden files and symlinks

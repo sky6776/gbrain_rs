@@ -704,7 +704,6 @@ No parameters.
 ### Known Limitations
 
 - **`artifact_query` mode=graph** is not yet implemented. Code graph queries (symbol definitions/references/call relationships) are not available through the artifact facade.
-- **KB internal tools** (`kb_list_libraries`, `kb_upload_document`, `kb_search`, etc.) require `expose_internal_tools=true` and are hidden by default. For user-facing operations, use the `artifact_*` facade tools instead.
 
 ---
 

@@ -41,8 +41,6 @@ cron scheduling, GStack PDF generation, or external research connectors.
 | Trigger | Skill |
 |---------|-------|
 | Code symbol lookup, reference tracing, call graph exploration | `skills/code-graph/SKILL.md` |
-| KB library management, document processing, KB search, backup/restore | `skills/kb-ops/SKILL.md` |
-| Promotion candidates / suggested changes (deprecated, use artifact-review) | `skills/promotion/SKILL.md` |
 
 ## Conventions
 
