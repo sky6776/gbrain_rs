@@ -223,6 +223,35 @@ gbrain config set log_level debug
 # ===== MCP Server =====
 # Start MCP stdio server
 gbrain serve
+
+# ===== Advanced Usage =====
+# Custom database path
+gbrain --db /path/to/custom/brain.db init
+gbrain --db /path/to/custom/brain.db put people/alice --content "Hello"
+
+# JSON output (for scripting)
+gbrain query "Alice" --json
+gbrain get 1 --include-projections --json
+gbrain health --json
+gbrain review list --status pending --json
+
+# Dry-run previews (all supporting commands)
+gbrain put people/bob --content "test" --dry-run
+gbrain upload report.pdf --dry-run --json
+gbrain delete 5 --dry-run
+gbrain detach 5 --from people/alice --dry-run
+gbrain restore 5 --dry-run
+gbrain reprocess 5 --dry-run
+
+# ===== Intent-driven Workflows =====
+# evidence: KB document evidence only, no brain page
+gbrain put research/findings --content "Experiment data shows..." --intent evidence
+
+# promote: shadow page + KB + candidates (requires review)
+gbrain put people/new-hire --content "New hire info..." --intent promote
+
+# upload promote + auto-accept low-risk
+gbrain upload meeting-notes.md --intent promote --promotion auto-low-risk --target people/alice
 ```
 
 ### Review Operations
@@ -278,6 +307,8 @@ gbrain review apply 1
 | `artifact_default_intent` | string | Artifact default intent: memory/evidence/promote | `memory` |
 | `artifact_auto_create_inbox_library` | boolean | Auto-create Inbox library when missing | `true` |
 | `artifact_manual_memory_to_kb` | boolean | Write memory intent to KB | `true` |
+| `autopilot_enabled` | boolean | Enable autopilot background maintenance | `true` |
+| `autopilot_interval_secs` | integer | Autopilot maintenance interval (seconds, min 60) | `3600` |
 
 ---
 
@@ -577,9 +608,29 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 // Reject a suggested change
 { "tool": "artifact_review_reject", "params": { "change_id": 2, "reason": "Information outdated" } }
 
-// Rollback an applied change
+// Rollback an applied change (reverts shadow page update + marks provenance as stale)
 { "tool": "artifact_review_rollback", "params": { "change_id": 1 } }
 ```
+
+### Write Intent Reference
+
+`artifact_put` and `artifact_upload` control how knowledge enters the system via the `intent` parameter:
+
+| Tool | Valid intent Values | Default | Behavior |
+|------|---------------------|---------|----------|
+| `artifact_put` | `memory` / `evidence` / `promote` | `memory` | memory=stable brain page+optional KB, evidence=KB only (no brain page), promote=shadow page+KB+candidates |
+| `artifact_upload` | `auto` / `evidence`(alias `document`) / `memory` / `attachment` / `promote` | `auto` | auto=smart routing by file type, evidence=KB document evidence, memory=curate into memory, attachment=file only, promote=explicit promotion with review |
+
+### Promotion Policy Reference
+
+`artifact_upload`'s `promotion` parameter controls automation of generating suggested changes from KB evidence:
+
+| Policy | Alias | Description |
+|--------|-------|-------------|
+| `none` | — | No auto-promotion; no shadows or candidates |
+| `shadow` | — | Create shadow pages only, no candidates |
+| `candidate` | — | Generate candidates for human review (default) |
+| `auto-low-risk` | `auto` | Auto-accept low-risk candidates (entity mentions, link suggestions, etc.); high-risk still needs review |
 
 ---
 
@@ -854,11 +905,14 @@ Active source ──delete──→ Soft-deleted (still in storage, not queryabl
                             │
                             ├──restore──→ Restored to active source
                             │
-                            └──permanent purge──→ Permanently deleted (storage freed)
+                            └──permanent purge──→ Permanently deleted (storage freed)[^purge-note]
 ```
+
+[^purge-note]: Permanent purge is implemented at the engine layer but not yet exposed as a standalone CLI command. Use `gbrain health` to identify stale records for manual cleanup.
 
 - `gbrain delete <id_or_uid>` — Soft-delete; source is marked deleted but data is retained
 - `gbrain restore <id_or_uid>` — Restore a soft-deleted source
+- `gbrain health` — Check knowledge source consistency
 
 ---
 

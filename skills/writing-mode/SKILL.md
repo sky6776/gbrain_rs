@@ -40,9 +40,9 @@ gbrain supports writing through `artifact_put` / `gbrain put` with intent:
 
 | Intent | When to use | Behavior |
 |--------|-------------|----------|
-| `memory` | Human-authored notes, curated knowledge | Default intent; writes to brain pages |
-| `evidence` | AI-generated content, external data | More strict validation, document-oriented |
-| `promote` | High-quality content to elevate | Promotes content to compiled truth level |
+| `memory` | Human-authored notes, curated knowledge | Default intent; writes stable brain page + optional KB projection |
+| `evidence` | AI-generated content, external data to store as evidence only | Writes to KB only — no brain page created; searchable as evidence |
+| `promote` | High-quality content to elevate with review | Creates shadow page + KB projection + review candidates before publishing |
 
 **Intent selection guide:**
 - Human-authored notes → `memory` (standard path)

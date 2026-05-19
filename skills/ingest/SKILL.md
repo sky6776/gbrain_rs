@@ -249,7 +249,9 @@ Raw source: [preserved at path / uploaded to cloud]
 - `artifact_put` — write to long-term memory (unified entry point)
 - `artifact_upload` — upload file as knowledge source
 - `artifact_get` — read knowledge source detail
-- `artifact_query` — unified knowledge query with source tracing
+- `artifact_list` — list knowledge sources
+- `artifact_delete` — soft-delete knowledge sources
+- `artifact_restore` — restore deleted knowledge sources
 - ~~`add_link`~~ — (legacy, 已移除)
 - ~~`add_timeline_entry`~~ — (legacy, 已移除)
 - ~~`add_tag`~~ — (legacy, 已移除)
