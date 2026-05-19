@@ -7,7 +7,7 @@ use crate::error::{GBrainError, Result};
 use crate::nlp::chinese;
 use crate::schema::SCHEMA_DDL;
 use crate::types::*;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -274,6 +274,27 @@ impl SqliteEngine {
     /// for job queue operations and search.
     pub fn connection(&self) -> Result<&Connection> {
         self.conn.as_ref().ok_or(GBrainError::NotConnected)
+    }
+
+    /// 只读连接：用于 dry-run 预览，跳过 journal_mode=WAL 等写入型 PRAGMA，
+    /// 避免 dry-run 意外修改数据库文件或创建 WAL sidecar 文件。
+    pub fn connect_readonly(&mut self) -> Result<()> {
+        debug!(db_path = %self.db_path, "Opening SQLite read-only connection");
+        // dry-run 仅用于查询已有数据，使用 SQLITE_OPEN_READ_ONLY 确保不写入
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // 仅设置连接级（非持久）PRAGMA，跳过 journal_mode/synchronous 等写入型 PRAGMA
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -64000;
+             PRAGMA temp_store = MEMORY;",
+        )?;
+        self.conn = Some(conn);
+        info!(db_path = %self.db_path, "SQLite read-only connection established");
+        Ok(())
     }
 
     /// 获取 gbrain 基础目录（db_path 的父目录）

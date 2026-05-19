@@ -53,12 +53,12 @@ This skill guarantees:
 Delete an artifact by ID or UID:
 
 **MCP:** `artifact_delete` with `id_or_uid`
-**CLI:** `gbrain artifact delete <id-or-uid>`
+**CLI:** `gbrain delete <id-or-uid>`
 
 Use `dry_run=true` to preview impact before committing:
 
 **MCP:** `artifact_delete` with `id_or_uid` and `dry_run=true`
-**CLI:** `gbrain artifact delete <id-or-uid> --dry-run`
+**CLI:** `gbrain delete <id-or-uid> --dry-run`
 
 After deletion:
 - All projections (KB, brain, shadow, file) marked as stale
@@ -72,7 +72,7 @@ After deletion:
 Recover a soft-deleted artifact:
 
 **MCP:** `artifact_restore` with `id_or_uid`
-**CLI:** `gbrain artifact restore <id-or-uid>`
+**CLI:** `gbrain restore <id-or-uid>`
 
 After restore:
 - Artifact returns to active state
@@ -85,7 +85,7 @@ After restore:
 Remove association between an artifact and a specific page:
 
 **MCP:** `artifact_detach` with `id_or_uid` and `from_slug`
-**CLI:** `gbrain artifact detach <id-or-uid> --from <slug>`
+**CLI:** `gbrain detach <id-or-uid> --from <slug>`
 
 Detach only removes the specific occurrence/projection linking the artifact
 to that page. The artifact itself remains active.
@@ -95,7 +95,7 @@ to that page. The artifact itself remains active.
 Verify projection consistency:
 
 **MCP:** `artifact_health`
-**CLI:** `gbrain artifact health`
+**CLI:** `gbrain health`
 
 Checks for stale projections, missing KB documents, stuck processing jobs,
 and orphan provenance records.

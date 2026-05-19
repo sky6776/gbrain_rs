@@ -9,18 +9,6 @@ tools:
   - artifact_put    # 统一写入接口
   - artifact_upload # 统一上传接口
   - artifact_query  # 统一查询接口
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - add_link       # 旧链接接口
-  - add_timeline_entry # 旧时间线接口
-  - add_tag        # 旧标签接口
-  - get_tags       # 旧标签查询
-  - put_raw_data   # 旧原始数据接口
-  - get_backlinks  # 旧反向链接接口
-  - sync_brain     # 旧同步接口
-optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:
@@ -41,7 +29,7 @@ Ingest meetings, articles, media, documents, and conversations into the brain.
 
 - Every fact written to a brain page carries an inline `[Source: ...]` citation with date and provenance.
 - Every entity mention creates a back-link from the entity's page to the page mentioning them (Iron Law).
-- Raw sources are preserved for provenance with `gbrain artifact upload` or `put_raw_data`.
+- Raw sources are preserved for provenance with `gbrain upload`.
 - State sections are rewritten with current best understanding, never appended to.
 - Notable entities get pages or updates when the current ingestion task mentions them.
 
@@ -86,16 +74,13 @@ the signal detection loop that makes the brain compound over time.
 1. **Scan the message** for entity mentions: people, companies, concepts, original
    thinking. Fire on every message (no exceptions unless purely operational).
 2. **For each entity detected:**
-   - `gbrain artifact query "name"` -- does a page already exist?
-   - **If yes:** load context with `gbrain artifact get <uid>`. Use the compiled truth to
+   - `gbrain query "name"` -- does a page already exist?
+   - **If yes:** load context with `gbrain get <uid>`. Use the compiled truth to
      inform your response. Update the page if the message contains new information.
    - **If no:** assess notability (see `skills/_brain-filing-rules.md`). If the entity
-     is worth tracking, create a new page with `gbrain artifact put <slug>` and populate
+     is worth tracking, create a new page with `gbrain put <slug>` and populate
      with what you know.
-3. **After creating or updating pages:** refresh the index (admin-tools):
-   ```bash
-   gbrain extract --mode all
-   ```
+3. **After creating or updating pages:** 索引通过 artifact 投影自动同步，无需手动刷新。
 4. **Don't block the conversation.** Entity detection and enrichment should happen
    alongside the response, not before it. The user shouldn't wait for brain writes
    to get an answer.
@@ -194,19 +179,18 @@ if the post is primarily about a person/company.
 
 Every ingested item must have its raw source preserved for provenance.
 
-**Use `gbrain artifact upload` for file provenance:**
+**Use `gbrain upload` for file provenance:**
 ```bash
-gbrain artifact upload <file> --page <page-slug>
+gbrain upload <file> --page <page-slug>
 ```
 
-- JSON/API payloads can be stored with `put_raw_data`.
 - Large cloud-storage routing from original gbrain is not part of gbrain_rs.
 
 **Accessing stored files:**
-- `gbrain artifact list` -- list knowledge sources
-- `gbrain artifact get <uid>` -- get artifact details with source tracing
+- `gbrain list` -- list knowledge sources
+- `gbrain get <uid>` -- get artifact details with source tracing
 
-Use `put_raw_data` in gbrain to store raw API responses and metadata (JSON, not binary).
+JSON/API payloads 可通过 `gbrain upload` 存储原始响应和元数据。
 
 ## Test Before Bulk
 
@@ -266,10 +250,10 @@ Raw source: [preserved at path / uploaded to cloud]
 - `artifact_upload` — upload file as knowledge source
 - `artifact_get` — read knowledge source detail
 - `artifact_query` — unified knowledge query with source tracing
-- `add_link` — cross-reference entities (admin-tools)
-- `add_timeline_entry` — record events (admin-tools)
-- `add_tag` — tag a page (admin-tools)
-- `get_tags` — list page tags (admin-tools)
-- `put_raw_data` — store raw API responses (admin-tools)
-- `get_backlinks` — check who references an entity (admin-tools)
-- `sync_brain` — sync changes to index (admin-tools)
+- ~~`add_link`~~ — (legacy, 已移除)
+- ~~`add_timeline_entry`~~ — (legacy, 已移除)
+- ~~`add_tag`~~ — (legacy, 已移除)
+- ~~`get_tags`~~ — (legacy, 已移除)
+- ~~`put_raw_data`~~ — (legacy, 已移除)
+- ~~`get_backlinks`~~ — (legacy, 已移除)
+- ~~`sync_brain`~~ — (legacy, 已移除)

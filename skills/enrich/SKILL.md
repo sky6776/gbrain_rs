@@ -14,14 +14,6 @@ triggers:
 tools:
   - artifact_put    # 统一写入接口
   - artifact_query  # 统一查询接口
-internal_tools:
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - query          # 旧查询接口
-  - add_link       # 旧链接接口
-  - add_timeline_entry # 旧时间线接口
-  - get_backlinks  # 旧反向链接接口
-optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:
@@ -96,7 +88,7 @@ Extract people, companies, concepts from the incoming signal.
 ### Step 2: Check brain state
 
 For each entity:
-- `gbrain artifact query "name"` — does knowledge already exist?
+- `gbrain query "name"` — does knowledge already exist?
 - **If yes:** UPDATE path (add new signal, update compiled truth if material)
 - **If no:** CREATE path (check notability gate first, then create)
 
@@ -119,7 +111,7 @@ Don't just capture facts. Capture texture:
 Priority order -- stop when you have enough signal for the entity's tier.
 
 **4a. Brain cross-reference (always, all tiers)**
-- `gbrain artifact query "name"` and `gbrain artifact query "what do we know about name"`
+- `gbrain query "name"` and `gbrain query "what do we know about name"`
 - Check related pages: company pages for person enrichment and vice versa
 - This is free and often the richest source
 
@@ -150,7 +142,7 @@ Priority order -- stop when you have enough signal for the entity's tier.
 
 ### Step 5: Save raw data (preserves provenance)
 
-Store raw API responses via `put_raw_data` in gbrain:
+Store raw API responses via `gbrain upload` in gbrain:
 ```json
 {
   "source": "crustdata",
@@ -282,7 +274,7 @@ Active items, pending decisions, things to track.
 cross-references (updating related pages' compiled truth with new signal
 from this enrichment), not on creating links. Verify via the `auto_links`
 field in the artifact_put response (`{ created, removed, errors }`).
-Timeline entries still need explicit `gbrain timeline-add` calls (admin-tools).
+Timeline entries still need explicit calls (legacy `gbrain timeline-add` 已移除)。
 
 ## Bulk Enrichment Rules
 
@@ -342,11 +334,11 @@ Both page types have bidirectional back-links to every entity they mention.
 
 ## Tools Used
 
-- Read a page from gbrain (get_page)
-- Store/update a page in gbrain (put_page)
-- Add a timeline entry in gbrain (add_timeline_entry)
-- List pages in gbrain by type (list_pages)
-- Store raw API data in gbrain (put_raw_data)
-- Retrieve raw data from gbrain (get_raw_data)
-- Link entities in gbrain (add_link)
-- Check backlinks in gbrain (get_backlinks)
+- Read a page from gbrain (artifact_get / artifact_query)
+- Store/update a page in gbrain (artifact_put)
+- ~~Add a timeline entry in gbrain~~ (add_timeline_entry — legacy, 已移除)
+- ~~List pages in gbrain by type~~ (list_pages — legacy, 已移除)
+- Store raw API data in gbrain (artifact_upload)
+- ~~Retrieve raw data from gbrain (get_raw_data)~~ (legacy, 已移除)
+- ~~Link entities in gbrain (add_link)~~ (legacy, 已移除)
+- ~~Check backlinks in gbrain (get_backlinks)~~ (legacy, 已移除)

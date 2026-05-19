@@ -91,10 +91,6 @@ pub struct Config {
     pub default_kb_library_id: Option<i64>,
     /// 上传默认提升策略
     pub upload_default_promotion_policy: String,
-    /// 是否暴露内部工具（kb_*、promotion_*、projection_* 等）给 MCP 调用方
-    /// 默认 false：只暴露 artifact_* facade tools
-    /// 设为 true 时，旧版工具名（upload_source、memory_query、promotion_* 等）仍可使用
-    pub expose_internal_tools: bool,
     /// artifact 默认意图。默认 "memory"。可选值: memory, evidence, promote
     pub artifact_default_intent: String,
     /// 当 artifact_put 需要写入 KB 但没有 Inbox 库时，是否自动创建。默认 true。
@@ -186,8 +182,6 @@ impl Default for Config {
             artifact_storage_dir: None,
             default_kb_library_id: None,
             upload_default_promotion_policy: "candidate".to_string(),
-            // 默认不暴露内部工具，只暴露 artifact_* facade
-            expose_internal_tools: false,
             // artifact 默认意图为 memory（写入 gbrain 页面 + KB）
             artifact_default_intent: "memory".to_string(),
             // 当 artifact_put 需要写入 KB 但没有 Inbox 库时，自动创建
@@ -353,10 +347,6 @@ impl Config {
         if let Ok(policy) = std::env::var("GBRAIN_UPLOAD_PROMOTION_POLICY") {
             config.upload_default_promotion_policy = policy;
         }
-        // 是否暴露内部工具（默认 false，仅暴露 artifact_* facade）
-        config.expose_internal_tools = std::env::var("GBRAIN_EXPOSE_INTERNAL_TOOLS")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(config.expose_internal_tools);
         // artifact 默认意图（默认 "memory"，可选: memory, evidence, promote）
         if let Ok(intent) = std::env::var("GBRAIN_ARTIFACT_DEFAULT_INTENT") {
             config.artifact_default_intent = intent;
@@ -571,6 +561,139 @@ impl Config {
         Ok(())
     }
 
+    /// 根据 key 读取配置值（用于 `gbrain config get`）。
+    /// 返回 Some(value) 表示 key 是 Config 字段，None 表示 key 是 SQLite engine 专用 key。
+    pub fn get_field(&self, key: &str) -> Option<String> {
+        match key {
+            "embedding_model" => Some(self.embedding_model.clone()),
+            "embedding_dimensions" => Some(self.embedding_dimensions.to_string()),
+            "expansion_model" => Some(self.expansion_model.clone()),
+            "chunker_model" => Some(self.chunker_model.clone()),
+            "chunk_size" => Some(self.chunk_size.to_string()),
+            "chunk_overlap" => Some(self.chunk_overlap.to_string()),
+            "log_level" => Some(self.log_level.clone()),
+            "log_to_file" => Some(self.log_to_file.to_string()),
+            "log_to_console" => Some(self.log_to_console.to_string()),
+            "auto_link" => Some(self.auto_link.to_string()),
+            "auto_timeline" => Some(self.auto_timeline.to_string()),
+            "post_write_lint" => Some(self.post_write_lint.to_string()),
+            "kb_enabled" => Some(self.kb_enabled.to_string()),
+            "kb_raptor_model" => Some(self.kb_raptor_model.clone()),
+            "kb_max_file_size_mb" => Some(self.kb_max_file_size_mb.to_string()),
+            "kb_worker_enabled" => Some(self.kb_worker_enabled.to_string()),
+            "kb_worker_poll_interval_secs" => Some(self.kb_worker_poll_interval_secs.to_string()),
+            "upload_default_promotion_policy" => Some(self.upload_default_promotion_policy.clone()),
+            "artifact_default_intent" => Some(self.artifact_default_intent.clone()),
+            "artifact_auto_create_inbox_library" => {
+                Some(self.artifact_auto_create_inbox_library.to_string())
+            }
+            "artifact_manual_memory_to_kb" => {
+                Some(self.artifact_manual_memory_to_kb.to_string())
+            }
+            // SQLite engine 专用 key，不在 Config 中
+            "writer.lint_on_put_page" => None,
+            _ => None,
+        }
+    }
+
+    /// 根据 key 设置配置值（用于 `gbrain config set`）。
+    /// 返回 Ok(()) 表示成功设置，Err(msg) 表示 key 未识别或值无效。
+    pub fn apply_set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        match key {
+            "embedding_model" => self.embedding_model = value.to_string(),
+            "embedding_dimensions" => {
+                let v: usize = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.embedding_dimensions = v;
+            }
+            "expansion_model" => self.expansion_model = value.to_string(),
+            "chunker_model" => self.chunker_model = value.to_string(),
+            "chunk_size" => {
+                let v: usize = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.chunk_size = v;
+            }
+            "chunk_overlap" => {
+                let v: usize = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.chunk_overlap = v;
+            }
+            "log_level" => {
+                let valid = ["trace", "debug", "info", "warn", "error"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "log_level 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.log_level = value.to_string();
+            }
+            "log_to_file" => self.log_to_file = parse_bool(key, value)?,
+            "log_to_console" => self.log_to_console = parse_bool(key, value)?,
+            "auto_link" => self.auto_link = parse_bool(key, value)?,
+            "auto_timeline" => self.auto_timeline = parse_bool(key, value)?,
+            "post_write_lint" => self.post_write_lint = parse_bool(key, value)?,
+            "kb_enabled" => self.kb_enabled = parse_bool(key, value)?,
+            "kb_raptor_model" => self.kb_raptor_model = value.to_string(),
+            "kb_max_file_size_mb" => {
+                let v: usize = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.kb_max_file_size_mb = v;
+            }
+            "kb_worker_enabled" => self.kb_worker_enabled = parse_bool(key, value)?,
+            "kb_worker_poll_interval_secs" => {
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.kb_worker_poll_interval_secs = v;
+            }
+            "upload_default_promotion_policy" => {
+                // 校验合法枚举值，避免无效 policy 在 apply_promotion_policy 被静默忽略
+                let valid = ["none", "shadow", "candidate", "auto-low-risk"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "upload_default_promotion_policy 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.upload_default_promotion_policy = value.to_string()
+            }
+            "artifact_default_intent" => {
+                // 校验合法枚举值，避免无效 intent 在 routing 被静默退回 Auto
+                let valid = ["memory", "evidence", "promote"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "artifact_default_intent 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.artifact_default_intent = value.to_string()
+            },
+            "artifact_auto_create_inbox_library" => {
+                self.artifact_auto_create_inbox_library = parse_bool(key, value)?
+            }
+            "artifact_manual_memory_to_kb" => {
+                self.artifact_manual_memory_to_kb = parse_bool(key, value)?
+            }
+            // SQLite engine 专用 key（保留兼容），不在 Config 中，仅写入 DB
+            "writer.lint_on_put_page" => {
+                return Err(format!(
+                    "{} 是 SQLite engine 专用 key，需连接数据库后才能设置",
+                    key
+                ))
+            }
+            _ => return Err(format!("未知配置 key: {}", key)),
+        }
+        Ok(())
+    }
+
     /// Merge another config into this one (other takes precedence for Some values)
     fn merge(&mut self, other: Config) {
         if other.database_path.is_some() {
@@ -665,8 +788,6 @@ impl Config {
         if !other.upload_default_promotion_policy.is_empty() {
             self.upload_default_promotion_policy = other.upload_default_promotion_policy;
         }
-        // expose_internal_tools — always take config file value
-        self.expose_internal_tools = other.expose_internal_tools;
         // artifact_default_intent — always take config file value
         if !other.artifact_default_intent.is_empty() {
             self.artifact_default_intent = other.artifact_default_intent;
@@ -675,5 +796,18 @@ impl Config {
         self.artifact_auto_create_inbox_library = other.artifact_auto_create_inbox_library;
         // artifact_manual_memory_to_kb — always take config file value
         self.artifact_manual_memory_to_kb = other.artifact_manual_memory_to_kb;
+    }
+}
+
+/// 严格解析布尔值，只接受 true/false/1/0，拒绝拼写错误。
+/// 用于 `gbrain config set` 的参数校验，防止 `flase` 被静默视为 true。
+fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(format!(
+            "{} 需要布尔值 (true/false/1/0)，不是: {}",
+            key, value
+        )),
     }
 }

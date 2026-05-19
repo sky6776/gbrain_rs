@@ -796,8 +796,10 @@ fn rollback_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidat
 /// 没有 page_versions 历史可恢复。因此 page_create 回滚必须直接处理页面生命周期。
 ///
 /// 安全约束：
-/// - 页面创建后未被修改（created_at == updated_at）时，直接软删除。
-/// - 页面已被后续修改时，拒绝回滚，提示人工审查。
+/// - 通过比较页面当前各字段（title/content/hash/page_type/timeline/frontmatter）
+///   与候选创建时的原始值来判断页面是否被修改。
+/// - 所有字段匹配时，直接软删除页面。
+/// - 任一字段不匹配时，拒绝回滚，提示人工审查。
 fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Result<()> {
     let slug = &candidate.target_slug;
 
@@ -851,11 +853,29 @@ fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Re
                 .get("frontmatter")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            // 修复：orig_hash 需与 apply_page_create_candidate 的 content_hash 算法一致，
+            // 包含 title + page_type + content + timeline + frontmatter（canonical JSON）+ tags。
+            // 上一轮改 apply 的 hash 后此处未同步更新，导致刚创建未修改的页面也 hash 不一致、无法回滚。
+            let orig_frontmatter_value: serde_json::Value =
+                serde_json::from_str(orig_frontmatter).unwrap_or(serde_json::json!({}));
+            let orig_tags: Vec<String> = orig_frontmatter_value
+                .as_object()
+                .and_then(|obj| obj.get("tags"))
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
             let orig_hash = {
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(orig_title.as_bytes());
+                hasher.update(orig_page_type.as_bytes());
                 hasher.update(orig_content.as_bytes());
+                hasher.update(orig_timeline.as_bytes());
+                let fm_str = serialize_canonical_json(&orig_frontmatter_value);
+                hasher.update(fm_str.as_bytes());
+                for tag in &orig_tags {
+                    hasher.update(tag.as_bytes());
+                }
                 format!("{:x}", hasher.finalize())
             };
 
@@ -1702,17 +1722,55 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
         .get("content")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // P2修复：从 payload 读取扩展字段，与 rollback_page_create 的比对逻辑保持一致
+    let page_type = payload
+        .get("page_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("note");
+    let timeline = payload
+        .get("timeline")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let frontmatter = payload
+        .get("frontmatter")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     // 修复：补齐 title_tokens、compiled_truth_tokens、content_hash，
     // 与 put_page 保持一致，确保中文分词索引和内容变更检测正确
     let slug = &candidate.target_slug;
     let title_tokens = crate::nlp::chinese::tokenize_content(title);
     let truth_tokens = crate::nlp::chinese::tokenize_content(content);
+    // P2修复：计算 timeline_tokens，确保中文时间线检索/FTS 权重正确索引
+    let timeline_tokens = if timeline.is_empty() {
+        String::new()
+    } else {
+        crate::nlp::chinese::tokenize_content(timeline)
+    };
+    // 修复：content_hash 包含 title + page_type + content + timeline + frontmatter + tags，
+    // 与 src/operations.rs compute_content_hash 保持一致，确保冲突检测和版本基线语义正确
+    let frontmatter_value: serde_json::Value =
+        serde_json::from_str(frontmatter).unwrap_or(serde_json::json!({}));
+    let tags: Vec<String> = frontmatter_value
+        .as_object()
+        .and_then(|obj| obj.get("tags"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
     let content_hash = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(title.as_bytes());
+        // page_type 参与 hash，避免 page_type 变化但内容相同被误判为未变更
+        hasher.update(page_type.as_bytes());
         hasher.update(content.as_bytes());
+        hasher.update(timeline.as_bytes());
+        // frontmatter 使用 sorted keys 的 canonical JSON 格式，与 operations.rs 保持一致
+        let fm_str = serialize_canonical_json(&frontmatter_value);
+        hasher.update(fm_str.as_bytes());
+        for tag in &tags {
+            hasher.update(tag.as_bytes());
+        }
         format!("{:x}", hasher.finalize())
     };
     let now = now_str();
@@ -1722,9 +1780,9 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
     // 与 update_shadow_page_section 保持一致：操作无效果时返回错误。
     let rows = conn.execute(
         "INSERT OR IGNORE INTO pages
-         (slug, title, compiled_truth, page_type, title_tokens, compiled_truth_tokens, content_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'note', ?4, ?5, ?6, ?7, ?7)",
-        params![slug, title, content, title_tokens, truth_tokens, content_hash, now],
+         (slug, title, compiled_truth, page_type, title_tokens, compiled_truth_tokens, content_hash, created_at, updated_at, timeline, timeline_tokens, frontmatter)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11)",
+        params![slug, title, content, page_type, title_tokens, truth_tokens, content_hash, now, timeline, timeline_tokens, frontmatter],
     ).map_err(|e| GBrainError::Database(format!("创建页面失败: {}", e)))?;
 
     if rows == 0 {
@@ -1747,14 +1805,15 @@ fn apply_page_create_candidate(conn: &Connection, candidate: &PromotionCandidate
         match deleted_at {
             Some(_) => {
                 // P2修复：页面已被软删除，复用该行恢复为 active 页面
-                // 显式清空 frontmatter/timeline/timeline_tokens，防止旧页面残留混入新 page_create
+                // 从 payload 读取扩展字段（page_type/timeline/frontmatter），与普通创建路径保持一致
                 conn.execute(
-                    "UPDATE pages SET title=?1, compiled_truth=?2, page_type='note', \
-                     title_tokens=?3, compiled_truth_tokens=?4, content_hash=?5, \
-                     updated_at=?6, deleted_at=NULL, \
-                     frontmatter='', timeline='', timeline_tokens='' WHERE slug=?7",
+                    "UPDATE pages SET title=?1, compiled_truth=?2, page_type=?3, \
+                     title_tokens=?4, compiled_truth_tokens=?5, content_hash=?6, \
+                     updated_at=?7, deleted_at=NULL, \
+                     frontmatter=?8, timeline=?9, timeline_tokens=?10 WHERE slug=?11",
                     params![
-                        title, content, title_tokens, truth_tokens, content_hash, now, slug
+                        title, content, page_type, title_tokens, truth_tokens, content_hash, now,
+                        frontmatter, timeline, timeline_tokens, slug
                     ],
                 )
                 .map_err(|e| {
@@ -2244,4 +2303,26 @@ fn rebuild_chunks_for_page(conn: &Connection, slug: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 将 serde_json::Value 转换为 canonical JSON 字符串（sorted keys），
+/// 与 src/operations.rs canonical_json 逻辑一致，确保 page_create 的
+/// content_hash 和 put_page 的 content_hash 对相同 frontmatter 产生相同结果。
+fn serialize_canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted: Vec<_> = map.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            let pairs: Vec<String> = sorted
+                .iter()
+                .map(|(k, v)| format!("{}:{}", k, serialize_canonical_json(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(serialize_canonical_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        other => other.to_string(),
+    }
 }

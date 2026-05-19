@@ -18,18 +18,6 @@ tools:
   - artifact_review_list # 建议变更列表
   - artifact_review_apply # 应用变更
   - artifact_review_rollback # 回滚变更
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - add_link       # 旧链接接口
-  - add_timeline_entry # 旧时间线接口
-  - get_backlinks  # 旧反向链接接口
-  - sync_brain     # 旧同步接口
-  - code_def       # 代码定义查找
-  - code_refs      # 代码引用查找
-  - get_callers    # 代码调用者查找
-optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:
@@ -70,9 +58,9 @@ broken brain. See `skills/conventions/quality.md` for format.
 
 Before using ANY external API to research a person, company, or topic:
 
-1. `gbrain artifact query "name"` — unified knowledge query (memory + evidence + timeline)
-2. `gbrain artifact query "natural question about name" --mode memory` — brain-first search
-3. `gbrain artifact get <uid>` — read full artifact detail if needed
+1. `gbrain query "name"` — unified knowledge query (memory + evidence + timeline)
+2. `gbrain query "natural question about name" --mode memory` — brain-first search
+3. `gbrain get <uid>` — read full artifact detail if needed
 4. Check backlinks: who references this entity?
 5. Check timeline: recent events involving this entity
 
@@ -101,8 +89,8 @@ types. Stale links (refs no longer in the page text) are removed. This is
 - No manual `add_link` calls needed for ordinary knowledge writes via artifact_put.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
   `founded`, `advises`, `source` (frontmatter), `mentions` (default).
-- Timeline entries with specific dates still need explicit `add_timeline_entry`
-  (or batch via `gbrain extract --mode timeline` — requires admin-tools feature).
+- Timeline entries are handled via artifact projections automatically
+  (or batch via timeline extraction).
 
 ### Phase 3: On Every Outbound Response (READ → PULL → RESPOND)
 
@@ -147,7 +135,7 @@ Rules:
 - The key is `sources.id` (immutable), never `sources.name` (mutable display).
 - Single-source brains still write `[default:slug]` OR may omit the prefix
   for backward compat.
-- Every page payload returned by `query`, `get_page`, `list_pages`
+- Every page payload returned by `artifact_query`, `artifact_get`, `artifact_list`
   carries `source_id` — always use it when citing, never guess.
 
 If a search result has `source_id: "gstack"` and `slug: "plans/foo"`,
@@ -169,12 +157,8 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - `artifact_upload` — upload file as knowledge source
 - `artifact_list` — list all knowledge sources
 - `artifact_get` — get knowledge source details
+- `artifact_delete` — soft-delete knowledge source
+- `artifact_restore` — restore soft-deleted knowledge source
 - `artifact_review_list` — list suggested changes
 - `artifact_review_apply` — apply a suggested change
 - `artifact_review_rollback` — undo an applied change
-- `add_timeline_entry` — record events (admin-tools)
-- `get_backlinks` — check who references an entity (admin-tools)
-- `sync_brain` — sync changes to the index (admin-tools)
-- `code_def` — find code symbol definitions
-- `code_refs` — find code symbol references
-- `get_callers` — find callers of a symbol

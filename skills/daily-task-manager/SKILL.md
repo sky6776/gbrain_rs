@@ -13,12 +13,6 @@ triggers:
 tools:
   - artifact_query  # 统一查询接口
   - artifact_put    # 统一写入接口
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - add_timeline_entry # 旧时间线接口
-optional_internal_tools: true
 mutating: true
 ---
 
@@ -35,14 +29,14 @@ This skill guarantees:
 
 ## Phases
 
-1. **Load current tasks.** `gbrain artifact query "ops/tasks"` — read the task list.
+1. **Load current tasks.** `gbrain query "ops/tasks"` — read the task list.
 2. **Execute the requested action:**
    - **Add:** Append task with priority, description, due date. Add timeline entry.
    - **Complete:** Mark as done, move to completed section with date.
    - **Defer:** Move to next day/week with reason.
    - **Remove:** Delete from list (rare, prefer complete or defer).
    - **Review:** Display all active tasks by priority.
-3. **Save.** `gbrain artifact put ops/tasks` — write updated task list.
+3. **Save.** `gbrain put ops/tasks` — write updated task list.
 
 ## Output Format
 

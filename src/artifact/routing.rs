@@ -34,43 +34,53 @@ pub fn infer_route_plan_from_artifact_intent(
     mime: &str,
     intent_str: &str,
     manual: bool,
-) -> RoutePlan {
-    // 手动 memory put：直接写稳定页面，不走 shadow
-    if manual && intent_str == "memory" {
-        return RoutePlan {
-            to_kb: true, // 由 config.artifact_manual_memory_to_kb 控制
-            to_brain: true,
-            to_shadow: false,
-            to_file: false,
-            promotion: crate::artifact::types::PromotionPolicy::AutoAcceptLowRisk,
-        };
+) -> Result<RoutePlan, String> {
+    // 先通过 FromStr 规范化 intent，再分支处理。
+    // 修复前先做原始字符串比较，导致 FromStr 接受的别名（如 document）和
+    // 大小写变体（如 Memory）绕过手动 put 路由，错误落入上传路由。
+    if manual {
+        let intent: UploadIntent = intent_str.parse().map_err(|e| {
+            format!("手动 put 不支持该 intent: {}", e)
+        })?;
+        match intent {
+            UploadIntent::Memory => {
+                return Ok(RoutePlan {
+                    to_kb: true, // 由 config.artifact_manual_memory_to_kb 控制
+                    to_brain: true,
+                    to_shadow: false,
+                    to_file: false,
+                    promotion: crate::artifact::types::PromotionPolicy::AutoAcceptLowRisk,
+                });
+            }
+            UploadIntent::Document => {
+                // evidence 等效，仅 KB 证据，不写稳定页面
+                return Ok(RoutePlan {
+                    to_kb: true,
+                    to_brain: false,
+                    to_shadow: false,
+                    to_file: false,
+                    promotion: crate::artifact::types::PromotionPolicy::Candidate,
+                });
+            }
+            UploadIntent::Promote => {
+                return Ok(RoutePlan {
+                    to_kb: true,
+                    to_brain: true,
+                    to_shadow: true,
+                    to_file: false,
+                    promotion: crate::artifact::types::PromotionPolicy::Candidate,
+                });
+            }
+            // Auto/Attachment 等对手动 put 无意义
+            other => {
+                return Err(format!(
+                    "手动 put 不支持 intent={}，有效值: memory/evidence/promote",
+                    other
+                ));
+            }
+        }
     }
-    // 手动 evidence put：仅 KB 证据
-    if manual && intent_str == "evidence" {
-        return RoutePlan {
-            to_kb: true,
-            to_brain: false,
-            to_shadow: false,
-            to_file: false,
-            promotion: crate::artifact::types::PromotionPolicy::Candidate,
-        };
-    }
-    // 手动 promote put：写页面 + KB + review
-    if manual && intent_str == "promote" {
-        return RoutePlan {
-            to_kb: true,
-            to_brain: true,
-            to_shadow: true,
-            to_file: false,
-            promotion: crate::artifact::types::PromotionPolicy::Candidate,
-        };
-    }
-    let intent = match intent_str {
-        "memory" => UploadIntent::Memory,
-        "evidence" => UploadIntent::Document,
-        "promote" => UploadIntent::Promote,
-        "attachment" => UploadIntent::Attachment,
-        _ => UploadIntent::Auto,
-    };
-    infer_route_plan(extension, mime, &intent)
+    // 非手动 put（上传文件），走上传路由
+    let intent: UploadIntent = intent_str.parse()?;
+    Ok(infer_route_plan(extension, mime, &intent))
 }

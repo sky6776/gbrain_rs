@@ -14,13 +14,6 @@ tools:
   - artifact_put    # 统一写入接口
   - artifact_upload # 统一上传接口
   - artifact_query  # 统一查询接口
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - add_link       # 旧链接接口
-  - add_timeline_entry # 旧时间线接口
-optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:
@@ -85,18 +78,15 @@ Extract from the transcript:
 ### Phase 3: Attendee enrichment (MANDATORY)
 
 For EACH attendee:
-1. `gbrain artifact query "{name}"` — does a people page exist?
+1. `gbrain query "{name}"` — does a people page exist?
 2. If NO → create via enrich skill (this is mandatory, not optional)
 3. If YES → update compiled truth with meeting context
-4. Add timeline entry on the person's page:
-   `gbrain timeline-add <person-slug> <date> "Attended <meeting-title>"` (admin-tools)
+4. Add timeline entry on the person's page.
 
-**Note (v0.10.1):** Once the meeting page is written via `gbrain artifact put`,
+**Note (v0.10.1):** Once the meeting page is written via `gbrain put`,
 the auto-link post-hook automatically creates `attended` links from the meeting
-to each attendee whose page is referenced as `[Name](people/slug)`. You don't
-need to call `gbrain link` for attendees (admin-tools). You DO still need
-`gbrain timeline-add` for dated events (admin-tools; auto-link only handles
-links, not timeline entries).
+to each attendee whose page is referenced as `[Name](people/slug)`.
+(legacy `gbrain link` 和 `gbrain timeline-add` 已移除)。
 
 ### Phase 4: Entity propagation (MANDATORY)
 
@@ -113,7 +103,7 @@ Acme Corp, the event goes on Alice's page, Bob's page, AND Acme Corp's page.
 
 ### Phase 6: Sync
 
-`gbrain sync` to update the index (admin-tools).
+索引通过 artifact 投影自动同步，无需手动操作。
 
 ## Output Format
 

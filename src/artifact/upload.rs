@@ -157,29 +157,12 @@ pub fn upload_source(
     // 3. 推断路由计划
     let route_plan = infer_route_plan(&extension, &mime_type, &input.intent);
 
-    // 修复：提升策略优先级：用户显式指定 > config 默认值 > intent 推断
-    // 之前 config 的 upload_default_promotion_policy 不参与决策，用户配置它不会生效
-    let route_plan = if let Some(policy) = &input.promotion_policy {
-        RoutePlan {
-            promotion: policy.clone(),
-            ..route_plan
-        }
-    } else if !config_default_promotion_policy.is_empty()
-        && config_default_promotion_policy != "candidate"
-    {
-        // config 默认值非空且非默认的 "candidate" 时使用配置值
-        // "candidate" 是初始默认值，与 intent 推断结果一致，无需覆盖
-        if let Ok(policy) = config_default_promotion_policy.parse() {
-            RoutePlan {
-                promotion: policy,
-                ..route_plan
-            }
-        } else {
-            route_plan
-        }
-    } else {
-        route_plan
-    };
+    // 应用 promotion 策略：用户显式指定 > config 默认值 > intent 推断
+    let route_plan = apply_promotion_policy(
+        route_plan,
+        &input.promotion_policy,
+        config_default_promotion_policy,
+    );
 
     // dry_run 模式：仅返回路由计划，不实际写入（必须在任何落库/落盘之前判断）
     if input.dry_run {

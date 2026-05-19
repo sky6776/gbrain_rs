@@ -12,11 +12,6 @@ triggers:
 tools:
   - artifact_query  # 统一查询接口
   - artifact_put    # 统一写入接口
-internal_tools:
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - query          # 旧查询接口
-optional_internal_tools: true
 mutating: true
 ---
 
@@ -28,7 +23,7 @@ This skill guarantees:
 - Reports saved with timestamped filenames and frontmatter
 - Keyword routing: query → report category mapping
 - Latest report loadable by category name
-- Reports are searchable via `gbrain artifact query`
+- Reports are searchable via `gbrain query`
 
 ## Phases
 

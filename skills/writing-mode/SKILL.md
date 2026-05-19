@@ -2,8 +2,8 @@
 name: writing-mode
 version: 1.0.0
 description: |
-  Writing quality control. Choose writing mode (Strict/Lint/Off), run lint checks,
-  and auto-fix quality issues in brain pages.
+  Writing quality control. Choose writing intent (memory/evidence/promote), verify content quality,
+  and auto-fix issues in brain pages.
 triggers:
   - "lint"
   - "quality check"
@@ -11,14 +11,10 @@ triggers:
   - "check page quality"
   - "fix lint issues"
 tools:
-  - artifact_put    # 统一写入接口
-  - artifact_query  # 统一查询接口
-internal_tools:
-  - put_page       # 旧页面写入
-  - get_page       # 旧页面获取
-  - list_pages     # 旧列表接口
-  - query          # 旧查询接口
-optional_internal_tools: true
+  - artifact_put     # 统一写入接口
+  - artifact_get     # 获取知识源详情
+  - artifact_query   # 统一查询接口
+  - artifact_list    # 列出知识源
 mutating: true
 writes_pages: true
 writes_to:
@@ -27,39 +23,39 @@ writes_to:
 
 # Writing Mode Skill — Quality Control for Brain Pages
 
-Control the quality of content written to brain pages through three writing modes
-and a zero-LLM lint system that detects and fixes common issues.
+Control the quality of content written to brain pages through intent-driven writing
+and a zero-LLM quality verification system that detects common issues.
 
 ## Contract
 
 This skill guarantees:
-- Writing mode is chosen appropriately for the content source
-- Lint checks are run when quality verification is needed
+- Writing intent is chosen appropriately for the content source
+- Content quality verification is performed when needed
 - Auto-fix is used cautiously — only for safe, deterministic fixes
 - Dry-run is used before applying fixes to verify what will change
 
-## Writing Modes
+## Writing Intents
 
-gbrain supports three writing modes via `put_page`:
+gbrain supports writing through `artifact_put` / `gbrain put` with intent:
 
-| Mode | When to use | Behavior |
-|------|-------------|----------|
-| `Strict` | AI-generated content, external data | Requires frontmatter, rejects empty content, validates link references |
-| `Lint` | Most writes (default for MCP) | Zero-LLM quality check with 6 rules, auto-fixes safe issues |
-| `Off` | Bulk imports, raw data dumps | No validation — write directly, fastest mode |
+| Intent | When to use | Behavior |
+|--------|-------------|----------|
+| `memory` | Human-authored notes, curated knowledge | Default intent; writes to brain pages |
+| `evidence` | AI-generated content, external data | More strict validation, document-oriented |
+| `promote` | High-quality content to elevate | Promotes content to compiled truth level |
 
-**Mode selection guide:**
-- Human-authored notes → `Lint` (catch mistakes without blocking)
-- AI agent writes → `Strict` (enforce structure and prevent AI slop)
-- Bulk import from external source → `Off` (speed over quality)
-- Uncertain → `Lint` (safe default)
+**Intent selection guide:**
+- Human-authored notes → `memory` (standard path)
+- AI agent writes → `evidence` (enforce structure and prevent AI slop)
+- Bulk import from external source → `memory` with `--force` (speed over quality)
+- Uncertain → `memory` (safe default)
 
-## Lint Rules
+## Quality Verification
 
-The lint system checks 6 rules without any LLM calls:
+The write path performs quality checks without LLM calls:
 
-| Rule | What it detects | Auto-fixable? |
-|------|-----------------|---------------|
+| Check | What it detects | Auto-fixed? |
+|-------|-----------------|-------------|
 | LLM preamble | "Here is...", "Sure, I'll..." AI intro text | Yes — strips preamble |
 | Placeholder dates | `YYYY-MM-DD`, `TBD`, `FIXME` unfilled dates | No — requires human input |
 | Missing frontmatter | Pages without YAML `---` header | Yes — inserts minimal frontmatter |
@@ -69,79 +65,77 @@ The lint system checks 6 rules without any LLM calls:
 
 ## Phases
 
-### Phase 1: Choose Writing Mode
+### Phase 1: Choose Writing Intent
 
-Before writing content, select the appropriate mode:
+Before writing content, select the appropriate intent:
 
 1. **Assess content source** — is it human-written, AI-generated, or bulk import?
-2. **Select mode** — Strict for AI, Lint for human, Off for bulk.
-3. **Write with mode** — include `writer_mode` in `put_page` call (MCP only).
+2. **Select intent** — memory for human, evidence for AI, memory+force for bulk.
+3. **Write with intent** — include `--intent` in `gbrain put` call.
 
-### Phase 2: Lint Check
+### Phase 2: Write with Dry-Run Preview
 
-Run lint to verify page quality:
+Preview what will be written before committing:
 
-**CLI:** `gbrain lint [slug]` — check specific page or all pages
-**CLI:** `gbrain lint --fix` — auto-fix safe issues
-**CLI:** `gbrain lint --dry-run` — preview fixes without applying
+**CLI:** `gbrain put <slug> --content "..." --dry-run` — preview routing plan
+**CLI:** `gbrain put <slug> --file ./doc.md --dry-run` — preview with file content
 
-Lint output shows each rule violation with:
-- Rule name and severity
-- Location in the page content
-- Whether it's auto-fixable
-- Suggested fix (if applicable)
+### Phase 3: Verify Content
 
-### Phase 3: Fix Issues
+After writing, verify the content quality:
 
-1. **Auto-fix safe issues** — `gbrain lint --fix` handles preamble, frontmatter, code fences.
-2. **Manual fix unsafe issues** — placeholder dates, broken references, empty sections
-   require human judgment or additional information.
-3. **Verify fixes** — run `gbrain lint` again after fixing to confirm all issues resolved.
+**CLI:** `gbrain get <id_or_uid> --include-projections` — view written content and projections
+**CLI:** `gbrain query "<search terms>" --mode memory` — verify search discoverability
+**CLI:** `gbrain list` — confirm artifact appears in listing
 
-### Phase 4: Post-write Lint (Optional)
+### Phase 4: Post-write Review (Optional)
 
-Enable automatic lint after every write:
+Enable automatic review after every write:
 
-**CLI:** `gbrain config set post_write_lint true`
+**CLI:** `gbrain review list --status pending` — check for auto-generated suggestions
 
-This runs lint in `Lint` mode after every `put_page` call. Useful for quality
-assurance in production environments.
+This surfaces improvement candidates generated by the promotion system.
 
 ## Anti-Patterns
 
-- **Using `Off` mode for AI-generated content.** AI content frequently contains
-  preamble text and placeholder dates that `Lint` would catch.
-- **Auto-fixing without dry-run.** Always preview fixes with `--dry-run` first.
+- **Using `evidence` intent for human notes.** Evidence intent imposes stricter structure
+  that may interfere with natural note-taking.
+- **Writing without dry-run.** Always preview with `--dry-run` first for important content.
 - **Ignoring broken reference warnings.** A wikilink to a non-existent page
   creates a dead end in the knowledge graph.
-- **Running lint on every write in bulk import.** Use `Off` mode for bulk imports
-  and run lint separately afterward.
+- **Not verifying after write.** Always run `gbrain get` or `gbrain query` to confirm.
 
 ## CLI Commands
 
 ```bash
-# Lint all pages
-gbrain lint
+# Write memory with preview
+gbrain put people/alice --content "Alice是一位工程师" --dry-run
 
-# Lint a specific page
-gbrain lint people/alice
+# Write memory (actual)
+gbrain put people/alice --content "Alice是一位工程师" --intent memory
 
-# Auto-fix safe issues
-gbrain lint --fix
+# Write from file
+gbrain put docs/guide --file ./guide.md --intent evidence
 
-# Preview fixes without applying
-gbrain lint --dry-run
+# Force overwrite
+gbrain put people/alice --content "Updated content" --force
 
-# Preview fixes for a specific page
-gbrain lint people/alice --fix --dry-run
+# Verify written content
+gbrain get <id_or_uid> --include-projections
 
-# Enable post-write lint
-gbrain config set post_write_lint true
+# Check search discoverability
+gbrain query "Alice" --mode memory
+
+# List all artifacts
+gbrain list
+
+# Check pending review suggestions
+gbrain review list --status pending
 ```
 
 ## Tools Used
 
-- `put_page` — write pages with writer_mode control
-- `get_page` — read pages to verify lint fixes
-- `list_pages` — identify pages needing lint
-- `query` — find pages with quality issues
+- `artifact_put` — write pages with intent control
+- `artifact_get` — retrieve written content to verify
+- `artifact_list` — list all artifacts
+- `artifact_query` — search for content to verify discoverability

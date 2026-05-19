@@ -20,14 +20,6 @@ triggers:
   - "graph query"
 tools:
   - artifact_query  # 统一查询接口
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - list_pages     # 旧列表接口
-  - get_backlinks  # 旧反向链接接口
-  - traverse_graph # 旧图遍历接口
-  - get_timeline   # 旧时间线接口
-optional_internal_tools: true
 mutating: false
 ---
 
@@ -88,9 +80,9 @@ Answers should include:
 Search returns **chunks**, not full pages. Read the excerpts first before deciding
 whether to load a full page.
 
-- `gbrain artifact query` searches both gbrain curated knowledge and KB document evidence with source tracing.
+- `gbrain query` searches both gbrain curated knowledge and KB document evidence with source tracing.
   These are often enough to answer the question directly.
-- Only use `gbrain artifact get <uid>` to load the full artifact detail when a search result confirms
+- Only use `gbrain get <uid>` to load the full artifact detail when a search result confirms
   the page is relevant and you need more context.
 - **"Tell me about X"** -- get the full detail (the user wants the complete picture).
 - **"Did anyone mention Y?"** -- search results are enough (the user wants a yes/no with evidence).
@@ -115,43 +107,35 @@ When referencing brain pages in your answer, propagate inline citations:
   the user can trace facts to their origin
 - When you synthesize across multiple pages, cite all sources
 
-## Graph Traversal (v0.10.1+)
+## Graph Traversal
 
-For relationship questions ("who knows who at X?", "connections between A and B",
-"who works at Acme?", "who attended the standup?"), use the graph layer instead
-of full-text search:
+> **注意**: `mode=graph` 尚未在 artifact_query 中实现，图谱遍历暂不可用。
+> 当前可用 mode: `auto`/`memory`/`evidence`/`timeline`。
 
-- `gbrain graph-query <slug> --type <link_type> --depth N --direction in|out|both`
-- Available link types: `attended`, `works_at`, `invested_in`, `founded`, `advises`, `mentions`, `source`
-- `--direction in` answers "who points to X?" (e.g., who works at company X)
-- `--direction out` answers "what does X point to?" (default)
-- `--depth N` controls multi-hop traversal (default 5)
+For relationship questions, use memory or evidence mode with `filter_slug` to
+narrow results to related entities:
 
-Examples:
-- "Who works at Acme?" → `gbrain graph-query companies/acme --type works_at --direction in`
-- "Who attended Demo Day W26?" → `gbrain graph-query meetings/demo-day-w26 --type attended --direction out`
-- "What companies has Emily advised?" → `gbrain graph-query people/emily --type advises --direction out`
-- "Who has Alice met (via meetings)?" → `gbrain graph-query people/alice --type attended --depth 2`
+- `gbrain query "<topic>" --mode memory --filter <slug>` — narrow to specific entity's connections
+- MCP: `artifact_query` with `mode: "memory"` or `mode: "evidence"` and optional `filter_slug`
 
-Combine with `gbrain artifact query` for queries that need BOTH semantic similarity AND
-graph structure. Search results are ranked with a small backlink boost so well-
-connected entities surface higher.
+Search results are ranked with a small backlink boost so well-connected entities
+surface higher.
 
 ## Search Quality Awareness
 
 If search results seem off (wrong results, missing known pages, irrelevant hits):
-- Run `gbrain doctor` to check index health
+- Run `gbrain health` to check knowledge source consistency
 - Check embedding coverage -- partial embeddings degrade hybrid search
-- Compare keyword-only search (`gbrain query "name" --expand false`, admin-tools) vs hybrid search (`gbrain artifact query "name"`)
+- Compare hybrid search with `gbrain query "name"`
   for the same query to isolate whether the issue is embedding-related
-- Report search quality issues in the maintain workflow (see maintain skill)
+- Report search quality issues via the review system (`gbrain review list`)
 
 ## Tools Used
 
-- Hybrid search gbrain (query)
+- Hybrid search gbrain (artifact_query)
 - Unified artifact query (artifact_query)
-- Read a page from gbrain (get_page)
-- List pages in gbrain with filters (list_pages)
-- Check backlinks in gbrain (get_backlinks)
-- Traverse the link graph in gbrain (traverse_graph)
-- View timeline entries in gbrain (get_timeline)
+- Read artifact detail (artifact_get)
+- ~~List pages in gbrain with filters~~ (list_pages — legacy, 已移除)
+- ~~Check backlinks in gbrain~~ (get_backlinks — legacy, 已移除)
+- ~~Traverse the link graph in gbrain~~ (traverse_graph — legacy, 已移除)
+- ~~View timeline entries in gbrain~~ (get_timeline — legacy, 已移除)

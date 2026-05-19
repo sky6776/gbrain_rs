@@ -1712,8 +1712,7 @@ impl<'a> Operations<'a> {
     /// 软删除 Artifact
     /// 删除 artifact — admin-only 内部方法
     ///
-    /// CLI 和 MCP 应使用 ArtifactService::delete_artifact，
-    /// 此方法仅用于 admin-tools 命令和向后兼容。
+    /// CLI 和 MCP 应使用 ArtifactService::delete_artifact。
     ///
     /// P2-4 修复：同步软删除关联的 occurrences（与 ArtifactService::delete_artifact 一致），
     /// 避免旧路径留下 active occurrence 指向 deleted artifact 的状态。

@@ -86,7 +86,8 @@ impl<'a> ArtifactService<'a> {
             "text/markdown",
             resolved_intent,
             true,
-        );
+        )
+        .map_err(|e| GBrainError::InvalidInput(e))?;
 
         // P1-1 修复：幂等/冲突检测必须在 dry_run 判断之前完成，
         // 但所有写入操作必须在 dry_run 判断之后、且在同一个事务内执行。
@@ -410,6 +411,37 @@ impl<'a> ArtifactService<'a> {
     /// 上传文件作为知识源（设计文档 §4.1.1）
     /// 委托给现有 upload_source 逻辑
     pub fn upload_file(&self, input: UploadSourceInput) -> Result<UploadSourceOutput> {
+        // P2修复：dry_run 早返回必须在任何文件系统副作用之前，
+        // 避免 create_dir_all 在 dry-run 模式下仍创建 artifact 目录
+        if input.dry_run {
+            let sha256_hex = {
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&input.content);
+                format!("{:x}", hasher.finalize())
+            };
+            let extension = crate::artifact::types::infer_extension(&input.original_name);
+            let mime_type = crate::artifact::types::infer_mime_type(&extension);
+            // P2 修复：dry_run 的 route plan 需应用 promotion 策略，
+            // 与 upload.rs:160-182 的真实执行路径保持一致。
+            // 否则 `gbrain upload x --dry-run --promotion none` 预览仍显示 candidate。
+            let route_plan = crate::artifact::types::apply_promotion_policy(
+                crate::artifact::types::infer_route_plan(&extension, &mime_type, &input.intent),
+                &input.promotion_policy,
+                &self.config.upload_default_promotion_policy,
+            );
+            return Ok(UploadSourceOutput {
+                artifact_id: 0,
+                artifact_uid: String::new(),
+                occurrence_id: 0,
+                occurrence_uid: String::new(),
+                sha256: sha256_hex,
+                is_new: true,
+                route_plan,
+                projections: Vec::new(),
+            });
+        }
+
         let artifact_dir = self.config.artifact_dir();
         std::fs::create_dir_all(&artifact_dir)
             .map_err(|e| GBrainError::FileError(format!("创建 artifact 目录失败: {}", e)))?;
@@ -439,13 +471,24 @@ impl<'a> ArtifactService<'a> {
     pub fn query_facade(&self, input: &ArtifactQueryInput) -> Result<ArtifactQueryOutput> {
         let start = std::time::Instant::now();
 
-        // 将用户友好的 mode 映射到内部 QueryStrategy
+        // 将用户友好的 mode 映射到内部 QueryStrategy。
+        // 修复：graph 尚未实现，未知 mode 不应静默退回 BrainFirst，避免误导调用方。
         let strategy = match input.mode.as_deref().unwrap_or("auto") {
             "memory" | "auto" => crate::artifact::types::QueryStrategy::BrainFirst,
             "evidence" => crate::artifact::types::QueryStrategy::EvidenceFirst,
             "timeline" => crate::artifact::types::QueryStrategy::TimelineFirst,
-            "graph" => crate::artifact::types::QueryStrategy::BrainFirst,
-            _ => crate::artifact::types::QueryStrategy::BrainFirst,
+            "graph" => {
+                return Err(crate::error::GBrainError::InvalidInput(
+                    "artifact_query mode=graph 尚未实现，请使用 mode=auto/memory/evidence/timeline"
+                        .into(),
+                ));
+            }
+            other => {
+                return Err(crate::error::GBrainError::InvalidInput(format!(
+                    "未知查询模式: {}，有效值: auto/memory/evidence/timeline",
+                    other
+                )));
+            }
         };
 
         let include_sources = input.include_sources.unwrap_or(false);
@@ -590,6 +633,9 @@ impl<'a> ArtifactService<'a> {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<crate::artifact::types::ArtifactReviewItem>> {
+        // 安全边界：clamp 参数在所有入口（CLI/MCP/测试）生效，防止负数绕过
+        let limit = if limit <= 0 { 50 } else { limit.min(200) };
+        let offset = offset.max(0);
         let conn = self.engine.connection()?;
         crate::artifact::review::list_suggested_changes(conn, status, target_slug, limit, offset)
     }
@@ -752,6 +798,9 @@ impl<'a> ArtifactService<'a> {
     /// 列出 Artifacts
     /// P2-3 修复：返回外部 DTO ArtifactListItem，隐藏内部 id/storage_path/raw metadata
     pub fn list_artifacts(&self, limit: i64, offset: i64) -> Result<Vec<ArtifactListItem>> {
+        // 安全边界：clamp 参数在所有入口（CLI/MCP/测试）生效，防止负数绕过
+        let limit = if limit <= 0 { 50 } else { limit.min(200) };
+        let offset = offset.max(0);
         let conn = self.engine.connection()?;
         store::list_active_artifacts(conn, limit, offset)
             .map_err(|e| GBrainError::Database(e.to_string()))

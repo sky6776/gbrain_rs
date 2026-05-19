@@ -104,7 +104,6 @@ with KB document evidence and source tracing:
 | `auto` / `memory` | General questions — brain pages first |
 | `evidence` | Document-heavy questions — KB evidence first |
 | `timeline` | Chronological questions — timeline entries |
-| `graph` | Relationship exploration |
 
 Set `include_sources=true` to trace each result back to its source artifact.
 

@@ -2,9 +2,8 @@
 name: autopilot
 version: 1.0.0
 description: |
-  Self-maintenance daemon and health diagnostics. Run autopilot for automated
-  embedding and integrity checks, diagnose issues with doctor, and monitor
-  brain health.
+  Health diagnostics and knowledge maintenance. Check brain health via artifact_health,
+  review and apply suggested changes, and monitor knowledge base consistency.
 triggers:
   - "autopilot"
   - "self-maintain"
@@ -14,90 +13,64 @@ triggers:
   - "brain health"
   - "diagnose"
 tools:
-  - artifact_health # 健康检查接口
-internal_tools:
-  - get_stats      # 旧统计接口
-  - get_health     # 旧健康接口
-optional_internal_tools: true
+  - artifact_health       # 健康检查接口
+  - artifact_review_list  # 列出建议变更
+  - artifact_review_get   # 查看建议变更详情
+  - artifact_review_apply # 应用建议变更
+  - artifact_review_reject # 拒绝建议变更
+  - artifact_list         # 列出知识源
 mutating: true
 writes_pages: false
 ---
 
-# Autopilot Skill — Self-Maintenance and Health Diagnostics
+# Autopilot Skill — Health Diagnostics and Knowledge Maintenance
 
-Keep the brain healthy through automated maintenance and diagnostic tools.
+Keep the brain healthy through health checks and the review/apply cycle for
+suggested changes.
 
 ## Contract
 
 This skill guarantees:
-- Autopilot runs embedding generation and integrity checks automatically
-- Health diagnostics identify issues before they impact search quality
-- Doctor provides comprehensive diagnosis with actionable recommendations
-- Maintenance operations are safe and reversible (except purge)
+- Health diagnostics identify issues in knowledge source consistency
+- Suggested changes are reviewed and applied systematically
+- Maintenance operations are safe and reversible (reject / rollback)
+- Dry-run previews are used before applying changes
 
 ## Components
-
-### Autopilot Daemon
-
-The autopilot daemon is a self-maintaining process that:
-
-1. **Embeds stale content** — generates embeddings for chunks that lack vectors
-2. **Checks integrity** — verifies data consistency across tables
-3. **Reports health** — logs health metrics for monitoring
-
-**CLI:** `gbrain autopilot` — run continuously (default interval: 3600 seconds)
-**CLI:** `gbrain autopilot --once` — run one cycle and exit
-**CLI:** `gbrain autopilot --interval 600` — run every 10 minutes
 
 ### Health Dashboard
 
 Quick overview of brain health:
 
-**MCP:** `get_health` — embedding coverage, stale pages, orphan count
+**MCP:** `artifact_health` — knowledge source consistency, stale projections, orphan count
 **CLI:** `gbrain health` — formatted health dashboard
 
 Key metrics:
-- Embedding coverage (% of chunks with vectors)
-- Stale page count (pages needing re-embedding)
-- Orphan page count (pages with no inbound links)
-- Soft-deleted page count
+- Total artifacts and their status distribution (active/deleted/purged)
+- Stale projection count (projections needing re-processing)
+- Orphan occurrence count (occurrences with no valid artifact)
+- Consistency violations
 
-### Doctor
+### Suggested Changes (Review System)
 
-Comprehensive diagnostic with recommendations:
+The review system surfaces improvement candidates from the promotion pipeline:
 
-**CLI:** `gbrain doctor` — full diagnosis (may take time)
-**CLI:** `gbrain doctor --fast` — skip expensive checks
+**CLI:** `gbrain review list` — list all pending suggestions
+**CLI:** `gbrain review list --status pending` — filter by status
+**CLI:** `gbrain review show <id>` — view suggestion details
+**CLI:** `gbrain review apply <id>` — apply a suggestion
+**CLI:** `gbrain review reject <id> --reason "..."` — reject with reason
+**CLI:** `gbrain review rollback <id>` — rollback an applied change
 
-Doctor checks:
-- Database integrity (table consistency, foreign keys)
-- Embedding coverage and staleness
-- Orphan pages and broken links
-- FTS5 index health
-- Schema version compatibility
+### Knowledge Source Management
 
-### Integrity Check
+Routine maintenance operations:
 
-Focused data integrity verification:
-
-**CLI:** `gbrain integrity` — check data consistency
-
-Verifies:
-- All pages have corresponding chunks
-- All chunks have valid page references
-- No orphaned embeddings (vectors without chunks)
-- Link table consistency
-
-### Orphan Detection
-
-Find pages with no inbound connections:
-
-**CLI:** `gbrain orphans` — list orphan pages
-
-Orphan pages are:
-- Not referenced by any other page
-- Not discoverable through graph traversal
-- Candidates for enrichment or linking
+**CLI:** `gbrain list` — list all knowledge sources
+**CLI:** `gbrain get <id>` — get artifact detail with projections
+**CLI:** `gbrain reprocess <id>` — re-process stale projections
+**CLI:** `gbrain delete <id> --dry-run` — preview soft-delete impact
+**CLI:** `gbrain restore <id>` — restore soft-deleted artifacts
 
 ## Phases
 
@@ -106,41 +79,44 @@ Orphan pages are:
 Before any maintenance, assess current state:
 
 1. `gbrain health` — get the health dashboard
-2. `gbrain stats` — get page/chunk counts
-3. Review: are there stale embeddings? orphan pages? integrity issues?
+2. Review: are there stale projections? consistency issues? orphan records?
+3. Prioritize: stale projections > consistency issues > orphan records
 
-### Phase 2: Diagnosis
+### Phase 2: Review Suggested Changes
 
-If health check reveals issues:
+If health check reveals suggestions:
 
-1. `gbrain doctor` — comprehensive diagnosis
-2. Review recommendations from doctor output
-3. Prioritize: embedding staleness > integrity issues > orphan pages
+1. `gbrain review list` — list all suggestions
+2. `gbrain review show <id>` — examine each suggestion's details and risk level
+3. Prioritize: low-risk suggestions first, review high-risk carefully
 
-### Phase 3: Automated Maintenance
+### Phase 3: Apply or Reject
 
-Run autopilot for automated fixes:
+Process suggestions systematically:
 
-1. `gbrain autopilot --once` — single maintenance cycle
-2. For ongoing maintenance: `gbrain autopilot --interval 600`
-3. Monitor: `gbrain health` after each cycle
+1. `gbrain review apply <id>` — apply accepted suggestions
+2. `gbrain review reject <id> --reason "..."` — reject unwanted ones
+3. Verify: `gbrain health` after each batch
+4. Rollback if needed: `gbrain review rollback <id>`
 
-### Phase 4: Manual Intervention
+### Phase 4: Stale Content Refresh
 
-For issues autopilot can't fix:
+For stale projections identified by health check:
 
-1. `gbrain embed` — manually embed specific pages
-2. `gbrain orphans` — identify and enrich orphan pages
-3. `gbrain integrity` — verify data consistency
-4. `gbrain lint` — check page quality
+1. `gbrain list` — identify artifacts with stale projections
+2. `gbrain reprocess <id> --dry-run` — preview re-processing
+3. `gbrain reprocess <id>` — re-process to regenerate projections
+4. `gbrain health` — verify consistency restored
 
 ## Anti-Patterns
 
-- **Running autopilot without checking health first.** Always assess before maintaining.
-- **Setting autopilot interval too low.** Below 60 seconds wastes API calls on
-  embedding generation when nothing has changed.
-- **Ignoring doctor recommendations.** Doctor identifies specific issues — address them.
-- **Not monitoring embedding coverage.** Low coverage means search quality is degraded.
+- **Applying all suggestions blindly.** Review each suggestion's risk level and
+  target page before applying. High-risk suggestions may need human judgment.
+- **Ignoring stale projections.** Stale projections mean search results are
+  out of date with the source content.
+- **Not running health check regularly.** Periodic health checks catch issues
+  before they accumulate.
+- **Skipping dry-run for reprocess.** Always preview with `--dry-run` first.
 
 ## CLI Commands
 
@@ -148,35 +124,39 @@ For issues autopilot can't fix:
 # Quick health check
 gbrain health
 
-# Comprehensive diagnosis
-gbrain doctor
+# List all knowledge sources
+gbrain list
 
-# Fast diagnosis (skip expensive checks)
-gbrain doctor --fast
+# List pending suggestions
+gbrain review list --status pending
 
-# Check data integrity
-gbrain integrity
+# View suggestion details
+gbrain review show 1
 
-# Find orphan pages
-gbrain orphans
+# Apply a suggestion
+gbrain review apply 1
 
-# Run one maintenance cycle
-gbrain autopilot --once
+# Reject with reason
+gbrain review reject 2 --reason "信息已过时"
 
-# Continuous maintenance (every 10 minutes)
-gbrain autopilot --interval 600
+# Rollback an applied change
+gbrain review rollback 1
 
-# Manual embedding for stale content
-gbrain embed
+# Preview reprocess
+gbrain reprocess <id> --dry-run
 
-# Embed specific pages
-gbrain embed people/alice companies/acme --batch-size 10
+# Reprocess stale projections
+gbrain reprocess <id>
 
-# Brain statistics
-gbrain stats
+# Restore soft-deleted artifact
+gbrain restore <id>
 ```
 
 ## Tools Used
 
-- `get_stats` — brain statistics
-- `get_health` — health dashboard
+- `artifact_health` — knowledge source health dashboard
+- `artifact_review_list` — list suggested changes
+- `artifact_review_get` — view suggestion details
+- `artifact_review_apply` — apply suggestion
+- `artifact_review_reject` — reject suggestion
+- `artifact_list` — list all artifacts

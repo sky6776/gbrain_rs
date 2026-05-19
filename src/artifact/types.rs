@@ -80,6 +80,30 @@ impl fmt::Display for UploadIntent {
     }
 }
 
+impl std::str::FromStr for UploadIntent {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "auto" => Ok(UploadIntent::Auto),
+            "evidence" | "document" => Ok(UploadIntent::Document),
+            "attachment" => Ok(UploadIntent::Attachment),
+            "memory" => Ok(UploadIntent::Memory),
+            "promote" => Ok(UploadIntent::Promote),
+            // 向后兼容旧值
+            "kb_only" => Ok(UploadIntent::Document),
+            "brain_only" => Ok(UploadIntent::Promote),
+            "file_only" => Ok(UploadIntent::Attachment),
+            "kb_and_brain" => Ok(UploadIntent::Promote),
+            "all" => Ok(UploadIntent::Promote),
+            _ => Err(format!(
+                "未知上传意图: {}，有效值: auto/evidence/memory/attachment/promote",
+                s
+            )),
+        }
+    }
+}
+
 /// 投影类型
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -872,6 +896,39 @@ pub fn infer_route_plan(extension: &str, _mime_type: &str, intent: &UploadIntent
     }
 }
 
+/// 应用 promotion 策略到路由计划。
+///
+/// 优先级：用户显式指定 > config 默认值 > intent 推断（已在 route_plan 中）
+///
+/// 此函数从 upload.rs 提取为公共 helper，供 service.rs 的 dry_run 早返回路径复用，
+/// 确保 dry_run 预览的 route plan 与真实执行路径一致（P2 修复）。
+pub fn apply_promotion_policy(
+    route_plan: RoutePlan,
+    explicit_policy: &Option<PromotionPolicy>,
+    config_default_promotion_policy: &str,
+) -> RoutePlan {
+    if let Some(policy) = explicit_policy {
+        RoutePlan {
+            promotion: policy.clone(),
+            ..route_plan
+        }
+    } else if !config_default_promotion_policy.is_empty()
+        && config_default_promotion_policy != "candidate"
+    {
+        // "candidate" 是初始默认值，与 intent 推断结果一致，无需覆盖
+        if let Ok(policy) = config_default_promotion_policy.parse() {
+            RoutePlan {
+                promotion: policy,
+                ..route_plan
+            }
+        } else {
+            route_plan
+        }
+    } else {
+        route_plan
+    }
+}
+
 /// 生成投影键
 ///
 /// 设计文档 projection_key 规则:
@@ -1020,7 +1077,7 @@ pub struct ArtifactPutInput {
 pub struct ArtifactQueryInput {
     /// 查询文本
     pub query: String,
-    /// 查询模式: auto/memory/evidence/timeline/graph
+    /// 查询模式: auto/memory/evidence/timeline（graph 尚未实现）
     pub mode: Option<String>,
     /// 最大结果数
     pub limit: Option<usize>,
@@ -1032,7 +1089,7 @@ pub struct ArtifactQueryInput {
 
 /// artifact_query 统一输出（设计文档 §7）
 ///
-/// 合并 gbrain 记忆、KB 证据、时间线事件和图谱关系，
+/// 合并 gbrain 记忆、KB 证据和时间线事件，
 /// 隐藏内部 ID，提供统一的知识查询结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactQueryOutput {

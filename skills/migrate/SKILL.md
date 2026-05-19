@@ -10,16 +10,6 @@ tools:
   - artifact_query  # 统一查询接口
   - artifact_upload # 统一上传接口
   - artifact_health # 健康检查接口
-internal_tools:
-  - put_page       # 旧页面写入
-  - get_page       # 旧页面获取
-  - query          # 旧查询接口
-  - add_link       # 旧链接接口
-  - add_tag        # 旧标签接口
-  - get_stats      # 旧统计接口
-  - get_health     # 旧健康接口
-  - sync_brain     # 旧同步接口
-optional_internal_tools: true
 mutating: true
 ---
 
@@ -61,16 +51,8 @@ Universal migration from any wiki, note tool, or brain system into GBrain.
 1. Import the vault directory into gbrain (Obsidian vaults are markdown directories)
 2. Wire the graph with native wikilink support (v0.12.1+):
 
-   ```bash
-   gbrain extract --mode links
-   ```
-
-   (admin-tools)
-
-   `extract links` natively parses `[[relative/path]]` and `[[relative/path|Display Text]]`
-   alongside standard `[text](page.md)` markdown syntax. Ancestor-search resolution handles
-   wiki KBs where authors omit one or more leading `../` prefixes. The `.md` suffix is
-   inferred automatically for wikilinks.
+   链接通过 artifact 投影自动提取。`[[relative/path]]` 和 `[[relative/path|Display Text]]`
+   格式的 wikilink 由系统自动解析。
 
 Obsidian-specific:
 - Tags (`#tag`) become gbrain tags
@@ -140,8 +122,8 @@ Verification:
 - Write pages to gbrain (artifact_put — unified entry point)
 - Read pages from gbrain (artifact_query, artifact_get)
 - Upload files as knowledge sources (artifact_upload)
-- Link entities in gbrain (add_link — admin-tools)
-- Tag pages in gbrain (add_tag — admin-tools)
-- Get gbrain statistics (get_stats — admin-tools)
+- ~~Link entities in gbrain~~ (add_link — legacy, 已移除)
+- ~~Tag pages in gbrain~~ (add_tag — legacy, 已移除)
+- ~~Get gbrain statistics~~ (get_stats — legacy, 已移除)
 - Check gbrain health (artifact_health)
 - Search gbrain (artifact_query)

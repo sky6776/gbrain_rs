@@ -26,38 +26,36 @@ commands:
 | `artifact_restore` | Restore a deleted knowledge source |
 | `artifact_health` | Check knowledge source consistency |
 
-**Admin-Tools (legacy — require `admin-tools` feature):**
+**已移除的内部工具（不再可用，请使用 Artifact Facade 替代）:**
 
-| Tool | Use for |
-|------|---------|
-| `query` | Hybrid search (keyword + vector + expansion), best quality when embeddings are available |
-| `get_page` | Direct page read when you know the slug |
-| `put_page` | Create or update a brain page |
-| `add_timeline_entry` | Add a dated event |
-| `add_link` | Add a relationship edge |
-| `get_links` | Outgoing links from a page |
-| `get_backlinks` | Who references this entity |
-| `get_timeline` | Dated events for an entity |
-| `resolve_slugs` | Fuzzy slug resolution |
-| `traverse_graph` | Walk the relationship graph |
-| `code_def` | Find code symbol definitions |
-| `code_refs` | Find code symbol references |
-| `get_callers` | Who calls this function |
+| 旧工具 | 替代方案 |
+|--------|----------|
+| `query` | `artifact_query` |
+| `get_page` | `artifact_get` |
+| `put_page` | `artifact_put` |
+| `add_timeline_entry` | `artifact_put` (intent=memory) |
+| `add_link` | `artifact_put` (自动链接) |
+| `get_links` | 暂未暴露（mode=graph 尚未实现） |
+| `get_backlinks` | 暂未暴露（mode=graph 尚未实现） |
+| `get_timeline` | `artifact_query` (mode=timeline) |
+| `resolve_slugs` | `artifact_query` (模糊匹配内置) |
+| `traverse_graph` | 暂未暴露（mode=graph 尚未实现） |
+| `code_def` | `artifact_query` (代码图谱检索) |
+| `code_refs` | `artifact_query` (代码图谱检索) |
+| `get_callers` | `artifact_query` (代码图谱检索) |
 
 Tool names vary by transport. MCP uses short names; CLI commands are usually
 `gbrain <command>`. Use whichever your environment provides.
 
 ## The Lookup Chain (MANDATORY ORDER)
 
-1. **`artifact_query`** first — unified knowledge query (memory + evidence + timeline + source tracing)
-2. **`artifact_query`** with `mode=memory` for brain-first search — curated knowledge only
-3. **`artifact_query`** with `mode=evidence` for document-heavy queries — KB evidence first
-4. **`query`** (admin-tools) for hybrid search when you need keyword+vector+expansion
-5. **`get_page`** (admin-tools) if you found a slug — read the full compiled truth
-6. **`code_def`** / **`code_refs`** for code symbol lookups — precise graph queries
-7. **External APIs only after steps 1-3 return nothing useful**
+1. **`artifact_query`** first — 统一知识查询（memory + evidence + timeline + 来源追溯）
+2. **`artifact_query`** with `mode=memory` for brain-first search — 仅精选知识
+3. **`artifact_query`** with `mode=evidence` for document-heavy queries — KB 证据优先
+4. **内部工具**（如 `code_def`/`code_refs`）用于代码符号查询 — `mode=graph` 尚未实现
+5. **External APIs only after steps 1-4 return nothing useful**
 
-Never skip to external APIs without completing steps 1-3. The brain has
+Never skip to external APIs without completing steps 1-4. The brain has
 thousands of pages. The answer is almost always there.
 
 ## Rules
@@ -66,8 +64,7 @@ thousands of pages. The answer is almost always there.
 - **User's direct statements are highest-authority data.** The brain captures
   what the user said in meetings, conversations, and notes. External sources
   are supplementary.
-- **After bulk brain page writes:** refresh extracted graph/timeline data with
-  `gbrain extract --mode all` (admin-tools), or call MCP `sync_brain` when syncing a directory (admin-tools).
+- **After bulk brain page writes:** graph/timeline 数据通过 artifact 投影自动同步，无需手动刷新。
 - **Every brain page reference in output** should use a clickable link format
   appropriate to the deployment (GitHub URL, local path, or slug).
 - **Never use `memory_search` for entity lookups.** Memory tools search

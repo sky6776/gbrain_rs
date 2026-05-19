@@ -15,12 +15,6 @@ tools:
   - artifact_put    # 统一写入接口
   - artifact_upload # 统一上传接口
   - artifact_query  # 统一查询接口
-internal_tools:
-  - query          # 旧查询接口
-  - get_page       # 旧页面获取
-  - put_page       # 旧页面写入
-  - file_upload    # 旧文件上传接口
-optional_internal_tools: true
 mutating: true
 writes_pages: true
 writes_to:
@@ -39,7 +33,7 @@ This skill guarantees:
 - Every ingested item has a brain page with genuine analysis (not just a summary)
 - The author gets a people page (MANDATORY for anyone whose thinking is worth ingesting)
 - Cross-links created bidirectionally (source ↔ author, source ↔ mentioned entities)
-- Raw source preserved for provenance via `gbrain artifact upload` or `put_raw_data`
+- Raw source preserved for provenance via `gbrain upload`
 - Every fact has an inline `[Source: ...]` citation
 - Filing follows primary subject rules (not format-based)
 
@@ -52,7 +46,7 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
 
 1. **Fetch the content.** Use appropriate tools for the content type (web fetch for articles, API for tweets, PDF reader for documents).
 
-2. **Upload raw source.** Save fetched files for provenance: `gbrain artifact upload <file> --page <slug>`. Store JSON/text payloads with `put_raw_data`.
+2. **Upload raw source.** Save fetched files for provenance: `gbrain upload <file> --page <slug>`.
 
 3. **Identify the author — MANDATORY people page.** Anyone whose thinking is worth ingesting is worth tracking.
    - Search brain for existing author page
@@ -72,7 +66,7 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
    - Connections — does this involve known people/companies?
    - Don't just summarize. Tell the user things they wouldn't have noticed.
 
-6. **Refresh.** Run `gbrain extract --mode all` after bulk writes when links or timelines need backfilling (admin-tools).
+6. **Refresh.** 索引通过 artifact 投影自动同步，无需手动刷新。
 
 ## Output Format
 

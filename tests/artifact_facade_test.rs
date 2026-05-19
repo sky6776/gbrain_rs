@@ -1,8 +1,6 @@
-//! Artifact facade integration tests
-//!
-//! Tests covering the artifact_* unified facade:
-//! - Tool definitions (artifact_* only by default)
-//! - Internal tools blocked when expose_internal_tools=false
+//! artifact_* 统一 facade 测试:
+//! - 工具定义（仅 artifact_* 工具）
+//! - put_memory 创建 artifact、occurrence、projection、page
 //! - put_memory creates artifact, occurrence, projection, page
 //! - Intent routing (memory/evidence/promote)
 //! - Query with include_sources
@@ -55,34 +53,7 @@ fn tool_defs_default_only_artifact_tools() {
     }
 }
 
-// --- Test 2: Internal tools blocked when expose_internal_tools is false ---
-
-#[test]
-fn internal_tools_blocked_when_expose_false() {
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
-        "upload_source"
-    ));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool("kb_search"));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
-        "promotion_list_candidates"
-    ));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
-        "memory_query"
-    ));
-    assert!(gbrain_core::mcp::tool_defs::is_internal_tool(
-        "get_provenance"
-    ));
-
-    // artifact_* tools are NOT internal
-    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool(
-        "artifact_put"
-    ));
-    assert!(!gbrain_core::mcp::tool_defs::is_internal_tool(
-        "artifact_query"
-    ));
-}
-
-// --- Test 3: artifact_put creates artifact, occurrence, projection, page ---
+// --- Test 2: artifact_put creates artifact, occurrence, projection, page ---
 
 #[test]
 fn artifact_put_creates_artifact_occurrence_projection_page() {
@@ -1110,29 +1081,6 @@ fn mcp_tool_defs_default_only_artifact_facade() {
     }
 }
 
-// --- MCP tool_defs 测试: --all 输出包含内部工具 ---
-// 验证 build_tool_defs_with_internal(true) 包含内部工具
-
-#[test]
-fn mcp_tool_defs_all_includes_internal_tools() {
-    let defs = gbrain_core::mcp::tool_defs::build_tool_defs_with_internal(true);
-
-    // 应包含 artifact_* facade 工具
-    let has_artifact_put = defs.iter().any(|d| d.name == "artifact_put");
-    assert!(has_artifact_put, "--all 应包含 artifact_put");
-
-    // 应包含内部工具
-    let has_query = defs.iter().any(|d| d.name == "query");
-    let has_kb_search = defs.iter().any(|d| d.name == "kb_search");
-    let has_upload_source = defs.iter().any(|d| d.name == "upload_source");
-    let has_promotion_list = defs.iter().any(|d| d.name == "promotion_list_candidates");
-
-    assert!(has_query, "--all 应包含 query");
-    assert!(has_kb_search, "--all 应包含 kb_search");
-    assert!(has_upload_source, "--all 应包含 upload_source");
-    assert!(has_promotion_list, "--all 应包含 promotion_list_candidates");
-}
-
 // --- P1 修复验证: 同 slug promote 更新时旧 shadow projection 变 stale ---
 // 第一次 artifact_put --intent promote 创建 shadow page，
 // 第二次同 slug 不同内容再 put，旧 brain_shadow_page projection 应标记 stale
@@ -1485,51 +1433,6 @@ fn mcp_tools_call_artifact_delete_dry_run() {
     assert!(
         !json_str.contains("storage_path"),
         "preview 不应暴露 storage_path"
-    );
-}
-
-// --- MCP tools/call 测试: 内部工具在 expose_internal_tools=false 时被拦截 ---
-
-#[test]
-fn mcp_tools_call_internal_tools_blocked() {
-    let mut server = make_mcp_server();
-
-    // 尝试通过 MCP dispatch 调用内部工具 query
-    let result = server.dispatch_tool_call(
-        "query",
-        serde_json::json!({
-            "query": "test"
-        }),
-    );
-
-    assert!(
-        result.is_err(),
-        "expose_internal_tools=false 时调用 query 应被拦截"
-    );
-    let err_msg = format!("{}", result.unwrap_err());
-    assert!(
-        err_msg.contains("内部工具") || err_msg.contains("expose_internal_tools"),
-        "错误信息应说明是内部工具拦截: {}",
-        err_msg
-    );
-
-    // 尝试调用 kb_search
-    let result2 = server.dispatch_tool_call(
-        "kb_search",
-        serde_json::json!({
-            "query": "test"
-        }),
-    );
-    assert!(
-        result2.is_err(),
-        "expose_internal_tools=false 时调用 kb_search 应被拦截"
-    );
-
-    // 尝试调用 promotion_list_candidates
-    let result3 = server.dispatch_tool_call("promotion_list_candidates", serde_json::json!({}));
-    assert!(
-        result3.is_err(),
-        "expose_internal_tools=false 时调用 promotion_list_candidates 应被拦截"
     );
 }
 

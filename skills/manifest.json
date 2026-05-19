@@ -5,113 +5,79 @@
       "id": "brain-ops",
       "name": "Brain Operations",
       "description": "核心脑图操作：查询、写入、链接、时间线、同步",
-      "tools": ["artifact_query", "artifact_put", "artifact_upload", "artifact_list", "artifact_get", "artifact_delete", "artifact_restore", "artifact_review_list", "artifact_review_apply", "artifact_review_rollback"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry", "get_backlinks", "sync_brain", "code_def", "code_refs", "get_callers"]
+      "tools": ["artifact_query", "artifact_put", "artifact_upload", "artifact_list", "artifact_get", "artifact_delete", "artifact_restore", "artifact_review_list", "artifact_review_apply", "artifact_review_rollback"]
     },
     {
       "id": "citation-fixer",
       "name": "Citation Fixer",
       "description": "修复和标准化引用格式",
-      "tools": ["artifact_query", "artifact_put"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "list_pages"]
+      "tools": ["artifact_query", "artifact_put"]
     },
     {
       "id": "enrich",
       "name": "Enrich",
       "description": "丰富和扩展现有页面内容",
-      "tools": ["artifact_put", "artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["get_page", "put_page", "query", "add_link", "add_timeline_entry", "get_backlinks"]
+      "tools": ["artifact_put", "artifact_query"]
     },
     {
       "id": "ingest",
       "name": "Ingest",
       "description": "导入外部内容到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry", "add_tag", "get_tags", "put_raw_data", "get_backlinks", "sync_brain"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
     },
     {
       "id": "meeting-ingestion",
       "name": "Meeting Ingestion",
       "description": "导入会议记录到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "add_link", "add_timeline_entry"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
     },
     {
       "id": "query",
       "name": "Query",
       "description": "查询脑图内容",
-      "tools": ["artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "list_pages", "get_backlinks", "traverse_graph", "get_timeline"]
+      "tools": ["artifact_query"]
     },
     {
       "id": "writing-mode",
       "name": "Writing Mode",
       "description": "专注写作模式：创建和编辑页面",
-      "tools": ["artifact_put", "artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["put_page", "get_page", "list_pages", "query"]
+      "tools": ["artifact_put", "artifact_query"]
     },
     {
       "id": "daily-task-manager",
       "name": "Daily Task Manager",
       "description": "每日任务管理：查询和更新任务",
-      "tools": ["artifact_query", "artifact_put"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "add_timeline_entry"]
+      "tools": ["artifact_query", "artifact_put"]
     },
     {
       "id": "idea-ingest",
       "name": "Idea Ingest",
       "description": "导入想法到脑图",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "put_page", "file_upload"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
     },
     {
       "id": "migrate",
       "name": "Migrate",
       "description": "数据迁移和同步",
-      "tools": ["artifact_put", "artifact_query", "artifact_upload", "artifact_health"],
-      "optional_internal_tools": true,
-      "internal_tools": ["put_page", "get_page", "query", "add_link", "add_tag", "get_stats", "get_health", "sync_brain"]
+      "tools": ["artifact_put", "artifact_query", "artifact_upload", "artifact_health"]
     },
     {
       "id": "reports",
       "name": "Reports",
       "description": "生成报告和摘要",
-      "tools": ["artifact_query", "artifact_put"],
-      "optional_internal_tools": true,
-      "internal_tools": ["get_page", "put_page", "query"]
+      "tools": ["artifact_query", "artifact_put"]
     },
     {
       "id": "repo-architecture",
       "name": "Repo Architecture",
       "description": "分析仓库架构",
-      "tools": ["artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["query", "get_page", "list_pages"]
+      "tools": ["artifact_query"]
     },
     {
       "id": "autopilot",
       "name": "Autopilot",
       "description": "自动运维和健康检查",
-      "tools": ["artifact_health"],
-      "optional_internal_tools": true,
-      "internal_tools": ["get_stats", "get_health"]
-    },
-    {
-      "id": "code-graph",
-      "name": "Code Graph",
-      "description": "代码图谱：定义、引用、调用关系",
-      "tools": ["artifact_query"],
-      "optional_internal_tools": true,
-      "internal_tools": ["code_def", "code_refs", "search_code_chunks", "get_callers", "get_callees", "get_code_edges_by_chunk", "reindex_code_page"]
+      "tools": ["artifact_health"]
     }
   ]
 }
