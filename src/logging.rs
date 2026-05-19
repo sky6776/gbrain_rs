@@ -46,7 +46,10 @@ pub fn init(config: &Config) {
             .with_ansi(false);
 
         if config.log_to_console {
-            let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+            // 显式输出到 stderr，避免与 MCP stdio 的 stdout JSON-RPC 协议交错
+            let console_layer = tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_target(false);
             tracing_subscriber::registry()
                 .with(filter)
                 .with(file_layer)
@@ -60,6 +63,7 @@ pub fn init(config: &Config) {
         }
     } else if config.log_to_console {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(filter)
             .with_target(false)
             .init();

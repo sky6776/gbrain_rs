@@ -45,7 +45,7 @@ No database or external services to configure — works out of the box. AI featu
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
-- **Autopilot** — Self-maintenance daemon that auto-embeds stale content and runs integrity checks
+- **Autopilot** — Self-maintenance daemon thread, auto-runs in background when `gbrain serve` starts. Periodically embeds stale content and runs integrity checks (default every 3600s, configurable via `GBRAIN_AUTOPILOT_INTERVAL`, at least 60s, disable via `GBRAIN_AUTOPILOT_ENABLED`)
 - **Safety Guards** — Path traversal protection, slug validation, remote-call input sanitization, parameterized queries against SQL injection
 - **Code Knowledge Graph** — Tree-sitter AST code chunking + regex symbol indexing with symbol definitions, references, and call graph (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
 - **Audio Transcription** — Groq Whisper (default) or OpenAI Whisper support
@@ -780,6 +780,8 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |
 | `GBRAIN_KB_WORKER_ENABLED` | Enable KB background worker | `true` |
 | `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | `30` |
+| `GBRAIN_AUTOPILOT_ENABLED` | Enable autopilot background maintenance thread (takes effect in `gbrain serve`) | `true` |
+| `GBRAIN_AUTOPILOT_INTERVAL` | Autopilot maintenance interval (seconds, default 3600 = 1 hour, at least 60s) | `3600` |
 | `GBRAIN_KB_SYNONYMS_FILE` | Synonyms file path (for search query expansion) | — |
 | `GBRAIN_KB_ALIASES_FILE` | Alias mapping file path (for search query expansion) | — |
 

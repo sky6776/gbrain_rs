@@ -45,7 +45,7 @@ gbrain serve
 - **零配置** — 嵌入式 SQLite，无需外部服务（嵌入向量可选）
 - **分层丰富** — 自动实体检测与提升（提及 → 存根 → 完善）
 - **版本历史** — 完整的页面版本管理，支持回滚
-- **自动驾驶** — 自维护守护进程，自动嵌入过期内容并执行完整性检查
+- **自动驾驶** — 自维护守护线程，`gbrain serve` 时自动在后台运行，定期嵌入过期内容并执行完整性检查（默认每 3600 秒，可通过 `GBRAIN_AUTOPILOT_INTERVAL` 配置间隔，最小60秒，通过 `GBRAIN_AUTOPILOT_ENABLED` 关闭）
 - **安全防护** — 路径遍历防护、slug 验证、远程调用输入清理、参数化查询防 SQL 注入
 - **代码知识图谱** — Tree-sitter AST 代码分块 + regex 符号索引，支持符号定义、引用和调用图（Rust/TypeScript/JavaScript/Python/Go/Java/C/C++）
 - **音频转录** — 支持 Groq Whisper（默认）或 OpenAI Whisper
@@ -783,6 +783,8 @@ KB RAPTOR: GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPEN
 | `GBRAIN_KB_STORAGE_DIR` | KB 文件存储目录 | — |
 | `GBRAIN_KB_WORKER_ENABLED` | 启用 KB 后台处理 worker | `true` |
 | `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker 轮询间隔（秒） | `30` |
+| `GBRAIN_AUTOPILOT_ENABLED` | 启用 autopilot 后台维护线程（`gbrain serve` 时生效） | `true` |
+| `GBRAIN_AUTOPILOT_INTERVAL` | autopilot 维护间隔（秒，默认 3600 = 1 小时，最小60秒） | `3600` |
 | `GBRAIN_KB_SYNONYMS_FILE` | 同义词文件路径（用于搜索查询扩展） | — |
 | `GBRAIN_KB_ALIASES_FILE` | 别名映射文件路径（用于搜索查询扩展） | — |
 

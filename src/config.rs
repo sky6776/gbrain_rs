@@ -79,6 +79,8 @@ pub struct Config {
     pub kb_storage_dir: Option<String>,
     pub kb_worker_enabled: bool,
     pub kb_worker_poll_interval_secs: u64,
+    pub autopilot_enabled: bool,
+    pub autopilot_interval_secs: u64,
     /// P3-003: 同义词文件路径
     pub kb_synonyms_file: Option<String>,
     /// P3-004: 别名映射文件路径
@@ -175,6 +177,8 @@ impl Default for Config {
             kb_storage_dir: None,
             kb_worker_enabled: true,
             kb_worker_poll_interval_secs: 30,
+            autopilot_enabled: true,
+            autopilot_interval_secs: 3600,
             kb_synonyms_file: None,
             kb_aliases_file: None,
 
@@ -326,12 +330,37 @@ impl Config {
         if let Ok(dir) = std::env::var("GBRAIN_KB_STORAGE_DIR") {
             config.kb_storage_dir = Some(dir);
         }
-        config.kb_worker_enabled = std::env::var("GBRAIN_KB_WORKER_ENABLED")
-            .map(|v| v == "true")
+        config.kb_worker_enabled = parse_env_bool("GBRAIN_KB_WORKER_ENABLED")
             .unwrap_or(config.kb_worker_enabled);
         if let Ok(secs) = std::env::var("GBRAIN_KB_WORKER_POLL_INTERVAL") {
             if let Ok(s) = secs.parse() {
                 config.kb_worker_poll_interval_secs = s;
+            }
+        }
+        config.autopilot_enabled = parse_env_bool("GBRAIN_AUTOPILOT_ENABLED")
+            .unwrap_or(config.autopilot_enabled);
+        if let Ok(secs) = std::env::var("GBRAIN_AUTOPILOT_INTERVAL") {
+            let s: u64 = match secs.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "GBRAIN_AUTOPILOT_INTERVAL 无效值 '{}': {}，使用默认 {}s",
+                        secs,
+                        e,
+                        config.autopilot_interval_secs
+                    );
+                    // 不覆盖，保留 config 默认值
+                    config.autopilot_interval_secs
+                }
+            };
+            if s < 60 {
+                tracing::warn!(
+                    "GBRAIN_AUTOPILOT_INTERVAL={}s < 60s，clamp 到 60s",
+                    s
+                );
+                config.autopilot_interval_secs = 60;
+            } else {
+                config.autopilot_interval_secs = s;
             }
         }
 
@@ -582,6 +611,8 @@ impl Config {
             "kb_max_file_size_mb" => Some(self.kb_max_file_size_mb.to_string()),
             "kb_worker_enabled" => Some(self.kb_worker_enabled.to_string()),
             "kb_worker_poll_interval_secs" => Some(self.kb_worker_poll_interval_secs.to_string()),
+            "autopilot_enabled" => Some(self.autopilot_enabled.to_string()),
+            "autopilot_interval_secs" => Some(self.autopilot_interval_secs.to_string()),
             "upload_default_promotion_policy" => Some(self.upload_default_promotion_policy.clone()),
             "artifact_default_intent" => Some(self.artifact_default_intent.clone()),
             "artifact_auto_create_inbox_library" => {
@@ -651,6 +682,19 @@ impl Config {
                     .parse()
                     .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
                 self.kb_worker_poll_interval_secs = v;
+            }
+            "autopilot_enabled" => self.autopilot_enabled = parse_bool(key, value)?,
+            "autopilot_interval_secs" => {
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                if v < 60 {
+                    return Err(format!(
+                        "autopilot_interval_secs 最小值为 60 秒，当前值: {}",
+                        v
+                    ));
+                }
+                self.autopilot_interval_secs = v;
             }
             "upload_default_promotion_policy" => {
                 // 校验合法枚举值，避免无效 policy 在 apply_promotion_policy 被静默忽略
@@ -772,6 +816,8 @@ impl Config {
         }
         self.kb_worker_enabled = other.kb_worker_enabled;
         self.kb_worker_poll_interval_secs = other.kb_worker_poll_interval_secs;
+        self.autopilot_enabled = other.autopilot_enabled;
+        self.autopilot_interval_secs = other.autopilot_interval_secs;
         if other.kb_synonyms_file.is_some() {
             self.kb_synonyms_file = other.kb_synonyms_file.clone();
         }
@@ -796,6 +842,24 @@ impl Config {
         self.artifact_auto_create_inbox_library = other.artifact_auto_create_inbox_library;
         // artifact_manual_memory_to_kb — always take config file value
         self.artifact_manual_memory_to_kb = other.artifact_manual_memory_to_kb;
+    }
+}
+
+/// 解析环境变量布尔值，接受 true/false/1/0/TURE/FALSE（大小写不敏感）。
+/// 非法值会打 warn 日志并返回 None，由调用方决定回退策略。
+fn parse_env_bool(var_name: &str) -> Option<bool> {
+    let val = std::env::var(var_name).ok()?;
+    match val.to_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => {
+            tracing::warn!(
+                "{} 无效值 '{}'，有效值: true/false/1/0，已忽略",
+                var_name,
+                val
+            );
+            None
+        }
     }
 }
 

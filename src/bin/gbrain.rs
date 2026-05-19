@@ -463,6 +463,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     "auto_link", "auto_timeline", "post_write_lint",
                     "upload_default_promotion_policy", "artifact_default_intent",
                     "kb_max_file_size_mb", "kb_worker_enabled",
+                    "autopilot_enabled", "autopilot_interval_secs",
                 ] {
                     if let Some(val) = config.get_field(key) {
                         info!("{} = {}", key, val);
@@ -576,6 +577,15 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     config.kb_worker_poll_interval_secs,
                 );
                 info!("KB worker: 后台线程已随 MCP 服务启动");
+            }
+            // 后台启动 autopilot 维护线程（嵌入过期内容 + 完整性检查 + 健康报告）
+            if config.autopilot_enabled {
+                gbrain_core::autopilot::spawn_autopilot_thread(
+                    PathBuf::from(db_path.clone()),
+                    config.clone(),
+                    config.autopilot_interval_secs,
+                );
+                info!("Autopilot: 后台线程已随 MCP 服务启动");
             }
             let mut server = McpServer::with_config(engine, config.clone());
             server.run()?;

@@ -164,3 +164,45 @@ impl<'a> Autopilot<'a> {
         Ok((health.orphan_pages, health.dead_links))
     }
 }
+
+/// 在独立后台线程中启动 autopilot 维护循环
+///
+/// 创建独立的数据库连接，按配置的间隔周期运行 `Autopilot::run_once`。
+/// 与 KB worker 模式一致：取 db_path 和 config 的所有权，
+/// 在闭包内创建 engine，避免跨线程借用问题。
+const MIN_INTERVAL_SECS: u64 = 60;
+
+pub fn spawn_autopilot_thread(db_path: std::path::PathBuf, config: Config, interval_secs: u64) {
+    if !config.autopilot_enabled {
+        tracing::info!("Autopilot is disabled, not spawning background thread");
+        return;
+    }
+    let interval = if interval_secs < MIN_INTERVAL_SECS {
+        tracing::warn!(
+            "Autopilot: interval {}s < minimum {}s, clamping to {}s",
+            interval_secs,
+            MIN_INTERVAL_SECS,
+            MIN_INTERVAL_SECS
+        );
+        MIN_INTERVAL_SECS
+    } else {
+        interval_secs
+    };
+    std::thread::Builder::new()
+        .name("autopilot".to_string())
+        .spawn(move || {
+            let mut engine = crate::sqlite_engine::SqliteEngine::with_config(&db_path, config.clone());
+            if let Err(e) = engine.connect() {
+                tracing::warn!(error = %e, "Autopilot: 数据库连接失败");
+                return;
+            }
+            if let Err(e) = engine.init_schema() {
+                tracing::warn!(error = %e, "Autopilot: 初始化 schema 失败");
+                return;
+            }
+            tracing::info!(interval, "Autopilot: 后台线程已启动");
+            let autopilot = Autopilot::new(&engine, config);
+            autopilot.run_loop(interval);
+        })
+        .expect("spawn autopilot thread");
+}
