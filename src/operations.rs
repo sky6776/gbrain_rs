@@ -1347,10 +1347,14 @@ impl<'a> Operations<'a> {
                 None
             };
 
-        // 将 API 凭证注入 input 以支持模型 rerank
+        // 将 chat/completions 配置注入 input 以支持模型 rerank。
+        // API key/base URL 使用 expansion 配置（含回退到 openai），模型使用已加载的 expansion_model。
         let mut input_with_rerank = input.clone();
-        input_with_rerank.rerank_api_key = self.config.openai_api_key.clone();
-        input_with_rerank.rerank_base_url = self.config.openai_base_url.clone();
+        input_with_rerank.rerank_model = Some(self.config.expansion_model.clone());
+        input_with_rerank.rerank_api_key =
+            self.config.expansion_api_key_resolved().map(|s| s.to_string());
+        input_with_rerank.rerank_base_url =
+            self.config.expansion_base_url_resolved().map(|s| s.to_string());
 
         crate::kb::search::kb_search(conn, &input_with_rerank, query_vector.as_deref())
     }

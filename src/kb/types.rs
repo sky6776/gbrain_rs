@@ -396,6 +396,7 @@ pub struct KbSearchInput {
     pub folder_id: Option<i64>,
     // P5-011: filter by specific embedding index
     pub embedding_index_id: Option<i64>,
+    pub rerank_model: Option<String>,
     // FIX11-07: API key 不应序列化到 JSON 日志/响应中，防止泄露
     #[serde(skip_serializing)]
     pub rerank_api_key: Option<String>,
@@ -419,6 +420,7 @@ impl Default for KbSearchInput {
             group_by_document: false,
             folder_id: None,
             embedding_index_id: None,
+            rerank_model: None,
             rerank_api_key: None,
             rerank_base_url: None,
         }

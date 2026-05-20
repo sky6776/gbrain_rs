@@ -326,7 +326,12 @@ pub fn kb_search(
         let rerank_cfg = crate::kb::rerank::RerankConfig {
             model_rerank_enabled: rerank_enabled != 0,
             rerank_provider: rerank_provider.clone(),
-            rerank_model: "gpt-4o-mini".into(),
+            rerank_model: input
+                .rerank_model
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("gpt-4o-mini")
+                .to_string(),
             rerank_timeout_ms: 5000,
             rerank_max_candidates: 50,
             external_rerank_allowed,

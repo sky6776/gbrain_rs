@@ -291,7 +291,7 @@ gbrain review apply 1
 | `embedding_model` | string | Embedding model name | `text-embedding-3-large` |
 | `embedding_dimensions` | integer | Embedding vector dimensions | `1536` |
 | `expansion_model` | string | Query expansion LLM model | `gpt-4o-mini` |
-| `chunker_model` | string | LLM chunking model | `gpt-4o-mini` |
+| `chunker_model` | string | LLM chunking model (reserved; also used as a RAPTOR fallback model) | `gpt-4o-mini` |
 | `chunk_size` | integer | Chunk size (characters) | `500` |
 | `chunk_overlap` | integer | Chunk overlap (characters) | `50` |
 | `log_level` | string | Log level (trace/debug/info/warn/error) | `info` |
@@ -764,18 +764,30 @@ No parameters.
 
 > **API Compatibility Note**: This project only supports OpenAI-compatible API formats (`/embeddings`, `/chat/completions`, `/audio/transcriptions`). Anthropic/Claude API is not supported. By setting `*_BASE_URL`, you can connect to any OpenAI-compatible service (DeepSeek, Zhipu, DashScope, Ollama, etc.).
 
+### LLM Configuration Groups
+
+LLM configuration is split by call type and feature:
+
+| Group | Environment Variables | Used By |
+|-------|----------------------|---------|
+| **Embeddings** | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` / `GBRAIN_EMBEDDING_MODEL` | Document chunk embedding (vectorization), semantic chunking (paragraph similarity), query vectors |
+| **Query Expansion / Reranking** | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL` / `GBRAIN_EXPANSION_MODEL` | Search query expansion, search reranking via chat/completions |
+| **KB RAPTOR** | Library `raptor_llm_*`, `GBRAIN_KB_RAPTOR_*`, `GBRAIN_EXPANSION_*`, `GBRAIN_CHUNKER_*` | RAPTOR tree summarization |
+| **LLM Chunker (reserved)** | `GBRAIN_CHUNKER_API_KEY` / `GBRAIN_CHUNKER_BASE_URL` / `GBRAIN_CHUNKER_MODEL` | Reserved for LLM-guided chunking; not wired into the current KB document pipeline, and also used as a RAPTOR fallback |
+
 ### API Key Fallback Chain
 
 Each module's API key falls back in this priority order:
 
 ```
-Embeddings:  GBRAIN_OPENAI_API_KEY
-Expansion:   GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
-LLM Chunker: GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
-KB RAPTOR:   GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+Embeddings:    GBRAIN_OPENAI_API_KEY
+Expansion:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
+LLM Chunker (reserved): GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
+KB RAPTOR:     library raptor_llm_secret_ref → GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_CHUNKER_API_KEY
+Reranking:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
 ```
 
-Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-module for different models/providers.
+Setting `GBRAIN_OPENAI_API_KEY` enables embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`.
 
 ### Base Configuration
 
@@ -793,15 +805,17 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_EMBEDDING_MODEL` | Embedding model name | `text-embedding-3-large` |
 | `GBRAIN_EMBEDDING_DIMENSIONS` | Embedding vector dimensions | `1536` |
 
-### Query Expansion
+### Query Expansion / Reranking (Chat Completions)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GBRAIN_EXPANSION_API_KEY` | Query expansion LLM API key | Falls back to `GBRAIN_OPENAI_API_KEY` |
-| `GBRAIN_EXPANSION_BASE_URL` | Query expansion LLM base URL | Falls back to `GBRAIN_OPENAI_BASE_URL` |
-| `GBRAIN_EXPANSION_MODEL` | Query expansion model | `gpt-4o-mini` |
+| `GBRAIN_EXPANSION_API_KEY` | Query expansion and search reranking LLM API key | Falls back to `GBRAIN_OPENAI_API_KEY` |
+| `GBRAIN_EXPANSION_BASE_URL` | Query expansion and search reranking LLM base URL | Falls back to `GBRAIN_OPENAI_BASE_URL`; default OpenAI endpoint is used if omitted |
+| `GBRAIN_EXPANSION_MODEL` | Query expansion and search reranking LLM model | `gpt-4o-mini` |
 
 ### LLM Chunking
+
+The current KB document pipeline uses Markdown/recursive chunking or embedding-based semantic chunking; it does not call the LLM-guided chunker in `src/chunker/llm.rs` yet. The variables below are reserved for that path, and `GBRAIN_CHUNKER_*` is also used as the final RAPTOR fallback.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -824,9 +838,9 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GBRAIN_KB_ENABLED` | Enable KB subsystem | `true` |
-| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Falls back to `GBRAIN_EXPANSION_API_KEY` |
-| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL` |
-| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | Falls back to `GBRAIN_EXPANSION_MODEL` |
+| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Used via the default `kb_raptor_secret_ref`; fallback then tries `GBRAIN_EXPANSION_API_KEY`, then `GBRAIN_CHUNKER_API_KEY` |
+| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL`, then `GBRAIN_CHUNKER_BASE_URL`, then the OpenAI default endpoint |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | `gpt-4o-mini`; if the KB/library model is empty, the resolver can use `GBRAIN_EXPANSION_MODEL`, then `GBRAIN_CHUNKER_MODEL` |
 | `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | `50` |
 | `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv` |
 | `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |
@@ -836,6 +850,15 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_AUTOPILOT_INTERVAL` | Autopilot maintenance interval (seconds, default 3600 = 1 hour, at least 60s) | `3600` |
 | `GBRAIN_KB_SYNONYMS_FILE` | Synonyms file path (for search query expansion) | — |
 | `GBRAIN_KB_ALIASES_FILE` | Alias mapping file path (for search query expansion) | — |
+
+**KB Subsystem LLM Usage:**
+
+| Feature | LLM Type | API Key / Base URL | Model Used |
+|---------|----------|-------------------|------------|
+| Document chunk embedding (vectorization) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
+| Semantic chunking (paragraph similarity) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
+| RAPTOR hierarchical summarization | Chat Completions | Library `raptor_llm_*` → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*` | Library/KB model → `GBRAIN_EXPANSION_MODEL` → `GBRAIN_CHUNKER_MODEL` → `gpt-4o-mini` when no KB model is set |
+| Search reranking | Chat Completions | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL`, falling back to `GBRAIN_OPENAI_*` | `GBRAIN_EXPANSION_MODEL` / `expansion_model` → `gpt-4o-mini` |
 
 ### Artifact Fusion Architecture
 
@@ -984,7 +1007,7 @@ Async five-stage document processing pipeline:
 1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext / code)
 2. **Split** — Recursive splitter / Semantic splitter (Savitzky-Golay smoothing + chunk_overlap overlap), switchable via `semantic_enabled` flag
 3. **Embed** — Vector embedding generation and persistence
-4. **RAPTOR** — Recursive summarization tree (K-Means++ clustering + LLM summarization, three-level fallback chain: library config → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
+4. **RAPTOR** — Recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
 5. **Persist** — Transaction-protected node/vector writes
 
 ### Chinese NLP Module
