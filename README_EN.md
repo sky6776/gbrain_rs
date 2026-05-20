@@ -826,7 +826,7 @@ Setting only `GBRAIN_OPENAI_API_KEY` enables all AI features. Override per-modul
 | `GBRAIN_KB_ENABLED` | Enable KB subsystem | `true` |
 | `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Falls back to `GBRAIN_EXPANSION_API_KEY` |
 | `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL` |
-| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | `gpt-4o-mini` |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | Falls back to `GBRAIN_EXPANSION_MODEL` |
 | `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | `50` |
 | `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv` |
 | `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |

@@ -845,7 +845,7 @@ KB RAPTOR: GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_OPEN
 | `GBRAIN_KB_ENABLED` | 启用 KB 子系统 | `true` |
 | `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API 密钥 | 回退到 `GBRAIN_EXPANSION_API_KEY` |
 | `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM 基础 URL | 回退到 `GBRAIN_EXPANSION_BASE_URL` |
-| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM 模型 | `gpt-4o-mini` |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM 模型 | 回退到 `GBRAIN_EXPANSION_MODEL` |
 | `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB 文件大小上限（MB） | `50` |
 | `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB 允许的文件扩展名（逗号分隔） | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv` |
 | `GBRAIN_KB_STORAGE_DIR` | KB 文件存储目录 | — |
