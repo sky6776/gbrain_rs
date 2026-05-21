@@ -197,9 +197,14 @@ fn is_cjk_punctuation(c: char) -> bool {
 /// Walks backward from the overlap start point to find the nearest
 /// sentence-ending punctuation, avoiding mid-sentence splits.
 /// Returns a char-boundary-safe position to prevent panics on multi-byte UTF-8.
-fn align_to_sentence_boundary(text: &str, start_pos: usize) -> usize {
+fn align_to_sentence_boundary(text: &str, mut start_pos: usize) -> usize {
     if start_pos == 0 || start_pos >= text.len() {
         return start_pos;
+    }
+
+    // Ensure start_pos is on a char boundary before slicing
+    while !text.is_char_boundary(start_pos) && start_pos > 0 {
+        start_pos -= 1;
     }
 
     // Search backward from start_pos for a sentence boundary
