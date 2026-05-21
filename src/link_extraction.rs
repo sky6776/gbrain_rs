@@ -561,7 +561,11 @@ fn capture_context(content: &str, start: usize, end: usize) -> String {
     while !content.is_char_boundary(ctx_start) && ctx_start < end {
         ctx_start += 1;
     }
-    let ctx_end = end.saturating_add(240).min(content.len());
+    let mut ctx_end = end.saturating_add(240).min(content.len());
+    // 向回对齐到 char boundary，避免 +240 落在多字节 UTF-8 字符中间导致 panic
+    while !content.is_char_boundary(ctx_end) && ctx_end > ctx_start {
+        ctx_end -= 1;
+    }
     content[ctx_start..ctx_end].to_string()
 }
 
