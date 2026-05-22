@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tracing::{debug, trace};
 
 /// 缓存条目
 struct CacheEntry<T> {
@@ -40,8 +41,12 @@ impl<T: Clone> SearchCache<T> {
     pub fn get(&self, key: &str) -> Option<T> {
         let mut entries = self.entries.lock().ok()?;
         match entries.get(key) {
-            Some(entry) if !entry.is_expired() => Some(entry.value.clone()),
+            Some(entry) if !entry.is_expired() => {
+                trace!("cache hit: key={}", key);
+                Some(entry.value.clone())
+            }
             _ => {
+                trace!("cache miss: key={}", key);
                 entries.remove(key);
                 None
             }
@@ -54,6 +59,7 @@ impl<T: Clone> SearchCache<T> {
             if entries.len() >= self.max_entries {
                 // 简单淘汰：移除最旧的一个
                 if let Some(oldest_key) = entries.keys().next().cloned() {
+                    debug!("cache eviction: key={}", oldest_key);
                     entries.remove(&oldest_key);
                 }
             }
@@ -71,7 +77,12 @@ impl<T: Clone> SearchCache<T> {
     /// 根据 index_version 清理陈旧缓存
     pub fn invalidate_by_prefix(&self, prefix: &str) {
         if let Ok(mut entries) = self.entries.lock() {
+            let before = entries.len();
             entries.retain(|k, _| !k.starts_with(prefix));
+            let removed = before - entries.len();
+            if removed > 0 {
+                debug!("cache invalidation: prefix={}, removed={}", prefix, removed);
+            }
         }
     }
 

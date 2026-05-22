@@ -3,7 +3,7 @@
 //! 负责与 SQLite 交互，提供去重写入、投影注册等基础操作。
 
 use rusqlite::{params, Connection, Row};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use super::types::*;
 
@@ -145,7 +145,12 @@ pub fn insert_artifact(
             artifact.last_seen_at,
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    debug!(
+        "insert_artifact: id={}, uid={}, content_type={}",
+        id, artifact.artifact_uid, artifact.mime_type
+    );
+    Ok(id)
 }
 
 /// 更新原件的 last_seen_at
@@ -169,6 +174,7 @@ pub fn reactivate_artifact(conn: &Connection, id: i64) -> Result<(), rusqlite::E
         "UPDATE source_artifacts SET status = 'active', deleted_at = NULL, last_seen_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
         params![id],
     )?;
+    info!("reactivate_artifact: id={}", id);
     Ok(())
 }
 
@@ -178,6 +184,7 @@ pub fn soft_delete_artifact(conn: &Connection, id: i64) -> Result<(), rusqlite::
         "UPDATE source_artifacts SET status = 'deleted', deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
         params![id],
     )?;
+    warn!("soft_delete_artifact: id={}, reason=artifact_deleted", id);
     Ok(())
 }
 
@@ -249,7 +256,12 @@ pub fn insert_occurrence(
             occ.updated_at,
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    debug!(
+        "insert_occurrence: id={}, artifact_id={}, intent={}, target_slug={}",
+        id, occ.artifact_id, occ.intent, occ.target_slug
+    );
+    Ok(id)
 }
 
 /// 按原件 ID 查找事件列表
@@ -599,6 +611,7 @@ pub fn mark_projection_stale(
         "UPDATE artifact_projections SET status = 'stale', stale_reason = ?1, updated_at = datetime('now') WHERE id = ?2",
         params![reason, id],
     )?;
+    info!("mark_projection_stale: id={}, reason={}", id, reason);
     Ok(())
 }
 
@@ -794,7 +807,12 @@ pub fn record_event(
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![artifact_id, occurrence_id, event_type, actor, payload],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    debug!(
+        "record_event: id={}, artifact_id={:?}, event_type={}, actor={}",
+        id, artifact_id, event_type, actor
+    );
+    Ok(id)
 }
 
 /// 查询某 artifact 的事件历史

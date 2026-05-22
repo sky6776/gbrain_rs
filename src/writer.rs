@@ -10,7 +10,7 @@ use crate::error::{GBrainError, Result};
 use crate::operations::Operations;
 use crate::types::*;
 use std::collections::HashSet;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Write mode controlling validation strictness
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +378,9 @@ impl<'a> BrainWriter<'a> {
 
         // Run validators first (before acquiring transaction)
         let issues = self.run_validators(slug, title, content, page_type.as_ref());
+        if !issues.is_empty() {
+            debug!(slug = %slug, issue_count = issues.len(), "Validation issues found");
+        }
 
         match self.mode {
             WriteMode::Strict => {
@@ -386,6 +389,7 @@ impl<'a> BrainWriter<'a> {
                     .filter(|i| i.severity == IssueSeverity::Error)
                     .collect();
                 if !errors.is_empty() {
+                    debug!(slug = %slug, error_count = errors.len(), "Strict mode blocking write due to validation errors");
                     let messages: Vec<String> = errors.iter().map(|e| e.message.clone()).collect();
                     return Err(GBrainError::InvalidInput(format!(
                         "Validation failed: {}",
@@ -414,7 +418,10 @@ impl<'a> BrainWriter<'a> {
     /// Delete a page
     pub fn delete_page(&self, slug: &str) -> Result<()> {
         info!(slug = %slug, mode = %self.mode, "Deleting page");
-        self.ops.delete_page(slug)
+        let start = std::time::Instant::now();
+        let result = self.ops.delete_page(slug);
+        debug!(slug = %slug, elapsed_ms = start.elapsed().as_millis() as u64, "Delete page completed");
+        result
     }
 
     /// Run all validators and collect issues
@@ -427,7 +434,9 @@ impl<'a> BrainWriter<'a> {
     ) -> Vec<ValidationIssue> {
         let mut all_issues = Vec::new();
         for validator in &self.validators {
-            all_issues.extend(validator.validate(slug, title, content, page_type));
+            let issues = validator.validate(slug, title, content, page_type);
+            debug!(validator = %validator.id(), issue_count = issues.len(), "Validator completed");
+            all_issues.extend(issues);
         }
         all_issues
     }

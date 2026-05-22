@@ -8,7 +8,7 @@
 use crate::backoff::{backoff_delay_ms, BackoffOpts};
 use crate::error::{GBrainError, Result};
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default embedding model
 pub const DEFAULT_MODEL: &str = "text-embedding-3-large";
@@ -90,6 +90,7 @@ impl Embedder {
 
     /// Embed a single text string
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        debug!(text_len = text.len(), "Embedding single text");
         let results = self.embed_batch(&[text]).await?;
         results
             .into_iter()
@@ -285,6 +286,7 @@ impl Embedder {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
+                    error!(attempt, max_retries = backoff_opts.max_retries, error = %e, "Embedding request failed after all retries");
                     return Err(GBrainError::Embedding(format!(
                         "Request failed after {} attempts: {}",
                         backoff_opts.max_retries + 1,

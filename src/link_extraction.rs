@@ -11,7 +11,7 @@ use crate::engine::BrainEngine;
 use crate::types::{LinkBatchInput, LinkDirection, LinkSource, PageType};
 use regex::Regex;
 use std::sync::OnceLock;
-use tracing::trace;
+use tracing::{debug, trace, warn};
 
 // ---------------------------------------------------------------------------
 // P2-11: Lazily-compiled regex patterns (compiled once, reused on every call)
@@ -260,7 +260,7 @@ fn strip_code_blocks(content: &str) -> String {
 /// Extract entity references from markdown content
 /// Handles `[Name](dir/slug)`, `[type:Name](dir/slug)`, `[[dir/slug|Name]]`, and bare slug refs
 pub fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
-    trace!(content_len = content.len(), "Extracting entity references");
+    debug!(content_len = content.len(), "Extracting entity references");
     let cleaned = strip_code_blocks(content);
     let mut refs = Vec::new();
 
@@ -384,6 +384,11 @@ pub fn extract_entity_refs(content: &str) -> Vec<EntityRef> {
         }
     }
 
+    debug!(
+        ref_count = refs.len(),
+        content_len = content.len(),
+        "Entity reference extraction complete"
+    );
     refs
 }
 
@@ -488,6 +493,11 @@ pub fn extract_frontmatter_refs(
         }
     }
 
+    debug!(
+        candidate_count = refs.len(),
+        unresolved_count = unresolved.len(),
+        "Frontmatter reference extraction complete"
+    );
     let _ = from_slug; // used for reconciliation in operations layer
     FrontmatterExtractResult {
         candidates: refs,
@@ -654,6 +664,7 @@ pub fn infer_link_type(
 
     if target_lower.starts_with("people/") {
         if founded_re.is_match(&regex_input) {
+            trace!(target = %target, pattern = "founded", "Link type inferred from context");
             return "founded".to_string();
         }
         if invested_re.is_match(&regex_input) {
@@ -795,7 +806,11 @@ impl<'a> SlugResolver for EngineSlugResolver<'a> {
             return Ok(cached.clone());
         }
 
+        debug!(name = %name, "EngineSlugResolver resolving slug");
         let result = self.resolve_impl(name, dir_hint);
+        if result.is_none() {
+            warn!(name = %name, "EngineSlugResolver could not resolve slug");
+        }
         self.cache.insert(key, result.clone());
         Ok(result)
     }

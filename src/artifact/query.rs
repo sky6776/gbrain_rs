@@ -8,7 +8,7 @@
 //! 5. TimelineFirst: 先查时间线事件，再查 gbrain 上下文（§11.1/§11.2）
 
 use rusqlite::{params, Connection};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::error::{GBrainError, Result};
 use crate::search::hybrid::{hybrid_search, HybridOpts};
@@ -25,7 +25,7 @@ pub fn infer_query_strategy(query: &str) -> QueryStrategy {
     let intent = classify_intent(query);
 
     // 根据意图映射到策略
-    match intent.intent {
+    let strategy = match intent.intent {
         // "是谁/是什么" 类问题 → BrainFirst
         Intent::Entity => QueryStrategy::BrainFirst,
         // "时间线/最近发生了什么" 类问题 → TimelineFirst（§11.2）
@@ -34,7 +34,12 @@ pub fn infer_query_strategy(query: &str) -> QueryStrategy {
         Intent::Event => QueryStrategy::TimelineFirst,
         // 默认 → BrainFirst + KB fallback
         Intent::General => QueryStrategy::BrainFirst,
-    }
+    };
+    debug!(
+        "infer_query_strategy: query={}, strategy={}",
+        query, strategy
+    );
+    strategy
 }
 
 /// 执行统一查询
@@ -251,7 +256,7 @@ fn query_brain(
     let search_result = hybrid_search(engine, query, None, search_opts, hybrid_opts)
         .map_err(|e| GBrainError::Search(format!("gbrain 搜索失败: {}", e)))?;
 
-    let hits = search_result
+    let hits: Vec<BrainHit> = search_result
         .results
         .into_iter()
         .map(|r| BrainHit {
@@ -263,6 +268,12 @@ fn query_brain(
         })
         .collect();
 
+    debug!(
+        "query_brain: query={}, filter_slug={:?}, count={}",
+        query,
+        filter_slug,
+        hits.len()
+    );
     Ok(hits)
 }
 
@@ -404,6 +415,12 @@ fn query_kb_evidence(
         });
     }
 
+    debug!(
+        "query_kb_evidence: query={}, filter_slug={:?}, count={}",
+        query,
+        filter_slug,
+        hits.len()
+    );
     Ok(hits)
 }
 
@@ -642,7 +659,7 @@ pub fn check_artifact_health(conn: &Connection) -> Result<ArtifactHealthReport> 
         });
     }
 
-    Ok(ArtifactHealthReport {
+    let report = ArtifactHealthReport {
         total_artifacts,
         active_artifacts,
         orphan_projections,
@@ -651,5 +668,9 @@ pub fn check_artifact_health(conn: &Connection) -> Result<ArtifactHealthReport> 
         active_provenance,
         stale_provenance,
         issues,
-    })
+    };
+    info!("check_artifact_health: total={}, active={}, orphans={}, stale_projections={}, pending={}, issues={}",
+        report.total_artifacts, report.active_artifacts, report.orphan_projections,
+        report.stale_projections, report.pending_candidates, report.issues.len());
+    Ok(report)
 }

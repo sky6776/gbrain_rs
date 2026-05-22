@@ -11,7 +11,7 @@ use crate::engine::BrainEngine;
 use crate::sqlite_engine::SqliteEngine;
 use crate::types::{PageType, SearchOpts};
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, trace};
 
 /// Resolver mode — controls how resolvers access data
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +99,7 @@ impl ResolverRegistry {
     /// Returns candidates from all resolvers, deduplicated by slug
     /// (keeping the highest-confidence match).
     pub fn resolve(&self, partial: &str, hint: Option<ResolverHint>) -> Vec<ResolvedRef> {
+        debug!(partial = %partial, "ResolverRegistry resolving reference");
         let mut best: HashMap<String, ResolvedRef> = HashMap::new();
 
         for resolver in &self.resolvers {
@@ -129,6 +130,7 @@ impl ResolverRegistry {
                 .partial_cmp(&a.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        debug!(partial = %partial, result_count = results.len(), "ResolverRegistry resolve complete");
         results
     }
 
@@ -358,11 +360,13 @@ impl Resolver for TitleResolver {
     fn resolve(&self, partial: &str, _hint: Option<ResolverHint>) -> Vec<ResolvedRef> {
         let mut results = Vec::new();
         let partial_lower = partial.to_lowercase();
+        let mut match_count = 0usize;
 
         for (title, slug) in &self.titles {
             let title_lower = title.to_lowercase();
 
             if title_lower == partial_lower {
+                match_count += 1;
                 results.push(ResolvedRef {
                     slug: slug.clone(),
                     confidence: 0.9,
@@ -371,6 +375,7 @@ impl Resolver for TitleResolver {
                     cost_estimate: 0.0,
                 });
             } else if title_lower.contains(&partial_lower) {
+                match_count += 1;
                 results.push(ResolvedRef {
                     slug: slug.clone(),
                     confidence: 0.4,
@@ -387,6 +392,7 @@ impl Resolver for TitleResolver {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(10);
+        trace!(partial = %partial, match_count, "TitleResolver resolve complete");
         results
     }
 }

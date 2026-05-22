@@ -130,7 +130,12 @@ pub fn record_provenance(
     )
     .map_err(|e| GBrainError::Database(format!("插入 provenance 失败: {}", e)))?;
 
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    debug!(
+        "record_provenance: id={}, artifact_id={:?}, slug={}, field={}",
+        id, artifact_id, brain_slug, brain_field
+    );
+    Ok(id)
 }
 
 /// 查找某条 brain 事实的来源链
@@ -159,6 +164,11 @@ pub fn find_provenance_by_brain_slug(
             row.map_err(|e| GBrainError::Database(format!("映射 provenance 行失败: {}", e)))?,
         );
     }
+    debug!(
+        "find_provenance_by_brain_slug: slug={}, count={}",
+        brain_slug,
+        result.len()
+    );
     Ok(result)
 }
 
@@ -344,14 +354,19 @@ pub fn mark_provenance_stale_by_kb_document(
 /// 只恢复 stale_reason='kb_document_deleted' 的 provenance，
 /// 不恢复 reprocess/detach 主动标记的 stale provenance。
 pub fn reactivate_provenance_by_kb_document(conn: &Connection, kb_document_id: i64) -> Result<u64> {
-    Ok(conn
-        .execute(
+    let count =
+        conn.execute(
             "UPDATE provenance_ledger
          SET status = 'active', stale_reason = '', updated_at = datetime('now')
          WHERE kb_document_id = ?1 AND status = 'stale' AND stale_reason = 'kb_document_deleted'",
             params![kb_document_id],
         )
-        .map_err(|e| GBrainError::Database(format!("恢复 provenance 失败: {}", e)))? as u64)
+        .map_err(|e| GBrainError::Database(format!("恢复 provenance 失败: {}", e)))? as u64;
+    info!(
+        "reactivate_provenance_by_kb_document: kb_document_id={}, count={}",
+        kb_document_id, count
+    );
+    Ok(count)
 }
 
 /// 统计活跃 provenance 数

@@ -3,6 +3,7 @@
 use jieba_rs::Jieba;
 use pinyin::ToPinyin;
 use std::sync::OnceLock;
+use tracing::trace;
 
 const MAX_CONTENT_TOKENS: usize = 10000;
 const MAX_PINYIN_CHARS: usize = 200;
@@ -431,6 +432,7 @@ pub fn expand_query_with_synonyms(query: &str) -> Vec<String> {
             results.push(q.replace(&v.to_lowercase(), k));
         }
     }
+    trace!("synonym expansion: {} -> {} variants", query, results.len());
     results
 }
 
@@ -461,6 +463,7 @@ pub fn expand_query_with_aliases(query: &str) -> Vec<String> {
             results.push(q_lower.replace(&full.to_lowercase(), &abbr.to_lowercase()));
         }
     }
+    trace!("alias expansion: {} -> {} variants", query, results.len());
     results
 }
 

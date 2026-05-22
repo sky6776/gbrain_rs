@@ -6,6 +6,7 @@
 use crate::error::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 /// 单个检查项结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +149,7 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
         affected_count: split_mismatch,
     });
 
-    Ok(HealthSummary {
+    let summary = HealthSummary {
         overall_status: if issues == 0 {
             "healthy".into()
         } else {
@@ -156,12 +157,23 @@ pub fn check_index_health(conn: &Connection) -> Result<HealthSummary> {
         },
         checks,
         issues_count: issues,
-    })
+    };
+    info!(
+        "health check: status={}, issues={}, orphan_nodes={}, orphan_embeddings={}, missing_fts={}, split_mismatches={}",
+        summary.overall_status,
+        summary.issues_count,
+        summary.checks.iter().find(|c| c.check_name == "orphan_nodes").map(|c| c.affected_count).unwrap_or(0),
+        summary.checks.iter().find(|c| c.check_name == "orphan_embeddings").map(|c| c.affected_count).unwrap_or(0),
+        summary.checks.iter().find(|c| c.check_name == "missing_fts").map(|c| c.affected_count).unwrap_or(0),
+        summary.checks.iter().find(|c| c.check_name == "split_total_mismatch").map(|c| c.affected_count).unwrap_or(0),
+    );
+    Ok(summary)
 }
 
 /// P5-005: 修复缺失的 FTS 条目
 pub fn repair_fts(conn: &Connection) -> Result<i64> {
     let mut repaired = 0i64;
+    info!("repairing missing FTS entries");
     let mut stmt = conn.prepare(
         "SELECT n.id, n.content_tokens, n.library_id, n.document_id, n.level \
          FROM kb_document_nodes n WHERE n.id NOT IN (SELECT rowid FROM kb_doc_fts)",
@@ -187,6 +199,7 @@ pub fn repair_fts(conn: &Connection) -> Result<i64> {
         )?;
         repaired += 1;
     }
+    info!("FTS repair complete: repaired={}", repaired);
     Ok(repaired)
 }
 
@@ -214,6 +227,10 @@ pub fn repair_embeddings(conn: &Connection) -> Result<i64> {
     if count == 0 {
         return Ok(0);
     }
+    info!(
+        "repairing embeddings: {} nodes marked for re-embedding",
+        count
+    );
 
     // For each missing embedding node, insert a re-embed job into the jobs table.
     // The worker will pick these up and call the embedder to generate vectors.
@@ -360,6 +377,10 @@ pub fn purge_deleted(conn: &Connection, older_than_days: i32) -> Result<i64> {
     };
 
     let count = ids.len() as i64;
+    warn!(
+        "purging {} deleted documents older than {} days",
+        count, older_than_days
+    );
     let kb = crate::kb::engine::KbEngine::new(conn);
     for id in &ids {
         crate::kb::lifecycle::purge_document(&kb, *id)?;

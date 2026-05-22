@@ -16,7 +16,7 @@ use crate::types::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Tier classification for pages (mirrors TS enrichment tier rules)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -155,6 +155,10 @@ pub fn extract_entity_candidates(text: &str) -> Vec<EntityCandidate> {
     }
 
     candidates.truncate(20);
+    debug!(
+        candidate_count = candidates.len(),
+        "Entity candidate extraction complete"
+    );
     candidates
 }
 
@@ -164,6 +168,16 @@ pub fn extract_entity_candidates(text: &str) -> Vec<EntityCandidate> {
 /// - 3-7 mentions + 2+ sources → Tier2
 /// - Default → Tier3
 pub fn compute_tier(
+    mention_count: usize,
+    source_count: usize,
+    page_type: Option<PageType>,
+) -> Tier {
+    let tier = compute_tier_impl(mention_count, source_count, page_type);
+    debug!(mention_count, source_count, tier = %tier, "Tier computed");
+    tier
+}
+
+fn compute_tier_impl(
     mention_count: usize,
     source_count: usize,
     page_type: Option<PageType>,
@@ -228,7 +242,9 @@ impl<'a> EnrichmentService<'a> {
             }
         }
 
-        Ok(mentioning_pages.len())
+        let count = mentioning_pages.len();
+        debug!(slug = %slug, mention_count = count, "Mention count computed");
+        Ok(count)
     }
 
     /// Suggest a tier classification based on mention count (legacy)
@@ -278,6 +294,7 @@ impl<'a> EnrichmentService<'a> {
 
     /// Auto-enrich: detect entities, create stubs, add backlinks
     pub fn auto_enrich(&self, slug: &str, content: &str) -> Result<EnrichResult> {
+        info!(slug = %slug, "Starting auto_enrich");
         let mut result = EnrichResult {
             slug: slug.to_string(),
             entities_detected: 0,
@@ -352,6 +369,7 @@ impl<'a> EnrichmentService<'a> {
             }
         }
 
+        info!(slug = %slug, entities_detected = result.entities_detected, stubs_created = result.stubs_created, backlinks_added = result.backlinks_added, "Auto-enrich complete");
         Ok(result)
     }
 
@@ -445,6 +463,7 @@ impl<'a> EnrichmentService<'a> {
         let mut seen = std::collections::HashSet::new();
         links.retain(|l| seen.insert(l.to_slug.clone()));
         links.truncate(20);
+        trace!(link_count = links.len(), "Suggested links from content");
         links
     }
 }

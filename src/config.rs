@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 /// Brain configuration
 /// R3-03 fix: API keys are marked with `#[serde(skip_serializing)]` to prevent
@@ -562,6 +562,7 @@ impl Config {
                     "gpt-4o-mini".to_string()
                 }
             });
+        debug!(base_url = %base_url, model = %model, "RAPTOR config resolved");
         ResolvedRaptorConfig {
             api_key,
             base_url,
@@ -730,12 +731,14 @@ impl Config {
             }
             _ => return Err(format!("未知配置 key: {}", key)),
         }
+        info!(key = %key, value = %value, "Config key changed via apply_set");
         Ok(())
     }
 
     /// Merge another config into this one (other takes precedence for Some values)
     fn merge(&mut self, other: Config) {
         if other.database_path.is_some() {
+            trace!("merge: overriding database_path");
             self.database_path = other.database_path;
         }
         if other.openai_api_key.is_some() {
@@ -746,6 +749,7 @@ impl Config {
         }
         // Always take config file values for non-Option fields (they represent
         // explicit user choices, even if they match defaults)
+        trace!("merge: overriding embedding_model/embedding_dimensions");
         self.embedding_model = other.embedding_model;
         self.embedding_dimensions = other.embedding_dimensions;
         if other.expansion_api_key.is_some() {

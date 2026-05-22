@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tracing::{debug, trace};
 
 use super::types::UnifiedQueryResult;
 
@@ -67,8 +68,12 @@ impl QueryCache {
     pub fn get(&self, key: &str) -> Option<UnifiedQueryResult> {
         let mut entries = self.entries.lock().ok()?;
         match entries.get(key) {
-            Some(entry) if !entry.is_expired() => Some(entry.value.clone()),
+            Some(entry) if !entry.is_expired() => {
+                debug!("query_cache hit: key={}", key);
+                Some(entry.value.clone())
+            }
             _ => {
+                debug!("query_cache miss: key={}", key);
                 entries.remove(key);
                 None
             }
@@ -85,6 +90,7 @@ impl QueryCache {
                     .min_by_key(|(_, e)| e.created_at)
                     .map(|(k, _)| k.clone())
                 {
+                    trace!("query_cache eviction: key={}", oldest_key);
                     entries.remove(&oldest_key);
                 }
             }
@@ -102,14 +108,22 @@ impl QueryCache {
     /// 失效所有缓存（写入操作后调用）
     pub fn invalidate_all(&self) {
         if let Ok(mut entries) = self.entries.lock() {
+            let count = entries.len();
             entries.clear();
+            debug!("query_cache invalidate_all: cleared={}", count);
         }
     }
 
     /// 失效按前缀匹配的缓存
     pub fn invalidate_by_prefix(&self, prefix: &str) {
         if let Ok(mut entries) = self.entries.lock() {
+            let before = entries.len();
             entries.retain(|k, _| !k.starts_with(prefix));
+            let removed = before - entries.len();
+            debug!(
+                "query_cache invalidate_by_prefix: prefix={}, removed={}",
+                prefix, removed
+            );
         }
     }
 

@@ -20,6 +20,7 @@ use crate::kb::parser::ParserRegistry;
 use crate::operations::OpContext;
 use crate::sqlite_engine::SqliteEngine;
 use rusqlite::Connection;
+use tracing::{debug, info, warn};
 
 /// P2-12 修复：artifact_put --file 的内容大小上限常量（1MB），
 /// 与 put_memory 的内容长度限制保持一致。
@@ -67,6 +68,14 @@ impl<'a> ArtifactService<'a> {
         dry_run: bool,
         force: bool,
     ) -> Result<serde_json::Value> {
+        info!(
+            "put_memory start: slug={}, content_len={}, intent={:?}, dry_run={}, force={}",
+            slug,
+            content.len(),
+            intent,
+            dry_run,
+            force
+        );
         // 安全校验：内容长度限制（P2-12 修复：使用常量而非硬编码）
         if content.len() > MAX_PUT_MEMORY_CONTENT_BYTES {
             return Err(GBrainError::InvalidInput(format!(
@@ -159,7 +168,13 @@ impl<'a> ArtifactService<'a> {
         // 才能安全返回 no_op（说明页面内容确实与 artifact 所反映的一致）。
         let resolution = match &existing {
             // 冲突状态优先：页面被人工修改过，即使内容相同也不能返回 no_op
-            Some(a) if a.status == "active" && page_conflict_detected => "conflict",
+            Some(a) if a.status == "active" && page_conflict_detected => {
+                warn!(
+                    "put_memory conflict: slug={}, artifact_id={}, page modified by human",
+                    slug, a.id
+                );
+                "conflict"
+            }
             // 无冲突 + 内容相同 → 安全的幂等 no_op
             Some(a) if a.sha256 == content_sha256 && a.status == "active" => "no_op",
             Some(a) if a.status == "active" => "update",
@@ -168,6 +183,10 @@ impl<'a> ArtifactService<'a> {
 
         // P1-1 修复：dry_run 在任何写入之前返回，零副作用
         if dry_run {
+            debug!(
+                "put_memory dry_run: slug={}, resolution={}, to_brain={}, to_kb={}",
+                slug, resolution, route_plan.to_brain, route_plan.to_kb
+            );
             return Ok(serde_json::json!({
                 "dry_run": true,
                 "slug": slug,
@@ -411,12 +430,26 @@ impl<'a> ArtifactService<'a> {
                 .unwrap_or_else(|_| serde_json::json!({"status": "ok"})))
         })?;
 
+        info!(
+            "put_memory complete: slug={}, resolution={}",
+            slug,
+            output
+                .get("resolution")
+                .unwrap_or(&serde_json::json!("unknown"))
+        );
         Ok(serde_json::to_value(output).unwrap_or_else(|_| serde_json::json!({"status": "ok"})))
     }
 
     /// 上传文件作为知识源（设计文档 §4.1.1）
     /// 委托给现有 upload_source 逻辑
     pub fn upload_file(&self, input: UploadSourceInput) -> Result<UploadSourceOutput> {
+        info!(
+            "upload_file start: filename={}, intent={}, content_len={}, dry_run={}",
+            input.original_name,
+            input.intent,
+            input.content.len(),
+            input.dry_run
+        );
         // P2修复：dry_run 早返回必须在任何文件系统副作用之前，
         // 避免 create_dir_all 在 dry-run 模式下仍创建 artifact 目录
         if input.dry_run {
@@ -452,24 +485,36 @@ impl<'a> ArtifactService<'a> {
         std::fs::create_dir_all(&artifact_dir)
             .map_err(|e| GBrainError::FileError(format!("创建 artifact 目录失败: {}", e)))?;
 
-        self.engine.transaction_with_engine(|engine| {
-            let conn = engine.connection()?;
-            crate::artifact::upload::upload_source(
-                conn,
-                &input,
-                &artifact_dir,
-                &self.engine.gbrain_dir(),
-                self.config.default_kb_library_id,
-                &self.config.embedding_model,
-                self.config.embedding_dimensions,
-                &self.config.upload_default_promotion_policy,
-                self.config.artifact_auto_create_inbox_library,
-            )
-        })
+        self.engine
+            .transaction_with_engine(|engine| {
+                let conn = engine.connection()?;
+                crate::artifact::upload::upload_source(
+                    conn,
+                    &input,
+                    &artifact_dir,
+                    &self.engine.gbrain_dir(),
+                    self.config.default_kb_library_id,
+                    &self.config.embedding_model,
+                    self.config.embedding_dimensions,
+                    &self.config.upload_default_promotion_policy,
+                    self.config.artifact_auto_create_inbox_library,
+                )
+            })
+            .map(|output| {
+                info!(
+                    "upload_file complete: artifact_id={}, artifact_uid={}, is_new={}",
+                    output.artifact_id, output.artifact_uid, output.is_new
+                );
+                output
+            })
     }
 
     /// 统一知识查询（设计文档 §4.1.3）
     pub fn query(&self, input: UnifiedQueryInput) -> Result<UnifiedQueryResult> {
+        info!(
+            "query: strategy={}, limit={:?}",
+            input.strategy, input.limit
+        );
         let conn = self.engine.connection()?;
         query::unified_query(conn, &input, self.engine, self.config)
     }
@@ -659,11 +704,20 @@ impl<'a> ArtifactService<'a> {
 
     /// 应用建议变更
     pub fn apply_suggested_change(&self, change_id: i64) -> Result<ArtifactReviewActionOutput> {
-        self.engine.transaction_with_engine(|engine| {
-            let conn = engine.connection()?;
-            let c = crate::artifact::review::apply_suggested_change(conn, change_id)?;
-            Ok(candidate_to_review_action_output(c, "applied"))
-        })
+        info!("apply_suggested_change: change_id={}", change_id);
+        self.engine
+            .transaction_with_engine(|engine| {
+                let conn = engine.connection()?;
+                let c = crate::artifact::review::apply_suggested_change(conn, change_id)?;
+                Ok(candidate_to_review_action_output(c, "applied"))
+            })
+            .map(|o| {
+                info!(
+                    "apply_suggested_change complete: change_id={}, target_slug={}",
+                    o.change_id, o.target_slug
+                );
+                o
+            })
     }
 
     /// 拒绝建议变更
@@ -671,6 +725,7 @@ impl<'a> ArtifactService<'a> {
         &self,
         input: ReviewCandidateInput,
     ) -> Result<ArtifactReviewActionOutput> {
+        info!("reject_suggested_change: change_id={}", input.candidate_id);
         self.engine.transaction_with_engine(|engine| {
             let conn = engine.connection()?;
             let c = crate::artifact::review::reject_suggested_change(conn, &input)?;
@@ -680,6 +735,7 @@ impl<'a> ArtifactService<'a> {
 
     /// 回滚已应用的建议变更
     pub fn rollback_suggested_change(&self, change_id: i64) -> Result<ArtifactReviewActionOutput> {
+        info!("rollback_suggested_change: change_id={}", change_id);
         self.engine.transaction_with_engine(|engine| {
             let conn = engine.connection()?;
             let c = crate::artifact::review::rollback_suggested_change(conn, change_id)?;
@@ -689,8 +745,16 @@ impl<'a> ArtifactService<'a> {
 
     /// 健康检查
     pub fn health_check(&self) -> Result<ArtifactHealthReport> {
+        info!("health_check start");
         let conn = self.engine.connection()?;
-        query::check_artifact_health(conn)
+        let report = query::check_artifact_health(conn)?;
+        info!(
+            "health_check complete: total={}, active={}, issues={}",
+            report.total_artifacts,
+            report.active_artifacts,
+            report.issues.len()
+        );
+        Ok(report)
     }
 
     /// 获取 Artifact 详情
@@ -837,6 +901,7 @@ impl<'a> ArtifactService<'a> {
 
     /// 软删除 Artifact
     pub fn delete_artifact(&self, artifact_id: i64) -> Result<()> {
+        info!("delete_artifact: artifact_id={}", artifact_id);
         self.engine.transaction_with_engine(|engine| {
             let conn = engine.connection()?;
             // 标记所有投影为 stale
@@ -910,6 +975,10 @@ impl<'a> ArtifactService<'a> {
         from_slug: &str,
         dry_run: bool,
     ) -> Result<serde_json::Value> {
+        info!(
+            "detach: id_or_uid={}, from_slug={}, dry_run={}",
+            id_or_uid, from_slug, dry_run
+        );
         // 解析 artifact ID 或 UID
         let artifact_id = self.resolve_artifact_id(id_or_uid)?;
 
@@ -963,6 +1032,7 @@ impl<'a> ArtifactService<'a> {
     /// 同时恢复关联的 kb_documents（清除 deleted_at、重新入队处理）
     /// 和因 kb_document_deleted 而变 stale 的 provenance。
     pub fn restore(&self, id_or_uid: &str, dry_run: bool) -> Result<serde_json::Value> {
+        info!("restore: id_or_uid={}, dry_run={}", id_or_uid, dry_run);
         let artifact_id = self.resolve_artifact_id(id_or_uid)?;
 
         if dry_run {
@@ -1036,6 +1106,7 @@ impl<'a> ArtifactService<'a> {
     /// brain_page_update(to_brain=true, to_shadow=false) 不一致。
     /// 现在基于旧投影类型重建，保证 reprocess 后投影类型与原始一致。
     pub fn reprocess(&self, id_or_uid: &str, dry_run: bool) -> Result<serde_json::Value> {
+        info!("reprocess: id_or_uid={}, dry_run={}", id_or_uid, dry_run);
         let artifact_id = self.resolve_artifact_id(id_or_uid)?;
 
         if dry_run {

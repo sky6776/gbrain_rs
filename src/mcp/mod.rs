@@ -15,7 +15,7 @@ use crate::sqlite_engine::SqliteEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, Write};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// JSON-RPC 2.0 request
 #[derive(Debug, Deserialize)]
@@ -262,15 +262,19 @@ impl McpServer {
             "tools/call" => {
                 let result = self.handle_tool_call(request.params);
                 match result {
-                    Ok(value) => HandleResult::Response(JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id,
-                        result: Some(serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
-                        })),
-                        error: None,
-                    }),
+                    Ok(value) => {
+                        info!(tool = "tools/call", "MCP tool call completed successfully");
+                        HandleResult::Response(JsonRpcResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id,
+                            result: Some(serde_json::json!({
+                                "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
+                            })),
+                            error: None,
+                        })
+                    }
                     Err(e) => {
+                        warn!(error = %e, "MCP tool call failed, sending error response");
                         // P2-9: Convert GBrainError to OperationError for structured response
                         let op_err = e.to_operation_error();
                         let error_data = serde_json::json!({
@@ -340,6 +344,7 @@ impl McpServer {
 
         // Validate required parameters before dispatching
         if let Some(err) = validate_params(&tool_name, &arguments) {
+            debug!(tool = %tool_name, error = %err, "Parameter validation failed");
             return Err(crate::error::GBrainError::InvalidInput(err));
         }
 

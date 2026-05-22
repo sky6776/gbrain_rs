@@ -534,6 +534,11 @@ pub fn build_sync_manifest(repo_path: &Path) -> Result<(Vec<PathBuf>, Vec<String
         }
     }
 
+    info!(
+        changed = changed_files.len(),
+        deleted = deleted_slugs.len(),
+        "Sync manifest built from git diff"
+    );
     Ok((changed_files, deleted_slugs))
 }
 
@@ -665,6 +670,7 @@ fn validate_git_url(url: &str) -> Result<()> {
         "git-receive-pack",
     ];
     if dangerous.iter().any(|d| url.contains(d)) {
+        warn!(url = %url, "Dangerous git URL rejected");
         return Err(GBrainError::Security(format!(
             "Git URL contains dangerous transport: {}",
             url
@@ -749,6 +755,7 @@ fn collect_import_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     walk_import_dir(dir, &mut files);
     files.sort();
+    debug!(dir = %dir.display(), total_count = files.len(), "Collected import files");
     files
 }
 
@@ -796,6 +803,7 @@ fn save_manifest(manifest: &SyncManifest, path: &Path) -> Result<()> {
         .map_err(|e| GBrainError::FileError(format!("Failed to serialize manifest: {}", e)))?;
     std::fs::write(path, content)
         .map_err(|e| GBrainError::FileError(format!("Failed to write manifest: {}", e)))?;
+    debug!(path = %path.display(), entry_count = manifest.entries.len(), "Sync manifest saved");
     Ok(())
 }
 

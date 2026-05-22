@@ -5,6 +5,7 @@
 //!       generate_review_changes, auto_apply_policy
 
 use crate::artifact::types::{RoutePlan, UploadIntent};
+use tracing::debug;
 
 /// 根据意图、扩展名和 MIME 类型推断路由计划
 ///
@@ -82,5 +83,8 @@ pub fn infer_route_plan_from_artifact_intent(
     }
     // 非手动 put（上传文件），走上传路由
     let intent: UploadIntent = intent_str.parse()?;
-    Ok(infer_route_plan(extension, mime, &intent))
+    let plan = infer_route_plan(extension, mime, &intent);
+    debug!("infer_route_plan_from_artifact_intent: ext={}, mime={}, intent={}, manual={}, to_kb={} to_brain={} to_shadow={} to_file={} promotion={}",
+        extension, mime, intent_str, manual, plan.to_kb, plan.to_brain, plan.to_shadow, plan.to_file, plan.promotion);
+    Ok(plan)
 }

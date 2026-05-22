@@ -130,6 +130,12 @@ pub fn lint_pages(engine: &SqliteEngine, slug: Option<&str>, opts: LintOpts) -> 
         .collect();
 
     let mut results = Vec::new();
+    info!(
+        page_count = pages.len(),
+        fix = opts.fix,
+        dry_run = opts.dry_run,
+        "Starting lint run"
+    );
     for page in &pages {
         let result = lint_page(engine, page, &all_slugs, &opts);
 
@@ -164,6 +170,12 @@ pub fn lint_pages(engine: &SqliteEngine, slug: Option<&str>, opts: LintOpts) -> 
         results.push(result);
     }
 
+    let total_issues: usize = results.iter().map(|r| r.issues.len()).sum();
+    let pages_with_issues = results.iter().filter(|r| !r.issues.is_empty()).count();
+    info!(
+        page_count = pages.len(),
+        pages_with_issues, total_issues, "Lint complete"
+    );
     results
 }
 
@@ -378,6 +390,7 @@ fn check_code_fence_residue(page: &Page, issues: &mut Vec<LintIssue>) {
 /// AI injections).
 fn fix_llm_preamble(content: &str) -> String {
     let mut result_lines = Vec::new();
+    let mut removed_count = 0usize;
     for line in content.lines() {
         let trimmed_lower = line.trim().to_lowercase();
         let is_preamble = LLM_PREAMBLE_PATTERNS
@@ -385,7 +398,15 @@ fn fix_llm_preamble(content: &str) -> String {
             .any(|pat| trimmed_lower.starts_with(pat));
         if !is_preamble {
             result_lines.push(line);
+        } else {
+            removed_count += 1;
         }
+    }
+    if removed_count > 0 {
+        debug!(
+            lines_removed = removed_count,
+            "fix_llm_preamble removed preamble lines"
+        );
     }
     // Re-join with newlines; preserve trailing newline if original had one
     let mut fixed = result_lines.join("\n");
@@ -405,6 +426,7 @@ fn fix_code_fence_residue(content: &str) -> String {
 
     if fence_count % 2 != 0 {
         // Odd number of fences — append closing fence
+        debug!("fix_code_fence_residue: appending closing fence");
         let mut fixed = content.to_string();
         // Ensure content ends with a newline before appending ```
         if !fixed.ends_with('\n') {

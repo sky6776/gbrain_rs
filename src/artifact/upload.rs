@@ -149,8 +149,16 @@ pub fn upload_source(
     config_default_promotion_policy: &str,
     auto_create_inbox: bool,
 ) -> Result<UploadSourceOutput> {
+    info!(
+        "upload_source start: filename={}, intent={}, content_len={}, dry_run={}",
+        input.original_name,
+        input.intent,
+        input.content.len(),
+        input.dry_run
+    );
     // 1. 计算 SHA256
     let sha256 = compute_sha256(&input.content);
+    debug!("upload_source: sha256={}", sha256);
 
     // 2. 推断扩展名和 MIME 类型
     let extension = infer_extension(&input.original_name);
@@ -406,6 +414,7 @@ pub fn upload_source(
             ).map_err(|e| GBrainError::Database(format!("写入影子页面失败: {}", e)))?;
 
             if rows_affected > 0 {
+                debug!("shadow page created: {}", slug);
                 // P3 修复：使用 chunker 对全文分块，而非只取前 800 字插入单个 chunk。
                 // shadow page 超过 800 字后，后续内容不会进入 chunk 索引，
                 // 导致长文档后半段的事实无法被搜索命中。
@@ -506,7 +515,7 @@ pub fn upload_source(
         }
     }
 
-    Ok(UploadSourceOutput {
+    let output = UploadSourceOutput {
         artifact_id,
         artifact_uid,
         occurrence_id,
@@ -515,7 +524,12 @@ pub fn upload_source(
         is_new,
         route_plan,
         projections,
-    })
+    };
+    info!(
+        "upload_source complete: artifact_id={}, artifact_uid={}, is_new={}",
+        output.artifact_id, output.artifact_uid, output.is_new
+    );
+    Ok(output)
 }
 
 /// 创建影子页面
@@ -795,6 +809,10 @@ pub fn put_manual_memory(
     auto_create_inbox: bool,
     route_plan: &RoutePlan,
 ) -> Result<UploadSourceOutput> {
+    info!(
+        "put_manual_memory: slug={}, intent={:?}, to_brain={}, to_shadow={}, to_kb={}",
+        slug, intent, route_plan.to_brain, route_plan.to_shadow, route_plan.to_kb
+    );
     // 解析意图
     let resolved_intent = intent.unwrap_or("memory");
     // 1. 规范化为 markdown

@@ -71,6 +71,7 @@ pub struct FailImproveLoop {
 
 impl FailImproveLoop {
     pub fn new(log_dir: PathBuf) -> Self {
+        debug!(log_dir = %log_dir.display(), "FailImproveLoop initialized");
         Self { log_dir }
     }
 
@@ -182,7 +183,10 @@ impl FailImproveLoop {
         // 2. Fall back to LLM
         info!(operation = %operation, "Deterministic failed, falling back to LLM");
         let result = match fallback_fn(input) {
-            Ok(r) => r,
+            Ok(r) => {
+                debug!(operation = %operation, "LLM fallback succeeded");
+                r
+            }
             Err(e) => {
                 // LLM also failed — log the failure before propagating
                 self.log_failure(operation, input, None, None);
@@ -204,6 +208,8 @@ impl FailImproveLoop {
         deterministic_result: Option<&str>,
         llm_result: Option<&str>,
     ) {
+        let input_preview: String = input.chars().take(80).collect();
+        warn!(operation = %operation, input_preview = %input_preview, "Logging failure entry");
         let entry = FailureEntry {
             timestamp: chrono::Utc::now().to_rfc3339(),
             operation: operation.to_string(),
@@ -265,6 +271,14 @@ impl FailImproveLoop {
         } else {
             1.0
         };
+
+        debug!(
+            operation = %operation,
+            total_failures,
+            total_calls,
+            deterministic_rate,
+            "Failure analysis complete"
+        );
 
         let last_improvement = improvements.last().map(|i| i.timestamp.clone());
 

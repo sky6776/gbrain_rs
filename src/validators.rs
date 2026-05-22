@@ -15,7 +15,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::OnceLock;
-use tracing::debug;
+use tracing::{debug, info};
 
 static WIKILINK_RE: OnceLock<Regex> = OnceLock::new();
 static CITE_RE: OnceLock<Regex> = OnceLock::new();
@@ -150,6 +150,7 @@ pub fn validate_citations(slug: &str, content: &str) -> ValidationResult {
         }
     }
 
+    debug!(slug = %slug, issue_count = result.issues.len(), "Citation validation complete");
     result
 }
 
@@ -179,6 +180,7 @@ pub fn validate_slug(slug: &str) -> ValidationResult {
     }
 
     if slug != slug.to_lowercase() {
+        debug!(slug = %slug, "Slug validation: not lowercase");
         result.add_issue(ValidationIssue {
             rule: "slug".to_string(),
             severity: Severity::Warning,
@@ -241,6 +243,7 @@ pub fn validate_triple_hr(slug: &str, content: &str) -> ValidationResult {
         }
     }
 
+    debug!(slug = %slug, stray_count = result.issues.len(), "Triple-hr validation complete");
     result
 }
 
@@ -360,6 +363,7 @@ pub fn validate_back_link_symmetry(engine: &SqliteEngine, slug: &str) -> Validat
 
 /// Run all validators on content
 pub fn validate_all(engine: &SqliteEngine, slug: &str, content: &str) -> ValidationResult {
+    info!(slug = %slug, "Running all validators");
     let mut result = validate_slug(slug);
 
     let back_link_result = validate_back_links(engine, slug, content);
@@ -386,6 +390,7 @@ pub fn validate_all(engine: &SqliteEngine, slug: &str, content: &str) -> Validat
         result.is_valid = false;
     }
 
+    info!(slug = %slug, total_issues = result.issues.len(), is_valid = result.is_valid, "All validators complete");
     result
 }
 

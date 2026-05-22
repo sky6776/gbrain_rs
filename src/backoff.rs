@@ -79,11 +79,19 @@ where
     E: std::fmt::Display,
 {
     let mut attempt = 0u32;
+    let start = std::time::Instant::now();
 
     loop {
         attempt += 1;
         match f() {
-            Ok(val) => return Ok(val),
+            Ok(val) => {
+                tracing::debug!(
+                    attempt,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "with_backoff_sync succeeded"
+                );
+                return Ok(val);
+            }
             Err(e) => {
                 if attempt > opts.max_retries {
                     return Err(e);
@@ -96,6 +104,13 @@ where
                 } else {
                     delay_ms
                 };
+                tracing::warn!(
+                    attempt,
+                    max_retries = opts.max_retries,
+                    delay_ms,
+                    error = %e,
+                    "Operation failed (sync), retrying with backoff"
+                );
                 std::thread::sleep(Duration::from_millis(delay_ms));
             }
         }
