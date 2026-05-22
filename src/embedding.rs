@@ -1,7 +1,7 @@
 //! OpenAI embedding API client
 //! Mirrors gbrain's src/core/embedding.ts
 //!
-//! Supports batch embedding (up to 100 texts per call),
+//! Supports batch embedding (internally split into provider-safe batches),
 //! retry with exponential backoff, Retry-After header parsing,
 //! input truncation, and batch completion callbacks.
 
@@ -16,8 +16,12 @@ pub const DEFAULT_MODEL: &str = "text-embedding-3-large";
 /// Default embedding dimensions
 pub const DEFAULT_DIMENSIONS: usize = 1536;
 
-/// Maximum batch size for embedding API
-pub const MAX_BATCH_SIZE: usize = 100;
+/// Maximum batch size for a single embedding API request.
+///
+/// Some OpenAI-compatible providers, including BigModel embedding-3, reject
+/// batches larger than 64 even though other providers allow more. Keep the
+/// transport batch conservative and let `embed_batch` split larger inputs.
+pub const MAX_BATCH_SIZE: usize = 64;
 
 /// Maximum input text length for embedding (characters)
 const MAX_EMBEDDING_INPUT_CHARS: usize = 8000;
@@ -93,20 +97,24 @@ impl Embedder {
             .ok_or_else(|| GBrainError::Embedding("No embedding returned".to_string()))
     }
 
-    /// Embed a batch of text strings (up to MAX_BATCH_SIZE)
+    /// Embed a batch of text strings.
+    ///
+    /// The caller may pass any number of texts; this method splits them into
+    /// provider-safe request batches and preserves the original order.
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        if texts.len() > MAX_BATCH_SIZE {
-            return Err(GBrainError::Embedding(format!(
-                "Batch size {} exceeds maximum {}",
-                texts.len(),
-                MAX_BATCH_SIZE
-            )));
+        let mut all_embeddings = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(MAX_BATCH_SIZE) {
+            let mut embeddings = self.embed_batch_request(batch).await?;
+            all_embeddings.append(&mut embeddings);
         }
+        Ok(all_embeddings)
+    }
 
+    async fn embed_batch_request(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         // Truncate input texts to MAX_EMBEDDING_INPUT_CHARS at word boundaries
         let truncated_texts: Vec<String> = texts
             .iter()

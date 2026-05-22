@@ -889,7 +889,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
         } => {
             let svc = ops.artifact_service();
             let detail =
-                svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
+                svc.get_artifact_detail(&id_or_uid, include_projections, include_sources, false)?;
             match detail {
                 Some(d) => {
                     info!("{}", serde_json::to_string_pretty(&d)?);

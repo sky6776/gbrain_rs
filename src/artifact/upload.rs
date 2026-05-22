@@ -144,6 +144,8 @@ pub fn upload_source(
     artifact_dir: &Path,
     _gbrain_dir: &Path,
     config_default_library_id: Option<i64>,
+    config_embedding_model: &str,
+    config_embedding_dimensions: usize,
     config_default_promotion_policy: &str,
     auto_create_inbox: bool,
 ) -> Result<UploadSourceOutput> {
@@ -311,6 +313,8 @@ pub fn upload_source(
             conn,
             input.library_id,
             config_default_library_id,
+            config_embedding_model,
+            config_embedding_dimensions,
             auto_create_inbox,
         )?;
         let proj_key = format!("library:{}", resolved_library_id);
@@ -591,10 +595,18 @@ fn resolve_default_library(
     conn: &Connection,
     explicit_library_id: Option<i64>,
     config_default_library_id: Option<i64>,
+    config_embedding_model: &str,
+    config_embedding_dimensions: usize,
     auto_create_inbox: bool,
 ) -> Result<i64> {
     // 1. 用户显式传入
     if let Some(id) = explicit_library_id {
+        ensure_default_library_embedding_index(
+            conn,
+            id,
+            config_embedding_model,
+            config_embedding_dimensions,
+        )?;
         return Ok(id);
     }
 
@@ -609,6 +621,12 @@ fn resolve_default_library(
             )
             .unwrap_or(false);
         if exists {
+            ensure_default_library_embedding_index(
+                conn,
+                id,
+                config_embedding_model,
+                config_embedding_dimensions,
+            )?;
             return Ok(id);
         }
     }
@@ -623,6 +641,12 @@ fn resolve_default_library(
         .ok();
 
     if let Some(id) = existing {
+        ensure_default_library_embedding_index(
+            conn,
+            id,
+            config_embedding_model,
+            config_embedding_dimensions,
+        )?;
         return Ok(id);
     }
 
@@ -634,16 +658,110 @@ fn resolve_default_library(
     }
 
     let now = now_str();
+    let embedding_model = normalized_embedding_model(config_embedding_model);
+    let embedding_dimensions = normalized_embedding_dimensions(config_embedding_dimensions)?;
     conn.execute(
-        "INSERT INTO kb_libraries (name, created_at, updated_at)
-         VALUES ('Inbox', ?1, ?1)",
-        rusqlite::params![now],
+        "INSERT INTO kb_libraries
+            (name, embedding_provider, embedding_model, embedding_dimensions, created_at, updated_at)
+         VALUES ('Inbox', 'openai', ?1, ?2, ?3, ?3)",
+        rusqlite::params![embedding_model, embedding_dimensions, now],
     )
     .map_err(|e| GBrainError::Database(format!("自动创建 Inbox 库失败: {}", e)))?;
 
     let id = conn.last_insert_rowid();
+    ensure_default_library_embedding_index(
+        conn,
+        id,
+        config_embedding_model,
+        config_embedding_dimensions,
+    )?;
     info!("自动创建默认 Inbox 库: id={}", id);
     Ok(id)
+}
+
+fn normalized_embedding_model(config_embedding_model: &str) -> &str {
+    let model = config_embedding_model.trim();
+    if model.is_empty() {
+        "text-embedding-3-large"
+    } else {
+        model
+    }
+}
+
+fn normalized_embedding_dimensions(config_embedding_dimensions: usize) -> Result<i32> {
+    let dimensions = if config_embedding_dimensions == 0 {
+        1536
+    } else {
+        config_embedding_dimensions
+    };
+    i32::try_from(dimensions)
+        .map_err(|_| GBrainError::InvalidInput("embedding_dimensions 超出 i32 范围".to_string()))
+}
+
+fn ensure_default_library_embedding_index(
+    conn: &Connection,
+    library_id: i64,
+    config_embedding_model: &str,
+    config_embedding_dimensions: usize,
+) -> Result<()> {
+    let has_active: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM kb_embedding_indexes
+             WHERE library_id = ?1 AND is_active = 1",
+            rusqlite::params![library_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_active {
+        return Ok(());
+    }
+
+    let model = normalized_embedding_model(config_embedding_model);
+    let dimensions = normalized_embedding_dimensions(config_embedding_dimensions)?;
+
+    conn.execute(
+        "UPDATE kb_libraries
+         SET embedding_provider = CASE
+                 WHEN embedding_provider IS NULL OR embedding_provider = '' THEN 'openai'
+                 ELSE embedding_provider
+             END,
+             embedding_model = CASE
+                 WHEN embedding_model IS NULL OR embedding_model = '' THEN ?2
+                 ELSE embedding_model
+             END,
+             embedding_dimensions = CASE
+                 WHEN embedding_dimensions IS NULL OR embedding_dimensions <= 0 THEN ?3
+                 ELSE embedding_dimensions
+             END
+         WHERE id = ?1",
+        rusqlite::params![library_id, model, dimensions],
+    )
+    .map_err(|e| GBrainError::Database(format!("更新默认 KB 库 embedding 配置失败: {}", e)))?;
+
+    let reusable_index_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM kb_embedding_indexes
+             WHERE library_id = ?1 AND model = ?2 AND dimensions = ?3
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![library_id, model, dimensions],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let index_id = match reusable_index_id {
+        Some(id) => id,
+        None => crate::kb::embedding_index::create_embedding_index(
+            conn, library_id, "openai", model, dimensions, "vec0",
+        )?,
+    };
+    crate::kb::embedding_index::activate_index(conn, index_id)?;
+
+    info!(
+        library_id,
+        index_id, model, dimensions, "确保默认 KB 库存在 active embedding index"
+    );
+
+    Ok(())
 }
 
 /// 手动写入长期记忆（设计文档 §8.6）
@@ -668,6 +786,8 @@ pub fn put_manual_memory(
     artifact_dir: &Path,
     _gbrain_dir: &Path,
     config_default_library_id: Option<i64>,
+    config_embedding_model: &str,
+    config_embedding_dimensions: usize,
     // P1-2 修复后不再使用 config_promotion_policy，occurrence 的 promotion_policy
     // 改为从 route_plan.promotion 获取，确保与 dry-run 预览一致
     _config_promotion_policy: &str,
@@ -964,6 +1084,8 @@ pub fn put_manual_memory(
             conn,
             None,
             config_default_library_id,
+            config_embedding_model,
+            config_embedding_dimensions,
             auto_create_inbox,
         )?)
     } else {

@@ -16,8 +16,10 @@ use crate::artifact::types::{
 };
 use crate::config::Config;
 use crate::error::{GBrainError, Result};
+use crate::kb::parser::ParserRegistry;
 use crate::operations::OpContext;
 use crate::sqlite_engine::SqliteEngine;
+use rusqlite::Connection;
 
 /// P2-12 修复：artifact_put --file 的内容大小上限常量（1MB），
 /// 与 put_memory 的内容长度限制保持一致。
@@ -264,6 +266,8 @@ impl<'a> ArtifactService<'a> {
                         &artifact_dir,
                         &self.engine.gbrain_dir(),
                         self.config.default_kb_library_id,
+                        &self.config.embedding_model,
+                        self.config.embedding_dimensions,
                         &self.config.upload_default_promotion_policy,
                         self.config.artifact_manual_memory_to_kb,
                         self.config.artifact_auto_create_inbox_library,
@@ -366,6 +370,8 @@ impl<'a> ArtifactService<'a> {
                 &artifact_dir,
                 &self.engine.gbrain_dir(),
                 self.config.default_kb_library_id,
+                &self.config.embedding_model,
+                self.config.embedding_dimensions,
                 &self.config.upload_default_promotion_policy,
                 self.config.artifact_manual_memory_to_kb,
                 self.config.artifact_auto_create_inbox_library,
@@ -454,6 +460,8 @@ impl<'a> ArtifactService<'a> {
                 &artifact_dir,
                 &self.engine.gbrain_dir(),
                 self.config.default_kb_library_id,
+                &self.config.embedding_model,
+                self.config.embedding_dimensions,
                 &self.config.upload_default_promotion_policy,
                 self.config.artifact_auto_create_inbox_library,
             )
@@ -707,6 +715,7 @@ impl<'a> ArtifactService<'a> {
         id_or_uid: &str,
         include_projections: bool,
         include_sources: bool,
+        include_content: bool,
     ) -> Result<Option<crate::artifact::types::ArtifactDetailOutput>> {
         let artifact_id = self.resolve_artifact_id(id_or_uid)?;
         let conn = self.engine.connection()?;
@@ -776,6 +785,12 @@ impl<'a> ArtifactService<'a> {
                         .collect(),
                 );
 
+                let content = if include_content {
+                    load_artifact_content(conn, artifact_id, &a)?
+                } else {
+                    None
+                };
+
                 Ok(Some(crate::artifact::types::ArtifactDetailOutput {
                     uid: a.artifact_uid,
                     slug: a.canonical_slug,
@@ -789,6 +804,7 @@ impl<'a> ArtifactService<'a> {
                     projections,
                     sources,
                     occurrences,
+                    content,
                 }))
             }
             None => Ok(None),
@@ -1168,6 +1184,80 @@ impl<'a> ArtifactService<'a> {
         let artifact = store::find_artifact_by_uid(conn, id_or_uid)?
             .ok_or_else(|| GBrainError::InvalidInput(format!("未找到 artifact '{}'", id_or_uid)))?;
         Ok(artifact.id)
+    }
+}
+
+fn load_artifact_content(
+    conn: &Connection,
+    artifact_id: i64,
+    artifact: &SourceArtifact,
+) -> Result<Option<String>> {
+    if let Some(content) = load_artifact_content_from_kb(conn, artifact_id)? {
+        return Ok(Some(content));
+    }
+    load_artifact_content_from_storage(artifact)
+}
+
+fn load_artifact_content_from_kb(conn: &Connection, artifact_id: i64) -> Result<Option<String>> {
+    let projections = store::find_projections_by_artifact(conn, artifact_id)
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+    for projection in projections {
+        if projection.status != "active" || projection.projection_type != "kb_document" {
+            continue;
+        }
+
+        let Some(document_id) = projection
+            .projection_ref
+            .strip_prefix("kb_document:")
+            .and_then(|id| id.parse::<i64>().ok())
+        else {
+            continue;
+        };
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM kb_document_nodes
+                 WHERE document_id = ?1 AND level = 0
+                 ORDER BY chunk_order, id",
+            )
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![document_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            let chunk = row.map_err(|e| GBrainError::Database(e.to_string()))?;
+            if !chunk.trim().is_empty() {
+                chunks.push(chunk);
+            }
+        }
+
+        if !chunks.is_empty() {
+            return Ok(Some(chunks.join("\n\n")));
+        }
+    }
+
+    Ok(None)
+}
+
+fn load_artifact_content_from_storage(artifact: &SourceArtifact) -> Result<Option<String>> {
+    let bytes = std::fs::read(&artifact.storage_path).map_err(|e| {
+        GBrainError::FileError(format!(
+            "读取 artifact 原始文件失败 '{}': {}",
+            artifact.storage_path, e
+        ))
+    })?;
+
+    match ParserRegistry::new().parse(&artifact.extension, &bytes) {
+        Ok(parsed) => Ok(Some(parsed.content)),
+        Err(parse_error) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Err(parse_error),
+        },
     }
 }
 

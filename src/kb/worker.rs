@@ -82,6 +82,18 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                 "KB worker: 文档处理完成"
             );
 
+            if let Err(e) = update_shadow_pages_after_kb_success(
+                conn,
+                payload.document_id,
+                &payload.processing_run_id,
+            ) {
+                warn!(
+                    document_id = payload.document_id,
+                    error = %e,
+                    "KB worker: 更新 artifact shadow page 状态失败"
+                );
+            }
+
             // 修复：先入队 promotion 再 complete job，避免 enqueue 失败时
             // job 已完成不会重试，导致 artifact_promote_extract 永久丢失。
             // 之前先 complete_kb_job 再 enqueue，一旦 INSERT/COMMIT/查询出现
@@ -134,10 +146,282 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                 None,
                 Some(&payload.processing_run_id),
             );
+            if let Err(update_error) = update_shadow_pages_after_kb_failure(
+                conn,
+                payload.document_id,
+                &payload.processing_run_id,
+                &e.to_string(),
+            ) {
+                warn!(
+                    document_id = payload.document_id,
+                    error = %update_error,
+                    "KB worker: 更新失败状态到 artifact shadow page 失败"
+                );
+            }
             fail_kb_job(conn, job_db_id, &e.to_string())?;
             Ok(true)
         }
     }
+}
+
+fn update_shadow_pages_after_kb_success(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+) -> Result<usize> {
+    with_current_document_run(conn, document_id, run_id, || {
+        let (embedding_status, embedding_error, word_total, split_total): (i32, String, i64, i64) =
+            conn.query_row(
+                "SELECT embedding_status, embedding_error, word_total, split_total
+             FROM kb_documents WHERE id = ?1",
+                rusqlite::params![document_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|e| GBrainError::Database(format!("查询 KB 文档状态失败: {}", e)))?;
+
+        let summary = if embedding_status == crate::kb::types::STATUS_FAILED {
+            format!(
+                "KB text extracted and keyword indexed, but embedding failed: {}",
+                truncate_shadow_status_detail(&embedding_error)
+            )
+        } else {
+            format!(
+                "KB processing completed. Text extracted and indexed. Chunks: {}. Words: {}.",
+                split_total, word_total
+            )
+        };
+
+        update_shadow_pages_for_kb_document(conn, document_id, &summary)
+    })
+}
+
+fn update_shadow_pages_after_kb_failure(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+    error: &str,
+) -> Result<usize> {
+    let summary = format!(
+        "KB processing failed: {}",
+        truncate_shadow_status_detail(error)
+    );
+    with_current_document_run(conn, document_id, run_id, || {
+        update_shadow_pages_for_kb_document(conn, document_id, &summary)
+    })
+}
+
+fn with_current_document_run<F>(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+    update: F,
+) -> Result<usize>
+where
+    F: FnOnce() -> Result<usize>,
+{
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| GBrainError::Database(format!("开启 shadow page 状态回写事务失败: {}", e)))?;
+
+    let result = (|| -> Result<usize> {
+        if !document_run_is_current(conn, document_id, run_id)? {
+            debug!(
+                document_id,
+                expected_run_id = run_id,
+                "KB worker: shadow page 状态回写时 run_id 已过期，跳过"
+            );
+            return Ok(0);
+        }
+
+        update()
+    })();
+
+    match result {
+        Ok(updated) => {
+            conn.execute("COMMIT", []).map_err(|e| {
+                let _ = conn.execute("ROLLBACK", []);
+                GBrainError::Database(format!("提交 shadow page 状态回写失败: {}", e))
+            })?;
+            Ok(updated)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+fn document_run_is_current(conn: &Connection, document_id: i64, run_id: &str) -> Result<bool> {
+    let current_run_id: Option<String> = match conn.query_row(
+        "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+        rusqlite::params![document_id],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(current_run_id) => Some(current_run_id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            return Err(GBrainError::Database(format!(
+                "查询 KB 文档 run_id 失败: {}",
+                e
+            )))
+        }
+    };
+
+    Ok(current_run_id.as_deref() == Some(run_id))
+}
+
+fn update_shadow_pages_for_kb_document(
+    conn: &Connection,
+    document_id: i64,
+    summary: &str,
+) -> Result<usize> {
+    let projection_ref = format!("kb_document:{}", document_id);
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT sp.projection_ref
+             FROM artifact_projections kb
+             JOIN artifact_projections sp
+               ON sp.artifact_id = kb.artifact_id
+              AND COALESCE(sp.occurrence_id, -1) = COALESCE(kb.occurrence_id, -1)
+             WHERE kb.projection_type = 'kb_document'
+               AND kb.projection_ref = ?1
+               AND kb.status = 'active'
+               AND sp.projection_type = 'brain_shadow_page'
+               AND sp.status = 'active'",
+        )
+        .map_err(|e| GBrainError::Database(format!("查询 shadow page 投影失败: {}", e)))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![projection_ref], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| GBrainError::Database(format!("遍历 shadow page 投影失败: {}", e)))?;
+
+    let mut updated = 0usize;
+    for row in rows {
+        let projection_ref = row.map_err(|e| GBrainError::Database(e.to_string()))?;
+        let slug = projection_ref
+            .strip_prefix("slug:")
+            .unwrap_or(&projection_ref)
+            .to_string();
+        if update_shadow_page_summary(conn, &slug, summary)? {
+            updated += 1;
+        }
+    }
+
+    Ok(updated)
+}
+
+fn update_shadow_page_summary(conn: &Connection, slug: &str, summary: &str) -> Result<bool> {
+    let page: Option<(i64, String, String)> = match conn.query_row(
+        "SELECT id, title, compiled_truth FROM pages
+         WHERE slug = ?1 AND deleted_at IS NULL",
+        rusqlite::params![slug],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ) {
+        Ok(page) => Some(page),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            return Err(GBrainError::Database(format!(
+                "查询 shadow page 失败: {}",
+                e
+            )))
+        }
+    };
+
+    let Some((page_id, title, body)) = page else {
+        return Ok(false);
+    };
+
+    let updated_body = set_shadow_summary(&body, summary);
+    if updated_body == body {
+        return Ok(false);
+    }
+
+    let truth_tokens = crate::nlp::chinese::tokenize_content(&updated_body);
+    let content_hash = page_content_hash(&title, &updated_body);
+    conn.execute(
+        "UPDATE pages
+         SET compiled_truth = ?1,
+             compiled_truth_tokens = ?2,
+             content_hash = ?3,
+             updated_at = datetime('now')
+         WHERE id = ?4",
+        rusqlite::params![updated_body, truth_tokens, content_hash, page_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("更新 shadow page 状态失败: {}", e)))?;
+
+    rebuild_shadow_page_chunks(conn, page_id, &updated_body)?;
+    Ok(true)
+}
+
+fn set_shadow_summary(body: &str, summary: &str) -> String {
+    const HEADING: &str = "## Summary";
+    let summary = summary.trim();
+    let Some(start) = body.find(HEADING) else {
+        return format!("{}\n\n{}\n\n{}", body.trim_end(), HEADING, summary);
+    };
+
+    let content_start = start + HEADING.len();
+    let suffix = body[content_start..]
+        .find("\n\n## ")
+        .map(|offset| &body[content_start + offset..])
+        .unwrap_or("");
+    format!("{}\n\n{}{}", &body[..content_start], summary, suffix)
+}
+
+fn rebuild_shadow_page_chunks(conn: &Connection, page_id: i64, body: &str) -> Result<()> {
+    let _ = conn.execute(
+        "DELETE FROM vec_chunks
+         WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
+        rusqlite::params![page_id],
+    );
+    let _ = conn.execute(
+        "DELETE FROM chunk_embeddings
+         WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
+        rusqlite::params![page_id],
+    );
+    conn.execute(
+        "DELETE FROM chunks WHERE page_id = ?1",
+        rusqlite::params![page_id],
+    )
+    .map_err(|e| GBrainError::Database(format!("删除 shadow page 旧 chunk 失败: {}", e)))?;
+
+    let chunks =
+        crate::chunker::chunk_text(body, None, None, crate::types::ChunkSource::CompiledTruth);
+    for chunk in &chunks {
+        let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk.chunk_text);
+        conn.execute(
+            "INSERT INTO chunks
+                (page_id, chunk_index, chunk_text, chunk_text_tokens, token_count, chunk_source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'body', datetime('now'))",
+            rusqlite::params![
+                page_id,
+                chunk.chunk_index,
+                chunk.chunk_text,
+                chunk_text_tokens,
+                chunk.token_count
+            ],
+        )
+        .map_err(|e| GBrainError::Database(format!("创建 shadow page chunk 失败: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+fn page_content_hash(title: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(title.as_bytes());
+    hasher.update(body.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn truncate_shadow_status_detail(detail: &str) -> String {
+    let mut truncated: String = detail.chars().take(500).collect();
+    if detail.chars().count() > 500 {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 /// 运行一次 re-embed 作业处理循环：认领一个 kb_reembed 或 kb_reembed_node 作业并处理。

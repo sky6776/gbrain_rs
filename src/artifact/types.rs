@@ -1229,6 +1229,8 @@ pub struct ArtifactDetailOutput {
     pub sources: Option<Vec<SourceRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrences: Option<Vec<ArtifactOccurrenceSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// projection 摘要（用户友好字段，不暴露内部 projection_key/ref）

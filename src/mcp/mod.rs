@@ -561,10 +561,15 @@ impl McpServer {
                 let include_projections =
                     arguments["include_projections"].as_bool().unwrap_or(false);
                 let include_sources = arguments["include_sources"].as_bool().unwrap_or(false);
+                let include_content = arguments["include_content"].as_bool().unwrap_or(false);
 
                 let svc = ops.artifact_service();
-                let detail =
-                    svc.get_artifact_detail(&id_or_uid, include_projections, include_sources)?;
+                let detail = svc.get_artifact_detail(
+                    &id_or_uid,
+                    include_projections,
+                    include_sources,
+                    include_content,
+                )?;
 
                 match detail {
                     Some(d) => Ok(serde_json::to_value(d)?),

@@ -86,6 +86,7 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
             ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'）", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "include_projections", description: "包含投影详情", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "include_sources", description: "包含来源追溯", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "include_content", description: "包含正文内容（优先 KB chunks，未处理时尝试解析原始文件）", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },
 

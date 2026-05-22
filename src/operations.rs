@@ -1423,6 +1423,8 @@ impl<'a> Operations<'a> {
                 &artifact_dir,
                 &self.engine.gbrain_dir(),
                 self.config.default_kb_library_id,
+                &self.config.embedding_model,
+                self.config.embedding_dimensions,
                 &self.config.upload_default_promotion_policy,
                 self.config.artifact_auto_create_inbox_library,
             )

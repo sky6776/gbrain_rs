@@ -270,8 +270,9 @@ fn artifact_get_include_sources_queries_by_artifact_id() {
     let detail = svc
         .get_artifact_detail(
             &artifact_id.to_string(),
-            true, // include_projections
-            true, // include_sources
+            true,  // include_projections
+            true,  // include_sources
+            false, // include_content
         )
         .expect("get_artifact_detail");
 
@@ -280,6 +281,41 @@ fn artifact_get_include_sources_queries_by_artifact_id() {
     assert_eq!(detail.slug, "people/get-test");
     assert!(detail.projections.is_some(), "should include projections");
     assert!(detail.occurrences.is_some(), "should include occurrences");
+}
+
+#[test]
+fn artifact_get_include_content_reads_artifact_body() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    let put_result = svc
+        .put_memory(
+            "people/content-test",
+            "Full body content from the artifact",
+            Some("Content Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory");
+
+    let artifact_id = put_result
+        .get("artifact_id")
+        .or_else(|| put_result.get("id"))
+        .and_then(|v: &serde_json::Value| v.as_i64())
+        .expect("should have artifact_id");
+
+    let detail = svc
+        .get_artifact_detail(&artifact_id.to_string(), false, false, true)
+        .expect("get_artifact_detail")
+        .expect("detail should exist");
+
+    let content = detail.content.expect("content should be included");
+    assert!(
+        content.contains("Full body content from the artifact"),
+        "artifact body should be returned"
+    );
 }
 
 // --- Test 7: artifact_delete marks occurrences, projections, kb_docs, provenance ---
@@ -313,7 +349,7 @@ fn artifact_delete_marks_occurrences_projections_kb_docs_provenance() {
 
     // Verify artifact is deleted
     let detail = svc
-        .get_artifact_detail(&artifact_id.to_string(), true, false)
+        .get_artifact_detail(&artifact_id.to_string(), true, false, false)
         .expect("get_artifact_detail after delete");
     if let Some(d) = detail {
         assert_eq!(d.status, "deleted", "artifact should be soft-deleted");
@@ -359,7 +395,7 @@ fn artifact_restore_only_restores_artifact_deleted_state() {
 
     // Verify artifact is active again
     let detail = svc
-        .get_artifact_detail(&artifact_id.to_string(), true, false)
+        .get_artifact_detail(&artifact_id.to_string(), true, false, false)
         .expect("get_artifact_detail after restore");
     if let Some(d) = detail {
         assert_eq!(d.status, "active", "artifact should be restored to active");
