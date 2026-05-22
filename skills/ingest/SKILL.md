@@ -130,11 +130,10 @@ about a company -> `companies/`, reusable framework -> `concepts/`, raw data -> 
 **Input:** File path or URL.
 
 **Process:**
-1. Extract text with an available local or host tool before writing to gbrain_rs.
-2. **Save raw source** for provenance
-3. Summarize: executive summary + key sections + notable data
-4. Extract entities
-5. Cross-reference from entity pages
+1. Use `artifact_upload` directly with the file path — **do NOT `read_file` first**. `artifact_upload` handles all formats (md, docx, pdf, txt, csv, json) automatically.
+2. Summarize: executive summary + key sections + notable data
+3. Extract entities
+4. Cross-reference from entity pages
 
 **Write to:** per filing rules (file by primary subject, not format).
 
@@ -245,9 +244,9 @@ Raw source: [preserved at path / uploaded to cloud]
 
 ## Tools Used
 
+- `artifact_upload` — **首选** for importing documents (md, docx, pdf, txt, csv, json). 直接传文件路径，不要先 `read_file`.
+- `artifact_put` — write non-document knowledge (ideas, structured data, notes) to long-term memory
 - `artifact_query` — search for existing knowledge (unified entry point)
-- `artifact_put` — write to long-term memory (unified entry point)
-- `artifact_upload` — upload file as knowledge source
 - `artifact_get` — read knowledge source detail
 - `artifact_list` — list knowledge sources
 - `artifact_delete` — soft-delete knowledge sources

@@ -32,7 +32,7 @@ Universal migration from any wiki, note tool, or brain system into GBrain.
 | Obsidian | Markdown + `[[wikilinks]]` | Direct import, convert wikilinks to gbrain links |
 | Notion | Exported markdown or CSV | Parse Notion's export structure |
 | Logseq | Markdown with `((block refs))` | Convert block refs to page links |
-| Plain markdown | Any .md directory | Import directory into gbrain directly |
+| Plain markdown | Any .md directory | Use `artifact_upload` directly (no `read_file` first) |
 | CSV | Tabular data | Map columns to frontmatter fields |
 | JSON | Structured data | Map keys to page fields |
 | Roam | JSON export | Convert block structure to pages |
@@ -41,8 +41,8 @@ Universal migration from any wiki, note tool, or brain system into GBrain.
 
 1. **Assess the source.** What format? How many files? What structure?
 2. **Plan the mapping.** How do source fields map to gbrain fields (type, title, tags, compiled_truth, timeline)?
-3. **Test with a sample.** Import 5-10 files, verify by reading them back from gbrain and exporting.
-4. **Bulk import.** Import the full directory into gbrain.
+3. **Test with a sample.** Upload 5-10 files via `artifact_upload`, verify by reading them back from gbrain and exporting.
+4. **Bulk import.** For **document files** (md, docx, pdf, txt, csv, json, etc.): use `artifact_upload` directly with file paths — do NOT `read_file` first. For **non-document knowledge** (ideas, structured data, notes): use `artifact_put`.
 5. **Verify.** Check gbrain health and statistics, spot-check pages.
 6. **Build links.** Extract cross-references from content and create typed links in gbrain.
 
@@ -119,11 +119,16 @@ Verification:
 
 ## Tools Used
 
-- Write pages to gbrain (artifact_put — unified entry point)
+- Upload documents to gbrain (artifact_upload — **首选**, 直接传文件路径，支持 md/docx/pdf/txt/csv/json 等所有格式)
+- Write non-document knowledge to gbrain (artifact_put — 仅用于非文档类知识，如 ideas、structured data、notes)
 - Read pages from gbrain (artifact_query, artifact_get)
-- Upload files as knowledge sources (artifact_upload)
-- ~~Link entities in gbrain~~ (add_link — legacy, 已移除)
-- ~~Tag pages in gbrain~~ (add_tag — legacy, 已移除)
-- ~~Get gbrain statistics~~ (get_stats — legacy, 已移除)
 - Check gbrain health (artifact_health)
 - Search gbrain (artifact_query)
+
+### 工具选择规则
+
+| 场景 | 使用工具 | 说明 |
+|------|----------|------|
+| 导入文档文件 (md, docx, pdf, txt, csv, json 等) | `artifact_upload` | 直接传文件路径，**不要先 `read_file`** |
+| 写入想法、笔记、结构化知识 | `artifact_put` | 用于非文件类的知识写入 |
+| 查询已有知识 | `artifact_query` | 搜索 gbrain 中的内容 |
