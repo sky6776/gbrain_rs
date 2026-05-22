@@ -531,7 +531,10 @@ impl SqliteEngine {
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?1, datetime('now'))",
                 params![crate::schema::SCHEMA_VERSION],
             )?;
-            debug!("Schema version recorded: v{}", crate::schema::SCHEMA_VERSION);
+            debug!(
+                "Schema version recorded: v{}",
+                crate::schema::SCHEMA_VERSION
+            );
         }
 
         Ok(())
