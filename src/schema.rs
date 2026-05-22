@@ -333,6 +333,585 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_type_status ON jobs(job_type, status);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- KB 子系统表
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- KB 库（知识库顶层容器）
+CREATE TABLE IF NOT EXISTS kb_libraries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    name TEXT NOT NULL,
+    semantic_segmentation_enabled INTEGER NOT NULL DEFAULT 0,
+    raptor_enabled INTEGER NOT NULL DEFAULT 0,
+    raptor_llm_base_url TEXT NOT NULL DEFAULT '',
+    raptor_llm_secret_ref TEXT NOT NULL DEFAULT '',
+    raptor_llm_model TEXT NOT NULL DEFAULT '',
+    chunk_size INTEGER NOT NULL DEFAULT 512,
+    chunk_overlap INTEGER NOT NULL DEFAULT 50,
+    batch_max_documents INTEGER NOT NULL DEFAULT 3,
+    batch_max_chunks INTEGER NOT NULL DEFAULT 10,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    embedding_provider TEXT NOT NULL DEFAULT '',
+    embedding_model TEXT NOT NULL DEFAULT '',
+    embedding_dimensions INTEGER,
+    search_profile TEXT NOT NULL DEFAULT '',
+    rerank_enabled INTEGER NOT NULL DEFAULT 1,
+    rerank_provider TEXT NOT NULL DEFAULT '',
+    summary_enabled INTEGER NOT NULL DEFAULT 0,
+    external_embedding_allowed INTEGER NOT NULL DEFAULT 1,
+    external_rerank_allowed INTEGER NOT NULL DEFAULT 1,
+    external_summary_allowed INTEGER NOT NULL DEFAULT 1,
+    external_ocr_allowed INTEGER NOT NULL DEFAULT 1,
+    redaction_enabled INTEGER NOT NULL DEFAULT 0,
+    deleted_at TEXT -- 软删除时间戳，NULL 表示未删除
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_libraries_name ON kb_libraries(name);
+
+-- KB 文件夹
+CREATE TABLE IF NOT EXISTS kb_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES kb_folders(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_folders_library_id ON kb_folders(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_folders_parent_id ON kb_folders(parent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_folders_library_parent_name
+    ON kb_folders(library_id, COALESCE(parent_id, -1), name);
+
+-- KB 文档
+CREATE TABLE IF NOT EXISTS kb_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    folder_id INTEGER REFERENCES kb_folders(id) ON DELETE SET NULL,
+    original_name TEXT NOT NULL,
+    name_tokens TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL,
+    extension TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'local',
+    storage_path TEXT NOT NULL DEFAULT '',
+    original_path TEXT NOT NULL DEFAULT '',
+    job_id TEXT NOT NULL DEFAULT '',
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    parsing_status INTEGER NOT NULL DEFAULT 0,
+    parsing_progress INTEGER NOT NULL DEFAULT 0,
+    parsing_error TEXT NOT NULL DEFAULT '',
+    embedding_status INTEGER NOT NULL DEFAULT 0,
+    embedding_progress INTEGER NOT NULL DEFAULT 0,
+    embedding_error TEXT NOT NULL DEFAULT '',
+    word_total INTEGER NOT NULL DEFAULT 0,
+    split_total INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    keywords TEXT NOT NULL DEFAULT '',
+    entity_names TEXT NOT NULL DEFAULT '',
+    source_uri TEXT NOT NULL DEFAULT '',
+    modified_at TEXT,
+    document_date TEXT,
+    normalized_content_hash TEXT NOT NULL DEFAULT '',
+    simhash TEXT NOT NULL DEFAULT '',
+    document_family_id TEXT,
+    version_label TEXT NOT NULL DEFAULT '',
+    document_granularity TEXT NOT NULL DEFAULT 'micro',
+    content_char_count INTEGER NOT NULL DEFAULT 0,
+    content_token_count INTEGER NOT NULL DEFAULT 0,
+    page_count INTEGER NOT NULL DEFAULT 0,
+    section_count INTEGER NOT NULL DEFAULT 0,
+    chunk_strategy TEXT NOT NULL DEFAULT 'auto',
+    document_status TEXT NOT NULL DEFAULT 'queued',
+    index_status TEXT NOT NULL DEFAULT 'pending',
+    current_version_id INTEGER,
+    deleted_at TEXT,
+    purged_at TEXT,
+    last_indexed_at TEXT,
+    last_seen_at TEXT,
+    ocr_status TEXT NOT NULL DEFAULT 'not_needed',
+    ocr_text_coverage REAL NOT NULL DEFAULT 0.0
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
+    ON kb_documents(library_id, content_hash) WHERE deleted_at IS NULL AND purged_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id ON kb_documents(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_library_id_id ON kb_documents(library_id, id);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_document_status ON kb_documents(document_status);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_deleted_at ON kb_documents(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_kb_docs_granularity ON kb_documents(document_granularity);
+
+-- KB 文档节点
+CREATE TABLE IF NOT EXISTS kb_document_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    content_tokens TEXT NOT NULL DEFAULT '',
+    level INTEGER NOT NULL DEFAULT 0,
+    parent_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    chunk_order INTEGER NOT NULL DEFAULT 0,
+    section_id INTEGER,
+    title_path TEXT NOT NULL DEFAULT '',
+    page_number INTEGER,
+    source_start INTEGER,
+    source_end INTEGER,
+    node_metadata TEXT NOT NULL DEFAULT '{}',
+    embedding_text TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_library_id ON kb_document_nodes(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_document_id ON kb_document_nodes(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_parent_id ON kb_document_nodes(parent_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_level ON kb_document_nodes(level);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_doc_level_order
+    ON kb_document_nodes(document_id, level, chunk_order);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_section_id ON kb_document_nodes(section_id);
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_page_number ON kb_document_nodes(page_number);
+
+-- KB Embedding 索引注册表
+CREATE TABLE IF NOT EXISTS kb_embedding_indexes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    index_type TEXT NOT NULL DEFAULT 'vec0',
+    is_active INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_kb_emb_idx_library ON kb_embedding_indexes(library_id);
+
+-- KB 节点 Embedding（复合主键，支持多索引）
+CREATE TABLE IF NOT EXISTS kb_node_embeddings (
+    node_id INTEGER NOT NULL REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL,
+    dimensions INTEGER NOT NULL,
+    model TEXT NOT NULL DEFAULT 'text-embedding-3-large',
+    embedded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    embedding_index_id INTEGER NOT NULL REFERENCES kb_embedding_indexes(id) ON DELETE CASCADE,
+    PRIMARY KEY (node_id, embedding_index_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
+
+-- KB 文档版本
+CREATE TABLE IF NOT EXISTS kb_document_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    version_label TEXT NOT NULL DEFAULT '',
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    char_count INTEGER NOT NULL DEFAULT 0,
+    node_count INTEGER NOT NULL DEFAULT 0,
+    index_status TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_document_versions(document_id);
+
+-- KB 文档章节
+CREATE TABLE IF NOT EXISTS kb_document_sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    parent_section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE SET NULL,
+    title TEXT NOT NULL DEFAULT '',
+    title_path TEXT NOT NULL DEFAULT '',
+    heading_level INTEGER NOT NULL DEFAULT 0,
+    section_order INTEGER NOT NULL DEFAULT 0,
+    page_number INTEGER,
+    source_start INTEGER,
+    source_end INTEGER,
+    content_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_doc ON kb_document_sections(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_sections_parent ON kb_document_sections(parent_section_id);
+
+-- KB 文档摘要
+CREATE TABLE IF NOT EXISTS kb_document_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    section_id INTEGER REFERENCES kb_document_sections(id) ON DELETE CASCADE,
+    summary_type TEXT NOT NULL DEFAULT 'document',
+    summary_text TEXT NOT NULL DEFAULT '',
+    summary_tokens TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    UNIQUE(document_id, section_id, summary_type)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_summaries_doc ON kb_document_summaries(document_id);
+
+-- KB 搜索评测查询集
+CREATE TABLE IF NOT EXISTS kb_search_eval_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    query_text TEXT NOT NULL,
+    query_type TEXT NOT NULL DEFAULT 'manual',
+    expected_document_ids TEXT NOT NULL DEFAULT '[]',
+    notes TEXT NOT NULL DEFAULT ''
+);
+
+-- KB 索引状态表
+CREATE TABLE IF NOT EXISTS kb_index_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    index_name TEXT NOT NULL UNIQUE,
+    index_version INTEGER NOT NULL DEFAULT 1,
+    index_type TEXT NOT NULL DEFAULT 'vector',
+    dimensions INTEGER,
+    model TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'active',
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    last_rebuilt_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- KB 搜索日志
+CREATE TABLE IF NOT EXISTS kb_search_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    query_normalized TEXT NOT NULL DEFAULT '',
+    library_ids TEXT NOT NULL DEFAULT '[]',
+    profile TEXT NOT NULL DEFAULT '',
+    planner_type TEXT NOT NULL DEFAULT '',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cache_hit INTEGER NOT NULL DEFAULT 0,
+    debug_mode INTEGER NOT NULL DEFAULT 0,
+    embedding_index_id INTEGER,
+    result_document_ids TEXT NOT NULL DEFAULT '[]'
+);
+
+-- KB 搜索反馈
+CREATE TABLE IF NOT EXISTS kb_search_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    search_log_id INTEGER REFERENCES kb_search_logs(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    rating INTEGER NOT NULL DEFAULT 0,
+    comment TEXT NOT NULL DEFAULT ''
+);
+
+-- KB 表格索引
+CREATE TABLE IF NOT EXISTS kb_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    sheet_name TEXT NOT NULL DEFAULT '',
+    headers TEXT NOT NULL DEFAULT '[]',
+    column_count INTEGER NOT NULL DEFAULT 0,
+    row_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_kb_tables_doc ON kb_tables(document_id);
+
+-- KB 表格行
+CREATE TABLE IF NOT EXISTS kb_table_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    table_id INTEGER NOT NULL REFERENCES kb_tables(id) ON DELETE CASCADE,
+    row_index INTEGER NOT NULL DEFAULT 0,
+    row_text TEXT NOT NULL DEFAULT '',
+    row_tokens TEXT NOT NULL DEFAULT '',
+    row_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_table_rows_table ON kb_table_rows(table_id);
+
+-- KB 外部模型调用审计
+CREATE TABLE IF NOT EXISTS kb_external_model_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER REFERENCES kb_libraries(id) ON DELETE SET NULL,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    call_type TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    cost_estimate REAL NOT NULL DEFAULT 0.0,
+    success INTEGER NOT NULL DEFAULT 1,
+    error_message TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_kb_ext_calls_library ON kb_external_model_calls(library_id);
+
+-- KB 导入源
+CREATE TABLE IF NOT EXISTS kb_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    source_type TEXT NOT NULL DEFAULT 'local',
+    source_uri TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    connector_config TEXT NOT NULL DEFAULT '{}',
+    delete_policy TEXT NOT NULL DEFAULT 'mark_only',
+    sync_status TEXT NOT NULL DEFAULT 'idle',
+    last_synced_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kb_sources_library ON kb_sources(library_id);
+
+-- KB 导入源条目
+CREATE TABLE IF NOT EXISTS kb_source_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    source_id INTEGER NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    item_path TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    file_size INTEGER NOT NULL DEFAULT 0,
+    last_seen_at TEXT,
+    sync_status TEXT NOT NULL DEFAULT 'pending',
+    sync_error TEXT NOT NULL DEFAULT '',
+    UNIQUE(source_id, item_path)
+);
+CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
+
+-- KB 节点 FTS5 全文索引
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_doc_fts USING fts5(
+    tokens,
+    library_id,
+    document_id UNINDEXED,
+    level UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_insert
+AFTER INSERT ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(rowid, tokens, library_id, document_id, level)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.level);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_update
+AFTER UPDATE OF content_tokens, library_id, document_id, level ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, document_id, level)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.level);
+    INSERT INTO kb_doc_fts(rowid, tokens, library_id, document_id, level)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.level);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_delete
+AFTER DELETE ON kb_document_nodes BEGIN
+    INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, document_id, level)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.level);
+END;
+
+-- KB 文档名称 FTS5 索引
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_doc_name_fts USING fts5(
+    name_tokens,
+    library_id,
+    document_id UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_insert
+AFTER INSERT ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(rowid, name_tokens, library_id, document_id)
+    VALUES (new.id, new.name_tokens, new.library_id, new.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_delete
+AFTER DELETE ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(kb_doc_name_fts, rowid, name_tokens, library_id, document_id)
+    VALUES('delete', old.id, old.name_tokens, old.library_id, old.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_docs_fts_update
+AFTER UPDATE OF name_tokens, library_id ON kb_documents BEGIN
+    INSERT INTO kb_doc_name_fts(kb_doc_name_fts, rowid, name_tokens, library_id, document_id)
+    VALUES('delete', old.id, old.name_tokens, old.library_id, old.id);
+    INSERT INTO kb_doc_name_fts(rowid, name_tokens, library_id, document_id)
+    VALUES (new.id, new.name_tokens, new.library_id, new.id);
+END;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Artifact 子系统表（单入口多投影融合架构）
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- 原件内容对象（按 sha256 去重）
+CREATE TABLE IF NOT EXISTS source_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    artifact_uid TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen_at TEXT,
+
+    sha256 TEXT NOT NULL,
+    original_name TEXT NOT NULL DEFAULT '',
+    extension TEXT NOT NULL DEFAULT '',
+    mime_type TEXT NOT NULL DEFAULT '',
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+
+    storage_path TEXT NOT NULL DEFAULT '',
+    canonical_slug TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+
+    deleted_at TEXT,
+    purged_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_artifacts_sha256
+    ON source_artifacts(sha256) WHERE purged_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_source_artifacts_slug ON source_artifacts(canonical_slug);
+CREATE INDEX IF NOT EXISTS idx_source_artifacts_status ON source_artifacts(status);
+
+-- 上传/同步/关联事件
+CREATE TABLE IF NOT EXISTS artifact_occurrences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurrence_uid TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL DEFAULT 'upload',
+    source_uri TEXT NOT NULL DEFAULT '',
+    original_path TEXT NOT NULL DEFAULT '',
+    original_name TEXT NOT NULL DEFAULT '',
+    owner_ref TEXT NOT NULL DEFAULT '',
+
+    intent TEXT NOT NULL DEFAULT 'auto',
+    target_slug TEXT NOT NULL DEFAULT '',
+    page_slug TEXT NOT NULL DEFAULT '',
+    library_id INTEGER,
+    folder_id INTEGER,
+    promotion_policy TEXT NOT NULL DEFAULT 'candidate',
+
+    status TEXT NOT NULL DEFAULT 'active',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_artifact ON artifact_occurrences(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_source ON artifact_occurrences(source_kind, source_uri);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_target ON artifact_occurrences(target_slug);
+CREATE INDEX IF NOT EXISTS idx_artifact_occ_page ON artifact_occurrences(page_slug);
+
+-- 投影映射
+CREATE TABLE IF NOT EXISTS artifact_projections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    projection_type TEXT NOT NULL,
+    projection_key TEXT NOT NULL DEFAULT '',
+    projection_ref TEXT NOT NULL DEFAULT '',
+
+    status TEXT NOT NULL DEFAULT 'active',
+    version_hash TEXT NOT NULL DEFAULT '',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    superseded_by INTEGER REFERENCES artifact_projections(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_artifact ON artifact_projections(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_occurrence ON artifact_projections(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_type ON artifact_projections(projection_type);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_ref ON artifact_projections(projection_ref);
+CREATE INDEX IF NOT EXISTS idx_artifact_proj_superseded ON artifact_projections(superseded_by);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_proj_active_unique
+    ON artifact_projections(artifact_id, projection_type, projection_key)
+    WHERE status = 'active';
+
+-- 候选变更
+CREATE TABLE IF NOT EXISTS promotion_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER NOT NULL REFERENCES source_artifacts(id) ON DELETE CASCADE,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    kb_document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    kb_node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+
+    candidate_type TEXT NOT NULL,
+    target_slug TEXT NOT NULL DEFAULT '',
+    target_field TEXT NOT NULL DEFAULT '',
+
+    title TEXT NOT NULL DEFAULT '',
+    proposed_payload TEXT NOT NULL DEFAULT '{}',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+
+    confidence REAL NOT NULL DEFAULT 0.0,
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer TEXT NOT NULL DEFAULT '',
+    review_notes TEXT NOT NULL DEFAULT '',
+    applied_at TEXT,
+    candidate_fingerprint TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_artifact ON promotion_candidates(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_occurrence ON promotion_candidates(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_doc ON promotion_candidates(kb_document_id);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_status ON promotion_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_promo_candidates_target ON promotion_candidates(target_slug);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_candidates_fingerprint
+    ON promotion_candidates(candidate_fingerprint)
+    WHERE candidate_fingerprint != '' AND status IN ('pending', 'accepted', 'applied');
+
+-- 来源追溯
+CREATE TABLE IF NOT EXISTS provenance_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    artifact_id INTEGER REFERENCES source_artifacts(id) ON DELETE SET NULL,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    kb_document_id INTEGER REFERENCES kb_documents(id) ON DELETE SET NULL,
+    kb_node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    promotion_candidate_id INTEGER REFERENCES promotion_candidates(id) ON DELETE SET NULL,
+
+    brain_slug TEXT NOT NULL DEFAULT '',
+    brain_field TEXT NOT NULL DEFAULT '',
+    fact_hash TEXT NOT NULL DEFAULT '',
+
+    quote_text TEXT NOT NULL DEFAULT '',
+    quote_start INTEGER,
+    quote_end INTEGER,
+    page_number INTEGER,
+
+    confidence REAL NOT NULL DEFAULT 0.0,
+    status TEXT NOT NULL DEFAULT 'active',
+    stale_reason TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_provenance_artifact ON provenance_ledger(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_occurrence ON provenance_ledger(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_kb_doc ON provenance_ledger(kb_document_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_kb_node ON provenance_ledger(kb_node_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_brain_slug ON provenance_ledger(brain_slug);
+CREATE INDEX IF NOT EXISTS idx_provenance_fact_hash ON provenance_ledger(fact_hash);
+
+-- Artifact 审计事件
+CREATE TABLE IF NOT EXISTS artifact_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    artifact_id INTEGER REFERENCES source_artifacts(id) ON DELETE SET NULL,
+    occurrence_id INTEGER REFERENCES artifact_occurrences(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifact_events_artifact ON artifact_events(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_events_occurrence ON artifact_events(occurrence_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_events_type ON artifact_events(event_type);
 "#;
 
 /// Generate sqlite-vec virtual table DDL

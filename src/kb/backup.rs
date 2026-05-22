@@ -700,7 +700,7 @@ pub fn import_library(
     let table_id_map = import_tables(conn, archive_dir, new_lib_id, &doc_id_map)?;
     import_table_rows(conn, archive_dir, &table_id_map)?;
     let source_id_map = import_sources(conn, archive_dir, new_lib_id)?;
-    import_source_items(conn, archive_dir, &source_id_map)?;
+    import_source_items(conn, archive_dir, &source_id_map, &doc_id_map)?;
 
     Ok(new_lib_id)
 }
@@ -1359,11 +1359,12 @@ fn import_sources(
     Ok(id_map)
 }
 
-/// 导入 kb_source_items，重映射 source_id
+/// 导入 kb_source_items，重映射 source_id 和 document_id
 fn import_source_items(
     conn: &Connection,
     archive_dir: &Path,
     source_id_map: &std::collections::HashMap<i64, i64>,
+    doc_id_map: &std::collections::HashMap<i64, i64>,
 ) -> Result<()> {
     let path = archive_dir.join("source_items.json");
     if !path.exists() {
@@ -1377,19 +1378,25 @@ fn import_source_items(
     for item in &items {
         let old_source_id = item.get("source_id").and_then(|v| v.as_i64()).unwrap_or(0);
         let new_source_id = source_id_map.get(&old_source_id).copied().unwrap_or(0);
+        // 重映射 document_id：旧 ID → 新 ID，无法映射时写 NULL
+        let new_document_id = item
+            .get("document_id")
+            .and_then(|v| v.as_i64())
+            .and_then(|old_id| doc_id_map.get(&old_id).copied());
         conn.execute(
-            "INSERT INTO kb_source_items (source_id, relative_path, file_name, file_size, content_hash, \
-             sync_status, last_synced_at, item_metadata) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO kb_source_items (source_id, document_id, external_id, item_path, \
+             content_hash, file_size, last_seen_at, sync_status, sync_error) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 new_source_id,
-                json_str(item, "relative_path"),
-                json_str(item, "file_name"),
-                json_int(item, "file_size"),
+                new_document_id,
+                json_str(item, "external_id"),
+                json_str(item, "item_path"),
                 json_str(item, "content_hash"),
+                json_int(item, "file_size"),
+                json_opt_str(item, "last_seen_at"),
                 json_str(item, "sync_status"),
-                json_str(item, "last_synced_at"),
-                json_str(item, "item_metadata"),
+                json_str(item, "sync_error"),
             ],
         )?;
     }
@@ -1509,6 +1516,17 @@ fn json_int(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> i64 
 fn json_null_or_int(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<i64> {
     map.get(key)
         .and_then(|v| if v.is_null() { None } else { v.as_i64() })
+}
+
+/// Helper: extract Option<String> from JSON map (null 或不存在 → None)
+fn json_opt_str(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    map.get(key).and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_str().map(|s| s.to_string())
+        }
+    })
 }
 
 /// 从 embeddings.json 推断向量维度：优先取 `dimensions` 字段，否则从第一条 embedding blob 计算

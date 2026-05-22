@@ -477,14 +477,9 @@ impl SqliteEngine {
         Ok(scored.into_iter().map(|(slug, _)| slug).collect())
     }
 
-    /// 记录当前 schema 版本号。
-    ///
-    /// 新数据库通过 SCHEMA_DDL 一次性创建完整 schema，无需逐版本迁移。
-    /// 此函数仅将 SCHEMA_VERSION 写入 schema_version 表，确保版本追踪一致。
-    pub fn run_pending_migrations(&self) -> Result<()> {
-        let conn = self.conn()?;
-
-        // 检查当前版本，如果已有记录则跳过
+    /// 在执行 SCHEMA_DDL 之前检查旧库版本，避免 DDL 部分修改旧库后才报错。
+    fn check_schema_version_before_ddl(&self, conn: &Connection) -> Result<()> {
+        // schema_version 表可能不存在（全新数据库），此时查询会失败，直接返回即可
         let current_version: i32 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -493,6 +488,44 @@ impl SqliteEngine {
             )
             .unwrap_or(0);
 
+        // 版本 > 0 但 < 当前版本 → 旧库，拒绝升级
+        if current_version > 0 && current_version < crate::schema::SCHEMA_VERSION {
+            return Err(GBrainError::Database(format!(
+                "不支持的 schema 版本: 当前 v{}，需要 v{}。旧数据库不支持自动升级，请新建数据库。",
+                current_version,
+                crate::schema::SCHEMA_VERSION,
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// 记录当前 schema 版本号。
+    ///
+    /// 新数据库通过 SCHEMA_DDL 一次性创建完整 schema，无需逐版本迁移。
+    /// 此函数仅将 SCHEMA_VERSION 写入 schema_version 表，确保版本追踪一致。
+    pub fn run_pending_migrations(&self) -> Result<()> {
+        let conn = self.conn()?;
+
+        // 检查当前版本
+        let current_version: i32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        // 不支持旧版本数据库自动升级：版本 > 0 但 < 当前版本时直接报错
+        if current_version > 0 && current_version < crate::schema::SCHEMA_VERSION {
+            return Err(GBrainError::Database(format!(
+                "不支持的 schema 版本: 当前 v{}，需要 v{}。旧数据库不支持自动升级，请新建数据库。",
+                current_version,
+                crate::schema::SCHEMA_VERSION,
+            )));
+        }
+
+        // 新数据库（current_version == 0）或已匹配当前版本：记录版本号
         if current_version < crate::schema::SCHEMA_VERSION {
             conn.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?1, datetime('now'))",
@@ -716,6 +749,11 @@ impl BrainEngine for SqliteEngine {
     fn init_schema(&self) -> Result<()> {
         debug!("Initializing database schema");
         let conn = self.conn()?;
+
+        // 先检查旧库版本，在执行 DDL 之前拒绝不支持的旧库，
+        // 避免部分 CREATE TABLE IF NOT EXISTS 已修改旧库后才报错
+        self.check_schema_version_before_ddl(&conn)?;
+
         conn.execute_batch(SCHEMA_DDL)?;
 
         // 尝试创建 sqlite-vec 虚拟表（扩展未加载时忽略错误）
@@ -724,7 +762,7 @@ impl BrainEngine for SqliteEngine {
         let vec_kb_ddl = crate::schema::vec_kb_nodes_ddl(self.embedding_dimensions);
         let _ = conn.execute_batch(&vec_kb_ddl);
 
-        // Run pending migrations
+        // 记录版本号（旧库已在前置检查中拦截，此处仅处理新库或已匹配版本）
         self.run_pending_migrations()?;
 
         info!("Database schema initialized");
