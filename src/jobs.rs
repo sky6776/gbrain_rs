@@ -5,7 +5,6 @@
 //! Supports priority ordering, retry with max_attempts, and status transitions.
 
 use crate::error::{GBrainError, Result};
-use crate::schema::JOBS_TABLE_DDL;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -78,9 +77,8 @@ impl<'a> JobQueue<'a> {
         Self { conn }
     }
 
-    /// Ensure the jobs table exists
+    /// jobs 表已包含在 SCHEMA_DDL 中，无需额外初始化
     pub fn init(&self) -> Result<()> {
-        self.conn.execute_batch(JOBS_TABLE_DDL)?;
         Ok(())
     }
 
@@ -343,7 +341,7 @@ mod tests {
 
     fn setup() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(JOBS_TABLE_DDL).unwrap();
+        conn.execute_batch(crate::schema::SCHEMA_DDL).unwrap();
         conn
     }
 

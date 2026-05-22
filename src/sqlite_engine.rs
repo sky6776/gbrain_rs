@@ -46,65 +46,6 @@ fn has_table(conn: &Connection, name: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// Check if a column already exists in a table using PRAGMA table_info.
-/// Returns false if the table doesn't exist or the column is not found.
-fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    let pragma = format!("PRAGMA table_info(\"{}\")", table);
-    let Ok(mut stmt) = conn.prepare(&pragma) else {
-        return false;
-    };
-    let Ok(mapped) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
-        return false;
-    };
-    for c in mapped.flatten() {
-        if c.eq_ignore_ascii_case(column) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Parse an ALTER TABLE ADD COLUMN statement and return (table_name, column_name) if it matches.
-/// Returns None if the statement is not an ALTER TABLE ADD COLUMN.
-fn parse_alter_add_column(sql: &str) -> Option<(&str, &str)> {
-    let s = sql.trim();
-    // Match: ALTER TABLE <table> ADD COLUMN <column> ...
-    // Case-insensitive, handles optional COLUMN keyword
-    let upper = s.to_uppercase();
-    if !upper.starts_with("ALTER TABLE") || !upper.contains(" ADD") {
-        return None;
-    }
-    // Remove "ALTER TABLE"
-    let rest = s.strip_prefix("ALTER TABLE")?.trim();
-    // Find "ADD" or "ADD COLUMN" - case insensitive
-    let add_pos = rest.to_uppercase().find("ADD")?;
-    let table_part = rest[..add_pos].trim();
-    let after_add = rest[add_pos + 3..].trim();
-    // Skip optional "COLUMN" keyword
-    let col_part = if after_add.to_uppercase().starts_with("COLUMN") {
-        after_add.strip_prefix(&after_add[..6])?.trim()
-    } else {
-        after_add
-    };
-    // Column name is the first token (may be quoted with backticks, double quotes, or brackets)
-    let col_name = if let Some(inner) = col_part.strip_prefix('"') {
-        let end = inner.find('"')?;
-        &col_part[1..end + 1]
-    } else if let Some(inner) = col_part.strip_prefix('`') {
-        let end = inner.find('`')?;
-        &col_part[1..end + 1]
-    } else if col_part.starts_with('[') {
-        let end = col_part.find(']')?;
-        &col_part[1..end]
-    } else {
-        // Unquoted: take until whitespace or '('
-        col_part
-            .split(|c: char| c.is_whitespace() || c == '(')
-            .next()?
-    };
-    Some((table_part, col_name))
-}
-
 fn default_hard_excludes() -> Vec<String> {
     let mut prefixes = vec![
         "test/".to_string(),
@@ -536,16 +477,14 @@ impl SqliteEngine {
         Ok(scored.into_iter().map(|(slug, _)| slug).collect())
     }
 
-    /// Run all pending schema migrations.
+    /// 记录当前 schema 版本号。
     ///
-    /// Migration failures return Err rather than being silently swallowed,
-    /// preventing the database from ending up in a half-upgraded state.
-    /// ALTER TABLE ADD COLUMN statements are made idempotent by checking
-    /// PRAGMA table_info first — if the column already exists the statement
-    /// is skipped instead of causing an error.
+    /// 新数据库通过 SCHEMA_DDL 一次性创建完整 schema，无需逐版本迁移。
+    /// 此函数仅将 SCHEMA_VERSION 写入 schema_version 表，确保版本追踪一致。
     pub fn run_pending_migrations(&self) -> Result<()> {
         let conn = self.conn()?;
 
+        // 检查当前版本，如果已有记录则跳过
         let current_version: i32 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -554,76 +493,15 @@ impl SqliteEngine {
             )
             .unwrap_or(0);
 
-        let migrations = crate::schema::get_migrations();
-        for (version, ddl) in migrations {
-            if version > current_version {
-                debug!("Applying migration v{}", version);
-
-                // Make ALTER TABLE ADD COLUMN statements idempotent by
-                // checking PRAGMA table_info and skipping columns that
-                // already exist.
-                let filtered_ddl = Self::filter_idempotent_ddl(conn, ddl);
-
-                // Wrap each migration in a transaction for atomicity.
-                // Use unchecked_transaction to keep rusqlite's transaction
-                // depth tracking in sync.
-                let tx = conn.unchecked_transaction()?;
-                conn.execute_batch(&filtered_ddl).map_err(|e| {
-                    GBrainError::Migration(format!(
-                        "Migration v{} failed (DDL execution): {}",
-                        version, e
-                    ))
-                })?;
-                conn.execute(
-                    "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?1, datetime('now'))",
-                    params![version],
-                )
-                .map_err(|e| {
-                    GBrainError::Migration(format!(
-                        "Migration v{} failed (version insert): {}",
-                        version, e
-                    ))
-                })?;
-                tx.commit()?;
-                info!("Migration v{} applied", version);
-            }
-        }
-
-        // For fresh databases where SCHEMA_DDL already includes all columns,
-        // record the current schema version so pending migrations are skipped
-        if current_version == 0 {
+        if current_version < crate::schema::SCHEMA_VERSION {
             conn.execute(
-                "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
-                rusqlite::params![crate::schema::SCHEMA_VERSION],
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?1, datetime('now'))",
+                params![crate::schema::SCHEMA_VERSION],
             )?;
+            debug!("Schema version recorded: v{}", crate::schema::SCHEMA_VERSION);
         }
 
         Ok(())
-    }
-
-    /// Filter a DDL batch, replacing ALTER TABLE ADD COLUMN statements with
-    /// no-ops when the target column already exists. This makes migrations
-    /// idempotent so they can be safely re-run after a partial failure.
-    fn filter_idempotent_ddl(conn: &Connection, ddl: &str) -> String {
-        ddl.lines()
-            .map(|line| {
-                if let Some((table, column)) = parse_alter_add_column(line) {
-                    if column_exists(conn, table, column) {
-                        debug!(
-                            "Skipping ALTER TABLE {} ADD COLUMN {} — column already exists",
-                            table, column
-                        );
-                        // Replace with a no-op comment so line numbers stay stable
-                        return format!(
-                            "-- SKIP: column '{}' already exists in '{}'",
-                            column, table
-                        );
-                    }
-                }
-                line.to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 
     /// Normalize a partial slug for matching: lowercase, replace spaces/underscores with hyphens,
