@@ -18,9 +18,14 @@ tools:
   - artifact_review_get   # 查看建议变更详情
   - artifact_review_apply # 应用建议变更
   - artifact_review_reject # 拒绝建议变更
+  - artifact_review_rollback # 回滚已应用变更
   - artifact_list         # 列出知识源
+  - artifact_get          # 获取知识源详情
+  - artifact_reprocess    # 重新处理知识源
+  - artifact_delete       # 软删除知识源
+  - artifact_restore      # 恢复知识源
 mutating: true
-writes_pages: false
+writes_pages: true
 ---
 
 # Autopilot Skill — Health Diagnostics and Knowledge Maintenance
@@ -34,7 +39,7 @@ This skill guarantees:
 - Health diagnostics identify issues in knowledge source consistency
 - Suggested changes are reviewed and applied systematically
 - Maintenance operations are safe and reversible (reject / rollback)
-- Dry-run previews are used before applying changes
+- Dry-run previews are used before lifecycle operations where supported
 
 ## Components
 

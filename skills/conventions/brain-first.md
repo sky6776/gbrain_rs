@@ -14,8 +14,8 @@ commands:
 
 | Tool | Use for |
 |------|---------|
-| `artifact_put` | Write manual memory / promote shadow pages (unified entry point) |
-| `artifact_upload` | Upload a file as knowledge source |
+| `artifact_put` | Write manual memory and non-document knowledge |
+| `artifact_upload` | Upload user-provided documents/files as knowledge sources |
 | `artifact_query` | Unified knowledge query with source tracing (memory + evidence + timeline) |
 | `artifact_list` | List all knowledge sources |
 | `artifact_get` | Get knowledge source details |
@@ -33,16 +33,16 @@ commands:
 | `query` | `artifact_query` |
 | `get_page` | `artifact_get` |
 | `put_page` | `artifact_put` |
-| `add_timeline_entry` | `artifact_put` (intent=memory) |
-| `add_link` | `artifact_put` (自动链接) |
+| `add_timeline_entry` | `artifact_put` with a timeline section in the page content |
+| `add_link` | `artifact_put` content/frontmatter link reconciliation |
 | `get_links` | 暂未暴露（mode=graph 尚未实现） |
 | `get_backlinks` | 暂未暴露（mode=graph 尚未实现） |
 | `get_timeline` | `artifact_query` (mode=timeline) |
 | `resolve_slugs` | `artifact_query` (模糊匹配内置) |
 | `traverse_graph` | 暂未暴露（mode=graph 尚未实现） |
-| `code_def` | `artifact_query` (代码图谱检索) |
-| `code_refs` | `artifact_query` (代码图谱检索) |
-| `get_callers` | `artifact_query` (代码图谱检索) |
+| `code_def` | 暂未暴露为 MCP；仅 Rust `Operations` 内部 API 可用 |
+| `code_refs` | 暂未暴露为 MCP；仅 Rust `Operations` 内部 API 可用 |
+| `get_callers` | 暂未暴露为 MCP；仅 Rust `Operations` 内部 API 可用 |
 
 Tool names vary by transport. MCP uses short names; CLI commands are usually
 `gbrain <command>`. Use whichever your environment provides.
@@ -52,7 +52,7 @@ Tool names vary by transport. MCP uses short names; CLI commands are usually
 1. **`artifact_query`** first — 统一知识查询（memory + evidence + timeline + 来源追溯）
 2. **`artifact_query`** with `mode=memory` for brain-first search — 仅精选知识
 3. **`artifact_query`** with `mode=evidence` for document-heavy queries — KB 证据优先
-4. **内部工具**（如 `code_def`/`code_refs`）用于代码符号查询 — `mode=graph` 尚未实现
+4. **Code graph:** MCP 只能做通用 `artifact_query` 搜索；专用符号/调用图 API 仅在 Rust `Operations` 内部可用
 5. **External APIs only after steps 1-4 return nothing useful**
 
 Never skip to external APIs without completing steps 1-4. The brain has
@@ -64,12 +64,13 @@ thousands of pages. The answer is almost always there.
 - **User's direct statements are highest-authority data.** The brain captures
   what the user said in meetings, conversations, and notes. External sources
   are supplementary.
-- **After bulk brain page writes:** graph/timeline 数据通过 artifact 投影自动同步，无需手动刷新。
+- **Tool choice:** user-uploaded documents/files go straight to `artifact_upload`; non-document knowledge and curated memory go through `artifact_put`.
+- **After brain page writes:** chunks and links are refreshed by the page write path. Timeline rows are only created from supported timeline content; there is no standalone public timeline write tool.
 - **Every brain page reference in output** should use a clickable link format
   appropriate to the deployment (GitHub URL, local path, or slug).
 - **Never use `memory_search` for entity lookups.** Memory tools search
   session notes (MEMORY.md), not the brain knowledge graph. Use
-  `query` for entity lookups.
+  `artifact_query` for entity lookups.
 
 ## Entity Page Conventions
 

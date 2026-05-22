@@ -1,11 +1,11 @@
 ---
 name: citation-fixer
-version: 1.1.0
+version: 1.2.0
 description: |
   Audit and fix citation formatting across brain pages. Ensures every fact has
-  an inline [Source: ...] citation matching the standard format. Extended in
-  v0.25.1: scans for broken tweet/post references that lack actual URLs and
-  resolves them via the host's X / Twitter API integration.
+  an inline [Source: ...] citation matching the standard format. Uses the
+  artifact facade only; broken external references are flagged unless a
+  deterministic source URL is already available.
 triggers:
   - "fix citations"
   - "fix broken citations"
@@ -14,6 +14,8 @@ triggers:
   - "citation fixer"
 tools:
   - artifact_query  # 统一查询接口
+  - artifact_get    # 获取知识源详情/内容
+  - artifact_list   # 列出知识源
   - artifact_put    # 统一写入接口
 mutating: true
 ---
@@ -30,36 +32,36 @@ mutating: true
 
 This skill guarantees:
 
-- Every brain page is scanned for citation compliance.
+- The requested page set is scanned for citation compliance.
 - Missing citations are flagged with specific location.
 - Malformed citations are fixed to match the standard format.
-- **(v0.25.1)** Tweet / post references without URLs are resolved via
-  X API and patched with deterministic `https://x.com/<handle>/status/<id>`
-  links.
+- Broken tweet/post references without URLs are flagged for review. Do not
+  invent URLs or assume an X/Twitter API integration exists.
 - Results reported with counts (scanned, fixed, remaining).
 
 ## Phases
 
-1. **Scan pages.** List pages and read each one, checking for inline
-   `[Source: ...]` citations.
+1. **Scan relevant artifacts/pages.** Use `artifact_query` to find candidates,
+   `artifact_list` for bounded sweeps, and `artifact_get` with content when the
+   transport supports it.
 2. **Identify issues:**
    - Facts without any citation
    - Citations missing date
    - Citations missing source type
    - Citations with wrong format
-   - **(v0.25.1)** Tweet references without `x.com` URLs
+   - Tweet/post references without deterministic URLs
 3. **Fix format issues.** Rewrite malformed citations to match
    `conventions/quality.md`.
-4. **(v0.25.1) Resolve tweet references** via the X API integration.
+4. **Flag unresolved external references.** Only patch a URL when the source
+   artifact or user-provided evidence contains the exact URL.
 5. **Report results.** Count: pages scanned, citations found, issues
-   fixed, tweets resolved, remaining gaps.
+   fixed, unresolved external references, remaining gaps.
 
-## Tweet resolution pipeline (v0.25.1 extension)
+## Broken External Reference Pipeline
 
-For each broken tweet reference, follow this chain. The actual API call
-goes through whatever X integration the host has configured (typical
-shape: a recipe under `recipes/x-api/` with handle / search-all
-endpoints).
+For each broken tweet/post/reference, follow this chain. The current
+gbrain_rs skill surface does not include an X/Twitter API connector, so this
+workflow is conservative.
 
 ### Step 1: Identify broken references
 
@@ -80,31 +82,13 @@ From each broken reference, extract:
 - The **quoted text** (if available)
 - The **approximate date** (often present in surrounding timeline entries)
 
-### Step 3: Search for the actual tweet
+### Step 3: Check existing evidence
 
-Use the host's X API integration. Query patterns:
+Use `artifact_query` with `include_sources=true` and inspect related
+artifacts. If the exact URL is present in the source artifact, it can be used.
+If not, flag the reference as unresolved.
 
-```
-# Handle + quoted text:
-from:<handle> "<exact quote fragment>"
-
-# Quoted text only:
-"<exact quote fragment>"
-
-# Original of a retweet:
-"<exact quote>" -is:retweet
-```
-
-### Step 4: Verify and extract metadata
-
-Once a candidate is found:
-
-- Confirm the text matches the quoted fragment.
-- Pull the tweet id, author handle, engagement metrics (likes / RTs /
-  impressions).
-- Construct the URL: `https://x.com/<handle>/status/<tweet_id>`.
-
-### Step 5: Patch the brain page
+### Step 4: Patch the brain page
 
 Replace the broken citation with a proper one:
 
@@ -117,8 +101,7 @@ Replace the broken citation with a proper one:
 **After:**
 
 ```
-"<full verified quote>" — <N> likes, <N> RTs, <N> impressions
-[Source: [X/<handle>, YYYY-MM-DD](https://x.com/<handle>/status/<tweet_id>)]
+"<verified quote>" [Source: [X/<handle>, YYYY-MM-DD](https://x.com/<handle>/status/<tweet_id>)]
 ```
 
 ## Batch mode
@@ -127,16 +110,9 @@ When sweeping many pages:
 
 ### Find candidate pages
 
-```bash
-# Pages mentioning tweets but with no x.com links
-for f in $(find . -name "*.md" -not -path "./node_modules/*"); do
-  refs=$(grep -ci "tweet\|posted\|x post\|RT\|retweet\|said on X" "$f")
-  links=$(grep -c "x.com/.*/status/" "$f")
-  if [ "$refs" -gt 2 ] && [ "$links" -eq 0 ]; then
-    echo "$f"
-  fi
-done
-```
+Use bounded `artifact_query` searches such as `tweet`, `posted`, `said on X`,
+or `Source: X`, then inspect likely artifacts/pages. Avoid filesystem scans as
+the source of truth; gbrain_rs stores brain content in SQLite/artifact storage.
 
 ### Priority order
 
@@ -145,13 +121,11 @@ done
 2. High-traffic pages (frequent reads / writes from other skills).
 3. Everything else — bulk cleanup over time.
 
-### Rate limiting
+### Batch safety
 
-- X API: respect the host's tier limits; don't hammer.
-- Target ~50 pages per batch run.
-- 1-3 API calls per page (search + verify).
-- Batch-commit every 10-20 pages so a partial failure doesn't lose
-  progress.
+- Target small batches first (10-20 candidates).
+- Patch only deterministic formatting or URLs already present in evidence.
+- Use `artifact_put` with `dry_run=true` where practical before updating pages.
 
 ## Output format
 
@@ -161,32 +135,30 @@ Citation Audit Report
 Pages scanned:        N
 Citations found:      N
 Issues fixed:         N
-Tweet links resolved: N
+External links resolved: N
+Unresolved external refs: N
 Remaining gaps:       N (pages with uncitable facts)
 ```
 
 ## Anti-Patterns
 
-- ❌ Inventing citations for facts that have no source. Flag them.
-- ❌ Removing facts that lack citations (flag them; don't delete).
-- ❌ Fixing citations without reading the full page context.
-- ❌ Batch-fixing without checking quality on a sample first
-  (see `conventions/test-before-bulk.md`).
-- ❌ Composing tweet URLs by guessing the tweet id. Always go through
-  the X API; deterministic links only.
+- Inventing citations for facts that have no source. Flag them.
+- Removing facts that lack citations. Flag them; don't delete.
+- Fixing citations without reading the full page context.
+- Batch-fixing without checking quality on a sample first.
+- Composing tweet URLs by guessing the tweet id. Deterministic links only.
 
 ## Integration
 
 This skill can be called:
 
 - **Manually** — "fix citations on this page"
-- **As a batch cron** — weekly sweep of pages with broken refs
 - **By other skills** — `enrich`, `idea-ingest`, or `meeting-ingestion` can call citation-fixer
   before commit to validate output
 
 ## Metrics
 
-If running as a recurring batch, track state in a small JSON file under
+If running manually as a repeated batch, track state in a small JSON file under
 `~/.gbrain/citation-fixer-state.json`:
 
 ```json
@@ -194,7 +166,7 @@ If running as a recurring batch, track state in a small JSON file under
   "last_run": "2026-04-15T...",
   "pages_scanned": 0,
   "citations_fixed": 0,
-  "tweet_links_resolved": 0,
+  "external_links_resolved": 0,
   "citations_unresolvable": 0,
   "pages_remaining": 1424
 }

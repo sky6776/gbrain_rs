@@ -2,8 +2,8 @@
 name: reports
 version: 1.0.0
 description: |
-  Save and load timestamped reports. Keyword routing for fast lookup. Cron jobs
-  save output as reports; the agent or user queries them by keyword.
+  Save and load timestamped report pages. Keyword routing for fast lookup.
+  External jobs, agents, or users can write reports into gbrain and query them by keyword.
 triggers:
   - "save report"
   - "load latest report"
@@ -11,6 +11,7 @@ triggers:
   - "show me the pulse"
 tools:
   - artifact_query  # 统一查询接口
+  - artifact_get    # 获取知识源详情
   - artifact_put    # 统一写入接口
 mutating: true
 ---
@@ -20,14 +21,15 @@ mutating: true
 ## Contract
 
 This skill guarantees:
-- Reports saved with timestamped filenames and frontmatter
+- Reports saved as timestamped gbrain page slugs with frontmatter
 - Keyword routing: query → report category mapping
-- Latest report loadable by category name
+- Latest report can be found by querying a category and comparing report timestamps
 - Reports are searchable via `gbrain query`
 
 ## Phases
 
-1. **Save report.** Write to `reports/{category}/{YYYY-MM-DD-HHMM}.md` with frontmatter:
+1. **Save report.** Write with `artifact_put` / `gbrain put` to slug
+   `reports/{category}/{YYYY-MM-DD-HHMM}` with frontmatter:
    ```yaml
    ---
    title: {report title}
@@ -37,7 +39,8 @@ This skill guarantees:
    time: {HH:MM PT}
    ---
    ```
-2. **Load latest.** Given a category, find the most recent report file.
+2. **Load latest.** Given a category, query matching report pages and compare
+   frontmatter timestamps.
 3. **Keyword routing.** Map common queries to report categories:
    - "email" / "inbox" → ea-inbox-sweep
    - "social" / "mentions" → social-mentions
@@ -47,7 +50,7 @@ This skill guarantees:
 
 ## Output Format
 
-Saved: `reports/{category}/{YYYY-MM-DD-HHMM}.md`
+Saved: `reports/{category}/{YYYY-MM-DD-HHMM}`
 Loaded: full report content with metadata.
 
 ## Anti-Patterns

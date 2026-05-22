@@ -10,26 +10,26 @@
     {
       "id": "brain-ops",
       "name": "Brain Operations",
-      "description": "核心脑图操作：查询、写入、链接、时间线、同步",
+      "description": "核心脑图操作：查询、写入、上传、来源追溯、审核和生命周期管理",
       "tools": ["artifact_query", "artifact_put", "artifact_upload", "artifact_list", "artifact_get", "artifact_delete", "artifact_restore", "artifact_review_list", "artifact_review_apply", "artifact_review_rollback"]
     },
     {
       "id": "query",
       "name": "Query",
       "description": "查询脑图内容，3 层搜索 + 引用追溯",
-      "tools": ["artifact_query"]
+      "tools": ["artifact_query", "artifact_get"]
     },
     {
       "id": "enrich",
       "name": "Enrich",
       "description": "丰富和扩展现有页面内容，分层充实人物/公司页面",
-      "tools": ["artifact_put", "artifact_query"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
     },
     {
       "id": "ingest",
       "name": "Ingest",
       "description": "导入外部内容到脑图（路由到专用摄入技能）",
-      "tools": ["artifact_put", "artifact_upload", "artifact_query"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query", "artifact_get", "artifact_list"]
     },
     {
       "id": "idea-ingest",
@@ -53,13 +53,13 @@
       "id": "citation-fixer",
       "name": "Citation Fixer",
       "description": "修复和标准化引用格式",
-      "tools": ["artifact_query", "artifact_put"]
+      "tools": ["artifact_query", "artifact_get", "artifact_list", "artifact_put"]
     },
     {
       "id": "writing-mode",
       "name": "Writing Mode",
       "description": "专注写作模式：质量校验、lint 检查、dry-run 预览",
-      "tools": ["artifact_put", "artifact_query", "artifact_list", "artifact_get"]
+      "tools": ["artifact_put", "artifact_upload", "artifact_query", "artifact_list", "artifact_get"]
     },
     {
       "id": "delete-restore",
@@ -77,7 +77,7 @@
       "id": "reports",
       "name": "Reports",
       "description": "保存和加载带时间戳的报告",
-      "tools": ["artifact_query", "artifact_put"]
+      "tools": ["artifact_query", "artifact_get", "artifact_put"]
     },
     {
       "id": "repo-architecture",
@@ -89,13 +89,13 @@
       "id": "autopilot",
       "name": "Autopilot",
       "description": "自动运维和健康检查，审核建议变更并维护知识库",
-      "tools": ["artifact_health", "artifact_review_list", "artifact_review_get", "artifact_review_apply", "artifact_review_reject", "artifact_list"]
+      "tools": ["artifact_health", "artifact_review_list", "artifact_review_get", "artifact_review_apply", "artifact_review_reject", "artifact_review_rollback", "artifact_list", "artifact_get", "artifact_reprocess", "artifact_delete", "artifact_restore"]
     },
     {
       "id": "code-graph",
       "name": "Code Graph",
-      "description": "代码知识图谱：符号定义、引用追踪、调用图探索。代码图谱功能已内建于 KB 文档处理管线；MCP 层 mode=graph 尚未实现，当前仅 artifact_query 通用搜索可用",
-      "tools": ["artifact_query", "artifact_upload"]
+      "description": "代码图谱能力说明：专用符号/调用图 API 仅在 Rust Operations 内部可用；MCP 层 mode=graph 尚未实现，当前仅 artifact_query 通用搜索可用",
+      "tools": ["artifact_query"]
     }
   ]
 }

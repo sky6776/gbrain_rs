@@ -48,6 +48,8 @@ and managing the lifecycle of knowledge sources.
 
 This skill guarantees:
 - All knowledge operations go through the `artifact_*` facade (no direct KB/gbrain/promotion access)
+- User-provided documents or files are ingested with `artifact_upload`; do not read a document and pass its contents to `artifact_put`
+- Non-document knowledge, manual notes, and agent-authored memory updates are written with `artifact_put`
 - Suggested changes are reviewed before application
 - Every applied change is reversible via rollback
 - Source tracing (provenance) connects every brain fact back to its source artifact
@@ -74,20 +76,22 @@ KB evidence → suggested changes → review → apply/reject → brain page upd
 
 ### Phase 1: Write Memory or Upload File
 
-**Manual memory** — `artifact_put` with slug, content, and intent:
+**Manual memory / non-document knowledge** — `artifact_put` with slug, content, and intent:
 
 | Intent | Use for | What happens |
 |--------|---------|--------------|
-| `memory` | Personal notes, meeting notes | Creates stable brain page + optional KB projection |
+| `memory` | Human notes, structured facts, non-document knowledge | Creates stable brain page + optional KB projection |
 | `evidence` | Research evidence only | Creates KB projection only, no brain page |
 | `promote` | Knowledge to review before publishing | Creates shadow page + KB + review candidates |
 
-**File upload** — `artifact_upload` with path and intent:
+`artifact_put` may read only small UTF-8 text files, but if the user uploaded or provided a document path, prefer `artifact_upload`.
+
+**Document/file upload** — `artifact_upload` with path and intent:
 
 | Intent | Use for | What happens |
 |--------|---------|--------------|
 | `auto` | Default — system decides | Routes based on file type |
-| `document` | Research papers, reports | KB projection for searchability |
+| `evidence` / `document` | Research papers, reports, user-uploaded docs | KB projection + shadow page + candidate promotion |
 | `attachment` | Files to attach to existing pages | File attachment linked to `page_slug` |
 | `memory` | Personal notes, meeting notes | Shadow page + KB projection |
 | `promote` | Files with entity information | KB projection + review candidates |

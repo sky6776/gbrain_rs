@@ -20,6 +20,7 @@ triggers:
   - "graph query"
 tools:
   - artifact_query  # 统一查询接口
+  - artifact_get    # 获取知识源详情
 mutating: false
 ---
 
@@ -41,11 +42,11 @@ This skill guarantees:
 1. **Decompose the question** into search strategies:
    - Keyword search for specific names, dates, terms
    - Semantic query for conceptual questions
-   - Structured queries (list by type, backlinks) for relational questions
+   - Filtered memory/evidence/timeline searches for relational questions
 2. **Execute searches:**
    - Hybrid search gbrain for semantic+keyword with expansion (query)
    - Unified artifact query for cross-subsystem search (artifact_query)
-   - List pages in gbrain by type or check backlinks for structural queries
+   - Use `filter_slug` when narrowing to a known entity or page
 3. **Read top results.** Read the top 3-5 pages from gbrain to get full context.
 4. **Synthesize answer** with citations. Every claim traces back to a specific page slug.
 5. **Flag gaps.** If the brain doesn't have info, say "the brain doesn't have information on X" rather than hallucinating.
@@ -71,7 +72,8 @@ Answers should include:
 - Never hallucinate. Only answer from brain content.
 - Cite sources: "According to concepts/do-things-that-dont-scale..."
 - Flag stale results: if a search result shows [STALE], note that the info may be outdated
-- For "who" questions, use backlinks and typed links to find connections
+- For "who" questions, search mentions, wikilinks, and cited source context
+  because dedicated backlink traversal is not exposed through the artifact facade
 - For "what happened" questions, use timeline entries
 - For "what do we know" questions, read compiled_truth directly
 
@@ -118,8 +120,8 @@ narrow results to related entities:
 - `gbrain query "<topic>" --mode memory --filter <slug>` — narrow to specific entity's connections
 - MCP: `artifact_query` with `mode: "memory"` or `mode: "evidence"` and optional `filter_slug`
 
-Search results are ranked with a small backlink boost so well-connected entities
-surface higher.
+Dedicated graph/backlink traversal is not exposed through the artifact facade;
+do not promise complete relationship expansion from search alone.
 
 ## Search Quality Awareness
 

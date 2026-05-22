@@ -31,7 +31,7 @@ This skill guarantees:
 
 1. **Load current tasks.** `gbrain query "ops/tasks"` — read the task list.
 2. **Execute the requested action:**
-   - **Add:** Append task with priority, description, due date. Add timeline entry.
+   - **Add:** Append task with priority, description, due date, and an activity/timeline line in the task page.
    - **Complete:** Mark as done, move to completed section with date.
    - **Defer:** Move to next day/week with reason.
    - **Remove:** Delete from list (rare, prefer complete or defer).

@@ -84,7 +84,7 @@ After restore:
 
 Remove association between an artifact and a specific page:
 
-**MCP:** `artifact_detach` with `id_or_uid` and `from_slug`
+**MCP:** `artifact_detach` with `id_or_uid` and `from`
 **CLI:** `gbrain detach <id-or-uid> --from <slug>`
 
 Detach only removes the specific occurrence/projection linking the artifact

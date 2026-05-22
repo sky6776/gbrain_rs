@@ -9,6 +9,8 @@ tools:
   - artifact_put    # 统一写入接口
   - artifact_upload # 统一上传接口
   - artifact_query  # 统一查询接口
+  - artifact_get    # 读取知识源详情
+  - artifact_list   # 列出知识源
 mutating: true
 writes_pages: true
 writes_to:
@@ -29,7 +31,8 @@ Ingest meetings, articles, media, documents, and conversations into the brain.
 
 - Every fact written to a brain page carries an inline `[Source: ...]` citation with date and provenance.
 - Every entity mention creates a back-link from the entity's page to the page mentioning them (Iron Law).
-- Raw sources are preserved for provenance with `gbrain upload`.
+- User-provided documents/files are preserved with `artifact_upload` / `gbrain upload`.
+- Non-document knowledge and curated memory updates are written with `artifact_put`.
 - State sections are rewritten with current best understanding, never appended to.
 - Notable entities get pages or updates when the current ingestion task mentions them.
 
@@ -59,9 +62,9 @@ Every fact written to a brain page must carry an inline `[Source: ...]` citation
    - Read the entity's page from gbrain to check if it exists
    - If exists: update compiled_truth (rewrite State section with new info, don't append)
    - If new: check notability gate, then store the page in gbrain with the appropriate type and slug
-3. **Append to timeline.** Add a timeline entry in gbrain for each event, with date, summary, and source citation.
-4. **Create cross-reference links.** Link entities in gbrain for every entity pair mentioned together, using the appropriate relationship type.
-5. **Back-link all entities.** Update EVERY mentioned entity's page with a back-link to this page (Iron Law).
+3. **Append to timeline content.** Include dated timeline entries in the page content you write through `artifact_put`; there is no standalone public timeline write tool.
+4. **Create cross-reference links in content/frontmatter.** Use explicit markdown links, wikilinks, or supported frontmatter fields so the page write path can reconcile links.
+5. **Back-link all entities.** Update EVERY mentioned entity's page with a back-link to this page via `artifact_put` (Iron Law).
 6. **Timeline merge.** The same event appears on ALL mentioned entities' timelines. If Alice met Bob at Acme Corp, the event goes on Alice's page, Bob's page, and Acme Corp's page.
 
 ## Entity Detection on Every Message
@@ -130,7 +133,7 @@ about a company -> `companies/`, reusable framework -> `concepts/`, raw data -> 
 **Input:** File path or URL.
 
 **Process:**
-1. Use `artifact_upload` directly with the file path — **do NOT `read_file` first**. `artifact_upload` handles all formats (md, docx, pdf, txt, csv, json) automatically.
+1. Use `artifact_upload` directly with the file path — **do NOT `read_file` first**. `artifact_upload` handles supported document formats (md, docx, pdf, xlsx, txt, csv, json, yaml, toml, html) automatically.
 2. Summarize: executive summary + key sections + notable data
 3. Extract entities
 4. Cross-reference from entity pages
@@ -189,7 +192,7 @@ gbrain upload <file> --page <page-slug>
 - `gbrain list` -- list knowledge sources
 - `gbrain get <uid>` -- get artifact details with source tracing
 
-JSON/API payloads 可通过 `gbrain upload` 存储原始响应和元数据。
+JSON/API payloads should be written as non-document knowledge with `artifact_put` unless you have intentionally saved the raw payload as a local file for evidence preservation; local payload files can then be uploaded with `artifact_upload`.
 
 ## Test Before Bulk
 
@@ -239,18 +242,16 @@ Entities detected: N
 
 Back-links created: N
 Timeline entries: N
-Raw source: [preserved at path / uploaded to cloud]
+Raw source: [artifact UID / stored file path]
 ```
 
 ## Tools Used
 
-- `artifact_upload` — **首选** for importing documents (md, docx, pdf, txt, csv, json). 直接传文件路径，不要先 `read_file`.
+- `artifact_upload` — **首选** for importing user-provided documents/files (md, docx, pdf, xlsx, txt, csv, json, yaml, toml, html). 直接传文件路径，不要先 `read_file`.
 - `artifact_put` — write non-document knowledge (ideas, structured data, notes) to long-term memory
 - `artifact_query` — search for existing knowledge (unified entry point)
 - `artifact_get` — read knowledge source detail
 - `artifact_list` — list knowledge sources
-- `artifact_delete` — soft-delete knowledge sources
-- `artifact_restore` — restore deleted knowledge sources
 - ~~`add_link`~~ — (legacy, 已移除)
 - ~~`add_timeline_entry`~~ — (legacy, 已移除)
 - ~~`add_tag`~~ — (legacy, 已移除)

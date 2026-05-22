@@ -2,8 +2,8 @@
 name: writing-mode
 version: 1.0.0
 description: |
-  Writing quality control. Choose writing intent (memory/evidence/promote), verify content quality,
-  and auto-fix issues in brain pages.
+  Writing quality control. Choose writing intent (memory/evidence/promote), preview writes,
+  verify content quality, and guide explicit deterministic fixes in brain pages.
 triggers:
   - "lint"
   - "quality check"
@@ -12,6 +12,7 @@ triggers:
   - "fix lint issues"
 tools:
   - artifact_put     # 统一写入接口
+  - artifact_upload  # 文档/文件上传接口
   - artifact_get     # 获取知识源详情
   - artifact_query   # 统一查询接口
   - artifact_list    # 列出知识源
@@ -23,16 +24,17 @@ writes_to:
 
 # Writing Mode Skill — Quality Control for Brain Pages
 
-Control the quality of content written to brain pages through intent-driven writing
-and a zero-LLM quality verification system that detects common issues.
+Control the quality of content written to brain pages through intent-driven
+writing, dry-run previews, and deterministic validation checks.
 
 ## Contract
 
 This skill guarantees:
 - Writing intent is chosen appropriately for the content source
+- User-uploaded documents/files are routed through `artifact_upload`
 - Content quality verification is performed when needed
-- Auto-fix is used cautiously — only for safe, deterministic fixes
-- Dry-run is used before applying fixes to verify what will change
+- Fixes are explicit writes; do not assume the facade auto-repairs pages
+- Dry-run is used before applying important changes to verify what will change
 
 ## Writing Intents
 
@@ -47,21 +49,26 @@ gbrain supports writing through `artifact_put` / `gbrain put` with intent:
 **Intent selection guide:**
 - Human-authored notes → `memory` (standard path)
 - AI agent writes → `evidence` (enforce structure and prevent AI slop)
-- Bulk import from external source → `memory` with `--force` (speed over quality)
+- User-uploaded documents/files → `artifact_upload` / `gbrain upload`, not `artifact_put --file`
+- Bulk import from external document source → `artifact_upload` sample first, then bulk upload
 - Uncertain → `memory` (safe default)
+
+`artifact_put --file` is only for small UTF-8 text snippets that should become manual memory. For documents (md/pdf/docx/xlsx/csv/json/txt/yaml/toml/html), use `artifact_upload` directly with the file path.
 
 ## Quality Verification
 
-The write path performs quality checks without LLM calls:
+Use deterministic checks to find quality issues before or after a write. Treat
+the findings as review signals; apply corrections with an explicit
+`artifact_put`/`gbrain put` update after previewing important changes.
 
-| Check | What it detects | Auto-fixed? |
-|-------|-----------------|-------------|
-| LLM preamble | "Here is...", "Sure, I'll..." AI intro text | Yes — strips preamble |
-| Placeholder dates | `YYYY-MM-DD`, `TBD`, `FIXME` unfilled dates | No — requires human input |
-| Missing frontmatter | Pages without YAML `---` header | Yes — inserts minimal frontmatter |
-| Broken references | Wikilinks `[[slug]]` pointing to non-existent pages | No — requires page creation or link fix |
-| Empty sections | Headers with no content below them | No — requires content |
-| Unclosed code fences | ``` blocks without closing ``` | Yes — adds closing fence |
+| Check | What it detects | Handling |
+|-------|-----------------|----------|
+| LLM preamble | "Here is...", "Sure, I'll..." AI intro text | Remove in the authored content before writing |
+| Placeholder dates | `YYYY-MM-DD`, `TBD`, `FIXME` unfilled dates | Fill from source evidence or flag for human input |
+| Missing frontmatter | Pages without YAML `---` header | Add valid frontmatter in the explicit update |
+| Broken references | Wikilinks `[[slug]]` pointing to non-existent pages | Create the target page or change the link |
+| Empty sections | Headers with no content below them | Add content or remove the empty heading |
+| Unclosed code fences | ``` blocks without closing ``` | Close the fence before committing |
 
 ## Phases
 
@@ -70,15 +77,16 @@ The write path performs quality checks without LLM calls:
 Before writing content, select the appropriate intent:
 
 1. **Assess content source** — is it human-written, AI-generated, or bulk import?
-2. **Select intent** — memory for human, evidence for AI, memory+force for bulk.
-3. **Write with intent** — include `--intent` in `gbrain put` call.
+2. **Select route** — `artifact_upload` for documents/files; `artifact_put`
+   with memory/evidence/promote intent for authored knowledge.
+3. **Write with intent** — include `--intent` in `gbrain put` or `gbrain upload`.
 
 ### Phase 2: Write with Dry-Run Preview
 
 Preview what will be written before committing:
 
 **CLI:** `gbrain put <slug> --content "..." --dry-run` — preview routing plan
-**CLI:** `gbrain put <slug> --file ./doc.md --dry-run` — preview with file content
+**CLI:** `gbrain upload ./doc.md --dry-run --intent evidence` — preview a document upload
 
 ### Phase 3: Verify Content
 
@@ -90,7 +98,7 @@ After writing, verify the content quality:
 
 ### Phase 4: Post-write Review (Optional)
 
-Enable automatic review after every write:
+Check the review queue after promote/evidence workflows:
 
 **CLI:** `gbrain review list --status pending` — check for auto-generated suggestions
 
@@ -114,8 +122,8 @@ gbrain put people/alice --content "Alice是一位工程师" --dry-run
 # Write memory (actual)
 gbrain put people/alice --content "Alice是一位工程师" --intent memory
 
-# Write from file
-gbrain put docs/guide --file ./guide.md --intent evidence
+# Upload a document as evidence
+gbrain upload ./guide.md --intent evidence
 
 # Force overwrite
 gbrain put people/alice --content "Updated content" --force
@@ -136,6 +144,7 @@ gbrain review list --status pending
 ## Tools Used
 
 - `artifact_put` — write pages with intent control
+- `artifact_upload` — upload user-provided documents/files directly
 - `artifact_get` — retrieve written content to verify
 - `artifact_list` — list all artifacts
 - `artifact_query` — search for content to verify discoverability

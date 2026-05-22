@@ -30,6 +30,7 @@ writes_to:
 
 This skill guarantees:
 - Meeting page created with attendees, summary, key decisions, action items
+- Uploaded transcript/document files are ingested with `artifact_upload`; manual meeting notes are written with `artifact_put`
 - EVERY attendee gets a people page (created or updated)
 - EVERY company discussed gets entity propagation
 - Timeline entries on ALL mentioned entities (timeline merge)
@@ -81,7 +82,7 @@ For EACH attendee:
 1. `gbrain query "{name}"` — does a people page exist?
 2. If NO → create via enrich skill (this is mandatory, not optional)
 3. If YES → update compiled truth with meeting context
-4. Add timeline entry on the person's page.
+4. Add a dated timeline entry to the person's page content and write it with `artifact_put`.
 
 **Note (v0.10.1):** Once the meeting page is written via `gbrain put`,
 the auto-link post-hook automatically creates `attended` links from the meeting
@@ -93,8 +94,8 @@ to each attendee whose page is referenced as `[Name](people/slug)`.
 For each company, project, or concept discussed:
 1. Check brain for existing page
 2. Create/update as needed
-3. Add timeline entry referencing the meeting
-4. Back-link from entity page to meeting page
+3. Add a timeline entry referencing the meeting in the entity page content
+4. Back-link from entity page to meeting page, then write with `artifact_put`
 
 ### Phase 5: Timeline merge
 

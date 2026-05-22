@@ -81,16 +81,19 @@ pages immediately with attribution `[Source: User, YYYY-MM-DD]`.
 
 ### Phase 2.5: Structured Graph Updates (automatic)
 
-Every `artifact_put` call with intent=memory/promote automatically writes brain pages
-and extracts entity references into the graph (`links` table) with inferred relationship
-types. Stale links (refs no longer in the page text) are removed. This is
-"auto-link" reconciliation.
+`artifact_put` with `intent=memory` writes stable brain pages. The underlying
+page write path reconciles links from explicit markdown links, wikilinks, bare
+slug references, and supported frontmatter fields. Stale markdown/frontmatter
+links are removed during that reconciliation.
 
 - No manual `add_link` calls needed for ordinary knowledge writes via artifact_put.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
   `founded`, `advises`, `source` (frontmatter), `mentions` (default).
-- Timeline entries are handled via artifact projections automatically
-  (or batch via timeline extraction).
+- MCP does not expose graph traversal yet; relationship questions should use
+  `artifact_query` with `mode=memory`/`evidence` and `filter_slug`.
+- Timeline reads use `artifact_query` with `mode=timeline`. To write timeline
+  data, include a timeline section in the `artifact_put` content; there is no
+  standalone public timeline tool.
 
 ### Phase 3: On Every Outbound Response (READ → PULL → RESPOND)
 
@@ -124,7 +127,7 @@ The output is updated brain pages and enriched responses.
 
 ## Citation Format in gbrain_rs
 
-Artifact 统一接口返回的每条结果都包含 `source_id`（artifact UID），
+Artifact 统一接口在 `include_sources=true` 时返回 `sources[].artifact_uid`，
 引用时使用 `[Source: artifact_uid]` 格式。通过 `artifact_query` 的
 `include_sources=true` 参数获取完整来源追溯链。
 
@@ -139,7 +142,7 @@ Artifact 统一接口返回的每条结果都包含 `source_id`（artifact UID�
 
 ## Tools Used
 
-- `artifact_query` — unified knowledge query (memory + evidence + timeline + graph)
+- `artifact_query` — unified knowledge query (memory + evidence + timeline; graph mode is not implemented)
 - `artifact_put` — write to long-term memory (unified entry point)
 - `artifact_upload` — upload file as knowledge source
 - `artifact_list` — list all knowledge sources

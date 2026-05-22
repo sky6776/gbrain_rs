@@ -13,6 +13,7 @@ triggers:
   - "look up this company"
 tools:
   - artifact_put    # 统一写入接口
+  - artifact_upload # 文件证据上传接口
   - artifact_query  # 统一查询接口
 mutating: true
 writes_pages: true
@@ -142,7 +143,9 @@ Priority order -- stop when you have enough signal for the entity's tier.
 
 ### Step 5: Save raw data (preserves provenance)
 
-Store raw API responses via `gbrain upload` in gbrain:
+For raw API responses, write curated findings with `artifact_put`. If you need
+to preserve the exact raw response as evidence, save it as a local `.json` file
+and upload that file with `artifact_upload` / `gbrain upload`:
 ```json
 {
   "source": "crustdata",
@@ -163,12 +166,12 @@ the raw data shows exactly what the API returned.
 2. Check filing rules -- where does this entity go?
 3. Create page with the appropriate template (below)
 4. Fill compiled truth with citations
-5. Add first timeline entry
+5. Include the first timeline entry in the page content
 6. Leave empty sections as `[No data yet]` (don't fill with boilerplate)
 
 #### UPDATE path
 
-1. Add new timeline entries (reverse-chronological, append-only)
+1. Add new timeline entries to the page content (reverse-chronological, append-only)
 2. Update compiled truth ONLY if the new signal materially changes the picture
 3. Update State section with new facts
 4. Flag contradictions between new signal and existing compiled truth
@@ -269,12 +272,11 @@ Active items, pending decisions, things to track.
 - Update related project/deal pages if relevant context surfaced
 - Check index files if the brain uses them
 
-**Note (v0.10.1):** Links between brain pages are auto-created on every
-`artifact_put` call (auto-link post-hook). Step 7 focuses on content
-cross-references (updating related pages' compiled truth with new signal
-from this enrichment), not on creating links. Verify via the `auto_links`
-field in the artifact_put response (`{ created, removed, errors }`).
-Timeline entries still need explicit calls (legacy `gbrain timeline-add` 已移除)。
+**Note:** Links between brain pages are reconciled during `artifact_put` when
+the page content or frontmatter contains explicit references to existing slugs.
+Step 7 focuses on content cross-references (updating related pages' compiled
+truth with new signal from this enrichment). Timeline content should be included
+in the page body you write; legacy `gbrain timeline-add` has been removed.
 
 ## Bulk Enrichment Rules
 
@@ -338,7 +340,7 @@ Both page types have bidirectional back-links to every entity they mention.
 - Store/update a page in gbrain (artifact_put)
 - ~~Add a timeline entry in gbrain~~ (add_timeline_entry — legacy, 已移除)
 - ~~List pages in gbrain by type~~ (list_pages — legacy, 已移除)
-- Store raw API data in gbrain (artifact_upload)
+- Store raw evidence files in gbrain (artifact_upload); write curated API findings with artifact_put
 - ~~Retrieve raw data from gbrain (get_raw_data)~~ (legacy, 已移除)
 - ~~Link entities in gbrain (add_link)~~ (legacy, 已移除)
 - ~~Check backlinks in gbrain (get_backlinks)~~ (legacy, 已移除)

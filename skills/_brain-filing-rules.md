@@ -76,6 +76,9 @@ silently pick one.
 ## Raw Source Preservation
 
 Every ingested item should have its raw source preserved for provenance.
+Use `artifact_upload` / `gbrain upload` for user-provided documents and files.
+Use `artifact_put` for non-document knowledge, curated notes, and structured
+memory updates.
 
 **Upload command:**
 ```bash
