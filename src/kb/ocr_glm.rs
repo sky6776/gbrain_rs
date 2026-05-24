@@ -1,0 +1,456 @@
+//! 智谱 GLM-OCR Provider — 通过 HTTP API 调用 GLM-OCR layout_parsing
+
+use crate::error::{GBrainError, Result};
+use crate::kb::ocr_planner::generate_request_id;
+use crate::kb::ocr_provider::{OcrInput, OcrOptions, OcrPageResult, OcrProvider};
+use crate::kb::ocr_response::{normalize_glm_ocr_response, GlmOcrResponse};
+
+/// 智谱 GLM-OCR provider 实现
+pub struct GlmOcrProvider {
+    /// API key
+    api_key: String,
+}
+
+impl GlmOcrProvider {
+    pub fn new(api_key: &str) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+        }
+    }
+}
+
+impl OcrProvider for GlmOcrProvider {
+    fn name(&self) -> &'static str {
+        "glm_ocr"
+    }
+
+    fn recognize(&self, input: &OcrInput, options: &OcrOptions) -> Result<Vec<OcrPageResult>> {
+        let OcrInput::PdfRange {
+            file,
+            request_start_page_id,
+            request_end_page_id,
+            source_start_page,
+            source_end_page,
+            document_id,
+            run_id,
+        } = input;
+
+        let timeout = std::time::Duration::from_secs(
+            options.timeout_seconds_per_page
+                * (*request_end_page_id - *request_start_page_id + 1) as u64,
+        );
+
+        // 构造请求体
+        let file_content = match file {
+            crate::kb::ocr_provider::OcrFilePayload::Base64(data) => data.clone(),
+            crate::kb::ocr_provider::OcrFilePayload::Url(url) => {
+                // 如果是 URL，先下载内容再 base64 编码
+                // 第一版直接使用 base64 模式
+                return Err(GBrainError::InvalidInput(
+                    "GLM-OCR 当前仅支持 base64 模式".to_string(),
+                ));
+            }
+        };
+
+        let request_id =
+            generate_request_id(*document_id, run_id, *source_start_page, *source_end_page);
+
+        let mut body = serde_json::json!({
+            "model": options.model,
+            "file": file_content,
+            "start_page_id": request_start_page_id,
+            "end_page_id": request_end_page_id,
+            "enable_layout": options.enable_layout,
+            "request_id": request_id,
+        });
+
+        if options.return_crop_images {
+            body["return_crop_images"] = serde_json::json!(true);
+        }
+        if options.need_layout_visualization {
+            body["need_layout_visualization"] = serde_json::json!(true);
+        }
+
+        // 使用 blocking client 避免 tokio runtime 嵌套 panic
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| GBrainError::Http(format!("创建 HTTP client 失败: {}", e)))?;
+
+        let response = client
+            .post(&options.base_url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .map_err(|e| GBrainError::Http(format!("GLM-OCR 请求失败: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().unwrap_or_default();
+            return Err(GBrainError::Http(format!(
+                "GLM-OCR API 错误 (status={}): {}",
+                status, error_text
+            )));
+        }
+
+        let response_json: serde_json::Value = response
+            .json()
+            .map_err(|e| GBrainError::Serialization(format!("GLM-OCR 响应解析失败: {}", e)))?;
+
+        // 解析为 GlmOcrResponse
+        let mut glm_response: GlmOcrResponse = serde_json::from_value(response_json.clone())
+            .map_err(|e| GBrainError::Serialization(format!("GLM-OCR 响应结构解析失败: {}", e)))?;
+
+        // 保留原始 JSON
+        glm_response.raw_json = response_json;
+
+        let request_page_count = (*source_end_page - *source_start_page + 1) as usize;
+
+        // 多页请求只有 md_results 且无 layout_details 时，自动拆成单页请求重试。
+        // 单页 md_results-only 是正常响应，无需重试。
+        if request_page_count > 1 && glm_response.layout_details.is_empty() {
+            if let Some(ref md) = glm_response.md_results {
+                if !md.is_empty() {
+                    return self.retry_multi_page_as_single(
+                        input,
+                        options,
+                        file_content,
+                        *source_start_page,
+                        *source_end_page,
+                        *request_start_page_id,
+                        *document_id,
+                        run_id,
+                    );
+                }
+            }
+        }
+
+        // 规范化为 OcrPageResult
+        let results = crate::kb::ocr_response::normalize_glm_ocr_response(
+            &glm_response,
+            *source_start_page,
+            *source_end_page,
+            *request_start_page_id,
+            self.name(),
+            &options.model,
+            Some(&request_id),
+            &options.ocr_profile,
+        )?;
+
+        Ok(results)
+    }
+}
+
+/// 单页请求最大重试次数
+const MAX_SINGLE_PAGE_RETRIES: u32 = 3;
+/// 单页请求初始退避时间（秒），每次重试翻倍
+const INITIAL_SINGLE_PAGE_BACKOFF_SECS: u64 = 2;
+
+/// 单页请求错误分类
+enum SinglePageError {
+    /// 可重试错误（429/503/timeout/网络）
+    Retryable(String),
+    /// 不可重试错误（解析失败等）
+    Fatal(String),
+}
+
+impl GlmOcrProvider {
+    /// 发送单页 OCR 请求并解析响应
+    ///
+    /// 返回 Ok(results) 表示成功，Err(SinglePageError) 表示失败（可区分是否可重试）。
+    fn send_single_page_request(
+        &self,
+        client: &reqwest::blocking::Client,
+        base_url: &str,
+        body: &serde_json::Value,
+        single_source_page: i32,
+        single_request_page_id: i32,
+        request_id: &str,
+        model: &str,
+        ocr_profile: &str,
+    ) -> std::result::Result<Vec<OcrPageResult>, SinglePageError> {
+        let resp = match client
+            .post(base_url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("请求失败: {}", e);
+                return if is_single_page_retryable(&msg) {
+                    Err(SinglePageError::Retryable(msg))
+                } else {
+                    Err(SinglePageError::Fatal(msg))
+                };
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let error_text = resp.text().unwrap_or_default();
+            let msg = format!("API 错误 (status={}): {}", status, error_text);
+            return if is_single_page_retryable(&msg) {
+                Err(SinglePageError::Retryable(msg))
+            } else {
+                Err(SinglePageError::Fatal(msg))
+            };
+        }
+
+        let resp_json: serde_json::Value = match resp.json() {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(SinglePageError::Fatal(format!("响应解析失败: {}", e)));
+            }
+        };
+
+        let mut single_resp: GlmOcrResponse = match serde_json::from_value(resp_json.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(SinglePageError::Fatal(format!("响应结构解析失败: {}", e)));
+            }
+        };
+        single_resp.raw_json = resp_json;
+
+        match normalize_glm_ocr_response(
+            &single_resp,
+            single_source_page,
+            single_source_page,
+            single_request_page_id,
+            self.name(),
+            model,
+            Some(request_id),
+            ocr_profile, // 使用配置的 profile，而非硬编码 "general"
+        ) {
+            Ok(results) => Ok(results),
+            Err(e) => Err(SinglePageError::Fatal(e.to_string())),
+        }
+    }
+
+    /// 多页 md_results-only 自动重试：逐页发送单页请求并聚合结果
+    fn retry_multi_page_as_single(
+        &self,
+        input: &OcrInput,
+        options: &OcrOptions,
+        file_content: String,
+        source_start_page: i32,
+        source_end_page: i32,
+        request_start_page_id: i32,
+        document_id: i64,
+        run_id: &str,
+    ) -> Result<Vec<OcrPageResult>> {
+        tracing::warn!(
+            start = source_start_page,
+            end = source_end_page,
+            "GLM-OCR 多页请求返回 md_results 但无 layout_details，自动拆为单页重试"
+        );
+
+        let total_pages = (source_end_page - source_start_page + 1) as usize;
+        let mut all_results = Vec::with_capacity(total_pages);
+        // 记录失败的页，用于在返回结果时附带错误信息
+        let mut failed_pages: Vec<(i32, String)> = Vec::new();
+
+        for page_offset in 0..total_pages {
+            let single_source_page = source_start_page + page_offset as i32;
+            let single_request_page_id = request_start_page_id + page_offset as i32;
+
+            let request_id =
+                generate_request_id(document_id, run_id, single_source_page, single_source_page);
+
+            let mut body = serde_json::json!({
+                "model": options.model,
+                "file": file_content,
+                "start_page_id": single_request_page_id,
+                "end_page_id": single_request_page_id,
+                "enable_layout": options.enable_layout,
+                "request_id": request_id,
+            });
+            // 保留主请求中的调试/可视化开关，确保同一 job 结果一致
+            if options.return_crop_images {
+                body["return_crop_images"] = serde_json::json!(true);
+            }
+            if options.need_layout_visualization {
+                body["need_layout_visualization"] = serde_json::json!(true);
+            }
+
+            // 指数退避重试：对可重试错误（429/503/timeout/网络）重试最多 MAX_OCR_RETRIES 次
+            let mut retry_count = 0u32;
+            let mut page_done = false;
+            loop {
+                let client = match reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(
+                        options.timeout_seconds_per_page,
+                    ))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // client 创建失败通常不可重试
+                        failed_pages
+                            .push((single_source_page, format!("创建 HTTP client 失败: {}", e)));
+                        break;
+                    }
+                };
+
+                match self.send_single_page_request(
+                    &client,
+                    &options.base_url,
+                    &body,
+                    single_source_page,
+                    single_request_page_id,
+                    &request_id,
+                    &options.model,
+                    &options.ocr_profile,
+                ) {
+                    Ok(results) => {
+                        all_results.extend(results);
+                        page_done = true;
+                        break;
+                    }
+                    Err(SinglePageError::Retryable(msg)) => {
+                        if retry_count < MAX_SINGLE_PAGE_RETRIES {
+                            retry_count += 1;
+                            let backoff_secs =
+                                INITIAL_SINGLE_PAGE_BACKOFF_SECS * 2u64.pow(retry_count - 1);
+                            tracing::warn!(
+                                page = single_source_page,
+                                retry = retry_count,
+                                max_retries = MAX_SINGLE_PAGE_RETRIES,
+                                backoff_secs,
+                                error = %msg,
+                                "GLM-OCR 单页重试遇到可重试错误，指数退避"
+                            );
+                            std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                            continue;
+                        }
+                        failed_pages.push((single_source_page, msg));
+                        break;
+                    }
+                    Err(SinglePageError::Fatal(msg)) => {
+                        failed_pages.push((single_source_page, msg));
+                        break;
+                    }
+                }
+            }
+
+            if !page_done {
+                tracing::warn!(
+                    page = single_source_page,
+                    retries = retry_count,
+                    "GLM-OCR 单页重试最终失败"
+                );
+            }
+        }
+
+        // 全部失败时返回 Err，让调用方标记整段 failed
+        if all_results.is_empty() && !failed_pages.is_empty() {
+            return Err(GBrainError::Http(format!(
+                "GLM-OCR 单页重试全部失败: {}",
+                failed_pages
+                    .iter()
+                    .map(|(p, e)| format!("第{}页: {}", p, e))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+
+        // 部分失败时，将失败页作为空结果嵌入，携带真实错误信息
+        // 调用方 persist_ocr_page_results 会通过 _ocr_failed 标记识别并写入 failed 状态
+        if !failed_pages.is_empty() {
+            tracing::warn!(
+                failed_pages = ?failed_pages.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+                "GLM-OCR 单页重试部分页失败，成功页结果已收集，失败页携带错误信息返回"
+            );
+            for (page_num, error_msg) in &failed_pages {
+                all_results.push(OcrPageResult {
+                    page_number: *page_num,
+                    text: String::new(),
+                    markdown: String::new(),
+                    blocks: vec![],
+                    layout_visualization_url: None,
+                    // 标记 _ocr_failed + 真实错误，供 persist 识别
+                    raw_response_json: serde_json::json!({
+                        "_ocr_failed": true,
+                        "error": error_msg,
+                    }),
+                    request_id: None,
+                    confidence: None,
+                    provider: self.name().to_string(),
+                    // 修复：记录实际使用的 model 而非空字符串
+                    model: options.model.clone(),
+                });
+            }
+        }
+
+        Ok(all_results)
+    }
+}
+
+/// 将 PDF 数据编码为 base64
+pub fn pdf_to_base64(pdf_data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(pdf_data)
+}
+
+/// 从环境配置构建 OcrOptions
+pub fn build_ocr_options_from_config(config: &crate::config::Config) -> OcrOptions {
+    // 当 ocr_allow_custom_base_url=false 时，忽略用户配置的 base_url，
+    // 强制使用官方默认端点，防止数据泄露到非授权服务器
+    let base_url = if config.ocr_allow_custom_base_url {
+        config.ocr_base_url.clone()
+    } else {
+        "https://open.bigmodel.cn/api/paas/v4/layout_parsing".to_string()
+    };
+
+    OcrOptions {
+        model: config.ocr_model.clone(),
+        base_url,
+        timeout_seconds_per_page: config.ocr_timeout_seconds_per_page,
+        mode: crate::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode),
+        submit_mode: crate::kb::ocr_provider::OcrSubmitMode::from_str(&config.ocr_submit_mode),
+        enable_layout: config.ocr_enable_layout,
+        return_crop_images: config.ocr_return_crop_images,
+        need_layout_visualization: config.ocr_need_layout_visualization,
+        max_pages_per_request: config.ocr_max_pages_per_request,
+        max_pdf_bytes_per_request: config.ocr_max_pdf_bytes_per_request,
+        ocr_profile: config.ocr_profile.clone(),
+    }
+}
+
+/// 判断单页请求错误是否可重试（429/503/timeout/网络错误）
+fn is_single_page_retryable(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("503")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("hyper")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_ocr_options() {
+        let config = crate::config::Config::default();
+        let options = build_ocr_options_from_config(&config);
+        assert_eq!(options.model, "glm-ocr");
+        assert!(options.enable_layout);
+        assert_eq!(options.max_pages_per_request, 100);
+        assert_eq!(options.max_pdf_bytes_per_request, 52_428_800);
+    }
+
+    #[test]
+    fn test_pdf_to_base64() {
+        let data = b"Hello PDF";
+        let encoded = pdf_to_base64(data);
+        assert!(!encoded.is_empty());
+        // base64 编码后长度应为 4/3 倍（向上取整到 4 的倍数）
+        assert_eq!(encoded.len() % 4, 0);
+    }
+}

@@ -188,6 +188,12 @@ enum Commands {
         #[command(subcommand)]
         command: ReviewCommands,
     },
+
+    /// KB 知识库管理
+    Kb {
+        #[command(subcommand)]
+        command: KbCommands,
+    },
 }
 
 /// 配置管理子命令
@@ -239,6 +245,127 @@ pub enum ReviewCommands {
         /// 变更 ID
         change_id: i64,
     },
+}
+
+/// KB 知识库管理子命令（Phase 4）
+#[derive(Debug, clap::Subcommand)]
+pub enum KbCommands {
+    /// 查看 KB 文档的 OCR 状态
+    OcrStatus {
+        /// 文档 ID
+        doc_id: i64,
+    },
+    /// 手动触发 OCR 处理
+    OcrRun {
+        /// 文档 ID
+        doc_id: i64,
+        /// 指定要 OCR 的页码（逗号分隔，如 "1,3,5-10"），不指定则自动检测
+        #[arg(long)]
+        pages: Option<String>,
+    },
+    /// 重试失败的 OCR 作业
+    OcrRetry {
+        /// 文档 ID
+        doc_id: i64,
+    },
+}
+
+/// 解析页码范围字符串（如 "1,3,5-10" → vec![1,3,5,6,7,8,9,10]）。
+/// 页码为 1-based，必须落在 `1..=max_page` 内。
+fn parse_page_ranges(input: &str, max_page: i32) -> Result<Vec<i32>> {
+    if max_page <= 0 {
+        return Err(GBrainError::InvalidInput(
+            "无法确定 PDF 总页数，不能校验 OCR 页码范围".to_string(),
+        ));
+    }
+
+    let mut pages = Vec::new();
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(GBrainError::InvalidInput(
+                "OCR 页码范围包含空片段".to_string(),
+            ));
+        }
+
+        let (start, end) = if let Some((left, right)) = part.split_once('-') {
+            if right.contains('-') || left.trim().is_empty() || right.trim().is_empty() {
+                return Err(GBrainError::InvalidInput(format!(
+                    "OCR 页码范围格式无效: {}",
+                    part
+                )));
+            }
+            let start = left.trim().parse::<i32>().map_err(|_| {
+                GBrainError::InvalidInput(format!("OCR 页码不是有效整数: {}", left.trim()))
+            })?;
+            let end = right.trim().parse::<i32>().map_err(|_| {
+                GBrainError::InvalidInput(format!("OCR 页码不是有效整数: {}", right.trim()))
+            })?;
+            (start, end)
+        } else {
+            let page = part.parse::<i32>().map_err(|_| {
+                GBrainError::InvalidInput(format!("OCR 页码不是有效整数: {}", part))
+            })?;
+            (page, page)
+        };
+
+        if start < 1 || end < 1 {
+            return Err(GBrainError::InvalidInput(format!(
+                "OCR 页码必须从 1 开始: {}",
+                part
+            )));
+        }
+        if start > end {
+            return Err(GBrainError::InvalidInput(format!(
+                "OCR 页码范围起始页大于结束页: {}",
+                part
+            )));
+        }
+        if end > max_page {
+            return Err(GBrainError::InvalidInput(format!(
+                "OCR 页码范围超出 PDF 总页数 {}: {}",
+                max_page, part
+            )));
+        }
+
+        for p in start..=end {
+            if !pages.contains(&p) {
+                pages.push(p);
+            }
+        }
+    }
+
+    if pages.is_empty() {
+        return Err(GBrainError::InvalidInput("OCR 页码范围为空".to_string()));
+    }
+
+    pages.sort();
+    Ok(pages)
+}
+
+fn resolve_pdf_page_count(
+    conn: &rusqlite::Connection,
+    doc_id: i64,
+    storage_path: &str,
+) -> Result<i32> {
+    let total: i32 = conn
+        .query_row(
+            "SELECT page_count FROM kb_documents WHERE id = ?1",
+            rusqlite::params![doc_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if total > 0 {
+        return Ok(total);
+    }
+
+    let data = std::fs::read(storage_path)
+        .map_err(|e| GBrainError::FileError(format!("读取 PDF 文件以确定页数失败: {}", e)))?;
+    let pdf_total = gbrain_core::kb::parser::pdf::count_pdf_pages(&data)? as i32;
+    if pdf_total <= 0 {
+        return Err(GBrainError::InvalidInput("无法确定 PDF 总页数".to_string()));
+    }
+    Ok(pdf_total)
 }
 
 fn main() {
@@ -1039,8 +1166,342 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 info!("建议变更 {} 已回滚 (原状态: {})", change_id, result.status);
             }
         },
+
+        Commands::Kb { command } => match command {
+            KbCommands::OcrStatus { doc_id } => {
+                let conn = ops.engine.connection()?;
+                let kb = gbrain_core::kb::engine::KbEngine::new(conn);
+
+                // 查询文档信息
+                let doc = kb.get_document(doc_id)?;
+
+                let mut result = serde_json::json!({
+                    "document_id": doc.id,
+                    "title": doc.title,
+                    "ocr_status": doc.ocr_status,
+                    "ocr_text_coverage": doc.ocr_text_coverage,
+                });
+
+                // 查询页级 OCR 状态（按当前 run 过滤，避免展示旧 run 数据）
+                let conn = ops.engine.connection()?;
+                let mut stmt = conn.prepare(
+                    "SELECT page_number, status, provider, model, confidence, error \
+                     FROM kb_document_ocr_pages WHERE document_id = ?1 AND processing_run_id = ?2 ORDER BY page_number",
+                )?;
+                let pages: Vec<serde_json::Value> = stmt
+                    .query_map(rusqlite::params![doc_id, doc.processing_run_id], |row| {
+                        let page_number: i32 = row.get(0)?;
+                        let status: String = row.get(1)?;
+                        let provider: String = row.get(2)?;
+                        let model: String = row.get(3)?;
+                        let confidence: Option<f64> = row.get(4)?;
+                        let error: Option<String> = row.get(5)?;
+                        Ok(serde_json::json!({
+                            "page_number": page_number,
+                            "status": status,
+                            "provider": provider,
+                            "model": model,
+                            "confidence": confidence,
+                            "error": error,
+                        }))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+
+                result["ocr_pages"] = serde_json::json!(pages);
+                info!("{}", serde_json::to_string_pretty(&result)?);
+            }
+
+            KbCommands::OcrRun { doc_id, pages } => {
+                let conn = ops.engine.connection()?;
+
+                // 查询文档信息
+                let doc_row: (String, String, i64, String) = conn
+                    .query_row(
+                        "SELECT title, storage_path, library_id, processing_run_id \
+                         FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(|e| {
+                        gbrain_core::error::GBrainError::Database(format!("查询文档失败: {}", e))
+                    })?;
+
+                let (title, storage_path, library_id, run_id) = doc_row;
+
+                // 检查库隐私策略
+                {
+                    let kb = gbrain_core::kb::engine::KbEngine::new(conn);
+                    let library = kb.get_library(library_id).map_err(|e| {
+                        gbrain_core::error::GBrainError::Database(format!("查询库失败: {}", e))
+                    })?;
+                    if !library.external_ocr_allowed {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "库已关闭外部 OCR，无法执行 OCR".to_string(),
+                        )
+                        .into());
+                    }
+                    if library.redaction_enabled {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "库已启用脱敏，禁止外部 OCR".to_string(),
+                        )
+                        .into());
+                    }
+                }
+
+                let total_pages = resolve_pdf_page_count(conn, doc_id, &storage_path)?;
+
+                // 解析页码
+                let ocr_pages = if let Some(ref pages_str) = pages {
+                    parse_page_ranges(pages_str, total_pages)?
+                } else {
+                    // 自动检测：查询低密度/图片页
+                    let mut page_list = Vec::new();
+                    let mut stmt = conn.prepare(
+                        "SELECT page_number FROM kb_document_ocr_pages \
+                         WHERE document_id = ?1 AND processing_run_id = ?2 AND status IN ('failed', 'empty_ocr')",
+                    )?;
+                    let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
+                        row.get::<_, i32>(0)
+                    })?;
+                    for row in rows {
+                        if let Ok(p) = row {
+                            page_list.push(p);
+                        }
+                    }
+                    if page_list.is_empty() {
+                        // 无已知失败页，标记所有页
+                        page_list = (1..=total_pages).collect();
+                    }
+                    page_list
+                };
+
+                // 无法确定页码范围时跳过入队，避免无意义任务和混乱状态
+                if ocr_pages.is_empty() {
+                    return Err(gbrain_core::error::GBrainError::InvalidInput(
+                        "无法确定 OCR 页码范围，跳过入队".to_string(),
+                    )
+                    .into());
+                }
+
+                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+
+                // 全局 OCR 开关检查
+                if !config_local.ocr_enabled {
+                    return Err(gbrain_core::error::GBrainError::InvalidInput(
+                        "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，无法执行 OCR".to_string(),
+                    )
+                    .into());
+                }
+                // OCR API key 检查
+                if config_local.ocr_api_key.is_none() {
+                    return Err(gbrain_core::error::GBrainError::InvalidInput(
+                        "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
+                            .to_string(),
+                    )
+                    .into());
+                }
+
+                let payload = gbrain_core::kb::jobs::KbOcrPayload {
+                    kind: "kb_ocr_document".to_string(),
+                    document_id: doc_id,
+                    library_id,
+                    processing_run_id: run_id,
+                    storage_path,
+                    pages: ocr_pages.clone(),
+                    submit_mode: config_local.ocr_submit_mode.clone(),
+                    provider: "glm_ocr".to_string(),
+                    model: config_local.ocr_model.clone(),
+                    return_crop_images: config_local.ocr_return_crop_images,
+                    need_layout_visualization: config_local.ocr_need_layout_visualization,
+                };
+
+                let queue = gbrain_core::jobs::JobQueue::new(conn);
+                let job_input = gbrain_core::jobs::JobInput {
+                    job_type: "kb_ocr_document".to_string(),
+                    payload: serde_json::to_value(&payload).unwrap(),
+                    priority: Some(0),
+                    max_attempts: Some(3),
+                };
+                let job_row_id = queue.enqueue(job_input)?;
+
+                // 更新文档 OCR 状态为 queued（带 run guard）
+                let kb = gbrain_core::kb::engine::KbEngine::new(conn);
+                kb.update_document_ocr_with_run_guard(
+                    doc_id,
+                    "queued",
+                    0.0,
+                    Some(&payload.processing_run_id),
+                )?;
+
+                info!(
+                    "已入队 OCR 作业: document_id={}, title='{}', pages={:?}, job_row_id={}",
+                    doc_id, title, ocr_pages, job_row_id
+                );
+            }
+
+            KbCommands::OcrRetry { doc_id } => {
+                let conn = ops.engine.connection()?;
+
+                // 查询文档信息
+                let doc_row: (String, i64, String) = conn
+                    .query_row(
+                        "SELECT title, library_id, processing_run_id \
+                         FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .map_err(|e| {
+                        gbrain_core::error::GBrainError::Database(format!("查询文档失败: {}", e))
+                    })?;
+
+                let (title, library_id, run_id) = doc_row;
+
+                // 检查库隐私策略
+                {
+                    let kb = gbrain_core::kb::engine::KbEngine::new(conn);
+                    let library = kb.get_library(library_id).map_err(|e| {
+                        gbrain_core::error::GBrainError::Database(format!("查询库失败: {}", e))
+                    })?;
+                    if !library.external_ocr_allowed {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "库已关闭外部 OCR，无法执行 OCR 重试".to_string(),
+                        )
+                        .into());
+                    }
+                    if library.redaction_enabled {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "库已启用脱敏，禁止外部 OCR".to_string(),
+                        )
+                        .into());
+                    }
+                }
+
+                // 全局 OCR 开关和 API key 检查
+                {
+                    let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+                    if !config_local.ocr_enabled {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，无法执行 OCR 重试"
+                                .to_string(),
+                        )
+                        .into());
+                    }
+                    if config_local.ocr_api_key.is_none() {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
+                                .to_string(),
+                        )
+                        .into());
+                    }
+                }
+
+                // 查询失败的页
+                let mut failed_pages = Vec::new();
+                let mut stmt = conn.prepare(
+                    "SELECT page_number FROM kb_document_ocr_pages \
+                     WHERE document_id = ?1 AND processing_run_id = ?2 AND status = 'failed' ORDER BY page_number",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
+                    row.get::<_, i32>(0)
+                })?;
+                for row in rows {
+                    if let Ok(p) = row {
+                        failed_pages.push(p);
+                    }
+                }
+
+                if failed_pages.is_empty() {
+                    info!("文档 {} ('{}') 无失败的 OCR 页", doc_id, title);
+                    return Ok(());
+                }
+
+                // 重置当前 run 的失败页状态为 pending
+                conn.execute(
+                    "UPDATE kb_document_ocr_pages SET status = 'pending', error = '' \
+                     WHERE document_id = ?1 AND processing_run_id = ?2 AND status = 'failed'",
+                    rusqlite::params![doc_id, run_id],
+                )?;
+
+                // 获取 storage_path
+                let storage_path: String = conn
+                    .query_row(
+                        "SELECT storage_path FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap_or_default();
+
+                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+                let payload = gbrain_core::kb::jobs::KbOcrPayload {
+                    kind: "kb_ocr_document".to_string(),
+                    document_id: doc_id,
+                    library_id,
+                    processing_run_id: run_id,
+                    storage_path,
+                    pages: failed_pages.clone(),
+                    submit_mode: config_local.ocr_submit_mode.clone(),
+                    provider: "glm_ocr".to_string(),
+                    model: config_local.ocr_model.clone(),
+                    return_crop_images: config_local.ocr_return_crop_images,
+                    need_layout_visualization: config_local.ocr_need_layout_visualization,
+                };
+
+                let queue = gbrain_core::jobs::JobQueue::new(conn);
+                let job_input = gbrain_core::jobs::JobInput {
+                    job_type: "kb_ocr_document".to_string(),
+                    payload: serde_json::to_value(&payload).unwrap(),
+                    priority: Some(0),
+                    max_attempts: Some(3),
+                };
+                let job_row_id = queue.enqueue(job_input)?;
+
+                let kb = gbrain_core::kb::engine::KbEngine::new(conn);
+                kb.update_document_ocr_with_run_guard(
+                    doc_id,
+                    "queued",
+                    0.0,
+                    Some(&payload.processing_run_id),
+                )?;
+
+                info!(
+                    "已入队 OCR 重试: document_id={}, title='{}', failed_pages={:?}, job_row_id={}",
+                    doc_id, title, failed_pages, job_row_id
+                );
+            }
+        },
     }
 
     engine.disconnect()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_page_ranges_validates_bounds() {
+        assert_eq!(
+            parse_page_ranges("1,3,5-7", 10).unwrap(),
+            vec![1, 3, 5, 6, 7]
+        );
+        assert!(parse_page_ranges("0", 10).is_err());
+        assert!(parse_page_ranges("3-2", 10).is_err());
+        assert!(parse_page_ranges("11", 10).is_err());
+        assert!(parse_page_ranges("1,,2", 10).is_err());
+    }
 }

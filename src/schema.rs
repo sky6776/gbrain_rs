@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 28;
+pub const SCHEMA_VERSION: i32 = 30;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -735,6 +735,57 @@ AFTER UPDATE OF name_tokens, library_id ON kb_documents BEGIN
     INSERT INTO kb_doc_name_fts(rowid, name_tokens, library_id, document_id)
     VALUES (new.id, new.name_tokens, new.library_id, new.id);
 END;
+
+-- KB 文档 OCR 页级结果表
+CREATE TABLE IF NOT EXISTS kb_document_ocr_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL,
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    markdown TEXT NOT NULL DEFAULT '',
+    layout_json TEXT NOT NULL DEFAULT '[]',
+    layout_visualization_url TEXT NOT NULL DEFAULT '',
+    raw_response_json TEXT NOT NULL DEFAULT '{}',
+    request_id TEXT NOT NULL DEFAULT '',
+    confidence REAL,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(document_id, page_number, processing_run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ocr_pages_document
+    ON kb_document_ocr_pages(document_id);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ocr_pages_status
+    ON kb_document_ocr_pages(status);
+
+-- KB 文档 OCR 版面块表
+CREATE TABLE IF NOT EXISTS kb_document_ocr_blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    page_number INTEGER NOT NULL,
+    processing_run_id TEXT NOT NULL DEFAULT '',
+    block_index INTEGER NOT NULL DEFAULT 0,
+    label TEXT NOT NULL DEFAULT '',
+    bbox_json TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    plain_text TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'glm_ocr',
+    raw_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(document_id, page_number, block_index, source, processing_run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ocr_blocks_document_page
+    ON kb_document_ocr_blocks(document_id, page_number);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ocr_blocks_label
+    ON kb_document_ocr_blocks(label);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Artifact 子系统表（单入口多投影融合架构）

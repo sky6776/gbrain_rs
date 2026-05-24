@@ -270,7 +270,11 @@ impl<'a> KbEngine<'a> {
                     input.external_embedding_allowed.unwrap_or(true) as i32,
                     input.external_rerank_allowed.unwrap_or(true) as i32,
                     input.external_summary_allowed.unwrap_or(true) as i32,
-                    input.external_ocr_allowed.unwrap_or(true) as i32,
+                    input.external_ocr_allowed.unwrap_or_else(|| {
+                        std::env::var("GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT")
+                            .map(|v| v != "false" && v != "0")
+                            .unwrap_or(true)
+                    }) as i32,
                     input.redaction_enabled.unwrap_or(false) as i32,
                 ],
             )?;
@@ -1285,6 +1289,39 @@ impl<'a> KbEngine<'a> {
                  updated_at = datetime('now') WHERE id = ?3",
                 params![ocr_status, ocr_text_coverage, id],
             )?;
+            Ok(())
+        })
+    }
+
+    /// 带 run guard 的 OCR 状态更新：仅当 processing_run_id 匹配时才写入。
+    /// 防止 stale OCR job 修改新 run 的 ocr_status。
+    pub fn update_document_ocr_with_run_guard(
+        &self,
+        id: i64,
+        ocr_status: &str,
+        ocr_text_coverage: f64,
+        run_id: Option<&str>,
+    ) -> Result<()> {
+        self.transaction(|conn| {
+            if let Some(rid) = run_id {
+                let rows = conn.execute(
+                    "UPDATE kb_documents SET ocr_status = ?1, ocr_text_coverage = ?2, \
+                     updated_at = datetime('now') WHERE id = ?3 AND processing_run_id = ?4",
+                    params![ocr_status, ocr_text_coverage, id, rid],
+                )?;
+                if rows == 0 {
+                    tracing::warn!(
+                        id,
+                        "update_document_ocr_with_run_guard: run_id 不匹配，跳过 OCR 状态更新（stale job）"
+                    );
+                }
+            } else {
+                conn.execute(
+                    "UPDATE kb_documents SET ocr_status = ?1, ocr_text_coverage = ?2, \
+                     updated_at = datetime('now') WHERE id = ?3",
+                    params![ocr_status, ocr_text_coverage, id],
+                )?;
+            }
             Ok(())
         })
     }

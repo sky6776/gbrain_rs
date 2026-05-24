@@ -19,6 +19,25 @@ pub struct KbProcessPayload {
     pub extension: String,
 }
 
+/// Phase 3: OCR 文档处理 job payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbOcrPayload {
+    pub kind: String, // "kb_ocr_document"
+    pub document_id: i64,
+    pub library_id: i64,
+    pub processing_run_id: String,
+    pub storage_path: String,
+    /// 需要 OCR 的页码列表（1-based）
+    pub pages: Vec<i32>,
+    pub submit_mode: String,
+    pub provider: String,
+    pub model: String,
+    /// 是否返回裁剪图片
+    pub return_crop_images: bool,
+    /// 是否需要版面可视化
+    pub need_layout_visualization: bool,
+}
+
 /// P5-013: Reembed job payload — re-embed documents into a new embedding index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbReembedPayload {
@@ -208,4 +227,38 @@ pub fn resume_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
         params![library_id],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: OCR 作业入队与认领
+// ---------------------------------------------------------------------------
+
+/// 入队 OCR 文档处理作业。
+/// 返回新作业的数据库行 ID。
+pub fn enqueue_kb_ocr_job(conn: &Connection, payload: &KbOcrPayload) -> Result<i64> {
+    let queue = JobQueue::new(conn);
+    let input = JobInput {
+        job_type: "kb_ocr_document".to_string(),
+        payload: serde_json::to_value(payload)
+            .map_err(|e| GBrainError::Serialization(e.to_string()))?,
+        priority: Some(0),
+        max_attempts: Some(3),
+    };
+    queue.enqueue(input)
+}
+
+/// 认领下一个待处理的 OCR 作业。
+/// 返回 (job_db_id, payload) 供 worker 处理。
+pub fn claim_next_ocr_job(conn: &Connection) -> Result<Option<(i64, KbOcrPayload)>> {
+    let queue = JobQueue::new(conn);
+    match queue.dequeue_by_type("kb_ocr_document") {
+        Ok(Some(job)) => {
+            let payload: KbOcrPayload = serde_json::from_value(job.payload).map_err(|e| {
+                GBrainError::Serialization(format!("无效的 OCR 作业 payload: {}", e))
+            })?;
+            Ok(Some((job.id, payload)))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e),
+    }
 }

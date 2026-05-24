@@ -17,6 +17,13 @@ pub mod jobs;
 pub mod lifecycle;
 pub mod metadata;
 pub mod ocr;
+pub mod ocr_detector;
+pub mod ocr_glm;
+pub mod ocr_merge;
+pub mod ocr_pdf_splitter;
+pub mod ocr_planner;
+pub mod ocr_provider;
+pub mod ocr_response;
 pub mod parser;
 pub mod pipeline;
 pub mod planner;
@@ -36,5 +43,6 @@ pub use pipeline::{ingest_directory, process_document, process_document_async};
 pub use search::kb_search;
 pub use types::*;
 pub use worker::{
-    run_artifact_worker_once, run_kb_worker_loop, run_kb_worker_once, spawn_kb_worker_thread,
+    run_artifact_worker_once, run_kb_worker_loop, run_kb_worker_once, run_ocr_worker_once,
+    spawn_kb_worker_thread,
 };

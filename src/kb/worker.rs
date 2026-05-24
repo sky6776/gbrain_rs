@@ -9,7 +9,7 @@ use crate::embedding::Embedder;
 use crate::engine::BrainEngine;
 use crate::error::{GBrainError, Result};
 use crate::kb::engine::KbEngine;
-use crate::kb::jobs::{claim_next_kb_job, complete_kb_job, fail_kb_job};
+use crate::kb::jobs::{claim_next_kb_job, claim_next_ocr_job, complete_kb_job, fail_kb_job};
 use crate::kb::pipeline::process_document_async;
 use crate::kb::raptor::RaptorConfig;
 use crate::sqlite_engine::SqliteEngine;
@@ -459,7 +459,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 )?;
                 return Ok(true);
             }
-            reembed_single_node(conn, &embedder, &rt, node_id, None)
+            reembed_single_node(conn, &embedder, &rt, node_id, None, &config.embedding_model)
         }
         "kb_reembed" => {
             // 文档级重嵌入：读取所有无 embedding 的节点，逐个嵌入
@@ -471,7 +471,104 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 .get("target_embedding_index_id")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            reembed_document_nodes(conn, &embedder, &rt, doc_id, target_index_id)
+
+            // run_id 守卫：如果 payload 携带 processing_run_id，校验是否与文档当前 run 一致。
+            // 文档被重新处理时 run_id 会变更，旧的 re-embed job 应被丢弃。
+            if let Some(job_run_id) = payload.get("processing_run_id").and_then(|v| v.as_str()) {
+                let current_run_id: String = conn
+                    .query_row(
+                        "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap_or_default();
+                if current_run_id != job_run_id {
+                    tracing::warn!(
+                        document_id = doc_id,
+                        expected = %job_run_id,
+                        actual = %current_run_id,
+                        "re-embed worker: run_id 已过期，跳过"
+                    );
+                    complete_kb_job(conn, job_db_id)?;
+                    return Ok(true);
+                }
+            }
+
+            // 库级隐私策略检查：禁止外部 embedding 时跳过
+            let library_id: i64 = conn
+                .query_row(
+                    "SELECT library_id FROM kb_document_nodes WHERE document_id = ?1 LIMIT 1",
+                    rusqlite::params![doc_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            if library_id > 0 {
+                let kb = KbEngine::new(conn);
+                if let Ok(library) = kb.get_library(library_id) {
+                    if !library.external_embedding_allowed {
+                        tracing::warn!(
+                            document_id = doc_id,
+                            library_id,
+                            "re-embed worker: 库级策略禁止外部 embedding，跳过嵌入"
+                        );
+                        // 跳过嵌入，标记为 STATUS_SKIPPED（对应 keyword_only 语义）。
+                        // 与主 pipeline 策略一致：embedding 被禁用时不代表"完成"，而是"跳过"，
+                        // 避免无向量的文档被误标为向量索引 ready。
+                        let (word_total, split_total): (i32, i32) = conn
+                            .query_row(
+                                "SELECT word_total, split_total FROM kb_documents WHERE id = ?1",
+                                rusqlite::params![doc_id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .unwrap_or((0, 0));
+                        let kb = KbEngine::new(conn);
+                        let _ = kb.update_document_stats_with_run_guard(
+                            doc_id,
+                            word_total,
+                            split_total,
+                            Some(crate::kb::types::STATUS_SKIPPED),
+                            payload.get("processing_run_id").and_then(|v| v.as_str()),
+                        );
+                        complete_kb_job(conn, job_db_id)?;
+                        return Ok(true);
+                    }
+                }
+            }
+
+            // 未配置 embedding API key 时，跳过嵌入并标记为 STATUS_SKIPPED。
+            // 节点已有内容可用于关键词检索，不应让文档卡在 pending/processing。
+            if embedder.is_none() {
+                tracing::warn!(
+                    document_id = doc_id,
+                    "re-embed worker: 未配置 embedding API key，标记为 skipped（keyword_only）"
+                );
+                let (word_total, split_total): (i32, i32) = conn
+                    .query_row(
+                        "SELECT word_total, split_total FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap_or((0, 0));
+                let kb = KbEngine::new(conn);
+                let _ = kb.update_document_stats_with_run_guard(
+                    doc_id,
+                    word_total,
+                    split_total,
+                    Some(crate::kb::types::STATUS_SKIPPED),
+                    payload.get("processing_run_id").and_then(|v| v.as_str()),
+                );
+                complete_kb_job(conn, job_db_id)?;
+                return Ok(true);
+            }
+
+            reembed_document_nodes(
+                conn,
+                &embedder,
+                &rt,
+                doc_id,
+                target_index_id,
+                &config.embedding_model,
+            )
         }
         _ => Err(GBrainError::InvalidInput(format!(
             "未知 re-embed 作业类型: {}",
@@ -482,6 +579,70 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
     match result {
         Ok(count) => {
             info!(job_db_id, node_count = count, "re-embed worker: 处理完成");
+
+            // 修复：kb_reembed 成功后更新文档 embedding 状态为 COMPLETED。
+            // OCR writeback 会将 embedding_status 标记为 STATUS_PENDING 并入队此 job，
+            // 此处补齐向量后应将状态更新为 COMPLETED，否则文档永远停在 "processing"。
+            if job_type == "kb_reembed" {
+                let doc_id: i64 = payload
+                    .get("document_id")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                if doc_id > 0 {
+                    // 读取当前 word_total/split_total，避免传 0 覆盖已有值
+                    let (word_total, split_total): (i32, i32) = conn
+                        .query_row(
+                            "SELECT word_total, split_total FROM kb_documents WHERE id = ?1",
+                            rusqlite::params![doc_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .unwrap_or((0, 0));
+                    let kb = KbEngine::new(conn);
+                    let run_id = payload.get("processing_run_id").and_then(|v| v.as_str());
+                    if let Err(e) = kb.update_document_stats_with_run_guard(
+                        doc_id,
+                        word_total,
+                        split_total,
+                        Some(crate::kb::types::STATUS_COMPLETED),
+                        run_id,
+                    ) {
+                        // run guard 失败意味着文档已有新 run，不应继续操作
+                        tracing::warn!(
+                            document_id = doc_id,
+                            error = %e,
+                            "re-embed worker: run guard 失败，跳过后续操作（stale job）"
+                        );
+                        complete_kb_job(conn, job_db_id)?;
+                        return Ok(true);
+                    }
+
+                    // re-embed 后重建 RAPTOR 树。
+                    // OCR writeback 只创建叶节点，re-embed 补齐向量，
+                    // 但 RAPTOR 父节点（摘要/聚类节点）需要在此步重建。
+                    let library_id: i64 = conn
+                        .query_row(
+                            "SELECT library_id FROM kb_document_nodes WHERE document_id = ?1 LIMIT 1",
+                            rusqlite::params![doc_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0);
+                    if library_id > 0 {
+                        let kb2 = KbEngine::new(conn);
+                        if let Ok(library) = kb2.get_library(library_id) {
+                            if let Err(e) = rebuild_raptor_after_reembed(
+                                conn, &rt, doc_id, &library, config, run_id,
+                            ) {
+                                tracing::warn!(
+                                    document_id = doc_id,
+                                    error = %e,
+                                    "re-embed worker: RAPTOR 重建失败（不影响 embedding 结果）"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             complete_kb_job(conn, job_db_id)?;
             Ok(true)
         }
@@ -650,6 +811,727 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3: OCR 异步作业处理
+// ---------------------------------------------------------------------------
+
+/// 运行一次 OCR 作业处理循环：认领一个 kb_ocr_document 作业并执行。
+/// 返回是否处理了一个作业。
+///
+/// 流程：
+/// 1. 认领 kb_ocr_document 作业
+/// 2. 校验 processing_run_id 仍为当前值（防止旧 job 覆盖新上传）
+/// 3. 读取 PDF 文件并解析文本层
+/// 4. 规划 OCR 请求（按 pages 列表和大小限制拆分）
+/// 5. 逐块调用 GLM-OCR，持久化页级/块级结果
+/// 6. 合并文本层与 OCR 结果
+/// 7. 调用 writeback_ocr_results 执行 split/embed/persist
+/// 8. 更新文档 OCR 状态
+pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
+    let conn = engine.connection()?;
+
+    // 认领 OCR 作业
+    let claimed = claim_next_ocr_job(conn)?;
+    let Some((job_db_id, payload)) = claimed else {
+        return Ok(false);
+    };
+
+    info!(
+        job_db_id,
+        document_id = payload.document_id,
+        pages = ?payload.pages,
+        "OCR worker: 认领作业"
+    );
+
+    // 校验 processing_run_id 仍为当前值
+    let current_run_id: String = match conn.query_row(
+        "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+        rusqlite::params![payload.document_id],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(run_id) => run_id,
+        Err(e) => {
+            warn!(
+                document_id = payload.document_id,
+                error = %e,
+                "OCR worker: 查询文档 run_id 失败"
+            );
+            fail_kb_job(conn, job_db_id, &format!("查询文档失败: {}", e))?;
+            return Ok(true);
+        }
+    };
+
+    if current_run_id != payload.processing_run_id {
+        warn!(
+            document_id = payload.document_id,
+            expected = %payload.processing_run_id,
+            actual = %current_run_id,
+            "OCR worker: run_id 已过期，跳过"
+        );
+        // 旧 run 的 OCR job，直接完成不执行
+        complete_kb_job(conn, job_db_id)?;
+        return Ok(true);
+    }
+
+    // 更新文档 OCR 状态为 processing（带 run guard，防止 stale job 覆盖新 run 的状态）
+    let kb = KbEngine::new(conn);
+    kb.update_document_ocr_with_run_guard(
+        payload.document_id,
+        crate::kb::ocr::OcrStatus::Processing.as_str(),
+        0.0,
+        Some(&payload.processing_run_id),
+    )?;
+
+    // 检查库隐私策略：外部 OCR 是否被允许、是否启用脱敏
+    let library = kb.get_library(payload.library_id)?;
+    if !library.external_ocr_allowed {
+        warn!(
+            document_id = payload.document_id,
+            library_id = payload.library_id,
+            "OCR worker: 库已关闭外部 OCR，跳过"
+        );
+        // 策略阻断：标为 needed 而非 failed，表示文本层已索引但扫描内容未检索
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            payload.document_id,
+            &payload.pages,
+            "needed",
+            "库策略已关闭外部 OCR",
+            &payload.provider,
+            &payload.model,
+            &payload.processing_run_id,
+        )?;
+        crate::kb::ocr::update_document_ocr_status(
+            conn,
+            payload.document_id,
+            kb.get_document(payload.document_id)
+                .map(|d| d.page_count)
+                .unwrap_or(payload.pages.len() as i32),
+            Some(&payload.processing_run_id),
+        )?;
+        complete_kb_job(conn, job_db_id)?;
+        return Ok(true);
+    }
+    if library.redaction_enabled {
+        warn!(
+            document_id = payload.document_id,
+            library_id = payload.library_id,
+            "OCR worker: 库已启用脱敏，禁止外部 OCR"
+        );
+        // 策略阻断：标为 needed 而非 failed，表示文本层已索引但扫描内容未检索
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            payload.document_id,
+            &payload.pages,
+            "needed",
+            "库已启用脱敏，禁止外部 OCR",
+            &payload.provider,
+            &payload.model,
+            &payload.processing_run_id,
+        )?;
+        crate::kb::ocr::update_document_ocr_status(
+            conn,
+            payload.document_id,
+            kb.get_document(payload.document_id)
+                .map(|d| d.page_count)
+                .unwrap_or(payload.pages.len() as i32),
+            Some(&payload.processing_run_id),
+        )?;
+        complete_kb_job(conn, job_db_id)?;
+        return Ok(true);
+    }
+
+    // 全局 OCR 开关检查（作为最终边界，防止已入队任务绕过全局开关）
+    if !config.ocr_enabled {
+        warn!(
+            document_id = payload.document_id,
+            "OCR worker: 全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，跳过"
+        );
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            payload.document_id,
+            &payload.pages,
+            "needed",
+            "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)",
+            &payload.provider,
+            &payload.model,
+            &payload.processing_run_id,
+        )?;
+        crate::kb::ocr::update_document_ocr_status(
+            conn,
+            payload.document_id,
+            kb.get_document(payload.document_id)
+                .map(|d| d.page_count)
+                .unwrap_or(payload.pages.len() as i32),
+            Some(&payload.processing_run_id),
+        )?;
+        complete_kb_job(conn, job_db_id)?;
+        return Ok(true);
+    }
+
+    // OCR API key 检查（缺少 key 时标记为 failed，与 pipeline 行为一致）
+    if config.ocr_api_key.is_none() {
+        warn!(
+            document_id = payload.document_id,
+            "OCR worker: 未配置 OCR API key，跳过"
+        );
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            payload.document_id,
+            &payload.pages,
+            "failed",
+            "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)",
+            &payload.provider,
+            &payload.model,
+            &payload.processing_run_id,
+        )?;
+        crate::kb::ocr::update_document_ocr_status(
+            conn,
+            payload.document_id,
+            kb.get_document(payload.document_id)
+                .map(|d| d.page_count)
+                .unwrap_or(payload.pages.len() as i32),
+            Some(&payload.processing_run_id),
+        )?;
+        complete_kb_job(conn, job_db_id)?;
+        return Ok(true);
+    }
+
+    // 执行 OCR 处理
+    let result = execute_ocr_job(conn, &payload, config);
+
+    match result {
+        Ok(coverage) => {
+            info!(
+                job_db_id,
+                document_id = payload.document_id,
+                coverage,
+                "OCR worker: 处理完成"
+            );
+            // execute_ocr_job -> writeback_ocr_results 已正确更新文档 OCR 状态，无需重复调用
+            complete_kb_job(conn, job_db_id)?;
+            Ok(true)
+        }
+        Err(e) => {
+            warn!(
+                job_db_id,
+                document_id = payload.document_id,
+                error = %e,
+                "OCR worker: 处理失败"
+            );
+            // 标记失败页
+            crate::kb::ocr::update_ocr_pages_status(
+                conn,
+                payload.document_id,
+                &payload.pages,
+                "failed",
+                &e.to_string(),
+                &payload.provider,
+                &payload.model,
+                &payload.processing_run_id,
+            )?;
+            // 更新文档 OCR 状态（使用文档总页数，而非本次 payload 页数，避免重试场景 coverage 错误）
+            let doc_total_pages = {
+                let kb = KbEngine::new(conn);
+                kb.get_document(payload.document_id)
+                    .map(|d| d.page_count)
+                    .unwrap_or(payload.pages.len() as i32)
+            };
+            crate::kb::ocr::update_document_ocr_status(
+                conn,
+                payload.document_id,
+                doc_total_pages,
+                Some(&payload.processing_run_id),
+            )?;
+            fail_kb_job(conn, job_db_id, &e.to_string())?;
+            Ok(true)
+        }
+    }
+}
+
+/// OCR 请求最大重试次数
+const MAX_OCR_RETRIES: u32 = 3;
+/// OCR 请求初始退避时间（秒），每次重试翻倍
+const INITIAL_RETRY_BACKOFF_SECS: u64 = 2;
+
+/// 判断 OCR 错误是否可重试（429/503/timeout/网络错误）
+fn is_retryable_ocr_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("503")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("hyper")
+}
+
+/// 执行 OCR 作业核心逻辑：读取 PDF → 规划 → 调用 GLM-OCR → 合并 → 回写
+fn execute_ocr_job(
+    conn: &Connection,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    config: &Config,
+) -> Result<f64> {
+    use crate::kb::ocr_glm::{build_ocr_options_from_config, pdf_to_base64, GlmOcrProvider};
+    use crate::kb::ocr_merge::merge_text_and_ocr;
+    use crate::kb::ocr_planner::plan_ocr_requests;
+    use crate::kb::ocr_provider::{OcrFilePayload, OcrInput, OcrProvider, OcrSubmitMode};
+
+    // 读取 PDF 文件
+    let file_data = std::fs::read(&payload.storage_path).map_err(|e| {
+        GBrainError::FileError(format!("读取 PDF 文件失败 {}: {}", payload.storage_path, e))
+    })?;
+
+    // 解析 PDF 获取文本层页级分析
+    let registry = crate::kb::parser::ParserRegistry::new();
+    let parsed = registry.parse("pdf", &file_data)?;
+
+    let total_pages: i32 = parsed
+        .metadata
+        .get("total_pages")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    if total_pages == 0 {
+        // 无法确认 PDF 页数，可能是解析异常，返回错误以触发失败标记
+        // 而非静默 Ok(0.0) 让文档停在 processing/queued
+        return Err(GBrainError::InvalidInput(
+            "PDF 总页数为 0，无法执行 OCR".to_string(),
+        ));
+    }
+
+    // 防御性检查：限制 OCR 页数上限
+    // 处理前先校验 run guard，防止 stale job 写入页级状态
+    if let Err(e) =
+        crate::kb::ocr::check_ocr_run_guard(conn, payload.document_id, &payload.processing_run_id)
+    {
+        tracing::warn!(
+            document_id = payload.document_id,
+            error = %e,
+            "OCR worker: 初始 run guard 失败，跳过处理（stale job）"
+        );
+        return Err(e);
+    }
+
+    let ocr_pages = {
+        let max_pages = config.ocr_max_pages_per_document;
+        if payload.pages.len() > max_pages {
+            tracing::warn!(
+                document_id = payload.document_id,
+                page_count = payload.pages.len(),
+                max_pages,
+                "OCR worker: 页数超过单文档上限，截断为前 {} 页",
+                max_pages
+            );
+            // 超出上限的页标记为 skipped，确保有可见状态
+            let skipped: &[i32] = &payload.pages[max_pages..];
+            crate::kb::ocr::update_ocr_pages_status(
+                conn,
+                payload.document_id,
+                skipped,
+                "skipped",
+                &format!("超出单文档 OCR 页数上限 ({})", max_pages),
+                &payload.provider,
+                &payload.model,
+                &payload.processing_run_id,
+            )?;
+            tracing::info!(
+                document_id = payload.document_id,
+                skipped_count = skipped.len(),
+                "已将超出上限的 {} 页标记为 skipped",
+                skipped.len()
+            );
+            payload.pages[..max_pages].to_vec()
+        } else {
+            payload.pages.clone()
+        }
+    };
+
+    // 从 metadata 构建 PdfPageAnalysis
+    let page_analyses_raw = parsed
+        .metadata
+        .get("page_analyses")
+        .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(v).ok())
+        .unwrap_or_default();
+
+    let page_analyses: Vec<crate::kb::ocr_detector::PdfPageAnalysis> = page_analyses_raw
+        .iter()
+        .map(|pa| {
+            let page_number = pa.get("page_number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let text = pa
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let char_count = pa.get("char_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let image_area_ratio = pa
+                .get("image_area_ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let image_count = pa.get("image_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let has_vector = pa
+                .get("has_vector_or_unknown_objects")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let image_regions = if image_count > 0 {
+                (0..image_count)
+                    .map(|_| crate::kb::ocr_detector::PdfImageRegion {
+                        bbox: None,
+                        area_ratio: image_area_ratio / image_count as f64,
+                    })
+                    .collect()
+            } else if image_area_ratio > 0.0 {
+                vec![crate::kb::ocr_detector::PdfImageRegion {
+                    bbox: None,
+                    area_ratio: image_area_ratio,
+                }]
+            } else {
+                vec![]
+            };
+
+            crate::kb::ocr_detector::PdfPageAnalysis {
+                page_number,
+                text,
+                text_blocks: vec![],
+                char_count,
+                image_regions,
+                image_area_ratio,
+                has_vector_or_unknown_objects: has_vector,
+                width: None,
+                height: None,
+            }
+        })
+        .collect();
+
+    // 从 config 构建基础 options，再用 job payload 中携带的配置覆盖
+    // 确保 job 自包含，环境变量变更不会影响已入队 job 的行为
+    let mut options = build_ocr_options_from_config(config);
+    options.model = payload.model.clone();
+    options.return_crop_images = payload.return_crop_images;
+    options.need_layout_visualization = payload.need_layout_visualization;
+    let submit_mode = OcrSubmitMode::from_str(&payload.submit_mode);
+
+    // 创建临时目录：包含 run_id 避免同一文档的并发 job 相互覆盖/删除
+    let temp_dir = std::env::temp_dir().join(format!(
+        "gbrain_ocr_{}_{}",
+        payload.document_id, payload.processing_run_id
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // 规划 OCR 请求
+    let plan = plan_ocr_requests(
+        payload.document_id,
+        &payload.processing_run_id,
+        &file_data,
+        total_pages,
+        &ocr_pages,
+        options.max_pages_per_request,
+        options.max_pdf_bytes_per_request,
+        &submit_mode,
+        &temp_dir,
+    )?;
+
+    // 执行每个请求块
+    let api_key = config.ocr_api_key.as_deref().unwrap_or("");
+    let provider = GlmOcrProvider::new(api_key);
+    let mut all_ocr_results: Vec<crate::kb::ocr_provider::OcrPageResult> = Vec::new();
+    // 跟踪失败的页段，用于在所有页段处理完后决定是否返回错误触发队列重试
+    let mut any_chunk_error: Option<String> = None;
+
+    for chunk in &plan.chunks {
+        // 每个页段处理前校验 run guard，防止 stale job 写入新 run 的页/块数据
+        if let Err(e) = crate::kb::ocr::check_ocr_run_guard(
+            conn,
+            payload.document_id,
+            &payload.processing_run_id,
+        ) {
+            tracing::warn!(
+                document_id = payload.document_id,
+                error = %e,
+                "OCR worker: run guard 失败，中止剩余页段处理（stale job）"
+            );
+            break;
+        }
+
+        // 拆分失败的页段：跳过 OCR 请求，直接标记为 failed
+        if chunk.split_failed {
+            warn!(
+                document_id = payload.document_id,
+                start = chunk.source_start_page,
+                end = chunk.source_end_page,
+                "OCR worker: 页段拆分失败，跳过 OCR 并标记为 failed"
+            );
+            // 持久化失败时向上返回错误，避免静默产生不可信状态
+            for page_num in chunk.source_start_page..=chunk.source_end_page {
+                crate::kb::ocr::update_ocr_page_status(
+                    conn,
+                    payload.document_id,
+                    page_num,
+                    "failed",
+                    "PDF 页段拆分失败，无法提交 OCR",
+                    &payload.provider,
+                    &payload.model,
+                    &payload.processing_run_id,
+                )?;
+            }
+            continue;
+        }
+
+        let file_payload = if let Some(ref split_path) = chunk.split_pdf_path {
+            let split_data = std::fs::read(split_path)
+                .map_err(|e| GBrainError::FileError(format!("读取拆分 PDF 失败: {}", e)))?;
+            OcrFilePayload::Base64(pdf_to_base64(&split_data))
+        } else {
+            OcrFilePayload::Base64(pdf_to_base64(&file_data))
+        };
+
+        let input = OcrInput::PdfRange {
+            file: file_payload,
+            request_start_page_id: chunk.request_start_page_id,
+            request_end_page_id: chunk.request_end_page_id,
+            source_start_page: chunk.source_start_page,
+            source_end_page: chunk.source_end_page,
+            document_id: payload.document_id,
+            run_id: payload.processing_run_id.clone(),
+        };
+
+        // 指数退避重试：对可重试错误（429/503/timeout/网络）进行最多 MAX_OCR_RETRIES 次重试
+        let mut retry_count = 0u32;
+        loop {
+            let call_started = std::time::Instant::now();
+            let recognition = provider.recognize(&input, &options);
+            let latency_ms = call_started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+
+            match recognition {
+                Ok(results) => {
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        payload.library_id,
+                        payload.document_id,
+                        &payload.provider,
+                        &payload.model,
+                        latency_ms,
+                        true,
+                        "",
+                        &results,
+                    );
+                    // 持久化 OCR 结果失败时向上返回错误，避免页面结果丢失但文档显示完成
+                    if !results.is_empty() {
+                        crate::kb::ocr::persist_ocr_page_results(
+                            conn,
+                            payload.document_id,
+                            &payload.processing_run_id,
+                            &results,
+                        )?;
+                        crate::kb::ocr::persist_ocr_blocks(
+                            conn,
+                            payload.document_id,
+                            &payload.processing_run_id,
+                            &results,
+                        )?;
+                    }
+                    // 标记未返回的页为 failed（处理多页请求部分失败的情况）
+                    let returned_pages: std::collections::HashSet<i32> =
+                        results.iter().map(|r| r.page_number).collect();
+                    for page_num in chunk.source_start_page..=chunk.source_end_page {
+                        if !returned_pages.contains(&page_num) {
+                            crate::kb::ocr::update_ocr_page_status(
+                                conn,
+                                payload.document_id,
+                                page_num,
+                                "failed",
+                                "OCR 请求未返回该页结果（部分失败）",
+                                &payload.provider,
+                                &payload.model,
+                                &payload.processing_run_id,
+                            )?;
+                        }
+                    }
+                    all_ocr_results.extend(results);
+                    break;
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        payload.library_id,
+                        payload.document_id,
+                        &payload.provider,
+                        &payload.model,
+                        latency_ms,
+                        false,
+                        &error_str,
+                        &[],
+                    );
+                    // 判断是否可重试（429/503/timeout/网络错误）
+                    if is_retryable_ocr_error(&error_str) && retry_count < MAX_OCR_RETRIES {
+                        retry_count += 1;
+                        let backoff_secs = INITIAL_RETRY_BACKOFF_SECS * 2u64.pow(retry_count - 1);
+                        tracing::warn!(
+                            document_id = payload.document_id,
+                            start = chunk.source_start_page,
+                            end = chunk.source_end_page,
+                            retry = retry_count,
+                            max_retries = MAX_OCR_RETRIES,
+                            backoff_secs,
+                            error = %e,
+                            "OCR 请求遇到可重试错误，指数退避重试"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                        continue;
+                    }
+                    // 不可重试或超过重试次数，标记该段所有页为 failed
+                    warn!(
+                        document_id = payload.document_id,
+                        start = chunk.source_start_page,
+                        end = chunk.source_end_page,
+                        error = %e,
+                        "OCR 请求失败"
+                    );
+                    for page_num in chunk.source_start_page..=chunk.source_end_page {
+                        crate::kb::ocr::update_ocr_page_status(
+                            conn,
+                            payload.document_id,
+                            page_num,
+                            "failed",
+                            &e.to_string(),
+                            &payload.provider,
+                            &payload.model,
+                            &payload.processing_run_id,
+                        )?;
+                    }
+                    // 记录首个错误，用于最终决定是否触发队列重试
+                    if any_chunk_error.is_none() {
+                        any_chunk_error = Some(e.to_string());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 如果全部页段失败（无任何成功结果），返回错误以触发队列重试
+    // 部分成功时继续执行合并与回写，确保成功页进入索引
+    if all_ocr_results.is_empty() {
+        if let Some(ref err_msg) = any_chunk_error {
+            tracing::warn!(
+                document_id = payload.document_id,
+                "OCR 全部页段失败，返回错误以触发队列重试"
+            );
+            // 清理临时目录
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Err(GBrainError::Http(format!("OCR 执行全部失败: {}", err_msg)));
+        }
+    } else if any_chunk_error.is_some() {
+        // 部分成功部分失败：成功页已有结果，失败页已在上面标记为 failed
+        // 继续执行合并与回写，让成功页进入索引
+        tracing::warn!(
+            document_id = payload.document_id,
+            success_count = all_ocr_results.len(),
+            "OCR 部分页段失败，成功页结果继续回写"
+        );
+    }
+
+    // 合并文本层与 OCR 结果
+    let merged = merge_text_and_ocr(&page_analyses, &all_ocr_results, &ocr_pages);
+
+    // 清理临时目录
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    // 回写前重新校验 run_id，防止过期 OCR 覆盖新上传产生的节点
+    let current_run_id_before_writeback: String = match conn.query_row(
+        "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+        rusqlite::params![payload.document_id],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(run_id) => run_id,
+        Err(e) => {
+            return Err(GBrainError::Database(format!(
+                "OCR writeback 前查询 run_id 失败: {}",
+                e
+            )));
+        }
+    };
+    if current_run_id_before_writeback != payload.processing_run_id {
+        warn!(
+            document_id = payload.document_id,
+            expected = %payload.processing_run_id,
+            actual = %current_run_id_before_writeback,
+            "OCR worker: writeback 前 run_id 已过期，跳过回写"
+        );
+        return Ok(0.0);
+    }
+
+    // 将合并结果（文本层 + OCR）回写到 KB 索引
+    let ocr_pages: Vec<crate::kb::ocr::OcrWritebackPage> = merged
+        .iter()
+        .map(|r| crate::kb::ocr::OcrWritebackPage {
+            page_number: r.page_number,
+            text: r.text.clone(),
+        })
+        .collect();
+
+    // 获取文档标题和 library 配置
+    let doc_title: String = conn
+        .query_row(
+            "SELECT title FROM kb_documents WHERE id = ?1",
+            rusqlite::params![payload.document_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+
+    let (chunk_size, chunk_overlap): (usize, usize) = conn
+        .query_row(
+            "SELECT chunk_size, chunk_overlap FROM kb_libraries WHERE id = ?1",
+            rusqlite::params![payload.library_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)? as usize,
+                ))
+            },
+        )
+        .unwrap_or((1024, 200));
+
+    let writeback_result = crate::kb::ocr::writeback_ocr_results(
+        conn,
+        payload.document_id,
+        payload.library_id,
+        &ocr_pages,
+        chunk_size,
+        chunk_overlap,
+        &doc_title,
+        total_pages,
+        Some(&payload.processing_run_id),
+    )?;
+
+    // 修复：OCR 回写后节点无向量，入队 kb_reembed job 补齐 embedding + RAPTOR。
+    // writeback_ocr_results 已将 embedding_status 标记为 STATUS_PENDING，
+    // re-embed worker 会在补齐向量后更新为 STATUS_COMPLETED。
+    // 携带 processing_run_id，re-embed worker 据此拒绝过期 job。
+    if writeback_result.nodes_created > 0 {
+        let queue = crate::jobs::JobQueue::new(conn);
+        if let Err(e) = queue.enqueue(crate::jobs::JobInput {
+            job_type: "kb_reembed".to_string(),
+            payload: serde_json::json!({
+                "document_id": payload.document_id,
+                "processing_run_id": payload.processing_run_id,
+            }),
+            priority: Some(0),
+            max_attempts: Some(3),
+        }) {
+            tracing::warn!(
+                document_id = payload.document_id,
+                error = %e,
+                "OCR worker: 入队 kb_reembed job 失败，embedding 需手动触发"
+            );
+        }
+    }
+
+    Ok(writeback_result.ocr_text_coverage)
+}
+
 /// 对单个节点执行 re-embed，返回嵌入向量维度数
 ///
 /// `target_index_id` 为 0 时自动解析为该节点所属 library 的 active index。
@@ -659,6 +1541,7 @@ fn reembed_single_node(
     rt: &tokio::runtime::Runtime,
     node_id: i64,
     target_index_id: Option<i64>,
+    model: &str,
 ) -> Result<usize> {
     // 解析 target_index_id：0 → active index
     let resolved_index_id = resolve_target_index(conn, node_id, target_index_id.unwrap_or(0))?;
@@ -692,7 +1575,7 @@ fn reembed_single_node(
         resolved_index_id,
         &vec,
         dims as i32,
-        "text-embedding-3-large",
+        model,
     )?;
     Ok(dims)
 }
@@ -706,6 +1589,7 @@ fn reembed_document_nodes(
     rt: &tokio::runtime::Runtime,
     document_id: i64,
     target_index_id: i64,
+    model: &str,
 ) -> Result<usize> {
     // 解析 target_index_id：0 → active index（通过文档的第一个节点查找所属 library）
     let resolved_index_id = if target_index_id > 0 {
@@ -773,7 +1657,7 @@ fn reembed_document_nodes(
                 resolved_index_id,
                 vec,
                 dims,
-                "text-embedding-3-large",
+                model,
             )?;
         }
     }
@@ -801,29 +1685,329 @@ fn resolve_target_index(conn: &Connection, node_id: i64, target_index_id: i64) -
     })
 }
 
+/// OCR re-embed 后重建 RAPTOR 树。
+///
+/// 加载文档叶节点及其嵌入向量，构建 RAPTOR 父节点并持久化到 DB。
+/// 仅在库启用 RAPTOR 且允许外部摘要时执行。
+fn rebuild_raptor_after_reembed(
+    conn: &Connection,
+    rt: &tokio::runtime::Runtime,
+    doc_id: i64,
+    library: &crate::kb::types::Library,
+    config: &Config,
+    run_id: Option<&str>,
+) -> Result<()> {
+    if !library.raptor_enabled || !library.external_summary_allowed {
+        return Ok(());
+    }
+
+    // 在事务内校验 run_id，防止 stale job 操纵新 run 的 RAPTOR 节点
+    if let Some(rid) = run_id {
+        let current_run: String = conn
+            .query_row(
+                "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                rusqlite::params![doc_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        if current_run != rid {
+            tracing::warn!(
+                document_id = doc_id,
+                expected = rid,
+                actual = %current_run,
+                "RAPTOR 重建: run_id 不匹配，跳过（stale job）"
+            );
+            return Ok(());
+        }
+    }
+
+    // 解析 active embedding index
+    let index_id: i64 = conn
+        .query_row(
+            "SELECT ei.id FROM kb_embedding_indexes ei \
+             JOIN kb_document_nodes n ON n.library_id = ei.library_id \
+             WHERE n.document_id = ?1 AND ei.is_active = 1 LIMIT 1",
+            rusqlite::params![doc_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| GBrainError::InvalidInput("无 active embedding index".into()))?;
+
+    // 加载叶节点 + 嵌入向量
+    let mut nodes: Vec<crate::kb::types::RaptorNode> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.library_id, n.document_id, n.content, n.chunk_order, \
+                    n.title_path, n.page_number, n.source_start, n.source_end, \
+                    n.node_metadata, n.embedding_text, e.embedding \
+             FROM kb_document_nodes n \
+             LEFT JOIN kb_node_embeddings e ON e.node_id = n.id AND e.embedding_index_id = ?1 \
+             WHERE n.document_id = ?2 AND n.level = 0 \
+             ORDER BY n.chunk_order",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![index_id, doc_id], |row| {
+            let id: i64 = row.get(0)?;
+            let library_id: i64 = row.get(1)?;
+            let document_id: i64 = row.get(2)?;
+            let content: String = row.get(3)?;
+            let chunk_order: i32 = row.get(4)?;
+            let title_path: String = row.get(5)?;
+            let page_number: Option<i32> = row.get(6)?;
+            let source_start: Option<i32> = row.get(7)?;
+            let source_end: Option<i32> = row.get(8)?;
+            let node_metadata: String = row.get(9)?;
+            let embedding_text: String = row.get(10)?;
+            let embedding_blob: Option<Vec<u8>> = row.get(11)?;
+
+            let vector = embedding_blob.map(|blob| {
+                blob.chunks_exact(4)
+                    .filter_map(|chunk| {
+                        let bytes: [u8; 4] = chunk.try_into().ok()?;
+                        Some(f32::from_le_bytes(bytes))
+                    })
+                    .collect::<Vec<f32>>()
+            });
+
+            Ok(crate::kb::types::RaptorNode {
+                id,
+                library_id,
+                document_id,
+                content,
+                level: 0,
+                parent_id: None,
+                chunk_order,
+                vector,
+                title_path,
+                page_number,
+                source_start,
+                source_end,
+                node_metadata,
+                embedding_text,
+            })
+        })?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let raptor_config = crate::kb::raptor::RaptorConfig::default();
+
+    if nodes.len() < raptor_config.min_nodes {
+        return Ok(());
+    }
+
+    // 所有节点必须有向量（RAPTOR 聚类依赖向量）
+    if nodes.iter().any(|n| n.vector.is_none()) {
+        tracing::warn!(
+            document_id = doc_id,
+            "部分叶节点无嵌入向量，跳过 RAPTOR 重建"
+        );
+        return Ok(());
+    }
+
+    // 解析 RAPTOR LLM 配置
+    let llm_config = crate::kb::raptor::resolve_raptor_llm_config(
+        Some(library),
+        config.kb_raptor_secret_ref.as_deref(),
+        config.kb_raptor_base_url.as_deref(),
+        if config.kb_raptor_model.is_empty() {
+            None
+        } else {
+            Some(config.kb_raptor_model.as_str())
+        },
+    )?;
+
+    let max_tokens = raptor_config.max_tokens_per_summary;
+    let llm_cfg = llm_config.clone();
+
+    // 构建 RAPTOR 树
+    let raptor_nodes = rt.block_on(crate::kb::raptor::build_raptor_tree(
+        &raptor_config,
+        &mut nodes,
+        |cluster| {
+            let cfg = llm_cfg.clone();
+            let cluster_texts: Vec<String> = cluster.iter().map(|n| n.content.clone()).collect();
+            async move {
+                let temp_nodes: Vec<crate::kb::types::RaptorNode> = cluster_texts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, content)| crate::kb::types::RaptorNode {
+                        id: i as i64,
+                        library_id: 0,
+                        document_id: 0,
+                        content: content.clone(),
+                        level: 0,
+                        parent_id: None,
+                        chunk_order: i as i32,
+                        vector: None,
+                        title_path: String::new(),
+                        page_number: None,
+                        source_start: None,
+                        source_end: None,
+                        node_metadata: String::new(),
+                        embedding_text: String::new(),
+                    })
+                    .collect();
+                let refs: Vec<&crate::kb::types::RaptorNode> = temp_nodes.iter().collect();
+                crate::kb::raptor::summarize_cluster(&refs, &cfg, max_tokens).await
+            }
+        },
+    ))?;
+
+    // 幂等持久化 RAPTOR 父节点：先清理旧父节点，再插入新的。
+    // 使用事务确保清理+重建原子性，避免重试产生重复父节点。
+    {
+        let tx = conn.unchecked_transaction()?;
+
+        // 事务内再次校验 run_id，防止加载/LLM 构建期间新 run 启动后旧 job 仍写入
+        if let Some(rid) = run_id {
+            let current_run: String = conn
+                .query_row(
+                    "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                    rusqlite::params![doc_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            if current_run != rid {
+                // run_id 不匹配，回滚事务并返回
+                tracing::warn!(
+                    document_id = doc_id,
+                    expected = rid,
+                    actual = %current_run,
+                    "RAPTOR 重建事务: run_id 不匹配，跳过写入（stale job）"
+                );
+                // 不提交事务，直接返回（unchecked_transaction 需要显式 rollback）
+                let _ = tx.rollback();
+                return Ok(());
+            }
+        }
+
+        // 1. 删除旧 RAPTOR 父节点（level > 0）及其 embeddings
+        let old_parent_ids: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1 AND level > 0")?;
+            let rows = stmt.query_map(rusqlite::params![doc_id], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        for &pid in &old_parent_ids {
+            crate::kb::engine::cleanup_node_vectors(conn, pid);
+        }
+        if !old_parent_ids.is_empty() {
+            conn.execute(
+                "DELETE FROM kb_document_nodes WHERE document_id = ?1 AND level > 0",
+                rusqlite::params![doc_id],
+            )?;
+        }
+
+        // 2. 重置叶节点的 parent_id（清除指向已删除旧父节点的引用）
+        conn.execute(
+            "UPDATE kb_document_nodes SET parent_id = NULL WHERE document_id = ?1 AND level = 0",
+            rusqlite::params![doc_id],
+        )?;
+
+        // 3. 插入新 RAPTOR 父节点
+        let mut id_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for node in &raptor_nodes {
+            if node.level == 0 {
+                id_map.insert(node.id, node.id);
+            }
+        }
+
+        for node in &raptor_nodes {
+            if node.level == 0 {
+                continue;
+            }
+
+            let content_tokens = crate::nlp::chinese::tokenize_content(&node.content);
+            conn.execute(
+                "INSERT INTO kb_document_nodes \
+                 (library_id, document_id, content, content_tokens, level, chunk_order, \
+                  title_path, page_number, source_start, source_end, node_metadata, embedding_text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    node.library_id,
+                    doc_id,
+                    node.content,
+                    content_tokens,
+                    node.level,
+                    node.chunk_order,
+                    node.title_path,
+                    node.page_number,
+                    node.source_start,
+                    node.source_end,
+                    node.node_metadata,
+                    node.embedding_text,
+                ],
+            )?;
+            let db_id = conn.last_insert_rowid();
+            id_map.insert(node.id, db_id);
+
+            // 写入父节点嵌入向量（子节点向量的平均值）
+            if let Some(ref vector) = node.vector {
+                crate::kb::embedding_index::upsert_node_embedding_for_index(
+                    conn,
+                    db_id,
+                    index_id,
+                    vector,
+                    vector.len() as i32,
+                    &config.embedding_model,
+                )?;
+            }
+        }
+
+        // 4. 更新叶节点的 parent_id
+        for node in &raptor_nodes {
+            if node.level == 0 {
+                if let Some(parent_temp_id) = node.parent_id {
+                    if let Some(&parent_db_id) = id_map.get(&parent_temp_id) {
+                        conn.execute(
+                            "UPDATE kb_document_nodes SET parent_id = ?1 WHERE id = ?2",
+                            rusqlite::params![parent_db_id, node.id],
+                        )?;
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+    }
+
+    let parent_count = raptor_nodes.iter().filter(|n| n.level > 0).count();
+    tracing::info!(
+        document_id = doc_id,
+        parent_count,
+        "re-embed worker: RAPTOR 重建完成"
+    );
+
+    Ok(())
+}
+
 /// 以守护进程模式运行 KB worker：持续轮询并处理所有类型的 KB 作业。
-/// 包括 kb_process_document（文档解析/切分/嵌入）、kb_reembed（文档级重嵌入）、
-/// kb_reembed_node（单节点修复）。
+/// 包括 kb_process_document（文档解析/切分/嵌入）、kb_ocr_document（异步 OCR）、
+/// kb_reembed（文档级重嵌入）、kb_reembed_node（单节点修复）。
 ///
 /// `interval_secs` 为无作业时的轮询间隔。
 pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs: u64) -> ! {
     info!(interval_secs, "KB worker: 启动守护进程模式");
     loop {
-        // 先处理文档处理作业，再处理 re-embed 作业
+        // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业
         let had_work = match run_kb_worker_once(engine, config) {
             Ok(true) => true,
-            Ok(false) => match run_reembed_worker_once(engine, config) {
+            Ok(false) => match run_ocr_worker_once(engine, config) {
                 Ok(true) => true,
-                Ok(false) => match run_artifact_worker_once(engine, config) {
+                Ok(false) => match run_reembed_worker_once(engine, config) {
                     Ok(true) => true,
-                    Ok(false) => false,
+                    Ok(false) => match run_artifact_worker_once(engine, config) {
+                        Ok(true) => true,
+                        Ok(false) => false,
+                        Err(e) => {
+                            warn!(error = %e, "artifact promote worker: 处理循环出错");
+                            false
+                        }
+                    },
                     Err(e) => {
-                        warn!(error = %e, "artifact promote worker: 处理循环出错");
+                        warn!(error = %e, "re-embed worker: 处理循环出错");
                         false
                     }
                 },
                 Err(e) => {
-                    warn!(error = %e, "re-embed worker: 处理循环出错");
+                    warn!(error = %e, "OCR worker: 处理循环出错");
                     false
                 }
             },
@@ -921,23 +2105,28 @@ pub fn spawn_kb_worker_pool(
                         info!(worker = i, "KB worker: 收到停止信号，退出");
                         break;
                     }
-                    // 先处理文档处理作业，再处理 re-embed 作业，最后处理 artifact promote 作业
-                    // 修复：pool 分支缺少 artifact_promote_extract 处理，
-                    // KB 处理完成后入队的 promote 作业会一直 pending
+                    // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，最后处理 artifact promote 作业
                     let had_work = match run_kb_worker_once(&engine, &config) {
                         Ok(true) => true,
-                        Ok(false) => match run_reembed_worker_once(&engine, &config) {
+                        Ok(false) => match run_ocr_worker_once(&engine, &config) {
                             Ok(true) => true,
-                            Ok(false) => match run_artifact_worker_once(&engine, &config) {
+                            Ok(false) => match run_reembed_worker_once(&engine, &config) {
                                 Ok(true) => true,
-                                Ok(false) => false,
+                                Ok(false) => match run_artifact_worker_once(&engine, &config) {
+                                    Ok(true) => true,
+                                    Ok(false) => false,
+                                    Err(e) => {
+                                        warn!(worker = i, error = %e, "artifact promote worker: 出错");
+                                        false
+                                    }
+                                },
                                 Err(e) => {
-                                    warn!(worker = i, error = %e, "artifact promote worker: 出错");
+                                    warn!(worker = i, error = %e, "re-embed worker: 出错");
                                     false
                                 }
                             },
                             Err(e) => {
-                                warn!(worker = i, error = %e, "re-embed worker: 出错");
+                                warn!(worker = i, error = %e, "OCR worker: 出错");
                                 false
                             }
                         },

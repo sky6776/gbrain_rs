@@ -8,7 +8,7 @@ use crate::embedding::Embedder;
 use crate::error::{GBrainError, Result};
 use crate::kb::engine::KbEngine;
 use crate::kb::jobs::KbProcessPayload;
-use crate::kb::parser::ParserRegistry;
+use crate::kb::parser::{ParsedDocument, ParserRegistry};
 use crate::kb::raptor::{self, RaptorConfig};
 use crate::kb::splitter::{create_async_splitter, create_splitter, SplitterConfig};
 use crate::kb::types::*;
@@ -449,6 +449,25 @@ pub async fn process_document_async(
         );
     })?;
 
+    // Phase 1+2: PDF OCR 分支 — 解析后、分割前执行 OCR
+    let parsed = if ext == "pdf" {
+        // 加载 OCR 配置（单次加载，避免 maybe_apply_pdf_ocr 内部重复 Config::load）
+        let ocr_config = crate::config::Config::load().unwrap_or_default();
+        maybe_apply_pdf_ocr(
+            conn,
+            doc_id,
+            lib_id,
+            run_id,
+            storage_path,
+            &parsed,
+            &library,
+            &file_data,
+            &ocr_config,
+        )?
+    } else {
+        parsed
+    };
+
     let word_total: i32 = count_words(&parsed.content) as i32;
 
     // P1-013: 元数据抽取（文件系统 + 格式特定）
@@ -486,7 +505,11 @@ pub async fn process_document_async(
 
     // P1-014: 文档粒度分类（解析完成后立即判定）
     let char_count = parsed.content.chars().count();
-    let page_count = 0; // 将在 P2 PDF/DOCX parser 中填充
+    let page_count: usize = parsed
+        .metadata
+        .get("total_pages")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
     let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
     // 修复：传入 run_id，防止旧 job 污染新 run 的 granularity
@@ -1318,6 +1341,620 @@ fn report_progress(on_progress: Option<&ProgressCallback>, phase: &str, message:
     if let Some(cb) = on_progress {
         cb(phase, message);
     }
+}
+
+// ---------------------------------------------------------------------------
+// PDF OCR 分支（Phase 1+2+3）
+// ---------------------------------------------------------------------------
+
+/// PDF OCR 分支入口：检测 → 规划 → 执行 OCR → 合并文本
+///
+/// 在 parse 后、split 前调用。行为：
+/// 1. 读取 parsed.metadata.page_analyses 并运行 OcrDetector
+/// 2. 如果 ocr_scope=none，更新 ocr_status=not_needed，返回原 parsed
+/// 3. 检查 OCR 是否启用、外部 OCR 是否允许
+/// 4. OCR 或外部 OCR 被关闭时，更新 ocr_status=needed，返回原 parsed
+/// 5. 同步内联模式：规划 → 调用 GLM-OCR → 规范化 → 合并 → 返回新 parsed
+/// 6. 异步模式：入队 kb_ocr_document job，返回原 parsed（仅文本层）
+#[allow(clippy::too_many_arguments)]
+fn maybe_apply_pdf_ocr(
+    conn: &Connection,
+    doc_id: i64,
+    lib_id: i64,
+    run_id: &str,
+    storage_path: &str,
+    parsed: &ParsedDocument,
+    library: &crate::kb::types::Library,
+    file_data: &[u8],
+    config: &crate::config::Config,
+) -> Result<ParsedDocument> {
+    use crate::kb::ocr::OcrStatus;
+    use crate::kb::ocr_detector::{detect_ocr_pages, PdfImageRegion, PdfPageAnalysis};
+    use crate::kb::ocr_provider::{OcrMode, OcrSubmitMode};
+
+    let ocr_enabled = config.ocr_enabled;
+    let external_allowed = library.external_ocr_allowed;
+
+    // 从 metadata 中读取页级分析
+    let page_analyses_raw = parsed
+        .metadata
+        .get("page_analyses")
+        .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(v).ok())
+        .unwrap_or_default();
+
+    let total_pages: usize = parsed
+        .metadata
+        .get("total_pages")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    if total_pages == 0 || page_analyses_raw.is_empty() {
+        // 无法确认 PDF 页数或页分析结果为空，标记 failed 而非 not_needed
+        // not_needed 意味着明确不需要 OCR，但页数为 0 可能是解析异常
+        let kb = KbEngine::new(conn);
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Failed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(parsed.clone());
+    }
+
+    // 转换为 PdfPageAnalysis
+    let page_analyses: Vec<PdfPageAnalysis> = page_analyses_raw
+        .iter()
+        .map(|pa| {
+            let page_number = pa.get("page_number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let text = pa
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let char_count = pa.get("char_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let image_area_ratio = pa
+                .get("image_area_ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let image_count = pa.get("image_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let has_vector = pa
+                .get("has_vector_or_unknown_objects")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let image_regions: Vec<PdfImageRegion> = if image_count > 0 {
+                (0..image_count)
+                    .map(|_| PdfImageRegion {
+                        bbox: None,
+                        area_ratio: image_area_ratio / image_count as f64,
+                    })
+                    .collect()
+            } else if image_area_ratio > 0.0 {
+                vec![PdfImageRegion {
+                    bbox: None,
+                    area_ratio: image_area_ratio,
+                }]
+            } else {
+                vec![]
+            };
+
+            PdfPageAnalysis {
+                page_number,
+                text,
+                text_blocks: vec![],
+                char_count,
+                image_regions,
+                image_area_ratio,
+                has_vector_or_unknown_objects: has_vector,
+                width: None,
+                height: None,
+            }
+        })
+        .collect();
+
+    // 运行 OCR 检测
+    let ocr_mode = OcrMode::from_str(&config.ocr_mode);
+    let mut detection = detect_ocr_pages(
+        &page_analyses,
+        config.ocr_text_density_threshold,
+        config.ocr_image_area_threshold,
+        config.ocr_image_count_threshold,
+        config.ocr_min_low_density_ratio,
+        &ocr_mode,
+    );
+
+    let kb = KbEngine::new(conn);
+
+    // 写入检测原因到 metadata
+    let reasons_json: std::collections::BTreeMap<String, Vec<String>> = detection
+        .reasons_by_page
+        .iter()
+        .map(|(page, reasons)| {
+            let labels: Vec<String> = reasons
+                .iter()
+                .map(|r| {
+                    serde_json::to_value(r)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                })
+                .collect();
+            (page.to_string(), labels)
+        })
+        .collect();
+
+    // 如果不需要 OCR
+    if !detection.needs_ocr {
+        tracing::info!(doc_id, "PDF OCR 检测: 不需要 OCR (ocr_scope=none)");
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::NotNeeded.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(parsed.clone());
+    }
+
+    tracing::info!(
+        doc_id,
+        ocr_pages = ?detection.ocr_pages,
+        "PDF OCR 检测: 需要 OCR"
+    );
+
+    // 限制 OCR 页数上限
+    let max_pages = config.ocr_max_pages_per_document;
+    if detection.ocr_pages.len() > max_pages {
+        tracing::warn!(
+            doc_id,
+            ocr_page_count = detection.ocr_pages.len(),
+            max_pages,
+            "OCR 页数超过单文档上限，截断为前 {} 页",
+            max_pages
+        );
+        // 超出上限的页标记为 skipped，确保有可见状态
+        let skipped_pages: Vec<i32> = detection.ocr_pages[max_pages..].to_vec();
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            doc_id,
+            &skipped_pages,
+            "skipped",
+            &format!("超出单文档 OCR 页数上限 ({})", max_pages),
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )?;
+        tracing::info!(
+            doc_id,
+            skipped_count = skipped_pages.len(),
+            "已将超出上限的 {} 页标记为 skipped",
+            skipped_pages.len()
+        );
+        detection.ocr_pages.truncate(max_pages);
+        detection.needs_ocr = !detection.ocr_pages.is_empty();
+    }
+
+    // 检查 OCR 是否启用和外部 OCR 是否允许
+    if !ocr_enabled || !external_allowed {
+        tracing::warn!(
+            doc_id,
+            ocr_enabled,
+            external_allowed,
+            "PDF 需要 OCR 但 OCR 或外部 OCR 被关闭"
+        );
+        let reason = if !ocr_enabled && !external_allowed {
+            "全局 OCR 和库外部 OCR 均已关闭"
+        } else if !ocr_enabled {
+            "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)"
+        } else {
+            "库策略已关闭外部 OCR"
+        };
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            doc_id,
+            &detection.ocr_pages,
+            "needed",
+            reason,
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )?;
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Needed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(parsed.clone());
+    }
+
+    // 检查隐私策略：redaction_enabled 时禁止外部 OCR
+    if library.redaction_enabled {
+        tracing::warn!(doc_id, "PDF 需要 OCR 但 library 启用了脱敏，禁止外部 OCR");
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            doc_id,
+            &detection.ocr_pages,
+            "needed",
+            "库已启用脱敏，禁止外部 OCR",
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )?;
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Needed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(parsed.clone());
+    }
+
+    // 检查 API key
+    if config.ocr_api_key.is_none() {
+        tracing::error!(
+            doc_id,
+            "PDF 需要 OCR 但未配置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY"
+        );
+        crate::kb::ocr::update_ocr_pages_status(
+            conn,
+            doc_id,
+            &detection.ocr_pages,
+            "failed",
+            "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)",
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )?;
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Failed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(parsed.clone());
+    }
+
+    // 异步模式：入队 kb_ocr_document job
+    if !config.ocr_sync_inline {
+        tracing::info!(doc_id, "PDF OCR: 入队异步 OCR job");
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Queued.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+
+        // 入队 OCR job
+        let ocr_payload = crate::kb::jobs::KbOcrPayload {
+            kind: "kb_ocr_document".to_string(),
+            document_id: doc_id,
+            library_id: lib_id,
+            processing_run_id: run_id.to_string(),
+            storage_path: storage_path.to_string(),
+            pages: detection.ocr_pages.clone(),
+            submit_mode: config.ocr_submit_mode.clone(),
+            provider: "glm_ocr".to_string(),
+            model: config.ocr_model.clone(),
+            return_crop_images: config.ocr_return_crop_images,
+            need_layout_visualization: config.ocr_need_layout_visualization,
+        };
+
+        let ocr_payload_json = serde_json::to_value(&ocr_payload)
+            .map_err(|e| GBrainError::Serialization(e.to_string()))?;
+
+        let queue = crate::jobs::JobQueue::new(conn);
+        let job_input = crate::jobs::JobInput {
+            job_type: "kb_ocr_document".to_string(),
+            payload: ocr_payload_json,
+            priority: Some(0),
+            max_attempts: Some(3),
+        };
+        queue.enqueue(job_input)?;
+
+        return Ok(parsed.clone());
+    }
+
+    // 同步内联模式：直接执行 OCR
+    tracing::info!(doc_id, "PDF OCR: 同步内联执行 OCR");
+    kb.update_document_ocr_with_run_guard(
+        doc_id,
+        OcrStatus::Processing.as_str(),
+        0.0,
+        Some(run_id),
+    )?;
+
+    match execute_inline_ocr(
+        conn,
+        doc_id,
+        lib_id,
+        run_id,
+        &page_analyses,
+        &detection,
+        file_data,
+        total_pages as i32,
+        &config,
+    ) {
+        Ok(merged_results) => {
+            // 用合并后的内容替换原 parsed 的 content
+            let merged_content = crate::kb::ocr_merge::merged_results_to_content(&merged_results);
+            let mut new_parsed = parsed.clone();
+            new_parsed.content = merged_content;
+
+            // 修复：从合并结果重建 blocks，使后续 split 的页码/source span 匹配正确。
+            // 原代码只更新 content 不重建 blocks，导致 split 用新 OCR 正文切块时
+            // 仍用原 PDF 文本层 blocks 做页码/span 匹配，扫描页容易得到错误页码。
+            new_parsed.blocks = Some(build_blocks_from_merged(&merged_results));
+
+            // 更新 page_texts metadata（从 page_analyses 重新生成）
+            let page_texts: Vec<String> = page_analyses.iter().map(|pa| pa.text.clone()).collect();
+            new_parsed.metadata.insert(
+                "page_texts".to_string(),
+                serde_json::to_string(&page_texts).unwrap_or_default(),
+            );
+            new_parsed
+                .metadata
+                .insert("needs_ocr".to_string(), detection.needs_ocr.to_string());
+            new_parsed.metadata.insert(
+                "ocr_pages".to_string(),
+                serde_json::to_string(&detection.ocr_pages).unwrap_or_default(),
+            );
+            new_parsed.metadata.insert(
+                "ocr_reasons_by_page".to_string(),
+                serde_json::to_string(&reasons_json).unwrap_or_default(),
+            );
+
+            Ok(new_parsed)
+        }
+        Err(e) => {
+            tracing::error!(doc_id, error = %e, "PDF OCR 执行失败");
+            kb.update_document_ocr_with_run_guard(
+                doc_id,
+                OcrStatus::Failed.as_str(),
+                0.0,
+                Some(run_id),
+            )?;
+            // OCR 失败时返回原始 parsed，不阻塞后续文本层索引
+            Ok(parsed.clone())
+        }
+    }
+}
+
+/// 从 OCR 合并结果构建 ParsedBlock 列表，offset 与 merged_results_to_content 输出对齐
+///
+/// 每个非空页生成一个 ParsedBlock，source_start/source_end 基于
+/// `[PAGE:N]\n{text}` 格式在全文中的字符偏移计算，确保后续 split
+/// 的 span 匹配能正确定位页码。
+fn build_blocks_from_merged(merged: &[crate::kb::ocr_merge::MergedPageResult]) -> Vec<ParsedBlock> {
+    let mut blocks = Vec::new();
+    let mut offset = 0i32;
+    for page in merged {
+        if page.text.trim().is_empty() {
+            continue;
+        }
+        let marker = format!("[PAGE:{}]\n", page.page_number);
+        let entry_chars = marker.chars().count() as i32 + page.text.chars().count() as i32;
+        blocks.push(ParsedBlock {
+            text: page.text.clone(),
+            title_path: String::new(),
+            page_number: Some(page.page_number),
+            source_start: Some(offset),
+            source_end: Some(offset + entry_chars),
+            block_type: if page.used_ocr { "ocr_text" } else { "text" }.to_string(),
+            metadata: String::new(),
+        });
+        offset += entry_chars + 2; // +2 for "\n\n" between pages
+    }
+    blocks
+}
+
+/// 同步内联执行 OCR：规划 → 调用 GLM-OCR → 合并文本
+#[allow(clippy::too_many_arguments)]
+fn execute_inline_ocr(
+    conn: &Connection,
+    doc_id: i64,
+    lib_id: i64,
+    run_id: &str,
+    page_analyses: &[crate::kb::ocr_detector::PdfPageAnalysis],
+    detection: &crate::kb::ocr_detector::OcrDetection,
+    file_data: &[u8],
+    total_pages: i32,
+    config: &crate::config::Config,
+) -> Result<Vec<crate::kb::ocr_merge::MergedPageResult>> {
+    use crate::kb::ocr_glm::{build_ocr_options_from_config, pdf_to_base64, GlmOcrProvider};
+    use crate::kb::ocr_merge::merge_text_and_ocr;
+    use crate::kb::ocr_planner::plan_ocr_requests;
+    use crate::kb::ocr_provider::{OcrFilePayload, OcrInput, OcrProvider, OcrSubmitMode};
+
+    let options = build_ocr_options_from_config(config);
+    let submit_mode = OcrSubmitMode::from_str(&config.ocr_submit_mode);
+
+    // 创建临时目录：包含 run_id 避免同一文档的并发 job 相互覆盖/删除
+    let temp_dir = std::env::temp_dir().join(format!("gbrain_ocr_{}_{}", doc_id, run_id));
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // 规划 OCR 请求
+    let plan = plan_ocr_requests(
+        doc_id,
+        "",
+        file_data,
+        total_pages,
+        &detection.ocr_pages,
+        options.max_pages_per_request,
+        options.max_pdf_bytes_per_request,
+        &submit_mode,
+        &temp_dir,
+    )?;
+
+    // 执行每个请求块
+    let api_key = config.ocr_api_key.as_deref().unwrap_or("");
+    let provider = GlmOcrProvider::new(api_key);
+    let mut all_ocr_results: Vec<crate::kb::ocr_provider::OcrPageResult> = Vec::new();
+
+    for chunk in &plan.chunks {
+        // 拆分失败的页段：跳过 OCR 请求，直接标记为 failed
+        if chunk.split_failed {
+            tracing::warn!(
+                doc_id,
+                start = chunk.source_start_page,
+                end = chunk.source_end_page,
+                "同步 OCR: 页段拆分失败，跳过 OCR 并标记为 failed"
+            );
+            // 持久化失败时向上返回错误，避免静默产生不可信状态
+            for page_num in chunk.source_start_page..=chunk.source_end_page {
+                crate::kb::ocr::update_ocr_page_status(
+                    conn,
+                    doc_id,
+                    page_num,
+                    "failed",
+                    "PDF 页段拆分失败，无法提交 OCR",
+                    "glm_ocr",
+                    &config.ocr_model,
+                    run_id,
+                )?;
+            }
+            continue;
+        }
+
+        // 准备输入
+        let file_payload = if let Some(ref split_path) = chunk.split_pdf_path {
+            // 使用拆分后的 PDF 子文件
+            let split_data = std::fs::read(split_path)?;
+            OcrFilePayload::Base64(pdf_to_base64(&split_data))
+        } else {
+            // 使用原始 PDF
+            OcrFilePayload::Base64(pdf_to_base64(file_data))
+        };
+
+        let input = OcrInput::PdfRange {
+            file: file_payload,
+            request_start_page_id: chunk.request_start_page_id,
+            request_end_page_id: chunk.request_end_page_id,
+            source_start_page: chunk.source_start_page,
+            source_end_page: chunk.source_end_page,
+            document_id: doc_id,
+            run_id: run_id.to_string(),
+        };
+
+        // 指数退避重试：对可重试错误（429/503/timeout/网络）重试最多 3 次
+        let mut retry_count = 0u32;
+        loop {
+            let call_started = std::time::Instant::now();
+            let recognition = provider.recognize(&input, &options);
+            let latency_ms = call_started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+
+            match recognition {
+                Ok(results) => {
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        lib_id,
+                        doc_id,
+                        "glm_ocr",
+                        &config.ocr_model,
+                        latency_ms,
+                        true,
+                        "",
+                        &results,
+                    );
+                    // 持久化页级和块级结果
+                    // 持久化 OCR 结果失败时向上返回错误，避免页面结果丢失但文档显示完成
+                    if !results.is_empty() {
+                        crate::kb::ocr::persist_ocr_page_results(conn, doc_id, run_id, &results)?;
+                        crate::kb::ocr::persist_ocr_blocks(conn, doc_id, run_id, &results)?;
+                    }
+                    // 标记未返回的页为 failed（处理多页请求部分失败的情况）
+                    let returned_pages: std::collections::HashSet<i32> =
+                        results.iter().map(|r| r.page_number).collect();
+                    for page_num in chunk.source_start_page..=chunk.source_end_page {
+                        if !returned_pages.contains(&page_num) {
+                            crate::kb::ocr::update_ocr_page_status(
+                                conn,
+                                doc_id,
+                                page_num,
+                                "failed",
+                                "OCR 请求未返回该页结果（部分失败）",
+                                "glm_ocr",
+                                &config.ocr_model,
+                                run_id,
+                            )?;
+                        }
+                    }
+                    all_ocr_results.extend(results);
+                    break;
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        lib_id,
+                        doc_id,
+                        "glm_ocr",
+                        &config.ocr_model,
+                        latency_ms,
+                        false,
+                        &error_str,
+                        &[],
+                    );
+                    let lower = error_str.to_lowercase();
+                    let retryable = lower.contains("429")
+                        || lower.contains("rate limit")
+                        || lower.contains("503")
+                        || lower.contains("timeout")
+                        || lower.contains("timed out")
+                        || lower.contains("connection")
+                        || lower.contains("hyper");
+
+                    if retryable && retry_count < 3 {
+                        retry_count += 1;
+                        let backoff_secs = 2u64 * 2u64.pow(retry_count - 1);
+                        tracing::warn!(
+                            doc_id,
+                            start = chunk.source_start_page,
+                            end = chunk.source_end_page,
+                            retry = retry_count,
+                            backoff_secs,
+                            error = %e,
+                            "同步 OCR 请求遇到可重试错误，指数退避重试"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        doc_id,
+                        start = chunk.source_start_page,
+                        end = chunk.source_end_page,
+                        error = %e,
+                        "OCR 请求失败"
+                    );
+                    // 标记失败页
+                    for page_num in chunk.source_start_page..=chunk.source_end_page {
+                        crate::kb::ocr::update_ocr_page_status(
+                            conn,
+                            doc_id,
+                            page_num,
+                            "failed",
+                            &error_str,
+                            "glm_ocr",
+                            &config.ocr_model,
+                            run_id,
+                        )?;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // 合并文本层与 OCR 结果
+    let merged = merge_text_and_ocr(page_analyses, &all_ocr_results, &detection.ocr_pages);
+
+    // 更新文档级 OCR 状态
+    crate::kb::ocr::update_document_ocr_status(conn, doc_id, total_pages, Some(run_id))?;
+
+    // 清理临时目录
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    Ok(merged)
 }
 
 #[cfg(test)]

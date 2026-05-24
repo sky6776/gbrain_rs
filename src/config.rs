@@ -99,6 +99,52 @@ pub struct Config {
     pub artifact_auto_create_inbox_library: bool,
     /// artifact_put 的 memory 意图是否写入 KB。默认 true。设为 false 则仅写入 gbrain 页面。
     pub artifact_manual_memory_to_kb: bool,
+
+    // --- OCR 子系统配置 ---
+    /// OCR 是否启用（默认 true）
+    pub ocr_enabled: bool,
+    /// 新建 library 默认是否允许外部 OCR（默认 true）
+    pub ocr_external_allowed_default: bool,
+    /// OCR API key（仅从环境变量读取: GBRAIN_OCR_API_KEY > ZHIPU_API_KEY）
+    /// 设计上不从 config.json 反序列化，防止配置文件中的旧 key 压过环境变量。
+    #[serde(skip)]
+    pub ocr_api_key: Option<String>,
+    /// OCR base URL（默认智谱 GLM-OCR endpoint）
+    pub ocr_base_url: String,
+    /// 是否允许自定义 base URL（默认 false，固定官方 endpoint）
+    pub ocr_allow_custom_base_url: bool,
+    /// OCR 模型名（默认 glm-ocr）
+    pub ocr_model: String,
+    /// OCR profile: general/table/formula/handwriting（只影响后处理，不发送给 API）
+    pub ocr_profile: String,
+    /// 是否启用 layout details（默认 true，用于块级合并）
+    pub ocr_enable_layout: bool,
+    /// OCR 模式: auto/all_pages
+    pub ocr_mode: String,
+    /// OCR 提交模式: pdf_first/pdf_range
+    pub ocr_submit_mode: String,
+    /// OCR 文本密度阈值（字符数低于此值视为低密度页）
+    pub ocr_text_density_threshold: usize,
+    /// OCR 最低低密度页比例（触发 OCR 的阈值）
+    pub ocr_min_low_density_ratio: f64,
+    /// OCR 图片面积覆盖率阈值
+    pub ocr_image_area_threshold: f64,
+    /// OCR 嵌入图片数量阈值
+    pub ocr_image_count_threshold: usize,
+    /// OCR 每页超时秒数
+    pub ocr_timeout_seconds_per_page: u64,
+    /// OCR 单次请求最大页数（默认 100）
+    pub ocr_max_pages_per_request: usize,
+    /// OCR 单次请求最大 PDF 字节数（默认 50MB）
+    pub ocr_max_pdf_bytes_per_request: usize,
+    /// OCR 单文档最大页数（默认 300）
+    pub ocr_max_pages_per_document: usize,
+    /// OCR 是否返回裁剪图片（默认 false）
+    pub ocr_return_crop_images: bool,
+    /// OCR 是否返回版面可视化（默认 false）
+    pub ocr_need_layout_visualization: bool,
+    /// OCR 是否同步内联执行（默认 false，生产用异步 job）
+    pub ocr_sync_inline: bool,
 }
 
 impl Default for Config {
@@ -192,6 +238,29 @@ impl Default for Config {
             artifact_auto_create_inbox_library: true,
             // artifact_put 的 memory 意图默认写入 KB
             artifact_manual_memory_to_kb: true,
+
+            // OCR 子系统默认配置
+            ocr_enabled: true,
+            ocr_external_allowed_default: true,
+            ocr_api_key: None,
+            ocr_base_url: "https://open.bigmodel.cn/api/paas/v4/layout_parsing".to_string(),
+            ocr_allow_custom_base_url: false,
+            ocr_model: "glm-ocr".to_string(),
+            ocr_profile: "general".to_string(),
+            ocr_enable_layout: true,
+            ocr_mode: "auto".to_string(),
+            ocr_submit_mode: "pdf_first".to_string(),
+            ocr_text_density_threshold: 50,
+            ocr_min_low_density_ratio: 0.5,
+            ocr_image_area_threshold: 0.08,
+            ocr_image_count_threshold: 1,
+            ocr_timeout_seconds_per_page: 60,
+            ocr_max_pages_per_request: 100,
+            ocr_max_pdf_bytes_per_request: 52_428_800, // 50MB
+            ocr_max_pages_per_document: 300,
+            ocr_return_crop_images: false,
+            ocr_need_layout_visualization: false,
+            ocr_sync_inline: false,
         }
     }
 }
@@ -386,6 +455,121 @@ impl Config {
         config.artifact_manual_memory_to_kb = std::env::var("GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB")
             .map(|v| v != "false" && v != "0")
             .unwrap_or(config.artifact_manual_memory_to_kb);
+
+        // --- OCR 子系统环境变量 ---
+        config.ocr_enabled = parse_env_bool("GBRAIN_OCR_ENABLED").unwrap_or(config.ocr_enabled);
+        config.ocr_external_allowed_default = parse_env_bool("GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT")
+            .unwrap_or(config.ocr_external_allowed_default);
+        // API key: GBRAIN_OCR_API_KEY 优先，兼容 ZHIPU_API_KEY
+        if let Ok(key) = std::env::var("GBRAIN_OCR_API_KEY") {
+            let key = key.trim();
+            if !key.is_empty() {
+                config.ocr_api_key = Some(key.to_string());
+            }
+        }
+        if config.ocr_api_key.is_none() {
+            if let Ok(key) = std::env::var("ZHIPU_API_KEY") {
+                let key = key.trim();
+                if !key.is_empty() {
+                    config.ocr_api_key = Some(key.to_string());
+                }
+            }
+        }
+        // base URL: 默认固定智谱 endpoint，需显式开启自定义
+        if let Ok(url) = std::env::var("GBRAIN_OCR_BASE_URL") {
+            config.ocr_base_url = url;
+        }
+        config.ocr_allow_custom_base_url = parse_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL")
+            .unwrap_or(config.ocr_allow_custom_base_url);
+        // 模型: GBRAIN_OCR_MODEL 优先，兼容 GLMOCR_MODEL
+        if let Ok(model) = std::env::var("GBRAIN_OCR_MODEL") {
+            let model = model.trim();
+            if !model.is_empty() {
+                config.ocr_model = model.to_string();
+            }
+        } else if let Ok(model) = std::env::var("GLMOCR_MODEL") {
+            let model = model.trim();
+            if !model.is_empty() {
+                config.ocr_model = model.to_string();
+            }
+        }
+        if let Ok(profile) = std::env::var("GBRAIN_OCR_PROFILE") {
+            let profile = profile.trim();
+            if matches!(profile, "general" | "table" | "formula" | "handwriting") {
+                config.ocr_profile = profile.to_string();
+            } else if !profile.is_empty() {
+                tracing::warn!(
+                    "GBRAIN_OCR_PROFILE 无效值 '{}'，有效值: general/table/formula/handwriting，已忽略",
+                    profile
+                );
+            }
+        }
+        // layout 开关: GBRAIN_OCR_ENABLE_LAYOUT 优先，兼容 GLMOCR_ENABLE_LAYOUT
+        config.ocr_enable_layout = parse_env_bool("GBRAIN_OCR_ENABLE_LAYOUT")
+            .or_else(|| parse_env_bool("GLMOCR_ENABLE_LAYOUT"))
+            .unwrap_or(config.ocr_enable_layout);
+        if let Ok(mode) = std::env::var("GBRAIN_OCR_MODE") {
+            config.ocr_mode = mode;
+        }
+        if let Ok(mode) = std::env::var("GBRAIN_OCR_SUBMIT_MODE") {
+            config.ocr_submit_mode = mode;
+        }
+        if let Ok(threshold) = std::env::var("GBRAIN_OCR_TEXT_DENSITY_THRESHOLD") {
+            if let Ok(v) = threshold.parse() {
+                config.ocr_text_density_threshold = v;
+            }
+        }
+        if let Ok(ratio) = std::env::var("GBRAIN_OCR_MIN_LOW_DENSITY_RATIO") {
+            if let Ok(v) = ratio.parse() {
+                config.ocr_min_low_density_ratio = v;
+            }
+        }
+        if let Ok(threshold) = std::env::var("GBRAIN_OCR_IMAGE_AREA_THRESHOLD") {
+            if let Ok(v) = threshold.parse() {
+                config.ocr_image_area_threshold = v;
+            }
+        }
+        if let Ok(threshold) = std::env::var("GBRAIN_OCR_IMAGE_COUNT_THRESHOLD") {
+            if let Ok(v) = threshold.parse() {
+                config.ocr_image_count_threshold = v;
+            }
+        }
+        // 超时: GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE 优先，兼容 GLM_OCR_TIMEOUT、GLMOCR_TIMEOUT
+        if let Ok(secs) = std::env::var("GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE") {
+            if let Ok(v) = secs.parse() {
+                config.ocr_timeout_seconds_per_page = v;
+            }
+        } else if let Ok(secs) = std::env::var("GLM_OCR_TIMEOUT") {
+            if let Ok(v) = secs.parse() {
+                config.ocr_timeout_seconds_per_page = v;
+            }
+        } else if let Ok(secs) = std::env::var("GLMOCR_TIMEOUT") {
+            if let Ok(v) = secs.parse() {
+                config.ocr_timeout_seconds_per_page = v;
+            }
+        }
+        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PAGES_PER_REQUEST") {
+            if let Ok(v) = max.parse() {
+                config.ocr_max_pages_per_request = v;
+            }
+        }
+        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST") {
+            if let Ok(v) = max.parse() {
+                config.ocr_max_pdf_bytes_per_request = v;
+            }
+        }
+        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT") {
+            if let Ok(v) = max.parse() {
+                config.ocr_max_pages_per_document = v;
+            }
+        }
+        config.ocr_return_crop_images = parse_env_bool("GBRAIN_OCR_RETURN_CROP_IMAGES")
+            .unwrap_or(config.ocr_return_crop_images);
+        config.ocr_need_layout_visualization =
+            parse_env_bool("GBRAIN_OCR_NEED_LAYOUT_VISUALIZATION")
+                .unwrap_or(config.ocr_need_layout_visualization);
+        config.ocr_sync_inline =
+            parse_env_bool("GBRAIN_OCR_SYNC_INLINE").unwrap_or(config.ocr_sync_inline);
 
         info!(
             db_path = %config.db_path().display(),
@@ -617,6 +801,13 @@ impl Config {
                 Some(self.artifact_auto_create_inbox_library.to_string())
             }
             "artifact_manual_memory_to_kb" => Some(self.artifact_manual_memory_to_kb.to_string()),
+            // OCR 子系统
+            "ocr_enabled" => Some(self.ocr_enabled.to_string()),
+            "ocr_base_url" => Some(self.ocr_base_url.clone()),
+            "ocr_model" => Some(self.ocr_model.clone()),
+            "ocr_mode" => Some(self.ocr_mode.clone()),
+            "ocr_submit_mode" => Some(self.ocr_submit_mode.clone()),
+            "ocr_profile" => Some(self.ocr_profile.clone()),
             // SQLite engine 专用 key，不在 Config 中
             "writer.lint_on_put_page" => None,
             _ => None,
@@ -721,6 +912,55 @@ impl Config {
             }
             "artifact_manual_memory_to_kb" => {
                 self.artifact_manual_memory_to_kb = parse_bool(key, value)?
+            }
+            // OCR 子系统配置
+            "ocr_enabled" => self.ocr_enabled = parse_bool(key, value)?,
+            "ocr_model" => self.ocr_model = value.to_string(),
+            "ocr_mode" => {
+                let valid = ["auto", "all_pages"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "ocr_mode 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.ocr_mode = value.to_string();
+            }
+            "ocr_submit_mode" => {
+                let valid = ["pdf_first", "pdf_range"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "ocr_submit_mode 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.ocr_submit_mode = value.to_string();
+            }
+            "ocr_profile" => {
+                let valid = ["general", "table", "formula", "handwriting"];
+                if !valid.contains(&value) {
+                    return Err(format!(
+                        "ocr_profile 无效值: {}，有效值: {}",
+                        value,
+                        valid.join(", ")
+                    ));
+                }
+                self.ocr_profile = value.to_string();
+            }
+            "ocr_base_url" => self.ocr_base_url = value.to_string(),
+            "ocr_text_density_threshold" => {
+                let v: usize = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.ocr_text_density_threshold = v;
+            }
+            "ocr_timeout_seconds_per_page" => {
+                let v: u64 = value
+                    .parse()
+                    .map_err(|_| format!("{} 需要整数，不是: {}", key, value))?;
+                self.ocr_timeout_seconds_per_page = v;
             }
             // SQLite engine 专用 key（保留兼容），不在 Config 中，仅写入 DB
             "writer.lint_on_put_page" => {
@@ -841,6 +1081,38 @@ impl Config {
         self.artifact_auto_create_inbox_library = other.artifact_auto_create_inbox_library;
         // artifact_manual_memory_to_kb — always take config file value
         self.artifact_manual_memory_to_kb = other.artifact_manual_memory_to_kb;
+        // OCR 子系统 — always take config file values
+        self.ocr_enabled = other.ocr_enabled;
+        self.ocr_external_allowed_default = other.ocr_external_allowed_default;
+        // ocr_api_key 不从配置文件合并，只从环境变量读取
+        if !other.ocr_base_url.is_empty() {
+            self.ocr_base_url = other.ocr_base_url;
+        }
+        self.ocr_allow_custom_base_url = other.ocr_allow_custom_base_url;
+        if !other.ocr_model.is_empty() {
+            self.ocr_model = other.ocr_model;
+        }
+        if !other.ocr_profile.is_empty() {
+            self.ocr_profile = other.ocr_profile;
+        }
+        self.ocr_enable_layout = other.ocr_enable_layout;
+        if !other.ocr_mode.is_empty() {
+            self.ocr_mode = other.ocr_mode;
+        }
+        if !other.ocr_submit_mode.is_empty() {
+            self.ocr_submit_mode = other.ocr_submit_mode;
+        }
+        self.ocr_text_density_threshold = other.ocr_text_density_threshold;
+        self.ocr_min_low_density_ratio = other.ocr_min_low_density_ratio;
+        self.ocr_image_area_threshold = other.ocr_image_area_threshold;
+        self.ocr_image_count_threshold = other.ocr_image_count_threshold;
+        self.ocr_timeout_seconds_per_page = other.ocr_timeout_seconds_per_page;
+        self.ocr_max_pages_per_request = other.ocr_max_pages_per_request;
+        self.ocr_max_pdf_bytes_per_request = other.ocr_max_pdf_bytes_per_request;
+        self.ocr_max_pages_per_document = other.ocr_max_pages_per_document;
+        self.ocr_return_crop_images = other.ocr_return_crop_images;
+        self.ocr_need_layout_visualization = other.ocr_need_layout_visualization;
+        self.ocr_sync_inline = other.ocr_sync_inline;
     }
 }
 
@@ -848,7 +1120,7 @@ impl Config {
 /// 非法值会打 warn 日志并返回 None，由调用方决定回退策略。
 fn parse_env_bool(var_name: &str) -> Option<bool> {
     let val = std::env::var(var_name).ok()?;
-    match val.to_lowercase().as_str() {
+    match val.trim().to_lowercase().as_str() {
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
         _ => {
