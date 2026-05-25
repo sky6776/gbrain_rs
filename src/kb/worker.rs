@@ -74,6 +74,18 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
 
     match result {
         Ok(process_result) => {
+            // P2 修复：使用显式 deferred_ocr 标记替代 word_total==0 && split_total==0 判断
+            // 之前的隐式判断会误匹配合法空文档（空解析结果也会产生 0/0）
+            if process_result.deferred_ocr {
+                info!(
+                    job_db_id,
+                    document_id = payload.document_id,
+                    "KB worker: PDF OCR 已异步入队，shadow/promotion 延后到 OCR 完成后执行"
+                );
+                complete_kb_job(conn, job_db_id)?;
+                return Ok(true);
+            }
+
             info!(
                 job_db_id,
                 document_id = payload.document_id,
@@ -208,6 +220,57 @@ fn update_shadow_pages_after_kb_failure(
     with_current_document_run(conn, document_id, run_id, || {
         update_shadow_pages_for_kb_document(conn, document_id, &summary)
     })
+}
+
+fn finalize_artifact_after_kb_success(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+    context: &str,
+) -> Result<()> {
+    if let Err(e) = update_shadow_pages_after_kb_success(conn, document_id, run_id) {
+        warn!(
+            document_id,
+            error = %e,
+            context = context,
+            "KB worker: 更新 artifact shadow page 状态失败"
+        );
+    }
+
+    enqueue_artifact_promote_if_linked(conn, document_id, run_id)
+}
+
+fn finalize_ocr_writeback_reembed_if_needed(
+    conn: &Connection,
+    job_db_id: i64,
+    payload: &serde_json::Value,
+    document_id: i64,
+    context: &str,
+) -> Result<bool> {
+    if payload.get("source").and_then(|v| v.as_str()) != Some("ocr_writeback") {
+        return Ok(false);
+    }
+
+    let Some(run_id) = payload.get("processing_run_id").and_then(|v| v.as_str()) else {
+        fail_kb_job(
+            conn,
+            job_db_id,
+            "ocr_writeback re-embed payload missing processing_run_id",
+        )?;
+        return Ok(true);
+    };
+
+    if let Err(e) = finalize_artifact_after_kb_success(conn, document_id, run_id, context) {
+        warn!(
+            document_id,
+            error = %e,
+            "re-embed worker: 触发 artifact promotion 失败，job 保持可重试状态"
+        );
+        fail_kb_job(conn, job_db_id, &format!("promotion 入队失败: {}", e))?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 fn with_current_document_run<F>(
@@ -522,13 +585,34 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                             )
                             .unwrap_or((0, 0));
                         let kb = KbEngine::new(conn);
-                        let _ = kb.update_document_stats_with_run_guard(
+                        if let Err(e) = kb.update_document_stats_with_run_guard(
                             doc_id,
                             word_total,
                             split_total,
                             Some(crate::kb::types::STATUS_SKIPPED),
                             payload.get("processing_run_id").and_then(|v| v.as_str()),
-                        );
+                        ) {
+                            warn!(
+                                document_id = doc_id,
+                                error = %e,
+                                "re-embed worker: keyword_only 状态更新失败"
+                            );
+                            fail_kb_job(
+                                conn,
+                                job_db_id,
+                                &format!("keyword_only 状态更新失败: {}", e),
+                            )?;
+                            return Ok(true);
+                        }
+                        if finalize_ocr_writeback_reembed_if_needed(
+                            conn,
+                            job_db_id,
+                            &payload,
+                            doc_id,
+                            "reembed_worker_embedding_policy_skipped",
+                        )? {
+                            return Ok(true);
+                        }
                         complete_kb_job(conn, job_db_id)?;
                         return Ok(true);
                     }
@@ -550,13 +634,34 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                     )
                     .unwrap_or((0, 0));
                 let kb = KbEngine::new(conn);
-                let _ = kb.update_document_stats_with_run_guard(
+                if let Err(e) = kb.update_document_stats_with_run_guard(
                     doc_id,
                     word_total,
                     split_total,
                     Some(crate::kb::types::STATUS_SKIPPED),
                     payload.get("processing_run_id").and_then(|v| v.as_str()),
-                );
+                ) {
+                    warn!(
+                        document_id = doc_id,
+                        error = %e,
+                        "re-embed worker: keyword_only 状态更新失败"
+                    );
+                    fail_kb_job(
+                        conn,
+                        job_db_id,
+                        &format!("keyword_only 状态更新失败: {}", e),
+                    )?;
+                    return Ok(true);
+                }
+                if finalize_ocr_writeback_reembed_if_needed(
+                    conn,
+                    job_db_id,
+                    &payload,
+                    doc_id,
+                    "reembed_worker_missing_embedding_key",
+                )? {
+                    return Ok(true);
+                }
                 complete_kb_job(conn, job_db_id)?;
                 return Ok(true);
             }
@@ -639,6 +744,16 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                                 );
                             }
                         }
+                    }
+
+                    if finalize_ocr_writeback_reembed_if_needed(
+                        conn,
+                        job_db_id,
+                        &payload,
+                        doc_id,
+                        "reembed_worker",
+                    )? {
+                        return Ok(true);
                     }
                 }
             }
@@ -828,6 +943,16 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
 /// 7. 调用 writeback_ocr_results 执行 split/embed/persist
 /// 8. 更新文档 OCR 状态
 pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
+    // 创建 embedder（用于语义分割，与 kb worker 一致）
+    let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
+        Arc::new(Embedder::new(
+            api_key,
+            config.openai_base_url.as_deref(),
+            Some(&config.embedding_model),
+            Some(config.embedding_dimensions),
+        ))
+    });
+
     let conn = engine.connection()?;
 
     // 认领 OCR 作业
@@ -901,16 +1026,13 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
             &payload.model,
             &payload.processing_run_id,
         )?;
-        crate::kb::ocr::update_document_ocr_status(
+        return complete_ocr_with_native_text_fallback(
             conn,
-            payload.document_id,
-            kb.get_document(payload.document_id)
-                .map(|d| d.page_count)
-                .unwrap_or(payload.pages.len() as i32),
-            Some(&payload.processing_run_id),
-        )?;
-        complete_kb_job(conn, job_db_id)?;
-        return Ok(true);
+            job_db_id,
+            &payload,
+            embedder.clone(),
+            "ocr_external_policy_disabled",
+        );
     }
     if library.redaction_enabled {
         warn!(
@@ -929,16 +1051,13 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
             &payload.model,
             &payload.processing_run_id,
         )?;
-        crate::kb::ocr::update_document_ocr_status(
+        return complete_ocr_with_native_text_fallback(
             conn,
-            payload.document_id,
-            kb.get_document(payload.document_id)
-                .map(|d| d.page_count)
-                .unwrap_or(payload.pages.len() as i32),
-            Some(&payload.processing_run_id),
-        )?;
-        complete_kb_job(conn, job_db_id)?;
-        return Ok(true);
+            job_db_id,
+            &payload,
+            embedder.clone(),
+            "ocr_redaction_policy_disabled",
+        );
     }
 
     // 全局 OCR 开关检查（作为最终边界，防止已入队任务绕过全局开关）
@@ -957,16 +1076,13 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
             &payload.model,
             &payload.processing_run_id,
         )?;
-        crate::kb::ocr::update_document_ocr_status(
+        return complete_ocr_with_native_text_fallback(
             conn,
-            payload.document_id,
-            kb.get_document(payload.document_id)
-                .map(|d| d.page_count)
-                .unwrap_or(payload.pages.len() as i32),
-            Some(&payload.processing_run_id),
-        )?;
-        complete_kb_job(conn, job_db_id)?;
-        return Ok(true);
+            job_db_id,
+            &payload,
+            embedder.clone(),
+            "ocr_globally_disabled",
+        );
     }
 
     // OCR API key 检查（缺少 key 时标记为 failed，与 pipeline 行为一致）
@@ -985,38 +1101,64 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
             &payload.model,
             &payload.processing_run_id,
         )?;
-        crate::kb::ocr::update_document_ocr_status(
+        return complete_ocr_with_native_text_fallback(
             conn,
-            payload.document_id,
-            kb.get_document(payload.document_id)
-                .map(|d| d.page_count)
-                .unwrap_or(payload.pages.len() as i32),
-            Some(&payload.processing_run_id),
-        )?;
-        complete_kb_job(conn, job_db_id)?;
-        return Ok(true);
+            job_db_id,
+            &payload,
+            embedder.clone(),
+            "ocr_api_key_missing",
+        );
     }
 
     // 执行 OCR 处理
-    let result = execute_ocr_job(conn, &payload, config);
+    let result = execute_ocr_job(conn, &payload, config, embedder.clone());
 
     match result {
-        Ok(coverage) => {
+        Ok(ocr_result) => {
             info!(
                 job_db_id,
                 document_id = payload.document_id,
-                coverage,
+                coverage = ocr_result.coverage,
                 "OCR worker: 处理完成"
             );
+            if !ocr_result.reembed_enqueued {
+                if let Err(e) = finalize_artifact_after_kb_success(
+                    conn,
+                    payload.document_id,
+                    &payload.processing_run_id,
+                    "ocr_worker",
+                ) {
+                    warn!(
+                        document_id = payload.document_id,
+                        error = %e,
+                        "OCR worker: 触发 artifact promotion 失败，job 保持可重试状态"
+                    );
+                    fail_kb_job(conn, job_db_id, &format!("promotion 入队失败: {}", e))?;
+                    return Ok(true);
+                }
+            }
             // execute_ocr_job -> writeback_ocr_results 已正确更新文档 OCR 状态，无需重复调用
             complete_kb_job(conn, job_db_id)?;
             Ok(true)
         }
-        Err(e) => {
+        Err(GBrainError::OcrPostWriteback(msg)) => {
             warn!(
                 job_db_id,
                 document_id = payload.document_id,
-                error = %e,
+                error = %msg,
+                "OCR worker: OCR 回写已完成，但后续处理失败"
+            );
+            // OCR 页级结果和节点已经成功写入；这里只让 job 失败以便告警/重试，
+            // 不再把已完成的 OCR 页覆盖成 failed。
+            fail_kb_job(conn, job_db_id, &msg)?;
+            Ok(true)
+        }
+        Err(e) => {
+            let error_message = e.to_string();
+            warn!(
+                job_db_id,
+                document_id = payload.document_id,
+                error = %error_message,
                 "OCR worker: 处理失败"
             );
             // 标记失败页
@@ -1025,7 +1167,7 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                 payload.document_id,
                 &payload.pages,
                 "failed",
-                &e.to_string(),
+                &error_message,
                 &payload.provider,
                 &payload.model,
                 &payload.processing_run_id,
@@ -1043,7 +1185,46 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                 doc_total_pages,
                 Some(&payload.processing_run_id),
             )?;
-            fail_kb_job(conn, job_db_id, &e.to_string())?;
+
+            // OCR 任务耗尽重试后，仍须把 PDF 可抽取的原文本层写入索引。
+            // 在还有重试机会时保留 ocr_pending，避免每次失败都重复重建节点。
+            if !ocr_job_has_attempts_remaining(conn, job_db_id)? {
+                match writeback_native_text_layer(conn, &payload, embedder.clone()) {
+                    Ok(fallback_result) => {
+                        if !fallback_result.reembed_enqueued {
+                            if let Err(finalize_error) = finalize_artifact_after_kb_success(
+                                conn,
+                                payload.document_id,
+                                &payload.processing_run_id,
+                                "ocr_permanent_failure_native_fallback",
+                            ) {
+                                fail_kb_job(
+                                    conn,
+                                    job_db_id,
+                                    &format!(
+                                        "{}; 原文本层已写回但 artifact promotion 入队失败: {}",
+                                        error_message, finalize_error
+                                    ),
+                                )?;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    Err(fallback_error) => {
+                        fail_kb_job(
+                            conn,
+                            job_db_id,
+                            &format!(
+                                "{}; 原文本层 fallback 失败: {}",
+                                error_message, fallback_error
+                            ),
+                        )?;
+                        return Ok(true);
+                    }
+                }
+            }
+
+            fail_kb_job(conn, job_db_id, &error_message)?;
             Ok(true)
         }
     }
@@ -1053,6 +1234,318 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
 const MAX_OCR_RETRIES: u32 = 3;
 /// OCR 请求初始退避时间（秒），每次重试翻倍
 const INITIAL_RETRY_BACKOFF_SECS: u64 = 2;
+
+#[derive(Debug, Clone, Copy)]
+struct OcrExecutionResult {
+    coverage: f64,
+    reembed_enqueued: bool,
+}
+
+fn ocr_job_has_attempts_remaining(conn: &Connection, job_db_id: i64) -> Result<bool> {
+    let (attempts, max_attempts): (i32, i32) = conn
+        .query_row(
+            "SELECT attempts, max_attempts FROM jobs WHERE id = ?1 AND status = 'running'",
+            rusqlite::params![job_db_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| GBrainError::Database(format!("查询 OCR job 重试状态失败: {}", e)))?;
+    Ok(attempts < max_attempts)
+}
+
+fn complete_ocr_with_native_text_fallback(
+    conn: &Connection,
+    job_db_id: i64,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    embedder: Option<Arc<Embedder>>,
+    context: &str,
+) -> Result<bool> {
+    match writeback_native_text_layer(conn, payload, embedder) {
+        Ok(result) => {
+            info!(
+                job_db_id,
+                document_id = payload.document_id,
+                "OCR worker: 外部 OCR 不可执行，已写回 PDF 原文本层索引"
+            );
+            if !result.reembed_enqueued {
+                if let Err(e) = finalize_artifact_after_kb_success(
+                    conn,
+                    payload.document_id,
+                    &payload.processing_run_id,
+                    context,
+                ) {
+                    warn!(
+                        document_id = payload.document_id,
+                        error = %e,
+                        "OCR worker: 原文本层 fallback 触发 artifact promotion 失败，job 保持可重试状态"
+                    );
+                    fail_kb_job(conn, job_db_id, &format!("promotion 入队失败: {}", e))?;
+                    return Ok(true);
+                }
+            }
+            complete_kb_job(conn, job_db_id)?;
+            Ok(true)
+        }
+        Err(GBrainError::OcrPostWriteback(msg)) => {
+            warn!(
+                job_db_id,
+                document_id = payload.document_id,
+                error = %msg,
+                "OCR worker: 原文本层已写回，但后续 re-embed 入队失败"
+            );
+            fail_kb_job(conn, job_db_id, &msg)?;
+            Ok(true)
+        }
+        Err(e) => {
+            warn!(
+                job_db_id,
+                document_id = payload.document_id,
+                error = %e,
+                "OCR worker: 写回 PDF 原文本层 fallback 失败"
+            );
+            fail_kb_job(conn, job_db_id, &e.to_string())?;
+            Ok(true)
+        }
+    }
+}
+
+fn writeback_native_text_layer(
+    conn: &Connection,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    embedder: Option<Arc<Embedder>>,
+) -> Result<OcrExecutionResult> {
+    let file_data = std::fs::read(&payload.storage_path).map_err(|e| {
+        GBrainError::FileError(format!("读取 PDF 原文本层失败 {}: {}", payload.storage_path, e))
+    })?;
+    let parsed = crate::kb::parser::ParserRegistry::new().parse("pdf", &file_data)?;
+    let total_pages: i32 = parsed
+        .metadata
+        .get("total_pages")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if total_pages == 0 {
+        return Err(GBrainError::InvalidInput(
+            "PDF 总页数为 0，无法写回原文本层索引".to_string(),
+        ));
+    }
+
+    crate::kb::ocr::check_ocr_run_guard(
+        conn,
+        payload.document_id,
+        &payload.processing_run_id,
+    )?;
+
+    let page_analyses: Vec<serde_json::Value> = parsed
+        .metadata
+        .get("page_analyses")
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default();
+    let native_pages: Vec<crate::kb::ocr::OcrWritebackPage> = page_analyses
+        .iter()
+        .filter_map(|page| {
+            let page_number = page.get("page_number")?.as_i64()? as i32;
+            if page_number <= 0 {
+                return None;
+            }
+            Some(crate::kb::ocr::OcrWritebackPage {
+                page_number,
+                text: page
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    if native_pages.is_empty() {
+        return Err(GBrainError::InvalidInput(
+            "PDF 解析结果缺少页级文本，无法写回原文本层索引".to_string(),
+        ));
+    }
+
+    // fallback 可能发生在 partial 文档的重试任务上。保留当前 run 已成功写入的
+    // OCR 页内容，仅对无可用 OCR 结果的页使用原文本层。
+    let page_analyses: Vec<crate::kb::ocr_detector::PdfPageAnalysis> = native_pages
+        .iter()
+        .map(|page| crate::kb::ocr_detector::PdfPageAnalysis {
+            page_number: page.page_number,
+            text: page.text.clone(),
+            text_blocks: vec![],
+            char_count: page.text.chars().count(),
+            image_regions: vec![],
+            image_area_ratio: 0.0,
+            has_vector_or_unknown_objects: false,
+            width: None,
+            height: None,
+        })
+        .collect();
+    let (persisted_ocr_results, attempted_ocr_pages) =
+        load_current_ocr_merge_state(conn, payload)?;
+    let fallback_pages: Vec<crate::kb::ocr::OcrWritebackPage> =
+        crate::kb::ocr_merge::merge_text_and_ocr(
+            &page_analyses,
+            &persisted_ocr_results,
+            &attempted_ocr_pages,
+        )
+        .into_iter()
+        .map(|page| crate::kb::ocr::OcrWritebackPage {
+            page_number: page.page_number,
+            text: page.text,
+        })
+        .collect();
+
+    writeback_pages_and_enqueue_reembed(conn, payload, &fallback_pages, total_pages, embedder)
+}
+
+fn writeback_pages_and_enqueue_reembed(
+    conn: &Connection,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    pages: &[crate::kb::ocr::OcrWritebackPage],
+    total_pages: i32,
+    embedder: Option<Arc<Embedder>>,
+) -> Result<OcrExecutionResult> {
+    let doc_title: String = conn
+        .query_row(
+            "SELECT title FROM kb_documents WHERE id = ?1",
+            rusqlite::params![payload.document_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    let (chunk_size, chunk_overlap, semantic_enabled): (usize, usize, bool) = conn
+        .query_row(
+            "SELECT chunk_size, chunk_overlap, semantic_segmentation_enabled FROM kb_libraries WHERE id = ?1",
+            rusqlite::params![payload.library_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, i32>(2)? != 0,
+                ))
+            },
+        )
+        .unwrap_or((1024, 200, false));
+
+    let writeback_result = crate::kb::ocr::writeback_ocr_results(
+        conn,
+        payload.document_id,
+        payload.library_id,
+        pages,
+        chunk_size,
+        chunk_overlap,
+        &doc_title,
+        total_pages,
+        Some(&payload.processing_run_id),
+        semantic_enabled,
+        embedder,
+    )?;
+
+    let mut reembed_enqueued = false;
+    if writeback_result.nodes_created > 0 {
+        let queue = crate::jobs::JobQueue::new(conn);
+        queue
+            .enqueue(crate::jobs::JobInput {
+                job_type: "kb_reembed".to_string(),
+                payload: serde_json::json!({
+                    "document_id": payload.document_id,
+                    "processing_run_id": payload.processing_run_id,
+                    "source": "ocr_writeback",
+                }),
+                priority: Some(0),
+                max_attempts: Some(3),
+            })
+            .map_err(|e| {
+                GBrainError::OcrPostWriteback(format!(
+                    "OCR 回写已完成但入队 kb_reembed job 失败，文档仍处于 embedding pending: {}",
+                    e
+                ))
+            })?;
+        reembed_enqueued = true;
+    }
+
+    Ok(OcrExecutionResult {
+        coverage: writeback_result.ocr_text_coverage,
+        reembed_enqueued,
+    })
+}
+
+fn load_current_ocr_merge_state(
+    conn: &Connection,
+    payload: &crate::kb::jobs::KbOcrPayload,
+) -> Result<(
+    Vec<crate::kb::ocr_provider::OcrPageResult>,
+    Vec<i32>,
+)> {
+    let mut stmt = conn.prepare(
+        "SELECT page_number, status, text, markdown, layout_json, \
+         layout_visualization_url, raw_response_json, request_id, confidence, provider, model \
+         FROM kb_document_ocr_pages \
+         WHERE document_id = ?1 AND processing_run_id = ?2 ORDER BY page_number",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![payload.document_id, &payload.processing_run_id],
+        |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<f64>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        },
+    )?;
+
+    let mut persisted_results = Vec::new();
+    let mut attempted_pages = Vec::new();
+    for row in rows {
+        let (
+            page_number,
+            status,
+            text,
+            markdown,
+            layout_json,
+            visualization_url,
+            raw_response_json,
+            request_id,
+            confidence,
+            provider,
+            model,
+        ) = row?;
+        attempted_pages.push(page_number);
+        let has_stored_ocr_text = !text.trim().is_empty() || !markdown.trim().is_empty();
+        if status != "done" && status != "empty_ocr" && !has_stored_ocr_text {
+            continue;
+        }
+
+        persisted_results.push(crate::kb::ocr_provider::OcrPageResult {
+            page_number,
+            text,
+            markdown,
+            blocks: serde_json::from_str(&layout_json).unwrap_or_default(),
+            layout_visualization_url: if visualization_url.is_empty() {
+                None
+            } else {
+                Some(visualization_url)
+            },
+            raw_response_json: serde_json::from_str(&raw_response_json)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            request_id: if request_id.is_empty() {
+                None
+            } else {
+                Some(request_id)
+            },
+            confidence,
+            provider,
+            model,
+        });
+    }
+
+    Ok((persisted_results, attempted_pages))
+}
 
 /// 判断 OCR 错误是否可重试（429/503/timeout/网络错误）
 fn is_retryable_ocr_error(error: &str) -> bool {
@@ -1071,7 +1564,8 @@ fn execute_ocr_job(
     conn: &Connection,
     payload: &crate::kb::jobs::KbOcrPayload,
     config: &Config,
-) -> Result<f64> {
+    embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
+) -> Result<OcrExecutionResult> {
     use crate::kb::ocr_glm::{build_ocr_options_from_config, pdf_to_base64, GlmOcrProvider};
     use crate::kb::ocr_merge::merge_text_and_ocr;
     use crate::kb::ocr_planner::plan_ocr_requests;
@@ -1114,7 +1608,7 @@ fn execute_ocr_job(
     }
 
     let ocr_pages = {
-        let max_pages = config.ocr_max_pages_per_document;
+        let max_pages = config.ocr_max_pages_per_document.max(1);
         if payload.pages.len() > max_pages {
             tracing::warn!(
                 document_id = payload.document_id,
@@ -1433,8 +1927,15 @@ fn execute_ocr_job(
         );
     }
 
-    // 合并文本层与 OCR 结果
-    let merged = merge_text_and_ocr(&page_analyses, &all_ocr_results, &ocr_pages);
+    // 合并当前 run 的全部已持久化 OCR 结果，而非仅本次请求返回页。
+    // 对 partial 文档重试失败页时，这可保留此前成功页的 OCR 正文。
+    let (persisted_ocr_results, attempted_ocr_pages) =
+        load_current_ocr_merge_state(conn, payload)?;
+    let merged = merge_text_and_ocr(
+        &page_analyses,
+        &persisted_ocr_results,
+        &attempted_ocr_pages,
+    );
 
     // 清理临时目录
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1460,7 +1961,10 @@ fn execute_ocr_job(
             actual = %current_run_id_before_writeback,
             "OCR worker: writeback 前 run_id 已过期，跳过回写"
         );
-        return Ok(0.0);
+        return Ok(OcrExecutionResult {
+            coverage: 0.0,
+            reembed_enqueued: false,
+        });
     }
 
     // 将合并结果（文本层 + OCR）回写到 KB 索引
@@ -1472,64 +1976,7 @@ fn execute_ocr_job(
         })
         .collect();
 
-    // 获取文档标题和 library 配置
-    let doc_title: String = conn
-        .query_row(
-            "SELECT title FROM kb_documents WHERE id = ?1",
-            rusqlite::params![payload.document_id],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_default();
-
-    let (chunk_size, chunk_overlap): (usize, usize) = conn
-        .query_row(
-            "SELECT chunk_size, chunk_overlap FROM kb_libraries WHERE id = ?1",
-            rusqlite::params![payload.library_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as usize,
-                    row.get::<_, i64>(1)? as usize,
-                ))
-            },
-        )
-        .unwrap_or((1024, 200));
-
-    let writeback_result = crate::kb::ocr::writeback_ocr_results(
-        conn,
-        payload.document_id,
-        payload.library_id,
-        &ocr_pages,
-        chunk_size,
-        chunk_overlap,
-        &doc_title,
-        total_pages,
-        Some(&payload.processing_run_id),
-    )?;
-
-    // 修复：OCR 回写后节点无向量，入队 kb_reembed job 补齐 embedding + RAPTOR。
-    // writeback_ocr_results 已将 embedding_status 标记为 STATUS_PENDING，
-    // re-embed worker 会在补齐向量后更新为 STATUS_COMPLETED。
-    // 携带 processing_run_id，re-embed worker 据此拒绝过期 job。
-    if writeback_result.nodes_created > 0 {
-        let queue = crate::jobs::JobQueue::new(conn);
-        if let Err(e) = queue.enqueue(crate::jobs::JobInput {
-            job_type: "kb_reembed".to_string(),
-            payload: serde_json::json!({
-                "document_id": payload.document_id,
-                "processing_run_id": payload.processing_run_id,
-            }),
-            priority: Some(0),
-            max_attempts: Some(3),
-        }) {
-            tracing::warn!(
-                document_id = payload.document_id,
-                error = %e,
-                "OCR worker: 入队 kb_reembed job 失败，embedding 需手动触发"
-            );
-        }
-    }
-
-    Ok(writeback_result.ocr_text_coverage)
+    writeback_pages_and_enqueue_reembed(conn, payload, &ocr_pages, total_pages, embedder)
 }
 
 /// 对单个节点执行 re-embed，返回嵌入向量维度数

@@ -1,6 +1,6 @@
-//! MCP 工具定义 — artifact 统一对外接口
+//! MCP 工具定义 — artifact 统一对外接口 + OCR 扩展工具
 //!
-//! 仅暴露 artifact_* 工具（知识操作统一入口）。
+//! 暴露 artifact_* 工具（知识操作统一入口）和 kb_ocr_* 工具（OCR 扩展）。
 //!
 //! 设计文档 §8.2: MCP tools 收口
 
@@ -177,19 +177,58 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
     },
 ];
 
-/// 构建 artifact 工具定义列表
+/// OCR 扩展工具定义 — PDF 文档 OCR 状态查询与手动触发
+///
+/// 设计文档 OCR MCP 扩展：kb_document_status / kb_ocr_run / kb_ocr_retry
+pub(crate) static OCR_TOOL_DEFS: &[OperationDef] = &[
+    OperationDef {
+        name: "kb_document_status",
+        description: "查询 KB 文档处理状态，包括 OCR 状态、页级 OCR 进度和处理错误。返回文档级和页级状态信息。",
+        params: &[
+            ParamDef { name: "document_id", description: "KB 文档 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_ocr_run",
+        description: "手动触发或重新触发文档的 OCR 处理。可选择指定页码范围，不指定则自动检测需要 OCR 的页。",
+        params: &[
+            ParamDef { name: "document_id", description: "KB 文档 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "pages", description: "页码范围（如 '1-3,5,7-10'），不指定则自动检测", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+    OperationDef {
+        name: "kb_ocr_retry",
+        description: "重试文档中失败或空的 OCR 页。仅重试状态为 failed/empty_ocr 的页。",
+        params: &[
+            ParamDef { name: "document_id", description: "KB 文档 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "pages", description: "指定重试的页码范围（如 '1-3,5'），不指定则重试所有失败页", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+        ],
+    },
+];
+
+/// 构建工具定义列表（artifact + OCR 扩展）
 pub fn build_tool_defs() -> Vec<ToolDef> {
-    ARTIFACT_FACADE_DEFS.iter().map(|op| op.into()).collect()
+    ARTIFACT_FACADE_DEFS
+        .iter()
+        .chain(OCR_TOOL_DEFS.iter())
+        .map(|op| op.into())
+        .collect()
 }
 
-/// 获取操作定义
+/// 获取操作定义（artifact + OCR 扩展）
 pub fn get_operation_def(name: &str) -> Option<&'static OperationDef> {
-    ARTIFACT_FACADE_DEFS.iter().find(|op| op.name == name)
+    ARTIFACT_FACADE_DEFS
+        .iter()
+        .chain(OCR_TOOL_DEFS.iter())
+        .find(|op| op.name == name)
 }
 
-/// 获取所有操作定义
+/// 获取所有操作定义（artifact + OCR 扩展）
 pub fn get_operation_defs() -> Vec<&'static OperationDef> {
-    ARTIFACT_FACADE_DEFS.iter().collect()
+    ARTIFACT_FACADE_DEFS
+        .iter()
+        .chain(OCR_TOOL_DEFS.iter())
+        .collect()
 }
 
 /// 获取 artifact facade 操作定义

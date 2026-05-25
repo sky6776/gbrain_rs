@@ -125,7 +125,7 @@ pub fn detect_ocr_pages(
     text_density_threshold: usize,
     image_area_threshold: f64,
     image_count_threshold: usize,
-    min_low_density_ratio: f64,
+    _min_low_density_ratio: f64,
     mode: &crate::kb::ocr_provider::OcrMode,
 ) -> OcrDetection {
     let total_pages = pages.len().max(1);
@@ -183,14 +183,11 @@ pub fn detect_ocr_pages(
         0.0
     };
 
-    // 低密度页比例未超过阈值时，移除 LowTextDensity 原因
-    // 避免纯文本 PDF 的封面/目录空白页被误送 OCR
-    if low_density_ratio < min_low_density_ratio {
-        for reasons in reasons_by_page.values_mut() {
-            reasons.retain(|r| !matches!(r, OcrReason::LowTextDensity));
-        }
-        reasons_by_page.retain(|_, reasons| !reasons.is_empty());
-    }
+    // P1 修复：ratio 仅作统计信息，不再否决单页 OCR 判定。
+    // 之前的逻辑是 low_density_ratio < min_low_density_ratio 时移除仅有 LowTextDensity
+    // 原因的页，但这导致混合 PDF 中少数真正需要 OCR 的低密度页被跳过。
+    // ratio 更适合作为整体策略提示（如日志/仪表盘），而非否决单页判定的依据。
+    // 单页是否需要 OCR 应由该页自身的特征（文本密度、图片、矢量对象）决定。
 
     let ocr_pages: Vec<i32> = reasons_by_page.keys().copied().collect();
     let needs_ocr = !ocr_pages.is_empty();
@@ -239,9 +236,11 @@ mod tests {
 
     #[test]
     fn test_detect_pure_text_pdf() {
+        // 文本需 >= 50 字符才不被视为低密度
+        let long_text = "这是一段足够长的文本内容用于测试纯文本".repeat(3); // 19*3=57 chars
         let pages = vec![
-            make_page(1, "这是一段足够长的文本内容用于测试", 0.0, 0, false),
-            make_page(2, "第二页也有一些文本内容用于测试", 0.0, 0, false),
+            make_page(1, &long_text, 0.0, 0, false),
+            make_page(2, &long_text, 0.0, 0, false),
         ];
         let result = detect_ocr_pages(
             &pages,
@@ -277,8 +276,9 @@ mod tests {
 
     #[test]
     fn test_detect_mixed_pdf() {
+        let long_text = "这页文字很充足而且没有图片，文本字符数量超过五十个字符的最低阈值要求".repeat(2); // 34*2=68
         let pages = vec![
-            make_page(1, "这页文字很充足而且没有图片", 0.0, 0, false),
+            make_page(1, &long_text, 0.0, 0, false),
             make_page(2, "", 0.9, 1, false),
             make_page(3, "短", 0.0, 0, false),
         ];
@@ -352,5 +352,69 @@ mod tests {
         );
         assert!(result.needs_ocr);
         assert!(result.uncertain_pages.contains(&1));
+    }
+
+    /// P1 修复：低密度页比例低于阈值但页有其他原因时，仍应触发 OCR
+    #[test]
+    fn test_low_density_ratio_below_threshold_but_has_other_reasons() {
+        // 3 页 PDF：2 页文本充足 + 1 页低密度但有图片
+        // 低密度比例 = 1/3 ≈ 0.33，刚好低于 0.4 阈值
+        // 但低密度页同时有图片（ImageArea），应保留 OCR
+        let long_text = "这是一段足够长的文本内容用于测试正常页面".repeat(3); // 20*3=60
+        let pages = vec![
+            make_page(1, &long_text, 0.0, 0, false),
+            make_page(2, &long_text, 0.0, 0, false),
+            make_page(3, "短", 0.5, 1, false), // 低密度 + 图片丰富
+        ];
+        let result = detect_ocr_pages(
+            &pages,
+            50,
+            0.08,
+            1,
+            0.4, // 阈值高于 1/3
+            &crate::kb::ocr_provider::OcrMode::Auto,
+        );
+        // 页 3 应该仍在 OCR 列表中（因为有 ImageArea 原因）
+        assert!(result.needs_ocr);
+        assert!(
+            result.ocr_pages.contains(&3),
+            "低密度但有图片的页应保留 OCR，实际 ocr_pages={:?}",
+            result.ocr_pages
+        );
+    }
+
+    /// P1 修复：ratio 不再否决单页 OCR，即使低密度比例低于阈值也应触发
+    #[test]
+    fn test_low_density_below_ratio_still_triggers_ocr() {
+        // 5 页 PDF：4 页文本充足 + 1 页仅低密度（无图片/矢量）
+        // 低密度比例 = 1/5 = 0.2，低于 0.3 阈值
+        // P1 修复后：ratio 仅作统计，单页低密度仍应触发 OCR
+        let long_text = "这是一段足够长的文本内容用于测试正常页面".repeat(3); // 20*3=60
+        let pages = vec![
+            make_page(1, &long_text, 0.0, 0, false),
+            make_page(2, &long_text, 0.0, 0, false),
+            make_page(3, &long_text, 0.0, 0, false),
+            make_page(4, &long_text, 0.0, 0, false),
+            make_page(5, "短", 0.0, 0, false), // 仅低密度，无其他原因
+        ];
+        let result = detect_ocr_pages(
+            &pages,
+            50,
+            0.08,
+            1,
+            0.3,
+            &crate::kb::ocr_provider::OcrMode::Auto,
+        );
+        // P1 修复：ratio 不再否决单页判定，低密度页仍需 OCR
+        assert!(
+            result.needs_ocr,
+            "低密度页应触发 OCR（ratio 不再否决单页），实际 needs_ocr={}",
+            result.needs_ocr
+        );
+        assert!(
+            result.ocr_pages.contains(&5),
+            "页 5 应在 OCR 列表中，实际 ocr_pages={:?}",
+            result.ocr_pages
+        );
     }
 }

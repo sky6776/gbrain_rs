@@ -570,6 +570,10 @@ impl Config {
                 .unwrap_or(config.ocr_need_layout_visualization);
         config.ocr_sync_inline =
             parse_env_bool("GBRAIN_OCR_SYNC_INLINE").unwrap_or(config.ocr_sync_inline);
+        if config.ocr_max_pages_per_document == 0 {
+            tracing::warn!("ocr_max_pages_per_document=0 无效，已 clamp 到 1");
+            config.ocr_max_pages_per_document = 1;
+        }
 
         info!(
             db_path = %config.db_path().display(),

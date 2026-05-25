@@ -482,6 +482,9 @@ pub struct RankedResult {
 pub struct ProcessResult {
     pub word_total: i32,
     pub split_total: i32,
+    /// P2 修复：显式标记异步 OCR 已延后，替代 word_total==0 && split_total==0 的隐式判断。
+    /// 合法的空文档也会产生 0/0，导致误判。此字段精确表达"文档因异步 OCR 而延后"语义。
+    pub deferred_ocr: bool,
 }
 
 // --- Parser block abstraction (P1-010) ---

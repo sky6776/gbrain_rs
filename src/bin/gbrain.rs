@@ -368,6 +368,90 @@ fn resolve_pdf_page_count(
     Ok(pdf_total)
 }
 
+fn pdf_page_analyses_from_metadata(
+    parsed: &gbrain_core::kb::parser::ParsedDocument,
+) -> Result<Vec<gbrain_core::kb::ocr_detector::PdfPageAnalysis>> {
+    let page_analyses_raw = parsed
+        .metadata
+        .get("page_analyses")
+        .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(v).ok())
+        .unwrap_or_default();
+
+    if page_analyses_raw.is_empty() {
+        return Err(GBrainError::InvalidInput(
+            "无法读取 PDF 页级分析，不能自动检测 OCR 页码".to_string(),
+        ));
+    }
+
+    Ok(page_analyses_raw
+        .iter()
+        .map(|pa| {
+            let page_number = pa.get("page_number").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let text = pa
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let char_count = pa.get("char_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let image_area_ratio = pa
+                .get("image_area_ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let image_count = pa.get("image_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let has_vector = pa
+                .get("has_vector_or_unknown_objects")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let image_regions = if image_count > 0 {
+                (0..image_count)
+                    .map(|_| gbrain_core::kb::ocr_detector::PdfImageRegion {
+                        bbox: None,
+                        area_ratio: image_area_ratio / image_count as f64,
+                    })
+                    .collect()
+            } else if image_area_ratio > 0.0 {
+                vec![gbrain_core::kb::ocr_detector::PdfImageRegion {
+                    bbox: None,
+                    area_ratio: image_area_ratio,
+                }]
+            } else {
+                vec![]
+            };
+
+            gbrain_core::kb::ocr_detector::PdfPageAnalysis {
+                page_number,
+                text,
+                text_blocks: vec![],
+                char_count,
+                image_regions,
+                image_area_ratio,
+                has_vector_or_unknown_objects: has_vector,
+                width: None,
+                height: None,
+            }
+        })
+        .collect())
+}
+
+fn detect_ocr_pages_for_pdf(storage_path: &str, config: &Config) -> Result<Vec<i32>> {
+    let pdf_data = std::fs::read(storage_path)
+        .map_err(|e| GBrainError::FileError(format!("读取 PDF 文件以自动检测 OCR 页失败: {}", e)))?;
+    let registry = gbrain_core::kb::parser::ParserRegistry::new();
+    let parsed = registry.parse("pdf", &pdf_data)?;
+    let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
+    let ocr_mode = gbrain_core::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode);
+    let detection = gbrain_core::kb::ocr_detector::detect_ocr_pages(
+        &page_analyses,
+        config.ocr_text_density_threshold,
+        config.ocr_image_area_threshold,
+        config.ocr_image_count_threshold,
+        config.ocr_min_low_density_ratio,
+        &ocr_mode,
+    );
+    Ok(detection.ocr_pages)
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1189,7 +1273,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                      FROM kb_document_ocr_pages WHERE document_id = ?1 AND processing_run_id = ?2 ORDER BY page_number",
                 )?;
                 let pages: Vec<serde_json::Value> = stmt
-                    .query_map(rusqlite::params![doc_id, doc.processing_run_id], |row| {
+                    .query_map(rusqlite::params![doc_id, &doc.processing_run_id], |row| {
                         let page_number: i32 = row.get(0)?;
                         let status: String = row.get(1)?;
                         let provider: String = row.get(2)?;
@@ -1208,7 +1292,42 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     .filter_map(|r| r.ok())
                     .collect();
 
+                let failed_pages: Vec<i64> = pages
+                    .iter()
+                    .filter(|page| page["status"].as_str() == Some("failed"))
+                    .filter_map(|page| page["page_number"].as_i64())
+                    .collect();
                 result["ocr_pages"] = serde_json::json!(pages);
+                result["ocr_failed_pages"] = serde_json::json!(failed_pages);
+
+                let mut stmt = conn.prepare(
+                    "SELECT label, COUNT(*) FROM kb_document_ocr_blocks \
+                     WHERE document_id = ?1 AND processing_run_id = ?2 GROUP BY label ORDER BY label",
+                )?;
+                let block_counts: serde_json::Map<String, serde_json::Value> = stmt
+                    .query_map(rusqlite::params![doc_id, &doc.processing_run_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .filter_map(|row| row.ok())
+                    .map(|(label, count)| (label, serde_json::json!(count)))
+                    .collect();
+                result["ocr_block_counts"] = serde_json::Value::Object(block_counts);
+
+                let reasons_by_page: serde_json::Value = conn
+                    .query_row(
+                        "SELECT json_extract(COALESCE(metadata_json, '{}'), '$.ocr_reasons_by_page') \
+                         FROM kb_documents WHERE id = ?1",
+                        rusqlite::params![doc_id],
+                        |row| {
+                            let value: String = row.get(0)?;
+                            Ok(serde_json::from_str(&value).unwrap_or(serde_json::Value::Null))
+                        },
+                    )
+                    .unwrap_or(serde_json::Value::Null);
+                if !reasons_by_page.is_null() {
+                    result["ocr_reasons_by_page"] = reasons_by_page;
+                }
+
                 info!("{}", serde_json::to_string_pretty(&result)?);
             }
 
@@ -1257,41 +1376,23 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 }
 
                 let total_pages = resolve_pdf_page_count(conn, doc_id, &storage_path)?;
+                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
 
                 // 解析页码
                 let ocr_pages = if let Some(ref pages_str) = pages {
                     parse_page_ranges(pages_str, total_pages)?
                 } else {
-                    // 自动检测：查询低密度/图片页
-                    let mut page_list = Vec::new();
-                    let mut stmt = conn.prepare(
-                        "SELECT page_number FROM kb_document_ocr_pages \
-                         WHERE document_id = ?1 AND processing_run_id = ?2 AND status IN ('failed', 'empty_ocr')",
-                    )?;
-                    let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
-                        row.get::<_, i32>(0)
-                    })?;
-                    for row in rows {
-                        if let Ok(p) = row {
-                            page_list.push(p);
-                        }
-                    }
-                    if page_list.is_empty() {
-                        // 无已知失败页，标记所有页
-                        page_list = (1..=total_pages).collect();
-                    }
-                    page_list
+                    // 自动检测：复用 PDF parser 的页级分析和 OCR detector。
+                    detect_ocr_pages_for_pdf(&storage_path, &config_local)?
                 };
 
-                // 无法确定页码范围时跳过入队，避免无意义任务和混乱状态
                 if ocr_pages.is_empty() {
-                    return Err(gbrain_core::error::GBrainError::InvalidInput(
-                        "无法确定 OCR 页码范围，跳过入队".to_string(),
-                    )
-                    .into());
+                    info!(
+                        "自动检测未发现需要 OCR 的页面: document_id={}, title='{}'",
+                        doc_id, title
+                    );
+                    return Ok(());
                 }
-
-                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
 
                 // 全局 OCR 开关检查
                 if !config_local.ocr_enabled {
@@ -1313,7 +1414,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     kind: "kb_ocr_document".to_string(),
                     document_id: doc_id,
                     library_id,
-                    processing_run_id: run_id,
+                    processing_run_id: run_id.clone(),
                     storage_path,
                     pages: ocr_pages.clone(),
                     submit_mode: config_local.ocr_submit_mode.clone(),
@@ -1323,23 +1424,50 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     need_layout_visualization: config_local.ocr_need_layout_visualization,
                 };
 
-                let queue = gbrain_core::jobs::JobQueue::new(conn);
-                let job_input = gbrain_core::jobs::JobInput {
-                    job_type: "kb_ocr_document".to_string(),
-                    payload: serde_json::to_value(&payload).unwrap(),
-                    priority: Some(0),
-                    max_attempts: Some(3),
-                };
-                let job_row_id = queue.enqueue(job_input)?;
+                let tx = conn.unchecked_transaction()?;
+                let enqueue_result = (|| -> Result<i64> {
+                    let rows = conn.execute(
+                        "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
+                        rusqlite::params![doc_id, run_id],
+                    )?;
+                    if rows == 0 {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "文档 processing_run_id 已变化，跳过 OCR 入队".to_string(),
+                        ));
+                    }
 
-                // 更新文档 OCR 状态为 queued（带 run guard）
-                let kb = gbrain_core::kb::engine::KbEngine::new(conn);
-                kb.update_document_ocr_with_run_guard(
-                    doc_id,
-                    "queued",
-                    0.0,
-                    Some(&payload.processing_run_id),
-                )?;
+                    for &page_num in &ocr_pages {
+                        gbrain_core::kb::ocr::update_ocr_page_status(
+                            conn,
+                            doc_id,
+                            page_num,
+                            "pending",
+                            "CLI 手动触发 OCR，等待处理",
+                            "glm_ocr",
+                            &config_local.ocr_model,
+                            &run_id,
+                        )?;
+                    }
+
+                    let queue = gbrain_core::jobs::JobQueue::new(conn);
+                    queue.enqueue(gbrain_core::jobs::JobInput {
+                        job_type: "kb_ocr_document".to_string(),
+                        payload: serde_json::to_value(&payload)?,
+                        priority: Some(0),
+                        max_attempts: Some(3),
+                    })
+                })();
+                let job_row_id = match enqueue_result {
+                    Ok(id) => {
+                        tx.commit()?;
+                        id
+                    }
+                    Err(e) => {
+                        let _ = tx.rollback();
+                        return Err(e);
+                    }
+                };
 
                 info!(
                     "已入队 OCR 作业: document_id={}, title='{}', pages={:?}, job_row_id={}",
@@ -1413,7 +1541,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let mut failed_pages = Vec::new();
                 let mut stmt = conn.prepare(
                     "SELECT page_number FROM kb_document_ocr_pages \
-                     WHERE document_id = ?1 AND processing_run_id = ?2 AND status = 'failed' ORDER BY page_number",
+                     WHERE document_id = ?1 AND processing_run_id = ?2 \
+                     AND status IN ('failed', 'empty_ocr') ORDER BY page_number",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
                     row.get::<_, i32>(0)
@@ -1423,18 +1552,12 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         failed_pages.push(p);
                     }
                 }
+                drop(stmt);
 
                 if failed_pages.is_empty() {
                     info!("文档 {} ('{}') 无失败的 OCR 页", doc_id, title);
                     return Ok(());
                 }
-
-                // 重置当前 run 的失败页状态为 pending
-                conn.execute(
-                    "UPDATE kb_document_ocr_pages SET status = 'pending', error = '' \
-                     WHERE document_id = ?1 AND processing_run_id = ?2 AND status = 'failed'",
-                    rusqlite::params![doc_id, run_id],
-                )?;
 
                 // 获取 storage_path
                 let storage_path: String = conn
@@ -1450,7 +1573,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     kind: "kb_ocr_document".to_string(),
                     document_id: doc_id,
                     library_id,
-                    processing_run_id: run_id,
+                    processing_run_id: run_id.clone(),
                     storage_path,
                     pages: failed_pages.clone(),
                     submit_mode: config_local.ocr_submit_mode.clone(),
@@ -1460,22 +1583,44 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     need_layout_visualization: config_local.ocr_need_layout_visualization,
                 };
 
-                let queue = gbrain_core::jobs::JobQueue::new(conn);
-                let job_input = gbrain_core::jobs::JobInput {
-                    job_type: "kb_ocr_document".to_string(),
-                    payload: serde_json::to_value(&payload).unwrap(),
-                    priority: Some(0),
-                    max_attempts: Some(3),
-                };
-                let job_row_id = queue.enqueue(job_input)?;
+                let tx = conn.unchecked_transaction()?;
+                let enqueue_result = (|| -> Result<i64> {
+                    conn.execute(
+                        "UPDATE kb_document_ocr_pages SET status = 'pending', error = '' \
+                         WHERE document_id = ?1 AND processing_run_id = ?2 \
+                         AND status IN ('failed', 'empty_ocr')",
+                        rusqlite::params![doc_id, run_id],
+                    )?;
 
-                let kb = gbrain_core::kb::engine::KbEngine::new(conn);
-                kb.update_document_ocr_with_run_guard(
-                    doc_id,
-                    "queued",
-                    0.0,
-                    Some(&payload.processing_run_id),
-                )?;
+                    let rows = conn.execute(
+                        "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
+                        rusqlite::params![doc_id, run_id],
+                    )?;
+                    if rows == 0 {
+                        return Err(gbrain_core::error::GBrainError::InvalidInput(
+                            "文档 processing_run_id 已变化，跳过 OCR 重试入队".to_string(),
+                        ));
+                    }
+
+                    let queue = gbrain_core::jobs::JobQueue::new(conn);
+                    queue.enqueue(gbrain_core::jobs::JobInput {
+                        job_type: "kb_ocr_document".to_string(),
+                        payload: serde_json::to_value(&payload)?,
+                        priority: Some(0),
+                        max_attempts: Some(3),
+                    })
+                })();
+                let job_row_id = match enqueue_result {
+                    Ok(id) => {
+                        tx.commit()?;
+                        id
+                    }
+                    Err(e) => {
+                        let _ = tx.rollback();
+                        return Err(e);
+                    }
+                };
 
                 info!(
                     "已入队 OCR 重试: document_id={}, title='{}', failed_pages={:?}, job_row_id={}",

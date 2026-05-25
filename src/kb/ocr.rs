@@ -5,7 +5,6 @@
 use crate::error::{GBrainError, Result};
 use crate::kb::context;
 use crate::kb::engine::KbEngine;
-use crate::kb::pipeline::persist_nodes_and_vectors;
 use crate::kb::types::*;
 use crate::nlp::chinese;
 use rusqlite::Connection;
@@ -211,7 +210,8 @@ pub fn persist_ocr_blocks(
 
 /// 更新页级 OCR 状态（用于标记失败/跳过页）
 ///
-/// 使用 INSERT OR REPLACE 确保即使页级记录尚不存在也能写入状态，
+/// 使用 UPSERT 确保即使页级记录尚不存在也能写入状态，同时保留该页已有
+/// OCR 正文与版面块。这样手动重跑已成功页面失败时，检索正文不会倒退丢失。
 /// 防止 OCR 完全失败时无任何页级行，导致 update_document_ocr_status
 /// 将 total_ocr_pages==0 误判为 NotNeeded。
 ///
@@ -228,11 +228,14 @@ pub fn update_ocr_page_status(
     run_id: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO kb_document_ocr_pages \
+        "INSERT INTO kb_document_ocr_pages \
          (document_id, page_number, processing_run_id, status, error, provider, model, text, markdown, \
           layout_json, layout_visualization_url, raw_response_json, request_id, \
           confidence, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', '[]', '', '{}', '', NULL, datetime('now'))",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', '[]', '', '{}', '', NULL, datetime('now')) \
+         ON CONFLICT(document_id, page_number, processing_run_id) DO UPDATE SET \
+         status = excluded.status, error = excluded.error, provider = excluded.provider, \
+         model = excluded.model, updated_at = datetime('now')",
         rusqlite::params![document_id, page_number, run_id, status, error, provider, model],
     )?;
     Ok(())
@@ -517,6 +520,10 @@ pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrWritebackPage]) -> Vec<ParsedBlock> 
 /// 调用方应在 OCR 完成后调用此函数。
 ///
 /// `run_id` 用于防止过期 OCR 覆盖新上传产生的节点，传 None 则不做守卫。
+/// `semantic_enabled` 控制 splitter 选择：true 且有 embedder 时使用语义分割器，
+/// false 或无 embedder 时使用普通 Recursive splitter（向后兼容）。
+/// `embedder` 用于语义分割器计算嵌入相似度；传 None 时即使 semantic_enabled=true
+/// 也会回退到 Recursive splitter。
 #[allow(clippy::too_many_arguments)]
 pub fn writeback_ocr_results(
     conn: &Connection,
@@ -528,6 +535,8 @@ pub fn writeback_ocr_results(
     doc_title: &str,
     total_page_count: i32,
     run_id: Option<&str>,
+    semantic_enabled: bool,
+    embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
 ) -> Result<WritebackResult> {
     if ocr_pages.is_empty() {
         return Ok(WritebackResult {
@@ -547,8 +556,18 @@ pub fn writeback_ocr_results(
         .collect::<Vec<_>>()
         .join("\n");
     if full_text.trim().is_empty() {
-        // 即使全文为空，也必须更新文档 OCR 状态，避免文档永远停在 processing
+        // 即使全文为空，也必须完成所有状态更新，避免文档永远停在 ocr_pending/processing
         update_document_ocr_status(conn, doc_id, total_page_count, run_id)?;
+        // 更新文档统计和状态：将 document_status 从 ocr_pending 推进到 ready，
+        // parsing_status 标记为完成，embedding_status 标记为 completed（无需 embed）
+        let kb = KbEngine::new(conn);
+        kb.update_document_stats_with_run_guard(
+            doc_id,
+            0, // word_total
+            0, // split_total
+            Some(crate::kb::types::STATUS_COMPLETED), // embedding 无内容，直接标记完成
+            run_id,
+        )?;
         return Ok(WritebackResult {
             blocks_created: blocks.len(),
             nodes_created: 0,
@@ -556,16 +575,29 @@ pub fn writeback_ocr_results(
         });
     }
 
+    // P2 修复：使用 create_async_splitter 以真正支持语义分割。
+    // 只有 semantic_enabled=true 且传入 embedder 时才返回语义分割器，
+    // 否则自动回退到 Recursive splitter。
     let splitter_config = crate::kb::splitter::SplitterConfig {
-        file_path: String::new(),
+        file_path: String::new(), // OCR 回写无文件路径，走 Recursive splitter
         chunk_size,
         chunk_overlap,
-        semantic_enabled: false,
+        semantic_enabled,
     };
-    let splitter = crate::kb::splitter::create_splitter(&splitter_config);
-    let chunks = splitter
-        .split(&full_text)
-        .map_err(|e| GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e)))?;
+    // FIX10-R1: 在 embedder 被 move 之前记录是否有 embedder，用于后续 overlap 计算
+    let has_embedder = embedder.is_some();
+    let splitter = crate::kb::splitter::create_async_splitter(&splitter_config, embedder)?;
+    let rt = tokio::runtime::Handle::try_current();
+    let chunks = match rt {
+        Ok(handle) => handle.block_on(splitter.split_async(&full_text)),
+        Err(_) => {
+            // 无 tokio runtime（如单元测试）：直接用 block_on 创建临时 runtime
+            tokio::runtime::Runtime::new()
+                .map_err(|e| GBrainError::Config(format!("创建 tokio runtime 失败: {}", e)))?
+                .block_on(splitter.split_async(&full_text))
+        }
+    }
+    .map_err(|e| GBrainError::InvalidInput(format!("OCR 回写分割失败: {}", e)))?;
 
     // FIX9-05: 为每个 chunk 通过 span overlap 匹配对应的 block 元数据，
     // 而非按 chunk 下标直接对应 page index。
@@ -573,7 +605,9 @@ pub fn writeback_ocr_results(
     // 按 chunk 在全文中的真实位置与 block 的 source span 重叠度匹配。
 
     // FIX10-R1: 使用统一的 helper 定位 chunk 字符偏移，max_overlap 按 splitter 类型计算
-    let max_overlap = crate::kb::pipeline::splitter_max_overlap(&splitter_config, false);
+    // 传 has_embedder 以匹配 create_async_splitter 的实际 splitter 选择：
+    // 有 embedder 时语义 splitter 使用 chunk_overlap，否则 Recursive splitter cap 到 chunk_size/2
+    let max_overlap = crate::kb::pipeline::splitter_max_overlap(&splitter_config, has_embedder);
     let chunk_spans: Vec<(usize, usize)> =
         crate::kb::pipeline::locate_chunk_char_offsets(&full_text, &chunks, max_overlap);
 
@@ -641,10 +675,7 @@ pub fn writeback_ocr_results(
 
     let nodes_created = nodes.len();
 
-    // 5. 持久化节点，使用 run_id 守卫防止过期 OCR 覆盖新节点
-    persist_nodes_and_vectors(conn, doc_id, lib_id, &nodes, run_id)?;
-
-    // 6. 计算 ocr_text_coverage
+    // 5. 计算 ocr_text_coverage
     let ocr_pages_with_text = ocr_pages
         .iter()
         .filter(|p| !p.text.trim().is_empty())
@@ -655,10 +686,10 @@ pub fn writeback_ocr_results(
         0.0
     };
 
-    // 7. 更新文档 OCR 状态（根据实际页级状态计算，避免无条件设为 Done 掩盖 failed/partial）
+    // 6. 更新文档 OCR 状态（根据实际页级状态计算，避免无条件设为 Done 掩盖 failed/partial）
     update_document_ocr_status(conn, doc_id, total_page_count, run_id)?;
 
-    // 8. 更新文档统计（词数/分块数）
+    // 7. 更新文档统计（词数/分块数）
     // 修复：embedding_status 传 STATUS_PENDING 而非 None。
     // None 会 unwrap_or(STATUS_COMPLETED) 导致 embedding 被误标为已完成，
     // 但此时节点均无向量，向量检索和 RAPTOR 全部丢失。
@@ -670,14 +701,33 @@ pub fn writeback_ocr_results(
     } else {
         full_text.split_whitespace().count() as i32
     };
-    // 使用 run guard 版本，防止 stale OCR job 覆盖新 run 的文档状态
-    kb.update_document_stats_with_run_guard(
-        doc_id,
-        word_total,
-        nodes_created as i32,
-        Some(crate::kb::types::STATUS_PENDING),
-        run_id,
-    )?;
+    // Persist nodes and stats in one transaction. Otherwise a stale OCR job can
+    // insert old-run nodes and then fail the run-guarded stats update.
+    let tx = conn.unchecked_transaction()?;
+    let result = (|| -> Result<()> {
+        crate::kb::pipeline::persist_nodes_and_vectors_inner(
+            conn,
+            doc_id,
+            lib_id,
+            &nodes,
+            run_id,
+        )?;
+        kb.update_document_stats_with_run_guard_inner(
+            doc_id,
+            word_total,
+            nodes_created as i32,
+            Some(crate::kb::types::STATUS_PENDING),
+            run_id,
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => tx.commit()?,
+        Err(e) => {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+    }
 
     Ok(WritebackResult {
         blocks_created: blocks.len(),

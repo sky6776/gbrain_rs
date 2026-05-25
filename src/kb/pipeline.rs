@@ -366,6 +366,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     Ok(ProcessResult {
         word_total,
         split_total,
+        deferred_ocr: false,
     })
 }
 
@@ -450,10 +451,11 @@ pub async fn process_document_async(
     })?;
 
     // Phase 1+2: PDF OCR 分支 — 解析后、分割前执行 OCR
+    // 返回 None 表示异步 OCR 已入队，主 pipeline 应在此提前返回，不执行后续 split/embed/persist
     let parsed = if ext == "pdf" {
         // 加载 OCR 配置（单次加载，避免 maybe_apply_pdf_ocr 内部重复 Config::load）
         let ocr_config = crate::config::Config::load().unwrap_or_default();
-        maybe_apply_pdf_ocr(
+        match maybe_apply_pdf_ocr(
             conn,
             doc_id,
             lib_id,
@@ -463,7 +465,20 @@ pub async fn process_document_async(
             &library,
             &file_data,
             &ocr_config,
-        )?
+        )? {
+            Some(p) => p,
+            None => {
+                // 异步 OCR 已入队，且 maybe_apply_pdf_ocr 已在同一事务中
+                // 写入 document_status=ocr_pending / ocr_status=queued。
+                // 这里仅提前返回，避免后续 split/embed/persist 和 artifact 流程抢跑。
+                tracing::info!(doc_id, "PDF OCR 已异步入队，主 pipeline 提前返回");
+                return Ok(ProcessResult {
+                    word_total: 0,
+                    split_total: 0,
+                    deferred_ocr: true, // P2 修复：显式标记 OCR 已延后
+                });
+            }
+        }
     } else {
         parsed
     };
@@ -974,6 +989,7 @@ pub async fn process_document_async(
     Ok(ProcessResult {
         word_total,
         split_total,
+        deferred_ocr: false,
     })
 }
 
@@ -1355,7 +1371,7 @@ fn report_progress(on_progress: Option<&ProgressCallback>, phase: &str, message:
 /// 3. 检查 OCR 是否启用、外部 OCR 是否允许
 /// 4. OCR 或外部 OCR 被关闭时，更新 ocr_status=needed，返回原 parsed
 /// 5. 同步内联模式：规划 → 调用 GLM-OCR → 规范化 → 合并 → 返回新 parsed
-/// 6. 异步模式：入队 kb_ocr_document job，返回原 parsed（仅文本层）
+/// 6. 异步模式：入队 kb_ocr_document job，返回 None 阻断后续本地索引
 #[allow(clippy::too_many_arguments)]
 fn maybe_apply_pdf_ocr(
     conn: &Connection,
@@ -1367,7 +1383,7 @@ fn maybe_apply_pdf_ocr(
     library: &crate::kb::types::Library,
     file_data: &[u8],
     config: &crate::config::Config,
-) -> Result<ParsedDocument> {
+) -> Result<Option<ParsedDocument>> {
     use crate::kb::ocr::OcrStatus;
     use crate::kb::ocr_detector::{detect_ocr_pages, PdfImageRegion, PdfPageAnalysis};
     use crate::kb::ocr_provider::{OcrMode, OcrSubmitMode};
@@ -1398,7 +1414,7 @@ fn maybe_apply_pdf_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(parsed.clone());
+        return Ok(Some(parsed.clone()));
     }
 
     // 转换为 PdfPageAnalysis
@@ -1492,7 +1508,7 @@ fn maybe_apply_pdf_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(parsed.clone());
+        return Ok(Some(parsed.clone()));
     }
 
     tracing::info!(
@@ -1502,7 +1518,7 @@ fn maybe_apply_pdf_ocr(
     );
 
     // 限制 OCR 页数上限
-    let max_pages = config.ocr_max_pages_per_document;
+    let max_pages = config.ocr_max_pages_per_document.max(1);
     if detection.ocr_pages.len() > max_pages {
         tracing::warn!(
             doc_id,
@@ -1564,7 +1580,7 @@ fn maybe_apply_pdf_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(parsed.clone());
+        return Ok(Some(parsed.clone()));
     }
 
     // 检查隐私策略：redaction_enabled 时禁止外部 OCR
@@ -1586,7 +1602,7 @@ fn maybe_apply_pdf_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(parsed.clone());
+        return Ok(Some(parsed.clone()));
     }
 
     // 检查 API key
@@ -1611,18 +1627,24 @@ fn maybe_apply_pdf_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(parsed.clone());
+        return Ok(Some(parsed.clone()));
     }
 
-    // 异步模式：入队 kb_ocr_document job
+    // 异步模式：入队 kb_ocr_document job，返回 None 阻断后续 split/embed/persist
     if !config.ocr_sync_inline {
         tracing::info!(doc_id, "PDF OCR: 入队异步 OCR job");
-        kb.update_document_ocr_with_run_guard(
-            doc_id,
-            OcrStatus::Queued.as_str(),
-            0.0,
-            Some(run_id),
-        )?;
+
+        // 主 pipeline 会在异步 OCR 入队后提前返回，因此这里必须持久化
+        // PDF 页数；否则 kb_ocr_retry 的严格页码校验拿不到总页数。
+        // 这些文档状态、页状态和 job 入队必须同事务提交，否则 OCR worker
+        // 可能在 job 可见后立刻跑完，又被外层/后续状态更新覆盖回 queued/ocr_pending。
+        let char_count = parsed.content.chars().count();
+        let granularity = crate::kb::granularity::classify_granularity(
+            "pdf",
+            char_count,
+            total_pages,
+        );
+        let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
 
         // 入队 OCR job
         let ocr_payload = crate::kb::jobs::KbOcrPayload {
@@ -1639,19 +1661,104 @@ fn maybe_apply_pdf_ocr(
             need_layout_visualization: config.ocr_need_layout_visualization,
         };
 
+        // 将检测原因持久化到文档 metadata，便于 CLI/MCP 状态查询展示
+        // 修复双重编码：使用 json(?) 让 SQLite 将 JSON 字符串解析为 JSON 对象后再写入，
+        // 而非直接作为字符串参数（会被当作 JSON 字符串值导致双重转义）。
+        // 带 processing_run_id 条件，防止旧 run 的 OCR reasons 覆盖新 run 的 metadata
+        let reasons_str = if reasons_json.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&reasons_json).unwrap_or_default())
+        };
+
         let ocr_payload_json = serde_json::to_value(&ocr_payload)
             .map_err(|e| GBrainError::Serialization(e.to_string()))?;
 
-        let queue = crate::jobs::JobQueue::new(conn);
-        let job_input = crate::jobs::JobInput {
-            job_type: "kb_ocr_document".to_string(),
-            payload: ocr_payload_json,
-            priority: Some(0),
-            max_attempts: Some(3),
-        };
-        queue.enqueue(job_input)?;
+        let tx = conn.unchecked_transaction()?;
+        let enqueue_result = (|| -> Result<i64> {
+            let rows = conn.execute(
+                "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
+                 content_char_count = ?3, page_count = ?4, parsing_status = ?5, \
+                 parsing_progress = ?6, document_status = 'ocr_pending', \
+                 ocr_status = ?7, ocr_text_coverage = 0.0, updated_at = datetime('now') \
+                 WHERE id = ?8 AND processing_run_id = ?9",
+                rusqlite::params![
+                    granularity.as_str(),
+                    chunk_strategy,
+                    char_count as i32,
+                    total_pages as i32,
+                    STATUS_PROCESSING,
+                    30,
+                    OcrStatus::Queued.as_str(),
+                    doc_id,
+                    run_id
+                ],
+            )?;
+            if rows == 0 {
+                return Err(GBrainError::InvalidInput(
+                    "文档 processing_run_id 已变化，跳过异步 OCR 入队".to_string(),
+                ));
+            }
 
-        return Ok(parsed.clone());
+            // 为每个 OCR 页创建 pending 状态记录，并持久化该页的 OCR 检测原因。
+            // CLI 状态查询（kb ocr-status）读页表，写入原因后用户可看到"为什么该页需要 OCR"。
+            for &page_num in &detection.ocr_pages {
+                let page_reasons = detection
+                    .reasons_by_page
+                    .get(&page_num)
+                    .map(|reasons| {
+                        let labels: Vec<String> = reasons
+                            .iter()
+                            .filter_map(|r| serde_json::to_value(r).ok())
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        labels.join(", ")
+                    })
+                    .unwrap_or_default();
+                let reason_desc = if page_reasons.is_empty() {
+                    "等待异步 OCR 处理".to_string()
+                } else {
+                    format!("OCR 原因: {} | 等待异步 OCR 处理", page_reasons)
+                };
+                crate::kb::ocr::update_ocr_page_status(
+                    conn,
+                    doc_id,
+                    page_num,
+                    "pending",
+                    &reason_desc,
+                    "glm_ocr",
+                    &config.ocr_model,
+                    run_id,
+                )?;
+            }
+
+            if let Some(reasons_str) = reasons_str.as_deref() {
+                conn.execute(
+                    "UPDATE kb_documents SET metadata_json = json_set(COALESCE(metadata_json, '{}'), '$.ocr_reasons_by_page', json(?2)), updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?3",
+                    rusqlite::params![doc_id, reasons_str, run_id],
+                )?;
+            }
+
+            let queue = crate::jobs::JobQueue::new(conn);
+            queue.enqueue(crate::jobs::JobInput {
+                job_type: "kb_ocr_document".to_string(),
+                payload: ocr_payload_json,
+                priority: Some(0),
+                max_attempts: Some(3),
+            })
+        })();
+        match enqueue_result {
+            Ok(_) => tx.commit()?,
+            Err(e) => {
+                let _ = tx.rollback();
+                return Err(e);
+            }
+        };
+
+        // 异步 OCR 入队成功：返回 None 阻断后续 split/embed/persist
+        // 文档状态保持 ocr_status=queued，document_status 不会被标为 ready
+        // OCR 完成后由 OCR worker 调用 writeback_ocr_results 完成后续流程
+        return Ok(None);
     }
 
     // 同步内联模式：直接执行 OCR
@@ -1703,7 +1810,7 @@ fn maybe_apply_pdf_ocr(
                 serde_json::to_string(&reasons_json).unwrap_or_default(),
             );
 
-            Ok(new_parsed)
+            Ok(Some(new_parsed))
         }
         Err(e) => {
             tracing::error!(doc_id, error = %e, "PDF OCR 执行失败");
@@ -1714,7 +1821,7 @@ fn maybe_apply_pdf_ocr(
                 Some(run_id),
             )?;
             // OCR 失败时返回原始 parsed，不阻塞后续文本层索引
-            Ok(parsed.clone())
+            Ok(Some(parsed.clone()))
         }
     }
 }

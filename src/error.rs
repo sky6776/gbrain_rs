@@ -50,6 +50,9 @@ pub enum GBrainError {
     #[error("HTTP error: {0}")]
     Http(String),
 
+    #[error("OCR post-writeback error: {0}")]
+    OcrPostWriteback(String),
+
     #[error("Transcription error: {0}")]
     Transcription(String),
 

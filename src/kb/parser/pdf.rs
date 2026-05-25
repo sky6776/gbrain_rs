@@ -238,21 +238,25 @@ fn get_inherited_resources<'a>(
 fn detect_inline_images(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> usize {
     let page_obj = match pdf.get_object(page_obj_id) {
         Ok(obj) => obj,
-        Err(_) => return 0,
+        // 解析失败时返回最大值，触发不确定页标记（保守策略）
+        Err(_) => return usize::MAX / 2,
     };
     let page_dict = match page_obj.as_dict() {
         Ok(d) => d,
-        Err(_) => return 0,
+        // 解析失败时返回最大值
+        Err(_) => return usize::MAX / 2,
     };
 
     let contents = match page_dict.get(b"Contents") {
         Ok(c) => c,
+        // 无 Contents 不一定没有 inline image，但无法检测，保守返回 0
         Err(_) => return 0,
     };
 
     let stream_data = collect_content_stream(pdf, contents);
     if stream_data.is_empty() {
-        return 0;
+        // content stream 为空但 Contents 存在，可能是解压失败，保守返回最大值
+        return usize::MAX / 2;
     }
 
     // 在 content stream 中搜索 BI 操作符（标记 inline image 开始）
@@ -274,6 +278,7 @@ fn detect_inline_images(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
 }
 
 /// 汇总页面 content stream 数据（处理单个 stream 或 stream 数组）
+/// 解压失败时返回空 Vec，调用方应根据上下文决定是否保守标记为不确定
 fn collect_content_stream(pdf: &lopdf::Document, contents: &lopdf::Object) -> Vec<u8> {
     match contents {
         lopdf::Object::Stream(stream) => stream.decompressed_content().unwrap_or_default(),
@@ -335,8 +340,10 @@ fn is_pdf_delimiter(b: u8) -> bool {
 fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> (usize, f64, bool) {
     let mut image_count = 0usize;
     let mut total_image_area: f64 = 0.0;
-    let mut has_vector_objects = false;
+    // 保守策略：默认 has_vector_objects=true，无法确认时加入 uncertain_pages
+    let mut has_vector_objects = true;
     let mut page_area: f64 = 1.0; // 默认 1.0 避免除零
+    let mut resources_resolved = false;
 
     // 获取页面尺寸
     if let Ok(page_obj) = pdf.get_object(page_obj_id) {
@@ -359,10 +366,16 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
     // 遍历页面资源中的 XObject，检测图片
     // 使用 get_inherited_resources 解析间接引用并沿父 Pages 节点继承资源
     if let Some(res_dict) = get_inherited_resources(pdf, page_obj_id) {
+        resources_resolved = true;
+        // 成功获取 Resources 后重置 has_vector_objects，仅在实际检测到矢量对象时设为 true
+        has_vector_objects = false;
+
         if let Ok(xobjects) = res_dict.get(b"XObject") {
             if let Some(xobj_dict) = resolve_as_dict(pdf, xobjects) {
                 for (_name, obj) in xobj_dict.iter() {
                     let Some(xobj) = resolve_xobject(pdf, obj) else {
+                        // 无法解析的 XObject 保守标记为不确定
+                        has_vector_objects = true;
                         continue;
                     };
                     if let Ok(xobj_dict) = xobj.as_dict() {
@@ -388,8 +401,14 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
                                     // Form XObject 可能包含矢量图形
                                     has_vector_objects = true;
                                 }
-                                _ => {}
+                                // 未知 Subtype，保守标记为不确定
+                                _ => {
+                                    has_vector_objects = true;
+                                }
                             }
+                        } else {
+                            // XObject 无 Subtype 字段，保守标记为不确定
+                            has_vector_objects = true;
                         }
                     }
                 }
@@ -406,10 +425,19 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
     // 检测 content stream 中的 inline image (BI 操作符)
     // XObject 检测无法覆盖 inline image，需要解析 content stream
     let inline_image_count = detect_inline_images(pdf, page_obj_id);
-    if inline_image_count > 0 {
+    // 保守值（usize::MAX / 2）表示解析失败，标记为不确定
+    if inline_image_count > 0 && inline_image_count < usize::MAX / 4 {
         image_count += inline_image_count;
         // 无法精确估算 inline image 面积，保守按每张占页面 50% 估算
         total_image_area += page_area * 0.5 * inline_image_count as f64;
+    } else if inline_image_count >= usize::MAX / 4 {
+        // content stream 解析失败，保守标记为不确定
+        has_vector_objects = true;
+    }
+
+    // 如果无法获取 Resources 字典，保守标记为不确定
+    if !resources_resolved {
+        has_vector_objects = true;
     }
 
     // 计算图片面积占比（图片面积之和 / 页面面积）
