@@ -438,7 +438,8 @@ CREATE TABLE IF NOT EXISTS kb_documents (
     last_indexed_at TEXT,
     last_seen_at TEXT,
     ocr_status TEXT NOT NULL DEFAULT 'not_needed',
-    ocr_text_coverage REAL NOT NULL DEFAULT 0.0
+    ocr_text_coverage REAL NOT NULL DEFAULT 0.0,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_docs_library_hash
@@ -753,6 +754,8 @@ CREATE TABLE IF NOT EXISTS kb_document_ocr_pages (
     request_id TEXT NOT NULL DEFAULT '',
     confidence REAL,
     error TEXT NOT NULL DEFAULT '',
+    ocr_page_width INTEGER,
+    ocr_page_height INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(document_id, page_number, processing_run_id)

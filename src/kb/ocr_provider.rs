@@ -122,6 +122,10 @@ pub struct OcrPageResult {
     pub provider: String,
     /// 模型名称
     pub model: String,
+    /// OCR 服务返回的页面宽度
+    pub ocr_page_width: Option<u32>,
+    /// OCR 服务返回的页面高度
+    pub ocr_page_height: Option<u32>,
 }
 
 /// 版面块结构

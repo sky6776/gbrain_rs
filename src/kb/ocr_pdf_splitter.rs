@@ -4,6 +4,7 @@
 //! 当原 PDF 超过单次请求限制（50MB 或 100 页）时需要拆分。
 
 use crate::error::{GBrainError, Result};
+use crate::kb::temp_guard::TempOcrDir;
 use std::path::Path;
 
 /// 拆分结果
@@ -44,73 +45,13 @@ impl PdfSplitter for LopdfSplitter {
         source_end_page: i32,
         output_dir: &Path,
     ) -> Result<SplitPdf> {
-        let mut doc = lopdf::Document::load_mem(source_pdf)
-            .map_err(|e| GBrainError::FileError(format!("PDF 加载失败: {}", e)))?;
-
-        let pages = doc.get_pages();
-        let total_pages = pages.len() as i32;
-
-        if source_start_page < 1
-            || source_end_page > total_pages
-            || source_start_page > source_end_page
-        {
-            return Err(GBrainError::InvalidInput(format!(
-                "无效页码范围: {}..={}，总页数: {}",
-                source_start_page, source_end_page, total_pages
-            )));
-        }
-
-        let child_page_count = source_end_page - source_start_page + 1;
-
-        // 收集要保留的页码（lopdf 内部页 ID）
-        let page_ids: Vec<u32> = pages
-            .keys()
-            .filter(|&&page_num| {
-                let idx = page_num as i32;
-                idx >= source_start_page && idx <= source_end_page
-            })
-            .copied()
-            .collect();
-
-        if page_ids.is_empty() {
-            return Err(GBrainError::InvalidInput(
-                "指定页码范围内无页面".to_string(),
-            ));
-        }
-
-        // 收集要删除的页码并降序排列
-        let mut pages_to_delete: Vec<u32> = pages
-            .keys()
-            .filter(|&&page_num| {
-                let idx = page_num as i32;
-                idx < source_start_page || idx > source_end_page
-            })
-            .copied()
-            .collect();
-
-        // 降序排列：先删高页码，避免 delete_pages 内部重排导致删错页
-        pages_to_delete.sort_by(|a, b| b.cmp(a));
-
-        doc.delete_pages(&pages_to_delete);
-
-        // 保存子 PDF
-        std::fs::create_dir_all(output_dir)
-            .map_err(|e| GBrainError::FileError(format!("创建临时目录失败: {}", e)))?;
-
-        let filename = format!("split_{}_{}.pdf", source_start_page, source_end_page);
-        let output_path = output_dir.join(&filename);
-
-        let mut out_buf = Vec::new();
-        doc.save_to(&mut out_buf)
-            .map_err(|e| GBrainError::FileError(format!("PDF 保存失败: {}", e)))?;
-
-        std::fs::write(&output_path, &out_buf)
-            .map_err(|e| GBrainError::FileError(format!("写入子 PDF 失败: {}", e)))?;
-
+        let (out_buf, child_page_count) =
+            generate_split_bytes(source_pdf, source_start_page, source_end_page)?;
+        let path = write_split_bytes(&out_buf, source_start_page, source_end_page, output_dir)?;
         let bytes = out_buf.len();
 
         Ok(SplitPdf {
-            path: output_path,
+            path,
             source_start_page,
             source_end_page,
             child_page_count,
@@ -119,58 +60,233 @@ impl PdfSplitter for LopdfSplitter {
     }
 }
 
-/// 对超过大小限制的 PDF 执行二分拆分
+/// 在内存中生成拆分 PDF 字节，不写入磁盘。
+/// 返回 (out_buf, child_page_count)。
+fn generate_split_bytes(
+    source_pdf: &[u8],
+    source_start_page: i32,
+    source_end_page: i32,
+) -> Result<(Vec<u8>, i32)> {
+    let mut doc = lopdf::Document::load_mem(source_pdf)
+        .map_err(|e| GBrainError::FileError(format!("PDF 加载失败: {}", e)))?;
+
+    let pages = doc.get_pages();
+    let total_pages = pages.len() as i32;
+
+    if source_start_page < 1
+        || source_end_page > total_pages
+        || source_start_page > source_end_page
+    {
+        return Err(GBrainError::InvalidInput(format!(
+            "无效页码范围: {}..={}，总页数: {}",
+            source_start_page, source_end_page, total_pages
+        )));
+    }
+
+    let child_page_count = source_end_page - source_start_page + 1;
+
+    // 收集要保留的页码（lopdf 内部页 ID）
+    let page_ids: Vec<u32> = pages
+        .keys()
+        .filter(|&&page_num| {
+            let idx = page_num as i32;
+            idx >= source_start_page && idx <= source_end_page
+        })
+        .copied()
+        .collect();
+
+    if page_ids.is_empty() {
+        return Err(GBrainError::InvalidInput(
+            "指定页码范围内无页面".to_string(),
+        ));
+    }
+
+    // 收集要删除的页码并降序排列
+    let mut pages_to_delete: Vec<u32> = pages
+        .keys()
+        .filter(|&&page_num| {
+            let idx = page_num as i32;
+            idx < source_start_page || idx > source_end_page
+        })
+        .copied()
+        .collect();
+
+    // 降序排列：先删高页码，避免 delete_pages 内部重排导致删错页
+    pages_to_delete.sort_by(|a, b| b.cmp(a));
+
+    doc.delete_pages(&pages_to_delete);
+
+    // 删除页后清理孤立对象：delete_pages 只移除页对象，
+    // 被删除页面引用的图片/内容流对象仍留在对象表中，
+    // 导致扫描 PDF 子文件可能仍接近原始大小，被误判为"单页仍超限"。
+    let _ = doc.prune_objects();
+
+    let mut out_buf = Vec::new();
+    doc.save_to(&mut out_buf)
+        .map_err(|e| GBrainError::FileError(format!("PDF 保存失败: {}", e)))?;
+
+    Ok((out_buf, child_page_count))
+}
+
+/// 将拆分 PDF 字节写入磁盘。
+fn write_split_bytes(
+    out_buf: &[u8],
+    source_start_page: i32,
+    source_end_page: i32,
+    output_dir: &Path,
+) -> Result<std::path::PathBuf> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| GBrainError::FileError(format!("创建临时目录失败: {}", e)))?;
+
+    let output_path = split_output_path(output_dir, source_start_page, source_end_page);
+
+    std::fs::write(&output_path, out_buf)
+        .map_err(|e| GBrainError::FileError(format!("写入子 PDF 失败: {}", e)))?;
+
+    Ok(output_path)
+}
+
+fn split_output_path(
+    output_dir: &Path,
+    source_start_page: i32,
+    source_end_page: i32,
+) -> std::path::PathBuf {
+    output_dir.join(format!("split_{}_{}.pdf", source_start_page, source_end_page))
+}
+
+/// Remove a no-longer-needed child file and release its reservation only when
+/// the file is confirmed absent. If cleanup fails, TempOcrDir retains the
+/// reservation and retries directory cleanup when the OCR run exits.
+fn rollback_split_file(path: &Path, bytes: usize, temp_guard: &mut TempOcrDir) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            temp_guard.release(bytes as u64);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            temp_guard.release(bytes as u64);
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "OCR split rollback cleanup failed; retaining temporary budget reservation"
+            );
+        }
+    }
+}
+
+/// 对超过大小限制的 PDF 执行二分拆分。
 ///
-/// 如果单页子文件仍超过限制，返回失败。
+/// `max_bytes` 为单个子文件 GLM-OCR 大小上限，
+/// `temp_budget_max_bytes` 为临时目录总字节预算上限。
+///
+/// 在内存中生成输出字节，申请预算成功后才写入磁盘；
+/// 预算不足时不会留下任何临时文件。
+/// `temp_guard` 拥有拆分文件目录及其预算，申请成功后立即登记，因此包括
+/// 写入失败在内的异常路径也会由目录守卫负责最终清理和释放。
 pub fn split_pdf_for_ocr(
     source_pdf: &[u8],
     source_start_page: i32,
     source_end_page: i32,
     max_bytes: usize,
-    output_dir: &Path,
-    splitter: &dyn PdfSplitter,
+    temp_budget_max_bytes: u64,
+    temp_guard: &mut TempOcrDir,
+    _splitter: &dyn PdfSplitter,
 ) -> Result<Vec<SplitPdf>> {
     let page_count = source_end_page - source_start_page + 1;
 
-    // 先尝试直接拆分整个范围
-    let result =
-        splitter.split_range(source_pdf, source_start_page, source_end_page, output_dir)?;
+    // 在内存中生成拆分字节，不写入磁盘
+    let (out_buf, child_page_count) =
+        generate_split_bytes(source_pdf, source_start_page, source_end_page)?;
+    let bytes = out_buf.len();
 
-    if result.bytes <= max_bytes {
-        return Ok(vec![result]);
+    if bytes <= max_bytes {
+        // 先申请预算，成功后才写盘，避免超限文件先落盘后删除
+        if !temp_guard.try_reserve(bytes as u64, temp_budget_max_bytes) {
+            // 预算不足，文件未写盘，无需删除
+            return Err(GBrainError::InvalidInput(format!(
+                "临时目录预算不足: 需要 {} bytes，当前已用 {} / 上限 {}",
+                bytes,
+                crate::kb::temp_guard::ocr_temp_dir_bytes_used(),
+                temp_budget_max_bytes
+            )));
+        }
+        // 预算申请后立即移交目录守卫，确保写盘失败路径同样能够释放计数。
+        let path = match write_split_bytes(
+            &out_buf,
+            source_start_page,
+            source_end_page,
+            temp_guard.path(),
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                let path = split_output_path(temp_guard.path(), source_start_page, source_end_page);
+                rollback_split_file(&path, bytes, temp_guard);
+                return Err(e);
+            }
+        };
+        return Ok(vec![SplitPdf {
+            path,
+            source_start_page,
+            source_end_page,
+            child_page_count,
+            bytes,
+        }]);
     }
 
-    // 超过大小限制，需要二分
+    // 超过大小限制：文件未写盘，无需删除
+
     if page_count == 1 {
         return Err(GBrainError::InvalidInput(format!(
             "单页 PDF 子文件超过 GLM-OCR {}MB 限制 ({} bytes)",
             max_bytes / 1_048_576,
-            result.bytes
+            bytes
         )));
     }
 
     let mid = source_start_page + page_count / 2 - 1;
-    let mut results = Vec::new();
 
     // 递归拆分左半部分
-    results.extend(split_pdf_for_ocr(
+    let mut results = Vec::new();
+    match split_pdf_for_ocr(
         source_pdf,
         source_start_page,
         mid,
         max_bytes,
-        output_dir,
-        splitter,
-    )?);
+        temp_budget_max_bytes,
+        temp_guard,
+        _splitter,
+    ) {
+        Ok(left_results) => {
+            results.extend(left_results);
+        }
+        Err(e) => {
+            // 左半失败时，其异常清理失败所保留的预算仍由目录守卫持有。
+            return Err(e);
+        }
+    }
 
     // 递归拆分右半部分
-    results.extend(split_pdf_for_ocr(
+    match split_pdf_for_ocr(
         source_pdf,
         mid + 1,
         source_end_page,
         max_bytes,
-        output_dir,
-        splitter,
-    )?);
+        temp_budget_max_bytes,
+        temp_guard,
+        _splitter,
+    ) {
+        Ok(right_results) => {
+            results.extend(right_results);
+        }
+        Err(e) => {
+            // 右半失败：仅在确认左半文件已清理后释放其预算。
+            for r in &results {
+                rollback_split_file(&r.path, r.bytes, temp_guard);
+            }
+            return Err(e);
+        }
+    }
 
     Ok(results)
 }

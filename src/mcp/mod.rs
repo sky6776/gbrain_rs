@@ -197,8 +197,24 @@ fn pdf_page_analyses_from_metadata(
                 image_regions,
                 image_area_ratio,
                 has_vector_or_unknown_objects: has_vector,
-                width: None,
-                height: None,
+                width: pa.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                height: pa.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+                content_parse_failed: pa
+                    .get("content_parse_failed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_vector_drawing_ops: pa
+                    .get("has_vector_drawing_ops")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_invisible_text: pa
+                    .get("has_invisible_text")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                font_encoding_suspected: pa
+                    .get("font_encoding_suspected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         })
         .collect())
@@ -987,12 +1003,17 @@ impl McpServer {
 
                 let config = crate::config::Config::load().unwrap_or_default();
 
-                // 解析页码范围或自动检测
-                let ocr_pages = if let Some(ref ps) = pages_str {
-                    parse_mcp_page_ranges(ps, total_pages)?
+                // 解析页码范围或自动检测：区分显式指定与自动检测
+                let (ocr_pages, _explicit_pages, detection_reasons) = if let Some(ref ps) = pages_str {
+                    let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
+                    // 显式指定：原因统一为 manual_requested
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
+                        .iter()
+                        .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                        .collect();
+                    (parsed_pages, true, reasons)
                 } else {
-                    // 自动检测：复用 PDF parser 的页级分析和 OCR detector，
-                    // 不再在失败页为空时退化为整本 OCR。
+                    // 自动检测：使用 detector 返回的真实原因
                     let registry = crate::kb::parser::ParserRegistry::new();
                     let parsed = registry.parse("pdf", &pdf_data)?;
                     let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
@@ -1006,10 +1027,38 @@ impl McpServer {
                         config.ocr_min_low_density_ratio,
                         &ocr_mode,
                     );
-                    detection.ocr_pages
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
+                        .reasons_by_page
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.to_string(),
+                                v.iter()
+                                    .map(|r| {
+                                        serde_json::to_string(r)
+                                            .unwrap_or_default()
+                                            .trim_matches('"')
+                                            .to_string()
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    (detection.ocr_pages, false, reasons)
                 };
 
                 if ocr_pages.is_empty() {
+                    // 持久化本次 none 检测结论，防止状态接口展示上一次运行的选择结果
+                    conn.execute(
+                        "UPDATE kb_documents SET \
+                         metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+                         '$.needs_ocr_pages', json('[]'), \
+                         '$.ocr_reasons_by_page', json('{}'), \
+                         '$.ocr_scope', 'none'), \
+                         updated_at = datetime('now') \
+                         WHERE id = ?1 AND processing_run_id = ?2",
+                        rusqlite::params![doc_id, run_id],
+                    )?;
                     return Ok(serde_json::json!({
                         "enqueued": false,
                         "document_id": doc_id,
@@ -1058,6 +1107,30 @@ impl McpServer {
                             "文档 processing_run_id 已变化，跳过 OCR 入队".to_string(),
                         ));
                     }
+
+                    // 同步更新 OCR 检测元数据：区分显式手动选页与自动检测，
+                    // ocr_scope 依据选中页数与总页数计算为 none/partial/full。
+                    let needs_ocr_pages_str =
+                        serde_json::to_string(&ocr_pages).unwrap_or_else(|_| "[]".to_string());
+                    let reasons_str = serde_json::to_string(&detection_reasons)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let ocr_scope = if ocr_pages.is_empty() {
+                        "none"
+                    } else if ocr_pages.len() as i32 >= total_pages {
+                        "full"
+                    } else {
+                        "partial"
+                    };
+                    conn.execute(
+                        "UPDATE kb_documents SET \
+                         metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+                         '$.needs_ocr_pages', json(?1), \
+                         '$.ocr_reasons_by_page', json(?2), \
+                         '$.ocr_scope', ?3), \
+                         updated_at = datetime('now') \
+                         WHERE id = ?4 AND processing_run_id = ?5",
+                        rusqlite::params![needs_ocr_pages_str, reasons_str, ocr_scope, doc_id, run_id],
+                    )?;
 
                     // 先为目标页创建 pending 状态记录，再入队，避免 worker 完成后被
                     // delayed pending 初始化用 INSERT OR REPLACE 覆盖 OCR 结果。

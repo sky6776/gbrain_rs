@@ -427,14 +427,33 @@ fn pdf_page_analyses_from_metadata(
                 image_regions,
                 image_area_ratio,
                 has_vector_or_unknown_objects: has_vector,
-                width: None,
-                height: None,
+                width: pa.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                height: pa.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+                content_parse_failed: pa
+                    .get("content_parse_failed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_vector_drawing_ops: pa
+                    .get("has_vector_drawing_ops")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_invisible_text: pa
+                    .get("has_invisible_text")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                font_encoding_suspected: pa
+                    .get("font_encoding_suspected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         })
         .collect())
 }
 
-fn detect_ocr_pages_for_pdf(storage_path: &str, config: &Config) -> Result<Vec<i32>> {
+fn detect_ocr_pages_for_pdf(
+    storage_path: &str,
+    config: &Config,
+) -> Result<gbrain_core::kb::ocr_detector::OcrDetection> {
     let pdf_data = std::fs::read(storage_path)
         .map_err(|e| GBrainError::FileError(format!("读取 PDF 文件以自动检测 OCR 页失败: {}", e)))?;
     let registry = gbrain_core::kb::parser::ParserRegistry::new();
@@ -449,7 +468,7 @@ fn detect_ocr_pages_for_pdf(storage_path: &str, config: &Config) -> Result<Vec<i
         config.ocr_min_low_density_ratio,
         &ocr_mode,
     );
-    Ok(detection.ocr_pages)
+    Ok(detection)
 }
 
 fn main() {
@@ -1378,19 +1397,56 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let total_pages = resolve_pdf_page_count(conn, doc_id, &storage_path)?;
                 let config_local = gbrain_core::config::Config::load().unwrap_or_default();
 
-                // 解析页码
-                let ocr_pages = if let Some(ref pages_str) = pages {
-                    parse_page_ranges(pages_str, total_pages)?
-                } else {
-                    // 自动检测：复用 PDF parser 的页级分析和 OCR detector。
-                    detect_ocr_pages_for_pdf(&storage_path, &config_local)?
-                };
+                // 解析页码：区分显式指定与自动检测
+                let (ocr_pages, _explicit_pages, detection_reasons) =
+                    if let Some(ref pages_str) = pages {
+                        let parsed_pages = parse_page_ranges(pages_str, total_pages)?;
+                        // 显式指定：原因统一为 manual_requested
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
+                            .iter()
+                            .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                            .collect();
+                        (parsed_pages, true, reasons)
+                    } else {
+                        // 自动检测：使用 detector 返回的真实原因
+                        let detection =
+                            detect_ocr_pages_for_pdf(&storage_path, &config_local)?;
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
+                            .reasons_by_page
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.to_string(),
+                                    v.iter()
+                                        .map(|r| {
+                                            serde_json::to_string(r)
+                                                .unwrap_or_default()
+                                                .trim_matches('"')
+                                                .to_string()
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect();
+                        (detection.ocr_pages, false, reasons)
+                    };
 
                 if ocr_pages.is_empty() {
                     info!(
                         "自动检测未发现需要 OCR 的页面: document_id={}, title='{}'",
                         doc_id, title
                     );
+                    // 持久化本次 none 检测结论，防止状态接口展示上一次运行的选择结果
+                    conn.execute(
+                        "UPDATE kb_documents SET \
+                         metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+                         '$.needs_ocr_pages', json('[]'), \
+                         '$.ocr_reasons_by_page', json('{}'), \
+                         '$.ocr_scope', 'none'), \
+                         updated_at = datetime('now') \
+                         WHERE id = ?1 AND processing_run_id = ?2",
+                        rusqlite::params![doc_id, run_id],
+                    )?;
                     return Ok(());
                 }
 
@@ -1436,6 +1492,30 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                             "文档 processing_run_id 已变化，跳过 OCR 入队".to_string(),
                         ));
                     }
+
+                    // 同步更新 OCR 检测元数据：区分显式手动选页与自动检测，
+                    // ocr_scope 依据选中页数与总页数计算为 none/partial/full。
+                    let needs_ocr_pages_str =
+                        serde_json::to_string(&ocr_pages).unwrap_or_else(|_| "[]".to_string());
+                    let reasons_str = serde_json::to_string(&detection_reasons)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let ocr_scope = if ocr_pages.is_empty() {
+                        "none"
+                    } else if ocr_pages.len() as i32 >= total_pages {
+                        "full"
+                    } else {
+                        "partial"
+                    };
+                    conn.execute(
+                        "UPDATE kb_documents SET \
+                         metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+                         '$.needs_ocr_pages', json(?1), \
+                         '$.ocr_reasons_by_page', json(?2), \
+                         '$.ocr_scope', ?3), \
+                         updated_at = datetime('now') \
+                         WHERE id = ?4 AND processing_run_id = ?5",
+                        rusqlite::params![needs_ocr_pages_str, reasons_str, ocr_scope, doc_id, run_id],
+                    )?;
 
                     for &page_num in &ocr_pages {
                         gbrain_core::kb::ocr::update_ocr_page_status(

@@ -314,12 +314,16 @@ impl GlmOcrProvider {
                             retry_count += 1;
                             let backoff_secs =
                                 INITIAL_SINGLE_PAGE_BACKOFF_SECS * 2u64.pow(retry_count - 1);
+                            let safe_msg = crate::kb::ocr::sanitize_error_text_with_secret(
+                                &msg,
+                                Some(&self.api_key),
+                            );
                             tracing::warn!(
                                 page = single_source_page,
                                 retry = retry_count,
                                 max_retries = MAX_SINGLE_PAGE_RETRIES,
                                 backoff_secs,
-                                error = %msg,
+                                error = %safe_msg,
                                 "GLM-OCR 单页重试遇到可重试错误，指数退避"
                             );
                             std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
@@ -380,6 +384,8 @@ impl GlmOcrProvider {
                     provider: self.name().to_string(),
                     // 修复：记录实际使用的 model 而非空字符串
                     model: options.model.clone(),
+                    ocr_page_width: None,
+                    ocr_page_height: None,
                 });
             }
         }
@@ -394,14 +400,43 @@ pub fn pdf_to_base64(pdf_data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(pdf_data)
 }
 
+/// 从 URL 中移除可能包含凭证的敏感部分（userinfo、query、fragment），
+/// 仅保留 `scheme://host:port/path`，用于审计日志脱敏
+fn sanitize_url_for_log(url: &str) -> String {
+    // 1. 移除 fragment（# 之后）
+    let url = url.split('#').next().unwrap_or(url);
+    // 2. 移除 query string（? 之后）
+    let url = url.split('?').next().unwrap_or(url);
+    // 3. 移除 userinfo（:// 之后、@ 之前的部分）
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let scheme_part = &url[..scheme_end + 3];
+            let host_and_path = &after_scheme[at_pos + 1..];
+            return format!("{}{}", scheme_part, host_and_path);
+        }
+    }
+    url.to_string()
+}
+
 /// 从环境配置构建 OcrOptions
 pub fn build_ocr_options_from_config(config: &crate::config::Config) -> OcrOptions {
     // 当 ocr_allow_custom_base_url=false 时，忽略用户配置的 base_url，
     // 强制使用官方默认端点，防止数据泄露到非授权服务器
+    let default_url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing";
     let base_url = if config.ocr_allow_custom_base_url {
-        config.ocr_base_url.clone()
+        let url = config.ocr_base_url.clone();
+        // 仅在实际启用非默认 endpoint 时记录不含密钥的审计日志，
+        // 移除 userinfo、query、fragment 防止凭证泄露
+        if url != default_url {
+            tracing::warn!(
+                "审计: OCR 使用自定义 endpoint (ocr_allow_custom_base_url=true)，数据将发送至非官方服务器: {}",
+                sanitize_url_for_log(&url)
+            );
+        }
+        url
     } else {
-        "https://open.bigmodel.cn/api/paas/v4/layout_parsing".to_string()
+        default_url.to_string()
     };
 
     OcrOptions {

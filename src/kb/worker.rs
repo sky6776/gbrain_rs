@@ -16,7 +16,8 @@ use crate::sqlite_engine::SqliteEngine;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, LazyLock};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// 运行一次 KB 作业处理循环：认领一个待处理作业并执行。
@@ -938,11 +939,64 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
 /// 2. 校验 processing_run_id 仍为当前值（防止旧 job 覆盖新上传）
 /// 3. 读取 PDF 文件并解析文本层
 /// 4. 规划 OCR 请求（按 pages 列表和大小限制拆分）
+// ---------------------------------------------------------------------------
+// OCR 资源限流：全局并发信号量与临时目录空间预算
+// ---------------------------------------------------------------------------
+
+/// 当前活跃的 OCR 请求数（全局共享）。
+static OCR_ACTIVE_COUNT: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(0));
+static OCR_ACTIVE_CONDVAR: LazyLock<Condvar> = LazyLock::new(Condvar::new);
+
+/// OCR 并发 permit RAII 守卫。drop 时释放一个并发槽位并通知等待者。
+pub(crate) struct OcrPermit;
+
+impl Drop for OcrPermit {
+    fn drop(&mut self) {
+        if let Ok(mut count) = OCR_ACTIVE_COUNT.lock() {
+            *count = count.saturating_sub(1);
+        }
+        OCR_ACTIVE_CONDVAR.notify_one();
+    }
+}
+
+/// 尝试获取 OCR 并发 permit，最多等待 `timeout`。
+/// 若在超时前获取到槽位则返回 Some(OcrPermit)，否则返回 None。
+pub(crate) fn try_acquire_ocr_permit(max_concurrency: usize, timeout: Duration) -> Option<OcrPermit> {
+    let start = std::time::Instant::now();
+    let mut count = OCR_ACTIVE_COUNT.lock().ok()?;
+    loop {
+        if *count < max_concurrency {
+            *count += 1;
+            return Some(OcrPermit);
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return None;
+        }
+        let remaining = timeout - elapsed;
+        let result = OCR_ACTIVE_CONDVAR.wait_timeout(count, remaining).ok()?;
+        count = result.0;
+        if result.1.timed_out() {
+            return None;
+        }
+    }
+}
+
 /// 5. 逐块调用 GLM-OCR，持久化页级/块级结果
 /// 6. 合并文本层与 OCR 结果
 /// 7. 调用 writeback_ocr_results 执行 split/embed/persist
 /// 8. 更新文档 OCR 状态
 pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
+    // 获取 OCR 并发 permit，最多等待 5 秒。
+    // 若超时未获取到槽位，跳过本次 OCR 处理，让 worker 尝试其他作业类型。
+    let _ocr_permit = match try_acquire_ocr_permit(
+        config.ocr_max_concurrency,
+        Duration::from_secs(5),
+    ) {
+        Some(permit) => permit,
+        None => return Ok(false),
+    };
+
     // 创建 embedder（用于语义分割，与 kb worker 一致）
     let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
         Arc::new(Embedder::new(
@@ -1137,7 +1191,46 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                     return Ok(true);
                 }
             }
-            // execute_ocr_job -> writeback_ocr_results 已正确更新文档 OCR 状态，无需重复调用
+            // OCR 回写已更新文档 OCR 状态，此处根据最终状态处理文档级错误：
+            // 终态为 Failed 时保存脱敏错误原因，非失败终态才清空错误。
+            {
+                let doc_total_pages = {
+                    let kb = KbEngine::new(conn);
+                    kb.get_document(payload.document_id)
+                        .map(|d| d.page_count)
+                        .unwrap_or(payload.pages.len() as i32)
+                };
+                let (final_ocr_status, _) = crate::kb::ocr::compute_ocr_status(
+                    conn,
+                    payload.document_id,
+                    doc_total_pages,
+                    Some(&payload.processing_run_id),
+                )?;
+                let kb = KbEngine::new(conn);
+                if final_ocr_status == crate::kb::ocr::OcrStatus::Failed {
+                    kb.update_document_status_with_run_guard(
+                        payload.document_id,
+                        None,
+                        None,
+                        Some("OCR 全部页面处理失败"),
+                        None,
+                        None,
+                        None,
+                        Some(&payload.processing_run_id),
+                    )?;
+                } else {
+                    kb.update_document_status_with_run_guard(
+                        payload.document_id,
+                        None,
+                        None,
+                        Some(""),
+                        None,
+                        None,
+                        None,
+                        Some(&payload.processing_run_id),
+                    )?;
+                }
+            }
             complete_kb_job(conn, job_db_id)?;
             Ok(true)
         }
@@ -1155,19 +1248,33 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
         }
         Err(e) => {
             let error_message = e.to_string();
+            // 统一脱敏：provider HTTP 响应正文可能包含 API key 或内部地址，
+            // 在写入数据库和日志前清洗，防止敏感信息泄漏
+            let safe_error_message = crate::kb::ocr::sanitize_error_text_with_secret(
+                &error_message,
+                config.ocr_api_key.as_deref(),
+            );
             warn!(
                 job_db_id,
                 document_id = payload.document_id,
-                error = %error_message,
+                error = %safe_error_message,
                 "OCR worker: 处理失败"
             );
-            // 标记失败页
+            // 标记失败页（使用脱敏后的错误信息）。
+            // 仅标记实际尝试处理的页：超出 max_pages 上限的尾部页面已在
+            // execute_ocr_job 内标记为 skipped，不应在此处覆盖为 failed。
+            let max_pages = config.ocr_max_pages_per_document.max(1);
+            let attempted_pages: Vec<i32> = if payload.pages.len() > max_pages {
+                payload.pages[..max_pages].to_vec()
+            } else {
+                payload.pages.clone()
+            };
             crate::kb::ocr::update_ocr_pages_status(
                 conn,
                 payload.document_id,
-                &payload.pages,
+                &attempted_pages,
                 "failed",
-                &error_message,
+                &safe_error_message,
                 &payload.provider,
                 &payload.model,
                 &payload.processing_run_id,
@@ -1179,12 +1286,27 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                     .map(|d| d.page_count)
                     .unwrap_or(payload.pages.len() as i32)
             };
-            crate::kb::ocr::update_document_ocr_status(
+            let final_ocr_status = crate::kb::ocr::update_document_ocr_status(
                 conn,
                 payload.document_id,
                 doc_total_pages,
                 Some(&payload.processing_run_id),
             )?;
+            // 全部 OCR 失败时，将脱敏后的错误写入文档级 parsing_error，
+            // 确保文档状态接口可以展示失败原因。
+            if final_ocr_status == crate::kb::ocr::OcrStatus::Failed {
+                let kb = KbEngine::new(conn);
+                kb.update_document_status_with_run_guard(
+                    payload.document_id,
+                    None,
+                    None,
+                    Some(&safe_error_message),
+                    None,
+                    None,
+                    None,
+                    Some(&payload.processing_run_id),
+                )?;
+            }
 
             // OCR 任务耗尽重试后，仍须把 PDF 可抽取的原文本层写入索引。
             // 在还有重试机会时保留 ocr_pending，避免每次失败都重复重建节点。
@@ -1203,7 +1325,7 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                                     job_db_id,
                                     &format!(
                                         "{}; 原文本层已写回但 artifact promotion 入队失败: {}",
-                                        error_message, finalize_error
+                                        safe_error_message, finalize_error
                                     ),
                                 )?;
                                 return Ok(true);
@@ -1216,7 +1338,7 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                             job_db_id,
                             &format!(
                                 "{}; 原文本层 fallback 失败: {}",
-                                error_message, fallback_error
+                                safe_error_message, fallback_error
                             ),
                         )?;
                         return Ok(true);
@@ -1224,7 +1346,7 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                 }
             }
 
-            fail_kb_job(conn, job_db_id, &error_message)?;
+            fail_kb_job(conn, job_db_id, &safe_error_message)?;
             Ok(true)
         }
     }
@@ -1266,6 +1388,47 @@ fn complete_ocr_with_native_text_fallback(
                 document_id = payload.document_id,
                 "OCR worker: 外部 OCR 不可执行，已写回 PDF 原文本层索引"
             );
+            // 检查 OCR 终态：若所有页均标记为 failed，需将脱敏错误写入文档级
+            // parsing_error，避免出现 ocr_status=failed 但无失败原因的状态；
+            // 非失败终态（needed/partial）时清空旧错误，防止残留上次重试的 provider 失败原因
+            {
+                let doc_total_pages = {
+                    let kb = KbEngine::new(conn);
+                    kb.get_document(payload.document_id)
+                        .map(|d| d.page_count)
+                        .unwrap_or(payload.pages.len() as i32)
+                };
+                let (final_ocr_status, _) = crate::kb::ocr::compute_ocr_status(
+                    conn,
+                    payload.document_id,
+                    doc_total_pages,
+                    Some(&payload.processing_run_id),
+                )?;
+                let kb = KbEngine::new(conn);
+                if final_ocr_status == crate::kb::ocr::OcrStatus::Failed {
+                    kb.update_document_status_with_run_guard(
+                        payload.document_id,
+                        None,
+                        None,
+                        Some("外部 OCR 不可执行，全部页面处理失败"),
+                        None,
+                        None,
+                        None,
+                        Some(&payload.processing_run_id),
+                    )?;
+                } else {
+                    kb.update_document_status_with_run_guard(
+                        payload.document_id,
+                        None,
+                        None,
+                        Some(""),
+                        None,
+                        None,
+                        None,
+                        Some(&payload.processing_run_id),
+                    )?;
+                }
+            }
             if !result.reembed_enqueued {
                 if let Err(e) = finalize_artifact_after_kb_success(
                     conn,
@@ -1376,6 +1539,10 @@ fn writeback_native_text_layer(
             has_vector_or_unknown_objects: false,
             width: None,
             height: None,
+            content_parse_failed: false,
+            has_vector_drawing_ops: false,
+            has_invisible_text: false,
+            font_encoding_suspected: false,
         })
         .collect();
     let (persisted_ocr_results, attempted_ocr_pages) =
@@ -1476,7 +1643,8 @@ fn load_current_ocr_merge_state(
 )> {
     let mut stmt = conn.prepare(
         "SELECT page_number, status, text, markdown, layout_json, \
-         layout_visualization_url, raw_response_json, request_id, confidence, provider, model \
+         layout_visualization_url, raw_response_json, request_id, confidence, provider, model, \
+         ocr_page_width, ocr_page_height \
          FROM kb_document_ocr_pages \
          WHERE document_id = ?1 AND processing_run_id = ?2 ORDER BY page_number",
     )?;
@@ -1495,6 +1663,8 @@ fn load_current_ocr_merge_state(
                 row.get::<_, Option<f64>>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, String>(10)?,
+                row.get::<_, Option<u32>>(11)?,
+                row.get::<_, Option<u32>>(12)?,
             ))
         },
     )?;
@@ -1514,6 +1684,8 @@ fn load_current_ocr_merge_state(
             confidence,
             provider,
             model,
+            ocr_page_width,
+            ocr_page_height,
         ) = row?;
         attempted_pages.push(page_number);
         let has_stored_ocr_text = !text.trim().is_empty() || !markdown.trim().is_empty();
@@ -1541,6 +1713,8 @@ fn load_current_ocr_merge_state(
             confidence,
             provider,
             model,
+            ocr_page_width,
+            ocr_page_height,
         });
     }
 
@@ -1692,8 +1866,24 @@ fn execute_ocr_job(
                 image_regions,
                 image_area_ratio,
                 has_vector_or_unknown_objects: has_vector,
-                width: None,
-                height: None,
+                width: pa.get("width").and_then(|v| v.as_u64()).map(|v| v as u32),
+                height: pa.get("height").and_then(|v| v.as_u64()).map(|v| v as u32),
+                content_parse_failed: pa
+                    .get("content_parse_failed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_vector_drawing_ops: pa
+                    .get("has_vector_drawing_ops")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                has_invisible_text: pa
+                    .get("has_invisible_text")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                font_encoding_suspected: pa
+                    .get("font_encoding_suspected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         })
         .collect();
@@ -1707,13 +1897,17 @@ fn execute_ocr_job(
     let submit_mode = OcrSubmitMode::from_str(&payload.submit_mode);
 
     // 创建临时目录：包含 run_id 避免同一文档的并发 job 相互覆盖/删除
-    let temp_dir = std::env::temp_dir().join(format!(
-        "gbrain_ocr_{}_{}",
-        payload.document_id, payload.processing_run_id
-    ));
-    std::fs::create_dir_all(&temp_dir)?;
+    // 使用 RAII 守卫确保任何退出路径都自动清理
+    let mut temp_guard = crate::kb::temp_guard::TempOcrDir::create(
+        &format!(
+            "gbrain_ocr_{}_{}",
+            payload.document_id, payload.processing_run_id
+        ),
+        file_data.len() as u64,
+        config.ocr_temp_dir_max_bytes,
+    )?;
 
-    // 规划 OCR 请求
+    // 规划 OCR 请求（内部按实际输出文件字节数申请临时目录预算）
     let plan = plan_ocr_requests(
         payload.document_id,
         &payload.processing_run_id,
@@ -1723,7 +1917,8 @@ fn execute_ocr_job(
         options.max_pages_per_request,
         options.max_pdf_bytes_per_request,
         &submit_mode,
-        &temp_dir,
+        config.ocr_temp_dir_max_bytes,
+        &mut temp_guard,
     )?;
 
     // 执行每个请求块
@@ -1769,6 +1964,11 @@ fn execute_ocr_job(
                     &payload.processing_run_id,
                 )?;
             }
+            // 计入失败聚合：确保全部页段拆分失败时能触发错误返回，
+            // 避免空 all_ocr_results + 空 any_chunk_error 走入成功收尾并清空文档错误。
+            if any_chunk_error.is_none() {
+                any_chunk_error = Some("PDF 页段拆分失败，无法提交 OCR".to_string());
+            }
             continue;
         }
 
@@ -1799,6 +1999,8 @@ fn execute_ocr_job(
 
             match recognition {
                 Ok(results) => {
+                    let results =
+                        crate::kb::ocr::sanitize_ocr_page_results(&results, Some(api_key));
                     crate::kb::ocr::log_ocr_external_model_call(
                         conn,
                         payload.library_id,
@@ -1809,6 +2011,7 @@ fn execute_ocr_job(
                         true,
                         "",
                         &results,
+                        Some(api_key),
                     );
                     // 持久化 OCR 结果失败时向上返回错误，避免页面结果丢失但文档显示完成
                     if !results.is_empty() {
@@ -1817,12 +2020,14 @@ fn execute_ocr_job(
                             payload.document_id,
                             &payload.processing_run_id,
                             &results,
+                            Some(api_key),
                         )?;
                         crate::kb::ocr::persist_ocr_blocks(
                             conn,
                             payload.document_id,
                             &payload.processing_run_id,
                             &results,
+                            Some(api_key),
                         )?;
                     }
                     // 标记未返回的页为 failed（处理多页请求部分失败的情况）
@@ -1847,6 +2052,8 @@ fn execute_ocr_job(
                 }
                 Err(e) => {
                     let error_str = e.to_string();
+                    let safe_error =
+                        crate::kb::ocr::sanitize_error_text_with_secret(&error_str, Some(api_key));
                     crate::kb::ocr::log_ocr_external_model_call(
                         conn,
                         payload.library_id,
@@ -1857,6 +2064,7 @@ fn execute_ocr_job(
                         false,
                         &error_str,
                         &[],
+                        Some(api_key),
                     );
                     // 判断是否可重试（429/503/timeout/网络错误）
                     if is_retryable_ocr_error(&error_str) && retry_count < MAX_OCR_RETRIES {
@@ -1869,7 +2077,7 @@ fn execute_ocr_job(
                             retry = retry_count,
                             max_retries = MAX_OCR_RETRIES,
                             backoff_secs,
-                            error = %e,
+                            error = %safe_error,
                             "OCR 请求遇到可重试错误，指数退避重试"
                         );
                         std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
@@ -1880,7 +2088,7 @@ fn execute_ocr_job(
                         document_id = payload.document_id,
                         start = chunk.source_start_page,
                         end = chunk.source_end_page,
-                        error = %e,
+                        error = %safe_error,
                         "OCR 请求失败"
                     );
                     for page_num in chunk.source_start_page..=chunk.source_end_page {
@@ -1889,7 +2097,7 @@ fn execute_ocr_job(
                             payload.document_id,
                             page_num,
                             "failed",
-                            &e.to_string(),
+                            &safe_error,
                             &payload.provider,
                             &payload.model,
                             &payload.processing_run_id,
@@ -1897,7 +2105,7 @@ fn execute_ocr_job(
                     }
                     // 记录首个错误，用于最终决定是否触发队列重试
                     if any_chunk_error.is_none() {
-                        any_chunk_error = Some(e.to_string());
+                        any_chunk_error = Some(safe_error);
                     }
                     break;
                 }
@@ -1913,8 +2121,7 @@ fn execute_ocr_job(
                 document_id = payload.document_id,
                 "OCR 全部页段失败，返回错误以触发队列重试"
             );
-            // 清理临时目录
-            let _ = std::fs::remove_dir_all(&temp_dir);
+            // temp_guard 在此处 drop，自动清理临时目录
             return Err(GBrainError::Http(format!("OCR 执行全部失败: {}", err_msg)));
         }
     } else if any_chunk_error.is_some() {
@@ -1937,8 +2144,8 @@ fn execute_ocr_job(
         &attempted_ocr_pages,
     );
 
-    // 清理临时目录
-    let _ = std::fs::remove_dir_all(&temp_dir);
+    // temp_guard 在此处 drop，自动清理临时目录
+    drop(temp_guard);
 
     // 回写前重新校验 run_id，防止过期 OCR 覆盖新上传产生的节点
     let current_run_id_before_writeback: String = match conn.query_row(

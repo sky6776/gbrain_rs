@@ -35,6 +35,7 @@ pub mod security;
 pub mod splitter;
 pub mod sync;
 pub mod table_index;
+pub mod temp_guard;
 pub mod types;
 pub mod worker;
 

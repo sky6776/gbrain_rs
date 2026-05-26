@@ -320,6 +320,10 @@ mod tests {
             has_vector_or_unknown_objects: false,
             width: None,
             height: None,
+            content_parse_failed: false,
+            has_vector_drawing_ops: false,
+            has_invisible_text: false,
+            font_encoding_suspected: false,
         }
     }
 
@@ -335,6 +339,8 @@ mod tests {
             confidence: None,
             provider: "glm_ocr".to_string(),
             model: "glm-ocr".to_string(),
+            ocr_page_width: None,
+            ocr_page_height: None,
         }
     }
 

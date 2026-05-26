@@ -6,9 +6,9 @@
 //! 3. 超过字节限制或页数限制时需物理拆分 PDF 子文件
 //! 4. 单页子文件仍超限时标记 failed
 
-use crate::error::{GBrainError, Result};
-use crate::kb::ocr_pdf_splitter::{split_pdf_for_ocr, LopdfSplitter, PdfSplitter, SplitPdf};
-use std::path::Path;
+use crate::error::Result;
+use crate::kb::ocr_pdf_splitter::{split_pdf_for_ocr, LopdfSplitter};
+use crate::kb::temp_guard::TempOcrDir;
 
 /// OCR 请求计划
 #[derive(Debug, Clone)]
@@ -43,7 +43,8 @@ pub struct OcrRequestChunk {
 /// 生成 OCR 请求计划
 ///
 /// 根据 PDF 文件大小、总页数、目标 OCR 页集合和配置限制，
-/// 规划如何拆分和提交 OCR 请求。
+/// 规划如何拆分和提交 OCR 请求。拆分生成的文件和预算均归
+/// `temp_guard` 管理，以便任何失败路径均由目录守卫平账。
 pub fn plan_ocr_requests(
     document_id: i64,
     processing_run_id: &str,
@@ -53,7 +54,8 @@ pub fn plan_ocr_requests(
     max_pages_per_request: usize,
     max_pdf_bytes: usize,
     submit_mode: &crate::kb::ocr_provider::OcrSubmitMode,
-    temp_dir: &Path,
+    temp_budget_max_bytes: u64,
+    temp_guard: &mut TempOcrDir,
 ) -> Result<OcrRequestPlan> {
     if ocr_pages.is_empty() {
         return Ok(OcrRequestPlan {
@@ -86,7 +88,8 @@ pub fn plan_ocr_requests(
                 *seg_start,
                 *seg_end,
                 max_pdf_bytes,
-                temp_dir,
+                temp_budget_max_bytes,
+                temp_guard,
                 &splitter,
             ) {
                 Ok(split_results) => {
@@ -232,6 +235,9 @@ mod tests {
     fn test_small_over_100_page_pdf_reuses_source_with_ranges() {
         let pages: Vec<i32> = (1..=101).collect();
         let pdf_data = vec![0u8; 1024];
+        let mut temp_guard =
+            crate::kb::temp_guard::TempOcrDir::create("ocr_plan_test", 0, 1_073_741_824)
+                .unwrap();
         let plan = plan_ocr_requests(
             1,
             "run_test",
@@ -241,7 +247,8 @@ mod tests {
             100,
             52_428_800,
             &crate::kb::ocr_provider::OcrSubmitMode::PdfFirst,
-            std::path::Path::new("."),
+            1_073_741_824, // temp budget: 1GB for test
+            &mut temp_guard,
         )
         .unwrap();
 

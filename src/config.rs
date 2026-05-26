@@ -139,6 +139,10 @@ pub struct Config {
     pub ocr_max_pdf_bytes_per_request: usize,
     /// OCR 单文档最大页数（默认 300）
     pub ocr_max_pages_per_document: usize,
+    /// OCR 全局最大并发请求数（默认 2）
+    pub ocr_max_concurrency: usize,
+    /// OCR 临时目录总字节预算（默认 512MB）
+    pub ocr_temp_dir_max_bytes: u64,
     /// OCR 是否返回裁剪图片（默认 false）
     pub ocr_return_crop_images: bool,
     /// OCR 是否返回版面可视化（默认 false）
@@ -258,6 +262,8 @@ impl Default for Config {
             ocr_max_pages_per_request: 100,
             ocr_max_pdf_bytes_per_request: 52_428_800, // 50MB
             ocr_max_pages_per_document: 300,
+            ocr_max_concurrency: 2,
+            ocr_temp_dir_max_bytes: 536_870_912, // 512MB
             ocr_return_crop_images: false,
             ocr_need_layout_visualization: false,
             ocr_sync_inline: false,
@@ -461,37 +467,21 @@ impl Config {
         config.ocr_external_allowed_default = parse_env_bool("GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT")
             .unwrap_or(config.ocr_external_allowed_default);
         // API key: GBRAIN_OCR_API_KEY 优先，兼容 ZHIPU_API_KEY
-        if let Ok(key) = std::env::var("GBRAIN_OCR_API_KEY") {
-            let key = key.trim();
-            if !key.is_empty() {
-                config.ocr_api_key = Some(key.to_string());
-            }
-        }
-        if config.ocr_api_key.is_none() {
-            if let Ok(key) = std::env::var("ZHIPU_API_KEY") {
-                let key = key.trim();
-                if !key.is_empty() {
-                    config.ocr_api_key = Some(key.to_string());
-                }
-            }
+        if let Some(key) = first_nonempty_env(&["GBRAIN_OCR_API_KEY", "ZHIPU_API_KEY"]) {
+            config.ocr_api_key = Some(key);
         }
         // base URL: 默认固定智谱 endpoint，需显式开启自定义
         if let Ok(url) = std::env::var("GBRAIN_OCR_BASE_URL") {
             config.ocr_base_url = url;
         }
-        config.ocr_allow_custom_base_url = parse_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL")
-            .unwrap_or(config.ocr_allow_custom_base_url);
+        // 安全开关：仅接受环境变量显式放行，忽略配置文件中的该字段，
+        // 防止配置文件将 PDF 内容与 Bearer API key 发往任意地址
+        if let Some(allowed) = parse_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL") {
+            config.ocr_allow_custom_base_url = allowed;
+        }
         // 模型: GBRAIN_OCR_MODEL 优先，兼容 GLMOCR_MODEL
-        if let Ok(model) = std::env::var("GBRAIN_OCR_MODEL") {
-            let model = model.trim();
-            if !model.is_empty() {
-                config.ocr_model = model.to_string();
-            }
-        } else if let Ok(model) = std::env::var("GLMOCR_MODEL") {
-            let model = model.trim();
-            if !model.is_empty() {
-                config.ocr_model = model.to_string();
-            }
+        if let Some(model) = first_nonempty_env(&["GBRAIN_OCR_MODEL", "GLMOCR_MODEL"]) {
+            config.ocr_model = model;
         }
         if let Ok(profile) = std::env::var("GBRAIN_OCR_PROFILE") {
             let profile = profile.trim();
@@ -514,54 +504,40 @@ impl Config {
         if let Ok(mode) = std::env::var("GBRAIN_OCR_SUBMIT_MODE") {
             config.ocr_submit_mode = mode;
         }
-        if let Ok(threshold) = std::env::var("GBRAIN_OCR_TEXT_DENSITY_THRESHOLD") {
-            if let Ok(v) = threshold.parse() {
-                config.ocr_text_density_threshold = v;
-            }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_TEXT_DENSITY_THRESHOLD"]) {
+            config.ocr_text_density_threshold = v as usize;
         }
-        if let Ok(ratio) = std::env::var("GBRAIN_OCR_MIN_LOW_DENSITY_RATIO") {
-            if let Ok(v) = ratio.parse() {
-                config.ocr_min_low_density_ratio = v;
-            }
+        if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_MIN_LOW_DENSITY_RATIO"]) {
+            config.ocr_min_low_density_ratio = v;
         }
-        if let Ok(threshold) = std::env::var("GBRAIN_OCR_IMAGE_AREA_THRESHOLD") {
-            if let Ok(v) = threshold.parse() {
-                config.ocr_image_area_threshold = v;
-            }
+        if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_IMAGE_AREA_THRESHOLD"]) {
+            config.ocr_image_area_threshold = v;
         }
-        if let Ok(threshold) = std::env::var("GBRAIN_OCR_IMAGE_COUNT_THRESHOLD") {
-            if let Ok(v) = threshold.parse() {
-                config.ocr_image_count_threshold = v;
-            }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_IMAGE_COUNT_THRESHOLD"]) {
+            config.ocr_image_count_threshold = v as usize;
         }
         // 超时: GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE 优先，兼容 GLM_OCR_TIMEOUT、GLMOCR_TIMEOUT
-        if let Ok(secs) = std::env::var("GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE") {
-            if let Ok(v) = secs.parse() {
-                config.ocr_timeout_seconds_per_page = v;
-            }
-        } else if let Ok(secs) = std::env::var("GLM_OCR_TIMEOUT") {
-            if let Ok(v) = secs.parse() {
-                config.ocr_timeout_seconds_per_page = v;
-            }
-        } else if let Ok(secs) = std::env::var("GLMOCR_TIMEOUT") {
-            if let Ok(v) = secs.parse() {
-                config.ocr_timeout_seconds_per_page = v;
-            }
+        if let Some(v) = first_valid_env_u64(&[
+            "GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE",
+            "GLM_OCR_TIMEOUT",
+            "GLMOCR_TIMEOUT",
+        ]) {
+            config.ocr_timeout_seconds_per_page = v;
         }
-        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PAGES_PER_REQUEST") {
-            if let Ok(v) = max.parse() {
-                config.ocr_max_pages_per_request = v;
-            }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_MAX_PAGES_PER_REQUEST"]) {
+            config.ocr_max_pages_per_request = v as usize;
         }
-        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST") {
-            if let Ok(v) = max.parse() {
-                config.ocr_max_pdf_bytes_per_request = v;
-            }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST"]) {
+            config.ocr_max_pdf_bytes_per_request = v as usize;
         }
-        if let Ok(max) = std::env::var("GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT") {
-            if let Ok(v) = max.parse() {
-                config.ocr_max_pages_per_document = v;
-            }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT"]) {
+            config.ocr_max_pages_per_document = v as usize;
+        }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_MAX_CONCURRENCY"]) {
+            config.ocr_max_concurrency = v as usize;
+        }
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_TEMP_DIR_MAX_BYTES"]) {
+            config.ocr_temp_dir_max_bytes = v;
         }
         config.ocr_return_crop_images = parse_env_bool("GBRAIN_OCR_RETURN_CROP_IMAGES")
             .unwrap_or(config.ocr_return_crop_images);
@@ -573,6 +549,10 @@ impl Config {
         if config.ocr_max_pages_per_document == 0 {
             tracing::warn!("ocr_max_pages_per_document=0 无效，已 clamp 到 1");
             config.ocr_max_pages_per_document = 1;
+        }
+        if config.ocr_max_concurrency == 0 {
+            tracing::warn!("ocr_max_concurrency=0 无效，已 clamp 到 1");
+            config.ocr_max_concurrency = 1;
         }
 
         info!(
@@ -1092,7 +1072,7 @@ impl Config {
         if !other.ocr_base_url.is_empty() {
             self.ocr_base_url = other.ocr_base_url;
         }
-        self.ocr_allow_custom_base_url = other.ocr_allow_custom_base_url;
+        // ocr_allow_custom_base_url 不从配置文件合并（仅环境变量控制的安全开关）
         if !other.ocr_model.is_empty() {
             self.ocr_model = other.ocr_model;
         }
@@ -1114,6 +1094,8 @@ impl Config {
         self.ocr_max_pages_per_request = other.ocr_max_pages_per_request;
         self.ocr_max_pdf_bytes_per_request = other.ocr_max_pdf_bytes_per_request;
         self.ocr_max_pages_per_document = other.ocr_max_pages_per_document;
+        self.ocr_max_concurrency = other.ocr_max_concurrency;
+        self.ocr_temp_dir_max_bytes = other.ocr_temp_dir_max_bytes;
         self.ocr_return_crop_images = other.ocr_return_crop_images;
         self.ocr_need_layout_visualization = other.ocr_need_layout_visualization;
         self.ocr_sync_inline = other.ocr_sync_inline;
@@ -1122,7 +1104,72 @@ impl Config {
 
 /// 解析环境变量布尔值，接受 true/false/1/0/TURE/FALSE（大小写不敏感）。
 /// 非法值会打 warn 日志并返回 None，由调用方决定回退策略。
-fn parse_env_bool(var_name: &str) -> Option<bool> {
+/// 按优先级依次检查多个环境变量名，返回第一个非空（trim 后非空）的值。
+/// 如果所有变量都未设置或为空，返回 None。
+fn first_nonempty_env(names: &[&str]) -> Option<String> {
+    for &name in names {
+        if let Ok(val) = std::env::var(name) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 按优先级依次检查多个环境变量名，返回第一个有效 u64 的值。
+/// 空字符串或无效值会跳过并记录 warning，继续尝试下一个别名。
+fn first_valid_env_u64(names: &[&str]) -> Option<u64> {
+    for &name in names {
+        if let Ok(val) = std::env::var(name) {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<u64>() {
+                Ok(v) => return Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        "{} 无效值 '{}': {}，继续尝试后续别名",
+                        name,
+                        trimmed,
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 按优先级依次检查多个环境变量名，返回第一个有效 f64 的值。
+fn first_valid_env_f64(names: &[&str]) -> Option<f64> {
+    for &name in names {
+        if let Ok(val) = std::env::var(name) {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<f64>() {
+                Ok(v) => return Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        "{} 无效值 '{}': {}，继续尝试后续别名",
+                        name,
+                        trimmed,
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_env_bool(var_name: &str) -> Option<bool> {
     let val = std::env::var(var_name).ok()?;
     match val.trim().to_lowercase().as_str() {
         "true" | "1" => Some(true),

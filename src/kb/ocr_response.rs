@@ -128,6 +128,14 @@ pub fn normalize_glm_ocr_response(
         for (i, page_blocks_raw) in response.layout_details.iter().enumerate() {
             let page_number = source_start_page + i as i32;
 
+            // 从 data_info 提取页面尺寸
+            let (ocr_page_width, ocr_page_height) = response
+                .data_info
+                .as_ref()
+                .and_then(|info| info.pages.get(i))
+                .map(|pi| (pi.width, pi.height))
+                .unwrap_or((None, None));
+
             // 将原始块转为 OcrLayoutBlock
             let blocks: Vec<OcrLayoutBlock> = page_blocks_raw
                 .iter()
@@ -174,6 +182,8 @@ pub fn normalize_glm_ocr_response(
                 confidence: None,
                 provider: provider_name.to_string(),
                 model: model_name.to_string(),
+                ocr_page_width,
+                ocr_page_height,
             });
         }
         return Ok(results);
@@ -185,6 +195,14 @@ pub fn normalize_glm_ocr_response(
             // 无法可靠按页映射，整段作为一个结果
             // 如果只请求了一页，直接映射
             if request_page_count == 1 {
+                // 从 data_info 提取页面尺寸
+                let (ocr_page_width, ocr_page_height) = response
+                    .data_info
+                    .as_ref()
+                    .and_then(|info| info.pages.first())
+                    .map(|pi| (pi.width, pi.height))
+                    .unwrap_or((None, None));
+
                 return Ok(vec![OcrPageResult {
                     page_number: source_start_page,
                     text: strip_markdown(md),
@@ -196,6 +214,8 @@ pub fn normalize_glm_ocr_response(
                     confidence: None,
                     provider: provider_name.to_string(),
                     model: model_name.to_string(),
+                    ocr_page_width,
+                    ocr_page_height,
                 }]);
             }
             // 多页但无 layout_details — 尽力按页映射，降级返回（无 blocks，仅文本）
@@ -203,6 +223,12 @@ pub fn normalize_glm_ocr_response(
             let mut results = Vec::with_capacity(request_page_count);
             for (i, page_md) in md_per_page.iter().enumerate() {
                 let page_number = source_start_page + i as i32;
+                let (ocr_page_width, ocr_page_height) = response
+                    .data_info
+                    .as_ref()
+                    .and_then(|info| info.pages.get(i))
+                    .map(|pi| (pi.width, pi.height))
+                    .unwrap_or((None, None));
                 results.push(OcrPageResult {
                     page_number,
                     text: strip_markdown(page_md),
@@ -214,6 +240,8 @@ pub fn normalize_glm_ocr_response(
                     confidence: None,
                     provider: provider_name.to_string(),
                     model: model_name.to_string(),
+                    ocr_page_width,
+                    ocr_page_height,
                 });
             }
             return Ok(results);
@@ -225,6 +253,12 @@ pub fn normalize_glm_ocr_response(
     // 避免文档状态被误判为 not_needed/done
     let mut results = Vec::with_capacity(request_page_count);
     for i in 0..request_page_count {
+        let (ocr_page_width, ocr_page_height) = response
+            .data_info
+            .as_ref()
+            .and_then(|info| info.pages.get(i))
+            .map(|pi| (pi.width, pi.height))
+            .unwrap_or((None, None));
         results.push(OcrPageResult {
             page_number: source_start_page + i as i32,
             text: String::new(),
@@ -236,6 +270,8 @@ pub fn normalize_glm_ocr_response(
             confidence: None,
             provider: provider_name.to_string(),
             model: model_name.to_string(),
+            ocr_page_width,
+            ocr_page_height,
         });
     }
     Ok(results)

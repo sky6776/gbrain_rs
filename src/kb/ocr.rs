@@ -102,8 +102,11 @@ pub fn persist_ocr_page_results(
     document_id: i64,
     run_id: &str,
     page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
 ) -> Result<()> {
     for page in page_results {
+        let sanitized_page = sanitize_ocr_page_result(page, sensitive_value);
+        let page = &sanitized_page;
         // 检查是否为携带错误信息的失败页（单页降级重试部分失败场景）
         let (status, error_msg) = if page.raw_response_json.get("_ocr_failed").is_some() {
             let err = page
@@ -112,7 +115,11 @@ pub fn persist_ocr_page_results(
                 .and_then(|v| v.as_str())
                 .unwrap_or("OCR 失败")
                 .to_string();
-            ("failed", Some(err))
+            // 脱敏错误信息
+            (
+                "failed",
+                Some(sanitize_error_text_with_secret(&err, sensitive_value)),
+            )
         } else if page.text.trim().is_empty() && page.markdown.trim().is_empty() {
             ("empty_ocr", None)
         } else {
@@ -121,12 +128,17 @@ pub fn persist_ocr_page_results(
 
         let layout_json = serde_json::to_string(&page.blocks).unwrap_or_default();
 
+        // 脱敏 raw_response_json：移除敏感字段、截断超长内容
+        let sanitized_raw_json =
+            sanitize_json_for_storage(&page.raw_response_json, sensitive_value);
+        let raw_response_for_db = serde_json::to_string(&sanitized_raw_json).unwrap_or_default();
+
         conn.execute(
             "INSERT OR REPLACE INTO kb_document_ocr_pages \
              (document_id, page_number, processing_run_id, status, error, provider, model, text, markdown, \
               layout_json, layout_visualization_url, raw_response_json, request_id, \
-              confidence, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))",
+              confidence, ocr_page_width, ocr_page_height, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, datetime('now'))",
             rusqlite::params![
                 document_id,
                 page.page_number,
@@ -139,9 +151,11 @@ pub fn persist_ocr_page_results(
                 page.markdown,
                 layout_json,
                 page.layout_visualization_url.as_deref().unwrap_or(""),
-                page.raw_response_json.to_string(),
+                raw_response_for_db,
                 page.request_id.as_deref().unwrap_or(""),
                 page.confidence,
+                page.ocr_page_width,
+                page.ocr_page_height,
             ],
         )?;
     }
@@ -155,6 +169,7 @@ pub fn persist_ocr_blocks(
     document_id: i64,
     run_id: &str,
     page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
 ) -> Result<()> {
     // 先删除每页同一 run 的旧 blocks，防止重试后残留高序号旧 block
     for page in page_results {
@@ -166,6 +181,7 @@ pub fn persist_ocr_blocks(
 
     for page in page_results {
         for (block_idx, block) in page.blocks.iter().enumerate() {
+            let safe_content = redact_sensitive_value(&block.content, sensitive_value);
             let bbox_json = block
                 .bbox_2d
                 .map(|b| serde_json::to_string(&b).unwrap_or_default())
@@ -173,9 +189,9 @@ pub fn persist_ocr_blocks(
 
             // 生成 plain_text：text/formula 直接用 content，table 去 HTML 标签
             let plain_text = match &block.label {
-                crate::kb::ocr_provider::OcrBlockLabel::Table => strip_html_tags(&block.content),
+                crate::kb::ocr_provider::OcrBlockLabel::Table => strip_html_tags(&safe_content),
                 crate::kb::ocr_provider::OcrBlockLabel::Image => String::new(),
-                _ => block.content.clone(),
+                _ => safe_content.clone(),
             };
 
             let raw_json = serde_json::json!({
@@ -198,7 +214,7 @@ pub fn persist_ocr_blocks(
                     block_idx as i32,
                     block.label.as_str(),
                     bbox_json,
-                    block.content,
+                    safe_content,
                     plain_text,
                     raw_json.to_string(),
                 ],
@@ -275,16 +291,16 @@ fn strip_html_tags(html: &str) -> String {
     HTML_TAG_RE.replace_all(html, "").trim().to_string()
 }
 
-/// 计算并更新文档级 OCR 状态和文本覆盖率。
-/// `run_id` 用于双重保障：(1) 聚合查询按 run 过滤，避免统计旧 run 的页记录；
-/// (2) 文档状态更新使用 run guard，防止 stale job 覆盖新 run 的状态。
-pub fn update_document_ocr_status(
+/// 只读聚合 OCR 页状态，返回 (OcrStatus, coverage)，不写入 kb_documents。
+///
+/// 用于需要在节点持久化完成前判断终态的场景（如同步内联 OCR 的文档错误清空判断），
+/// 避免在 split/节点写入失败时残留错误的 ocr_status。
+pub fn compute_ocr_status(
     conn: &Connection,
     document_id: i64,
     total_pages: i32,
     run_id: Option<&str>,
-) -> Result<OcrStatus> {
-    // 辅助函数：按 run_id 过滤统计指定状态的页数
+) -> Result<(OcrStatus, f64)> {
     let count_by_status = |status: &str| -> i32 {
         if let Some(rid) = run_id {
             conn.query_row(
@@ -305,14 +321,10 @@ pub fn update_document_ocr_status(
         }
     };
 
-    // 统计各状态页数
     let done_count = count_by_status("done");
     let failed_count = count_by_status("failed");
-    // 统计 empty_ocr 页（OCR 已执行但内容为空，视为识别失败）
     let empty_ocr_count = count_by_status("empty_ocr");
-    // 统计 skipped 页（超出上限被跳过，不应算为完成）
     let skipped_count = count_by_status("skipped");
-    // 统计 needed 页（策略阻断：OCR 仍需要但被库隐私策略阻止）
     let needed_count = count_by_status("needed");
 
     let total_ocr_pages: i32 = if let Some(rid) = run_id {
@@ -331,18 +343,12 @@ pub fn update_document_ocr_status(
         .unwrap_or(0)
     };
 
-    // 成功处理的页数：仅 done 页有实际内容，计入覆盖率
     let success_count = done_count;
-    // empty_ocr 表示 OCR 已执行但无内容，页面可能仍有原生文本层，
-    // 不应与真正的请求失败（failed）混为一谈。
-    // 只有真正的 failed（429/timeout/API 错误）才计入失败。
-
     let terminal_count = done_count + failed_count + empty_ocr_count + skipped_count + needed_count;
 
     let (status, coverage) = if total_ocr_pages == 0 {
         (OcrStatus::NotNeeded, 0.0)
     } else if terminal_count < total_ocr_pages {
-        // 仍有 pending/processing 页，不应误判为 done。
         let cov = if total_pages > 0 {
             success_count as f64 / total_pages as f64
         } else {
@@ -350,13 +356,10 @@ pub fn update_document_ocr_status(
         };
         (OcrStatus::Processing, cov)
     } else if needed_count == total_ocr_pages {
-        // 策略阻断：所有页均因库隐私策略或全局开关被阻止，OCR 仍需要。
         (OcrStatus::Needed, 0.0)
     } else if failed_count == total_ocr_pages {
-        // 全部页真正失败（仅有 failed，无 done 也无 empty_ocr）
         (OcrStatus::Failed, 0.0)
     } else if failed_count > 0 || empty_ocr_count > 0 || skipped_count > 0 || needed_count > 0 {
-        // 有失败/空结果/跳过/策略阻断页 → partial
         let cov = if total_pages > 0 {
             success_count as f64 / total_pages as f64
         } else {
@@ -364,7 +367,6 @@ pub fn update_document_ocr_status(
         };
         (OcrStatus::Partial, cov)
     } else {
-        // 全部成功（仅 done 页）
         let cov = if total_pages > 0 {
             success_count as f64 / total_pages as f64
         } else {
@@ -373,9 +375,35 @@ pub fn update_document_ocr_status(
         (OcrStatus::Done, cov)
     };
 
+    Ok((status, coverage))
+}
+
+/// 计算并更新文档级 OCR 状态和文本覆盖率。
+/// `run_id` 用于双重保障：(1) 聚合查询按 run 过滤，避免统计旧 run 的页记录；
+/// (2) 文档状态更新使用 run guard，防止 stale job 覆盖新 run 的状态。
+pub fn update_document_ocr_status(
+    conn: &Connection,
+    document_id: i64,
+    total_pages: i32,
+    run_id: Option<&str>,
+) -> Result<OcrStatus> {
+    let (status, coverage) = compute_ocr_status(conn, document_id, total_pages, run_id)?;
     let kb = KbEngine::new(conn);
     kb.update_document_ocr_with_run_guard(document_id, status.as_str(), coverage, run_id)?;
+    Ok(status)
+}
 
+/// 内部版本：在调用者已有事务的情况下更新文档 OCR 状态，避免嵌套 BEGIN。
+/// 供 writeback_ocr_results 等外层事务内调用。
+pub fn update_document_ocr_status_inner(
+    conn: &Connection,
+    document_id: i64,
+    total_pages: i32,
+    run_id: Option<&str>,
+) -> Result<OcrStatus> {
+    let (status, coverage) = compute_ocr_status(conn, document_id, total_pages, run_id)?;
+    let kb = KbEngine::new(conn);
+    kb.update_document_ocr_with_run_guard_inner(document_id, status.as_str(), coverage, run_id)?;
     Ok(status)
 }
 
@@ -391,9 +419,10 @@ pub fn log_ocr_external_model_call(
     success: bool,
     error_message: &str,
     page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
 ) {
     let (input_tokens, output_tokens) = ocr_usage_tokens(page_results);
-    let safe_error = sanitize_audit_error(error_message);
+    let safe_error = sanitize_error_text_with_secret(error_message, sensitive_value);
     if let Err(e) = crate::kb::privacy::log_external_model_call(
         conn,
         Some(library_id),
@@ -458,11 +487,6 @@ fn ocr_usage_tokens(page_results: &[crate::kb::ocr_provider::OcrPageResult]) -> 
     (input_tokens, output_tokens)
 }
 
-fn sanitize_audit_error(message: &str) -> String {
-    let one_line = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    one_line.chars().take(1000).collect()
-}
-
 // ---------------------------------------------------------------------------
 // P2-019: OCR 结果回写
 // ---------------------------------------------------------------------------
@@ -483,22 +507,33 @@ pub struct OcrWritebackPage {
 ///
 /// 每个 `OcrWritebackPage` 生成一个 `ParsedBlock`，block_type 为 "ocr_text"，
 /// 携带 page_number 和基于累计字符偏移的 source_start/source_end。
+/// P2-019: 将 OCR 结果转换为标准 ParsedBlock 列表。
+///
+/// 每个 `OcrWritebackPage` 生成一个 `ParsedBlock`，block_type 为 "ocr_text"，
+/// 携带 page_number 和基于累计字符偏移的 source_start/source_end。
+/// offset 计算与 full_text 的 `[PAGE:N]\n{text}` + `\n\n` 拼接格式保持一致。
 pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrWritebackPage]) -> Vec<ParsedBlock> {
     let mut blocks = Vec::with_capacity(ocr_pages.len());
     let mut offset = 0i32;
 
-    for page in ocr_pages {
-        let text_len = page.text.chars().count() as i32;
+    for (i, page) in ocr_pages.iter().enumerate() {
+        // full_text 格式: `[PAGE:N]\n{text}`，页间以 `\n\n` 分隔
+        let marker = format!("[PAGE:{}]\n", page.page_number);
+        let entry_chars = marker.chars().count() as i32 + page.text.chars().count() as i32;
         blocks.push(ParsedBlock {
             text: page.text.clone(),
             title_path: String::new(),
             page_number: Some(page.page_number),
             source_start: Some(offset),
-            source_end: Some(offset + text_len),
+            source_end: Some(offset + entry_chars),
             block_type: "ocr_text".to_string(),
             metadata: String::new(),
         });
-        offset += text_len + 1; // +1 为页间换行符
+        offset += entry_chars;
+        // 非最后一页后面有 `\n\n` 分隔符（2 个字符）
+        if i < ocr_pages.len() - 1 {
+            offset += 2;
+        }
     }
 
     blocks
@@ -524,6 +559,42 @@ pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrWritebackPage]) -> Vec<ParsedBlock> 
 /// false 或无 embedder 时使用普通 Recursive splitter（向后兼容）。
 /// `embedder` 用于语义分割器计算嵌入相似度；传 None 时即使 semantic_enabled=true
 /// 也会回退到 Recursive splitter。
+/// 在同一事务内完成空内容回写的 OCR 状态与文档统计更新。
+///
+/// 正常含正文路径已将节点、统计与 OCR 状态放在一个事务内；
+/// 空内容早退路径也须使用同一事务，避免 OCR 终态已提交而文档统计失败
+/// 或 run_id 变化导致的不一致。
+fn finalize_empty_writeback_in_tx(
+    conn: &Connection,
+    doc_id: i64,
+    total_page_count: i32,
+    run_id: Option<&str>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let result = (|| -> Result<()> {
+        update_document_ocr_status_inner(conn, doc_id, total_page_count, run_id)?;
+        let kb = KbEngine::new(conn);
+        kb.update_document_stats_with_run_guard_inner(
+            doc_id,
+            0,
+            0,
+            Some(crate::kb::types::STATUS_COMPLETED),
+            run_id,
+        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            tx.commit()?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = tx.rollback();
+            Err(e)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn writeback_ocr_results(
     conn: &Connection,
@@ -546,26 +617,46 @@ pub fn writeback_ocr_results(
         });
     }
 
-    // 1. 转换为 ParsedBlock
-    let blocks = ocr_to_parsed_blocks(ocr_pages);
+    // Empty OCR/native pages keep their page status but must not create
+    // searchable marker-only content.
+    let searchable_pages: Vec<OcrWritebackPage> = ocr_pages
+        .iter()
+        .filter(|page| !page.text.trim().is_empty())
+        .cloned()
+        .collect();
+    if searchable_pages.is_empty() {
+        // 所有页面正文均为空：在同一事务内完成 OCR 状态与文档统计更新，
+        // 避免先提交 OCR 终态后文档统计失败导致不一致
+        finalize_empty_writeback_in_tx(conn, doc_id, total_page_count, run_id)?;
+        return Ok(WritebackResult {
+            blocks_created: 0,
+            nodes_created: 0,
+            ocr_text_coverage: 0.0,
+        });
+    }
 
-    // 2. 拼接全文并分割
+    // 1. 转换有正文的页面为 ParsedBlock
+    let blocks = ocr_to_parsed_blocks(&searchable_pages);
+
+    // 2. 拼接全文并分割（保留 [PAGE:N] 标记，确保 splitter 能识别页面边界）
     let full_text: String = blocks
         .iter()
-        .map(|b| b.text.as_str())
+        .map(|b| {
+            if let Some(pn) = b.page_number {
+                format!("[PAGE:{}]\n{}", pn, b.text)
+            } else {
+                b.text.clone()
+            }
+        })
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n\n");
     if full_text.trim().is_empty() {
-        // 即使全文为空，也必须完成所有状态更新，避免文档永远停在 ocr_pending/processing
-        update_document_ocr_status(conn, doc_id, total_page_count, run_id)?;
-        // 更新文档统计和状态：将 document_status 从 ocr_pending 推进到 ready，
-        // parsing_status 标记为完成，embedding_status 标记为 completed（无需 embed）
-        let kb = KbEngine::new(conn);
-        kb.update_document_stats_with_run_guard(
+        // 全文为空：在同一事务内完成 OCR 状态与文档统计更新，
+        // 避免先提交 OCR 终态后文档统计失败导致不一致
+        finalize_empty_writeback_in_tx(
+            conn,
             doc_id,
-            0, // word_total
-            0, // split_total
-            Some(crate::kb::types::STATUS_COMPLETED), // embedding 无内容，直接标记完成
+            total_page_count,
             run_id,
         )?;
         return Ok(WritebackResult {
@@ -631,27 +722,53 @@ pub fn writeback_ocr_results(
         .map(|(i, chunk)| {
             // FIX9-05: 用 span overlap 匹配最相关的 block，而非 block_meta_vec.get(i)
             let (chunk_start, chunk_end) = chunk_spans[i];
-            let best_match = block_meta_vec
-                .iter()
-                .filter_map(|meta| {
-                    let (title_path, page_num, src_start, src_end) = meta;
-                    // 计算重叠长度
-                    let bs = src_start.unwrap_or(0) as usize;
-                    let be = src_end.unwrap_or(i32::MAX / 2) as usize;
-                    let overlap_start = chunk_start.max(bs);
-                    let overlap_end = chunk_end.min(be);
-                    let overlap = overlap_end.saturating_sub(overlap_start);
-                    if overlap > 0 {
-                        Some((overlap, title_path, page_num, src_start, src_end))
-                    } else {
-                        None
-                    }
-                })
-                .max_by_key(|(overlap, _, _, _, _)| *overlap);
 
-            let (title_path, page_num, src_start, src_end) = best_match
-                .map(|(_, tp, pn, ss, se)| (tp.clone(), *pn, *ss, *se))
-                .unwrap_or_default();
+            // 收集所有与 chunk 有重叠的 block，提取跨页信息
+            let mut overlapping_pages: Vec<i32> = Vec::new();
+            let mut best_overlap = 0usize;
+            let mut best_title = String::new();
+            let mut best_src_start: Option<i32> = None;
+            let mut best_src_end: Option<i32> = None;
+            let mut best_page_num: Option<i32> = None;
+
+            for meta in &block_meta_vec {
+                let (title_path, page_num, src_start, src_end) = meta;
+                let bs = src_start.unwrap_or(0) as usize;
+                let be = src_end.unwrap_or(i32::MAX / 2) as usize;
+                let overlap_start = chunk_start.max(bs);
+                let overlap_end = chunk_end.min(be);
+                let overlap = overlap_end.saturating_sub(overlap_start);
+                if overlap > 0 {
+                    if let Some(pn) = page_num {
+                        if !overlapping_pages.contains(pn) {
+                            overlapping_pages.push(*pn);
+                        }
+                    }
+                    if overlap > best_overlap {
+                        best_overlap = overlap;
+                        best_title = title_path.clone();
+                        best_src_start = *src_start;
+                        best_src_end = *src_end;
+                        best_page_num = *page_num;
+                    }
+                }
+            }
+
+            overlapping_pages.sort();
+            // 主页码取重叠最大的 block（best_page_num），与同步 pipeline 的最大重叠策略一致；
+            // 排序页号列表仅用于跨页来源信息的 metadata
+            let page_num = best_page_num;
+            let title_path = best_title;
+            let src_start = best_src_start;
+            let src_end = best_src_end;
+
+            // 跨页 chunk：在 metadata 中记录所有来源页
+            let node_metadata = if overlapping_pages.len() > 1 {
+                serde_json::json!({"page_numbers": overlapping_pages}).to_string()
+            } else {
+                String::new()
+            };
+
             let embedding_text =
                 context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {
@@ -667,7 +784,7 @@ pub fn writeback_ocr_results(
                 page_number: page_num,
                 source_start: src_start,
                 source_end: src_end,
-                node_metadata: String::new(),
+                node_metadata,
                 embedding_text,
             }
         })
@@ -686,14 +803,8 @@ pub fn writeback_ocr_results(
         0.0
     };
 
-    // 6. 更新文档 OCR 状态（根据实际页级状态计算，避免无条件设为 Done 掩盖 failed/partial）
-    update_document_ocr_status(conn, doc_id, total_page_count, run_id)?;
-
-    // 7. 更新文档统计（词数/分块数）
-    // 修复：embedding_status 传 STATUS_PENDING 而非 None。
-    // None 会 unwrap_or(STATUS_COMPLETED) 导致 embedding 被误标为已完成，
-    // 但此时节点均无向量，向量检索和 RAPTOR 全部丢失。
-    // 正确做法：标记为 pending，随后入队 kb_reembed job 补齐 embedding。
+    // 6. 原子提交：在同一事务中持久化 nodes、更新统计信息、更新 OCR 状态
+    // 确保不会出现 nodes 未写入但 OCR 状态已标记为 done 的情况
     let kb = KbEngine::new(conn);
     let word_total: i32 = if chinese::has_chinese(&full_text) {
         let tokens = chinese::tokenize_content(&full_text);
@@ -701,10 +812,11 @@ pub fn writeback_ocr_results(
     } else {
         full_text.split_whitespace().count() as i32
     };
-    // Persist nodes and stats in one transaction. Otherwise a stale OCR job can
-    // insert old-run nodes and then fail the run-guarded stats update.
+    // 单一事务：持久化 nodes → 更新统计 → 更新 OCR 状态
+    // 任一写入失败时回滚，禁止先暴露 done
     let tx = conn.unchecked_transaction()?;
     let result = (|| -> Result<()> {
+        // 持久化 nodes
         crate::kb::pipeline::persist_nodes_and_vectors_inner(
             conn,
             doc_id,
@@ -712,6 +824,7 @@ pub fn writeback_ocr_results(
             &nodes,
             run_id,
         )?;
+        // 更新文档统计（词数/分块数），embedding 标记为 pending
         kb.update_document_stats_with_run_guard_inner(
             doc_id,
             word_total,
@@ -719,6 +832,9 @@ pub fn writeback_ocr_results(
             Some(crate::kb::types::STATUS_PENDING),
             run_id,
         )?;
+        // 最后更新 OCR 状态（仅在 nodes 和统计写入成功后）
+        // 使用 _inner 版本避免嵌套事务（当前已在 unchecked_transaction 内）
+        update_document_ocr_status_inner(conn, doc_id, total_page_count, run_id)?;
         Ok(())
     })();
     match result {
@@ -782,7 +898,7 @@ mod tests {
         assert_eq!(blocks[0].page_number, Some(1));
         assert_eq!(blocks[0].block_type, "ocr_text");
         assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[0].source_end, Some(11));
+        assert_eq!(blocks[0].source_end, Some(20));
     }
 
     #[test]
@@ -799,10 +915,10 @@ mod tests {
         ];
         let blocks = ocr_to_parsed_blocks(&pages);
         assert_eq!(blocks.len(), 2);
-        // Second block offset starts after first page text
+        // Spans include the page marker and the two-character separator.
         assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[1].source_start, Some(9)); // "Page one".chars().count() + 1(换行符) == 9
-        assert_eq!(blocks[1].source_end, Some(17)); // 9 + "Page two".chars().count()
+        assert_eq!(blocks[1].source_start, Some(19));
+        assert_eq!(blocks[1].source_end, Some(36));
     }
 
     #[test]
@@ -820,9 +936,9 @@ mod tests {
         let blocks = ocr_to_parsed_blocks(&pages);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[0].source_end, Some(5)); // "第一页内容" = 5 chars
-        assert_eq!(blocks[1].source_start, Some(6)); // 5 + 1(换行符)
-        assert_eq!(blocks[1].source_end, Some(11)); // 6 + 5
+        assert_eq!(blocks[0].source_end, Some(14));
+        assert_eq!(blocks[1].source_start, Some(16));
+        assert_eq!(blocks[1].source_end, Some(30));
     }
 
     #[test]
@@ -831,4 +947,219 @@ mod tests {
         assert_eq!(OcrStatus::Needed.as_str(), "needed");
         assert_eq!(OcrStatus::Failed.as_str(), "failed");
     }
+}
+
+// ---------------------------------------------------------------------------
+// OCR 响应脱敏工具
+// ---------------------------------------------------------------------------
+
+/// 需要脱敏的鉴权字段名（精确小写匹配）
+/// 使用精确匹配而非子串匹配，避免将 prompt_tokens、completion_tokens
+/// 等合法的用量统计字段误脱敏为 "***REDACTED***"。
+const SENSITIVE_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "token",
+    "authorization",
+    "bearer_token",
+    "secret",
+    "api_secret",
+    "password",
+    "credential",
+];
+
+/// 脱敏后的替换文本
+const MASKED_VALUE: &str = "***REDACTED***";
+
+/// 错误文本最大长度（超出截断）
+const MAX_ERROR_TEXT_LEN: usize = 500;
+
+fn redact_sensitive_value(text: &str, sensitive_value: Option<&str>) -> String {
+    if let Some(secret) = sensitive_value.filter(|value| !value.is_empty()) {
+        text.replace(secret, MASKED_VALUE)
+    } else {
+        text.to_string()
+    }
+}
+
+fn sanitize_ocr_page_result(
+    page: &crate::kb::ocr_provider::OcrPageResult,
+    sensitive_value: Option<&str>,
+) -> crate::kb::ocr_provider::OcrPageResult {
+    let mut sanitized = page.clone();
+    sanitized.text = redact_sensitive_value(&sanitized.text, sensitive_value);
+    sanitized.markdown = redact_sensitive_value(&sanitized.markdown, sensitive_value);
+    sanitized.layout_visualization_url = sanitized
+        .layout_visualization_url
+        .as_deref()
+        .map(|value| sanitize_string(value, sensitive_value));
+    for block in &mut sanitized.blocks {
+        // 仅替换真实秘密值（API key），保留表格 HTML、公式、图片 URL 等原始版面内容。
+        // 路径/URL 脱敏已限定在 raw_response_json，普通 block 不应破坏正文中的合法路径。
+        block.content = redact_sensitive_value(&block.content, sensitive_value);
+    }
+    sanitized.raw_response_json =
+        sanitize_json_for_storage(&sanitized.raw_response_json, sensitive_value);
+    sanitized
+}
+
+pub fn sanitize_ocr_page_results(
+    page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
+) -> Vec<crate::kb::ocr_provider::OcrPageResult> {
+    page_results
+        .iter()
+        .map(|page| sanitize_ocr_page_result(page, sensitive_value))
+        .collect()
+}
+
+/// 递归脱敏 JSON 值中的鉴权字段和敏感内容
+///
+/// 处理规则：
+/// - 字段名与鉴权关键字精确匹配时，值替换为 `***REDACTED***`
+/// - Windows 绝对路径和 file:// URL 进行掩码
+/// - OCR 临时目录路径进行掩码
+/// - 环回地址（127.0.0.1/localhost/[::1]）和私网地址 URL 进行掩码
+/// - UNC 路径和 POSIX 绝对路径进行掩码
+/// - 不再截断超长字符串，确保 raw_response_json 可用于回放修复
+pub fn sanitize_json_for_storage(
+    value: &serde_json::Value,
+    sensitive_value: Option<&str>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sanitized: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| {
+                    let key_lower = k.to_lowercase();
+                    if SENSITIVE_KEYS.iter().any(|sk| key_lower == *sk) {
+                        (k.clone(), serde_json::Value::String(MASKED_VALUE.to_string()))
+                    } else {
+                        (k.clone(), sanitize_json_for_storage(v, sensitive_value))
+                    }
+                })
+                .collect();
+            serde_json::Value::Object(sanitized)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(
+                arr.iter()
+                    .map(|v| sanitize_json_for_storage(v, sensitive_value))
+                    .collect(),
+            )
+        }
+        serde_json::Value::String(s) => {
+            let sanitized = sanitize_string(s, sensitive_value);
+            serde_json::Value::String(sanitized)
+        }
+        other => other.clone(),
+    }
+}
+
+/// 脱敏字符串中的敏感内容
+fn sanitize_string(s: &str, sensitive_value: Option<&str>) -> String {
+    // 匹配 Windows 绝对路径，如 C:\Users\... 或 D:\path\...
+    static WIN_PATH_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new("(?i)[A-Z]:[\\\\/][^\\s'\"]+").unwrap());
+    static FILE_URL_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new("(?i)file:/+[^\\s'\"]+").unwrap());
+    static TEMP_DIR_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"gbrain_ocr_[^\\/\s'"?]+"#).unwrap());
+    // 匹配 Bearer token 和 Authorization header
+    static BEARER_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new("(?i)(Bearer\\s+)\\S+").unwrap());
+
+    let mut result = s.to_string();
+    if let Some(secret) = sensitive_value.filter(|value| !value.is_empty()) {
+        result = result.replace(secret, MASKED_VALUE);
+    }
+    // 掩码 Bearer token
+    result = BEARER_RE.replace_all(&result, "${1}***REDACTED***").to_string();
+    // 掩码类似 API key 的长十六进制/Base64 字符串（常见于 GLM-OCR 等服务的响应正文）
+    static API_KEY_LIKE_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)(api[_-]?key|token|secret|authorization)["'\s:=]+["']?([a-zA-Z0-9_\-]{20,})"#).unwrap());
+    result = API_KEY_LIKE_RE
+        .replace_all(&result, "${1}***REDACTED***")
+        .to_string();
+    // 掩码 Windows 绝对路径
+    result = WIN_PATH_RE.replace_all(&result, "***PATH***").to_string();
+    // 掩码 file:// URL
+    result = FILE_URL_RE.replace_all(&result, "***FILE_URL***").to_string();
+    // 掩码 OCR 临时目录路径
+    result = TEMP_DIR_RE
+        .replace_all(&result, "***TEMP_DIR***")
+        .to_string();
+    // 掩码内部/私网/环回/链路本地 URL（路径可选，覆盖 http://localhost:8080 等无路径 URL）
+    // 覆盖：127.0.0.0/8、[::1]、localhost、10.0.0.0/8、192.168.0.0/16、
+    //        172.16.0.0/12、169.254.0.0/16（link-local）、
+    //        [fe80::/10] IPv6 链路本地、[fc00::/7] IPv6 唯一本地地址
+    static INTERNAL_URL_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(
+                r#"(?i)https?://(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|\[fe[89ab][0-9a-f:.]+\]|\[f[cd][0-9a-f]{2}[0-9a-f:.]+\]|localhost|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})(:\d+)?(/[^\s'"<>]*)?"#,
+            )
+            .unwrap()
+        });
+    result = INTERNAL_URL_RE
+        .replace_all(&result, "***INTERNAL_URL***")
+        .to_string();
+    // 掩码 UNC 路径（\\server\share\...）
+    static UNC_PATH_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r#"\\\\[a-zA-Z0-9_.$-]+(\\[^\s'"<>]*)+"#).unwrap()
+        });
+    result = UNC_PATH_RE
+        .replace_all(&result, "***UNC_PATH***")
+        .to_string();
+    // 掩码 POSIX 绝对路径：通用跨平台识别，不限于固定目录前缀。
+    // 匹配以 / 开头的多级路径（如 /data/ocr/a.pdf、/private/tmp/x、
+    // /tmp/x、/home/user/file），要求至少两级目录以确保是路径而非普通文本。
+    // 前缀匹配支持空白、等号、括号、冒号、引号等常见分隔符，
+    // 覆盖 path=/data/ocr/a.pdf、open(/private/tmp/x) 等绕过场景。
+    static POSIX_PATH_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(
+                r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+)"#,
+            )
+            .unwrap()
+        });
+    result = POSIX_PATH_RE
+        .replace_all(&result, "${1}***POSIX_PATH***")
+        .to_string();
+    // 掩码带常见扩展名的单级 POSIX 绝对路径（如 /report.pdf、/image.png）。
+    // 前缀匹配与 POSIX_PATH_RE 一致，覆盖 path=/tmp/x.pdf 等绕过场景。
+    static POSIX_SINGLE_FILE_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(
+                r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+\.(pdf|png|jpe?g|gif|bmp|svg|webp|tiff?|json|xml|csv|txt|log|tmp|dat|bin|html?|css|js|py|rs|go|java|md|zip|tar|gz|bz2|xz|7z|docx?|xlsx?|pptx?))"#,
+            )
+            .unwrap()
+        });
+    result = POSIX_SINGLE_FILE_RE
+        .replace_all(&result, "${1}***POSIX_PATH***")
+        .to_string();
+    result
+}
+
+/// 脱敏错误文本：截断并清理敏感内容
+pub fn sanitize_error_text(error: &str) -> String {
+    sanitize_error_text_with_secret(error, None)
+}
+
+/// Redact an error before logging or persistence, including a configured secret
+/// if a provider has echoed it without an identifying field name.
+pub fn sanitize_error_text_with_secret(error: &str, sensitive_value: Option<&str>) -> String {
+    let mut sanitized = sanitize_string(error, sensitive_value);
+    // 截断（确保在 UTF-8 字符边界处截断）
+    if sanitized.len() > MAX_ERROR_TEXT_LEN {
+        let mut end = MAX_ERROR_TEXT_LEN;
+        while !sanitized.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        sanitized.truncate(end);
+        sanitized.push_str("...[TRUNCATED]");
+    }
+    sanitized
 }

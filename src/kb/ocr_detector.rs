@@ -28,6 +28,8 @@ pub enum OcrReason {
     HiddenOrInvisibleTextLayer,
     /// 强制全页 OCR
     ForcedAllPages,
+    /// 页面几何信息缺失或无效（尺寸无法确认，保守进入 OCR）
+    GeometryUncertain,
 }
 
 /// OCR 判定结果
@@ -102,10 +104,18 @@ pub struct PdfPageAnalysis {
     pub image_area_ratio: f64,
     /// 是否存在矢量或未知对象
     pub has_vector_or_unknown_objects: bool,
-    /// 页面宽度
+    /// 页面宽度（来自 MediaBox/CropBox）
     pub width: Option<u32>,
-    /// 页面高度
+    /// 页面高度（来自 MediaBox/CropBox）
     pub height: Option<u32>,
+    /// 页面 content stream 解析失败（强制 OCR）
+    pub content_parse_failed: bool,
+    /// 存在矢量绘图操作符（m/l/c/re/S/f/B 等）
+    pub has_vector_drawing_ops: bool,
+    /// 存在不可见文本（Tr=3 等文本渲染模式）
+    pub has_invisible_text: bool,
+    /// 字体编码疑似异常（无 Unicode 映射或提取文本明显异常）
+    pub font_encoding_suspected: bool,
 }
 
 /// PDF 图片区域
@@ -161,9 +171,45 @@ pub fn detect_ocr_pages(
             reasons.push(OcrReason::EmbeddedImage);
         }
 
+        // 页面几何信息缺失或无效：尺寸无法确认时保守进入 uncertain，
+        // 满足设计要求"尺寸无法确认则保守进入识别"
+        if page.width.is_none()
+            || page.height.is_none()
+            || page.width == Some(0)
+            || page.height == Some(0)
+        {
+            reasons.push(OcrReason::GeometryUncertain);
+            uncertain_pages.push(page.page_number);
+        }
+
         // 矢量或未知对象
         if page.has_vector_or_unknown_objects {
             reasons.push(OcrReason::VectorOrUnknownObjects);
+            uncertain_pages.push(page.page_number);
+        }
+
+        // 页面 content stream 解析失败 → 强制 OCR
+        if page.content_parse_failed {
+            reasons.push(OcrReason::ParserError);
+            uncertain_pages.push(page.page_number);
+        }
+
+        // 不可见文本（Tr=3 等） → 文本层为假象，必须 OCR
+        if page.has_invisible_text {
+            reasons.push(OcrReason::HiddenOrInvisibleTextLayer);
+            uncertain_pages.push(page.page_number);
+        }
+
+        // 路径绘制文字风险：content stream 中存在密集路径操作但无文本操作，
+        // 无法排除页面使用轮廓路径绘制文字的可能，纳入不确定范围
+        if page.has_vector_drawing_ops {
+            reasons.push(OcrReason::VectorOrUnknownObjects);
+            uncertain_pages.push(page.page_number);
+        }
+
+        // 字体编码异常 → 提取文本不可靠
+        if page.font_encoding_suspected {
+            reasons.push(OcrReason::FontEncodingIssue);
             uncertain_pages.push(page.page_number);
         }
 
@@ -229,8 +275,12 @@ mod tests {
             image_regions: regions,
             image_area_ratio: image_ratio,
             has_vector_or_unknown_objects: has_vec,
-            width: None,
-            height: None,
+            width: Some(612),  // 默认 Letter 尺寸
+            height: Some(792),
+            content_parse_failed: false,
+            has_vector_drawing_ops: false,
+            has_invisible_text: false,
+            font_encoding_suspected: false,
         }
     }
 
