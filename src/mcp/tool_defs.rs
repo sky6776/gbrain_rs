@@ -165,6 +165,7 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
         params: &[
             ParamDef { name: "change_id", description: "变更 ID", required: true, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "reason", description: "拒绝原因", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "reviewer", description: "审核者标识，默认值为 mcp", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
         ],
     },
 

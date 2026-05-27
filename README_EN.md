@@ -46,11 +46,11 @@ Keyword retrieval and local storage require no database or external service setu
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
 - **Autopilot** — Self-maintenance daemon thread, auto-runs in background when `gbrain serve` starts. Periodically embeds stale content and runs integrity checks (default every 3600s, configurable via `GBRAIN_AUTOPILOT_INTERVAL`, at least 60s, disable via `GBRAIN_AUTOPILOT_ENABLED`)
-- **Safety Guards** — Path traversal protection, slug validation, remote-call input sanitization, parameterized queries against SQL injection
+- **Safety Guards** — Path traversal protection, slug validation, MCP remote-file confinement, parameterized queries against SQL injection
 - **Code Knowledge Graph** — Code pages imported or reindexed as code can use Tree-sitter AST chunking and regex symbol indexing for definitions, references, and call graphs (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
 - **Audio Transcription Module** — The library API supports Groq Whisper (default) or OpenAI Whisper; no CLI/MCP command is currently exposed
 - **Writer Validation Library API** — `BrainWriter` provides Strict/Lint/Off modes; the unified Artifact CLI/MCP interface does not expose mode selection
-- **Soft-Delete Lifecycle** — Artifact deletion and restore are exposed; permanent and time-based purge are currently engine-level operations
+- **Soft-Delete Lifecycle** — Artifact deletion and restore are exposed; permanent deletion of Artifact sources is not implemented, while pages and KB documents have separate cleanup paths
 
 ---
 
@@ -113,7 +113,7 @@ Global options must precede the subcommand, for example `gbrain --json query "Al
 | `gbrain health` | Check knowledge source consistency |
 | `gbrain kb ocr-status <doc_id>` | View KB document OCR status |
 | `gbrain kb ocr-run <doc_id> [--pages]` | Trigger or enqueue OCR manually |
-| `gbrain kb ocr-retry <doc_id> [--pages]` | Retry failed or empty-result OCR pages |
+| `gbrain kb ocr-retry <doc_id>` | Retry failed or empty-result OCR pages |
 | `gbrain serve` | Run as MCP stdio server |
 
 #### Examples
@@ -417,7 +417,7 @@ gbrain review apply 1
 | `ocr-status <doc_id>` | integer | Yes | View OCR status for a KB document |
 | `ocr-run <doc_id>` | integer | Yes | Trigger or enqueue OCR for a KB document |
 | `ocr-retry <doc_id>` | integer | Yes | Retry failed or empty-result OCR pages |
-| `--pages <RANGES>` | string | No | Page ranges to run or retry, e.g. `1,3,5-10` |
+| `ocr-run --pages <RANGES>` | string | No | Page ranges to run, e.g. `1,3,5-10` |
 
 ### `gbrain review list`
 
@@ -498,11 +498,12 @@ Add to `.cursor/mcp.json`:
 
 The MCP server sets `remote=true` for remote callers, enabling additional security validations:
 - Slug format validation (path traversal prevention)
-- Input content sanitization
+- File read paths must stay within the MCP server process working directory and must not contain symlinks
+- Upload file extension, MIME-type, and size validation
 - Parameterized queries (SQL injection prevention)
 - Filename safety checks
 
-CLI uses `remote=false` directly, bypassing remote security restrictions.
+CLI uses `remote=false` and does not apply the MCP-specific working-directory and symlink restrictions.
 
 ---
 
@@ -538,13 +539,15 @@ gbrain exposes Artifact unified knowledge operation facade tools (`artifact_*`) 
 
 #### Examples
 
+MCP file requests can only read existing non-symlink files within the server process working directory; the `./imports/...` paths below are relative to the directory where `gbrain serve` is started.
+
 ```jsonc
 // ===== Write =====
 // Write manual memory
 { "tool": "artifact_put", "params": { "slug": "rust-async", "content": "Rust async programming uses async/await syntax...", "intent": "memory" } }
 
 // Write from file
-{ "tool": "artifact_put", "params": { "slug": "docs/guide", "file": "/path/to/guide.md", "intent": "evidence" } }
+{ "tool": "artifact_put", "params": { "slug": "docs/guide", "file": "./imports/guide.md", "intent": "evidence" } }
 
 // Preview routing plan
 { "tool": "artifact_put", "params": { "slug": "test", "content": "...", "dry_run": true } }
@@ -556,19 +559,19 @@ gbrain exposes Artifact unified knowledge operation facade tools (`artifact_*`) 
 ```jsonc
 // ===== Upload =====
 // Upload document (auto-routing)
-{ "tool": "artifact_upload", "params": { "path": "/path/to/report.pdf", "intent": "auto" } }
+{ "tool": "artifact_upload", "params": { "path": "./imports/report.pdf", "intent": "auto" } }
 
 // Upload as evidence
-{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "evidence", "library_id": 1, "folder_id": 2 } }
+{ "tool": "artifact_upload", "params": { "path": "./imports/doc.pdf", "intent": "evidence", "library_id": 1, "folder_id": 2 } }
 
 // Upload and generate suggested changes
-{ "tool": "artifact_upload", "params": { "path": "/path/to/doc.pdf", "intent": "promote", "target_slug": "people/alice", "promotion": "candidate" } }
+{ "tool": "artifact_upload", "params": { "path": "./imports/doc.pdf", "intent": "promote", "target_slug": "people/alice", "promotion": "candidate" } }
 
 // Upload as attachment
-{ "tool": "artifact_upload", "params": { "path": "/path/to/image.png", "intent": "attachment", "page_slug": "people/alice" } }
+{ "tool": "artifact_upload", "params": { "path": "./imports/image.png", "intent": "attachment", "page_slug": "people/alice" } }
 
 // Preview upload routing
-{ "tool": "artifact_upload", "params": { "path": "/path/to/data.csv", "dry_run": true } }
+{ "tool": "artifact_upload", "params": { "path": "./imports/data.csv", "dry_run": true } }
 ```
 
 ```jsonc
@@ -780,6 +783,7 @@ No parameters.
 |-----------|------|----------|-------------|
 | `change_id` | integer | Yes | Change ID |
 | `reason` | string | No | Rejection reason |
+| `reviewer` | string | No | Reviewer identifier; defaults to `mcp` |
 
 ### `artifact_review_rollback`
 
@@ -1027,12 +1031,10 @@ Knowledge source deletion follows a soft-delete mechanism to prevent accidental 
 ```
 Active source ──delete──→ Soft-deleted (still in storage, not queryable)
                             │
-                            ├──restore──→ Restored to active source
-                            │
-                            └──permanent purge──→ Permanently deleted (storage freed)[^purge-note]
+                            └──restore──→ Restored to active source
 ```
 
-[^purge-note]: Permanent purge is implemented at the engine layer but not yet exposed as a standalone CLI command. Use `gbrain health` to identify stale records for manual cleanup.
+Artifact sources do not currently have a permanent-delete operation. Engine cleanup paths for pages or KB documents do not advance `source_artifacts` records to the `purged` state.
 
 - `gbrain delete <id_or_uid>` — Soft-delete; source is marked deleted but data is retained
 - `gbrain restore <id_or_uid>` — Restore a soft-deleted source
@@ -1140,7 +1142,7 @@ Upload Source (Single Entry Point)
 
 **Core Concepts:**
 
-- **Artifact** — Uploaded original file, with state (active/deleted/purged), source type (upload/sync/link/mcp), upload intent (auto/evidence/memory/attachment/promote; `document` is a legacy alias for `evidence`)
+- **Artifact** — Uploaded original file, currently reaching active/deleted states (`purged` is reserved), source type (upload/sync/link/mcp), upload intent (auto/evidence/memory/attachment/promote; `document` is a legacy alias for `evidence`)
 - **Projection** — Representation of the same Artifact in different subsystems, with version chain (superseded_by) and state (active/stale/superseded)
 - **Candidate** — Suggested changes extracted from KB evidence, with risk level (low/medium/high) and review workflow (pending->accepted->applied / rejected / rolled_back)
 - **Provenance** — Audit records tracing page facts back to their source Artifact and Candidate

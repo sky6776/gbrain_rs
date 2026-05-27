@@ -1,5 +1,5 @@
 //! artifact_* 统一 facade 测试:
-//! - 工具定义（仅 artifact_* 工具）
+//! - 工具定义（artifact_* facade + KB OCR 扩展）
 //! - put_memory 创建 artifact、occurrence、projection、page
 //! - put_memory creates artifact, occurrence, projection, page
 //! - Intent routing (memory/evidence/promote)
@@ -38,16 +38,21 @@ fn make_svc<'a>(engine: &'a SqliteEngine, config: &'a Config) -> ArtifactService
     ArtifactService::new(engine, ctx, config)
 }
 
-// --- Test 1: Default tool defs only contain artifact_* tools ---
+fn is_expected_default_mcp_tool(name: &str) -> bool {
+    name.starts_with("artifact_")
+        || matches!(name, "kb_document_status" | "kb_ocr_run" | "kb_ocr_retry")
+}
+
+// --- Test 1: Default tool defs contain the facade and documented OCR extensions ---
 
 #[test]
-fn tool_defs_default_only_artifact_tools() {
+fn tool_defs_default_include_artifact_and_ocr_tools() {
     let defs = gbrain_core::mcp::tool_defs::build_tool_defs();
     assert!(!defs.is_empty(), "should have some tool defs");
     for def in &defs {
         assert!(
-            def.name.starts_with("artifact_"),
-            "default tool '{}' should start with 'artifact_'",
+            is_expected_default_mcp_tool(&def.name),
+            "unexpected default MCP tool '{}'",
             def.name
         );
     }
@@ -1065,53 +1070,63 @@ fn mcp_dispatch_artifact_query_no_sources() {
     }
 }
 
-// --- MCP tool_defs 测试: 默认 tools-json 只含 artifact_* ---
-// 验证 build_tool_defs() 默认输出只包含 artifact_* 命名空间工具
+// --- MCP tool_defs 测试: 默认 tools-json 含 facade 与 OCR 扩展 ---
+// 验证 build_tool_defs() 默认输出只包含已公开的 MCP 工具
 
 #[test]
-fn mcp_tool_defs_default_only_artifact_facade() {
+fn mcp_tool_defs_default_include_artifact_facade_and_ocr_extensions() {
     let defs = gbrain_core::mcp::tool_defs::build_tool_defs();
 
-    // 应包含所有 artifact_* facade 工具
-    let artifact_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    // 应包含 Artifact facade 与已公开的 OCR 扩展工具
+    let tool_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(tool_names.contains(&"artifact_put"), "应包含 artifact_put");
     assert!(
-        artifact_names.contains(&"artifact_put"),
-        "应包含 artifact_put"
-    );
-    assert!(
-        artifact_names.contains(&"artifact_upload"),
+        tool_names.contains(&"artifact_upload"),
         "应包含 artifact_upload"
     );
     assert!(
-        artifact_names.contains(&"artifact_query"),
+        tool_names.contains(&"artifact_query"),
         "应包含 artifact_query"
     );
     assert!(
-        artifact_names.contains(&"artifact_list"),
+        tool_names.contains(&"artifact_list"),
         "应包含 artifact_list"
     );
+    assert!(tool_names.contains(&"artifact_get"), "应包含 artifact_get");
     assert!(
-        artifact_names.contains(&"artifact_get"),
-        "应包含 artifact_get"
-    );
-    assert!(
-        artifact_names.contains(&"artifact_delete"),
+        tool_names.contains(&"artifact_delete"),
         "应包含 artifact_delete"
     );
     assert!(
-        artifact_names.contains(&"artifact_review_list"),
+        tool_names.contains(&"artifact_review_list"),
         "应包含 artifact_review_list"
     );
     assert!(
-        artifact_names.contains(&"artifact_review_apply"),
+        tool_names.contains(&"artifact_review_apply"),
         "应包含 artifact_review_apply"
     );
+    let review_reject = defs
+        .iter()
+        .find(|def| def.name == "artifact_review_reject")
+        .expect("应包含 artifact_review_reject");
+    assert!(
+        review_reject.input_schema["properties"]
+            .get("reviewer")
+            .is_some(),
+        "artifact_review_reject schema 应公开 reviewer"
+    );
+    assert!(
+        tool_names.contains(&"kb_document_status"),
+        "应包含 kb_document_status"
+    );
+    assert!(tool_names.contains(&"kb_ocr_run"), "应包含 kb_ocr_run");
+    assert!(tool_names.contains(&"kb_ocr_retry"), "应包含 kb_ocr_retry");
 
-    // 不应包含任何内部工具
+    // 不应包含未公开的内部工具
     for def in &defs {
         assert!(
-            def.name.starts_with("artifact_"),
-            "默认 tools-json 不应包含非 artifact_* 工具: {}",
+            is_expected_default_mcp_tool(&def.name),
+            "默认 tools-json 不应包含未公开工具: {}",
             def.name
         );
     }
@@ -1412,6 +1427,44 @@ fn mcp_tools_call_artifact_query() {
     assert!(
         result.get("evidence").is_some(),
         "artifact_query dispatch 应返回 evidence 字段"
+    );
+}
+
+// --- MCP tools/call 测试: kb_document_status 读取 OCR 状态 ---
+
+#[test]
+fn mcp_tools_call_kb_document_status() {
+    let mut server = make_mcp_server();
+
+    server
+        .dispatch_tool_call(
+            "artifact_put",
+            serde_json::json!({
+                "slug": "people/mcp-status-dispatch-test",
+                "content": "Content for MCP status dispatch test",
+                "title": "MCP Status Dispatch Test",
+                "intent": "evidence"
+            }),
+        )
+        .expect("dispatch artifact_put evidence");
+
+    let result = server
+        .dispatch_tool_call(
+            "kb_document_status",
+            serde_json::json!({
+                "document_id": 1
+            }),
+        )
+        .expect("dispatch kb_document_status");
+
+    assert_eq!(result.get("document_id").and_then(|v| v.as_i64()), Some(1));
+    assert!(
+        result.get("ocr_status").is_some(),
+        "kb_document_status 应返回 ocr_status"
+    );
+    assert!(
+        result.get("ocr_pages").is_some(),
+        "kb_document_status 应返回 ocr_pages"
     );
 }
 
