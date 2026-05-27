@@ -11,6 +11,8 @@ pub struct GlmOcrProvider {
     api_key: String,
 }
 
+const PDF_DATA_URI_PREFIX: &str = "data:application/pdf;base64,";
+
 impl GlmOcrProvider {
     pub fn new(api_key: &str) -> Self {
         Self {
@@ -40,9 +42,9 @@ impl OcrProvider for GlmOcrProvider {
                 * (*request_end_page_id - *request_start_page_id + 1) as u64,
         );
 
-        // 构造请求体
+        // MaaS layout_parsing expects local PDF bytes as a data URI, not bare base64.
         let file_content = match file {
-            crate::kb::ocr_provider::OcrFilePayload::Base64(data) => data.clone(),
+            crate::kb::ocr_provider::OcrFilePayload::Base64(data) => pdf_base64_to_data_uri(data),
             crate::kb::ocr_provider::OcrFilePayload::Url(_url) => {
                 // 如果是 URL，先下载内容再 base64 编码
                 // 第一版直接使用 base64 模式
@@ -402,6 +404,10 @@ pub fn pdf_to_base64(pdf_data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(pdf_data)
 }
 
+fn pdf_base64_to_data_uri(encoded_pdf: &str) -> String {
+    format!("{}{}", PDF_DATA_URI_PREFIX, encoded_pdf)
+}
+
 /// 从 URL 中移除可能包含凭证的敏感部分（userinfo、query、fragment），
 /// 仅保留 `scheme://host:port/path`，用于审计日志脱敏
 fn sanitize_url_for_log(url: &str) -> String {
@@ -489,5 +495,23 @@ mod tests {
         assert!(!encoded.is_empty());
         // base64 编码后长度应为 4/3 倍（向上取整到 4 的倍数）
         assert_eq!(encoded.len() % 4, 0);
+    }
+
+    #[test]
+    fn test_pdf_base64_is_wrapped_as_maas_data_uri() {
+        use base64::Engine;
+
+        let data = b"%PDF-1.7\nfixture";
+        let file_content = pdf_base64_to_data_uri(&pdf_to_base64(data));
+        let encoded = file_content
+            .strip_prefix(PDF_DATA_URI_PREFIX)
+            .expect("PDF request payload must use a data URI");
+
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("data URI should contain valid base64"),
+            data
+        );
     }
 }
