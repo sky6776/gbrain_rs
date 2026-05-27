@@ -45,6 +45,7 @@ pub struct OcrRequestChunk {
 /// 根据 PDF 文件大小、总页数、目标 OCR 页集合和配置限制，
 /// 规划如何拆分和提交 OCR 请求。拆分生成的文件和预算均归
 /// `temp_guard` 管理，以便任何失败路径均由目录守卫平账。
+#[allow(clippy::too_many_arguments)]
 pub fn plan_ocr_requests(
     document_id: i64,
     processing_run_id: &str,

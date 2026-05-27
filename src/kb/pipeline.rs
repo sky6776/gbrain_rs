@@ -1411,7 +1411,7 @@ fn maybe_apply_pdf_ocr(
 ) -> Result<Option<ParsedDocument>> {
     use crate::kb::ocr::OcrStatus;
     use crate::kb::ocr_detector::{detect_ocr_pages, PdfImageRegion, PdfPageAnalysis};
-    use crate::kb::ocr_provider::{OcrMode, OcrSubmitMode};
+    use crate::kb::ocr_provider::OcrMode;
 
     let ocr_enabled = config.ocr_enabled;
     let external_allowed = library.external_ocr_allowed;
@@ -1823,7 +1823,7 @@ fn maybe_apply_pdf_ocr(
         &detection,
         file_data,
         total_pages as i32,
-        &config,
+        config,
     ) {
         Ok(merged_results) => {
             // 用合并后的内容替换原 parsed 的 content

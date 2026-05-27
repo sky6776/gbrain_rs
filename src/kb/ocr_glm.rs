@@ -43,7 +43,7 @@ impl OcrProvider for GlmOcrProvider {
         // 构造请求体
         let file_content = match file {
             crate::kb::ocr_provider::OcrFilePayload::Base64(data) => data.clone(),
-            crate::kb::ocr_provider::OcrFilePayload::Url(url) => {
+            crate::kb::ocr_provider::OcrFilePayload::Url(_url) => {
                 // 如果是 URL，先下载内容再 base64 编码
                 // 第一版直接使用 base64 模式
                 return Err(GBrainError::InvalidInput(
@@ -159,6 +159,7 @@ impl GlmOcrProvider {
     /// 发送单页 OCR 请求并解析响应
     ///
     /// 返回 Ok(results) 表示成功，Err(SinglePageError) 表示失败（可区分是否可重试）。
+    #[allow(clippy::too_many_arguments)]
     fn send_single_page_request(
         &self,
         client: &reqwest::blocking::Client,
@@ -230,9 +231,10 @@ impl GlmOcrProvider {
     }
 
     /// 多页 md_results-only 自动重试：逐页发送单页请求并聚合结果
+    #[allow(clippy::too_many_arguments)]
     fn retry_multi_page_as_single(
         &self,
-        input: &OcrInput,
+        _input: &OcrInput,
         options: &OcrOptions,
         file_content: String,
         source_start_page: i32,

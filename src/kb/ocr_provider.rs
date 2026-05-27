@@ -73,6 +73,7 @@ pub enum OcrMode {
 }
 
 impl OcrMode {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "all_pages" => Self::AllPages,
@@ -91,6 +92,7 @@ pub enum OcrSubmitMode {
 }
 
 impl OcrSubmitMode {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "pdf_range" => Self::PdfRange,

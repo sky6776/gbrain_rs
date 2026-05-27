@@ -91,11 +91,12 @@ pub struct RawGlmLayoutBlock {
 /// `source_start_page` 和 `source_end_page` 是原始 PDF 页码范围，
 /// `request_start_page_id` 是请求中使用的起始页 ID（子文件内页码或原始页码）。
 /// 需要将响应页序映射回原始 PDF 页码。
+#[allow(clippy::too_many_arguments)]
 pub fn normalize_glm_ocr_response(
     response: &GlmOcrResponse,
     source_start_page: i32,
     source_end_page: i32,
-    request_start_page_id: i32,
+    _request_start_page_id: i32,
     provider_name: &str,
     model_name: &str,
     // 客户端生成的稳定 request_id，服务端未回显时作为 fallback

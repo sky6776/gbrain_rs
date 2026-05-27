@@ -516,126 +516,117 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
     }
 
     // ---------- Upload dry_run 预览（需要文件校验但不需要 DB）----------
-    match &cli.command {
-        Commands::Upload {
-            path,
-            intent,
-            target: _,
-            page: _,
-            library: _,
-            folder: _,
-            promotion,
-            dry_run,
-        } => {
-            let effective_dry_run = cli.dry_run || *dry_run;
-            if effective_dry_run {
-                let file_path = PathBuf::from(path);
+    if let Commands::Upload {
+        path,
+        intent,
+        target: _,
+        page: _,
+        library: _,
+        folder: _,
+        promotion,
+        dry_run,
+    } = &cli.command
+    {
+        let effective_dry_run = cli.dry_run || *dry_run;
+        if effective_dry_run {
+            let file_path = PathBuf::from(path);
 
-                let ext_for_route = file_path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
+            let ext_for_route = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
 
-                // 使用 FromStr 严格解析，拼写错误直接报错而非静默退回 Auto
-                let upload_intent: gbrain_core::artifact::types::UploadIntent =
-                    intent.parse().unwrap_or_else(|e| {
-                        error!("{}", e);
-                        std::process::exit(1);
-                    });
-
-                // 推断路由计划
-                let route_plan = gbrain_core::artifact::types::infer_route_plan(
-                    &ext_for_route,
-                    "",
-                    &upload_intent,
-                );
-
-                // 根据路由决定允许的扩展名（与真实上传路径一致）
-                let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
-                if route_plan.to_file {
-                    for extra in [
-                        "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
-                        "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
-                    ] {
-                        let s = extra.to_string();
-                        if !allowed_extensions.contains(&s) {
-                            allowed_extensions.push(s);
-                        }
-                    }
-                }
-                let max_file_bytes = config.kb_max_file_size_mb * 1024 * 1024;
-
-                // 验证文件：路径安全、大小、扩展名（与真实上传路径共享校验逻辑）
-                let validated_path = gbrain_core::kb::security::validate_upload_source(
-                    &file_path,
-                    false,
-                    &gbrain_core::config::Config::base_dir(),
-                    max_file_bytes,
-                    &allowed_extensions,
-                )?;
-
-                // 读取文件内容并校验 MIME 类型
-                let file_content = std::fs::read(&validated_path)?;
-                let ext = validated_path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let _mime =
-                    gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
-
-                // 使用 FromStr 严格解析，未知值直接报错
-                let promotion_policy = promotion.as_ref().map(|p| {
-                    p.parse::<gbrain_core::artifact::types::PromotionPolicy>()
-                        .unwrap_or_else(|e| {
-                            error!("{}", e);
-                            std::process::exit(1);
-                        })
+            // 使用 FromStr 严格解析，拼写错误直接报错而非静默退回 Auto
+            let upload_intent: gbrain_core::artifact::types::UploadIntent =
+                intent.parse().unwrap_or_else(|e| {
+                    error!("{}", e);
+                    std::process::exit(1);
                 });
 
-                // 应用 promotion 策略
-                let route_plan = gbrain_core::artifact::types::apply_promotion_policy(
-                    route_plan,
-                    &promotion_policy,
-                    &config.upload_default_promotion_policy,
-                );
+            // 推断路由计划
+            let route_plan =
+                gbrain_core::artifact::types::infer_route_plan(&ext_for_route, "", &upload_intent);
 
-                // 输出预览（支持 --json）
-                if cli.json {
-                    let real_sha256 = {
-                        let mut hasher = Sha256::new();
-                        hasher.update(&file_content);
-                        format!("{:x}", hasher.finalize())
-                    };
-                    let preview = gbrain_core::artifact::types::UploadSourceOutput {
-                        artifact_id: 0,
-                        artifact_uid: "dry-run".to_string(),
-                        occurrence_id: 0,
-                        occurrence_uid: "dry-run".to_string(),
-                        sha256: real_sha256,
-                        is_new: true,
-                        route_plan,
-                        projections: vec![],
-                    };
-                    info!("{}", serde_json::to_string_pretty(&preview)?);
-                } else {
-                    info!("Dry-run 上传预览:");
-                    info!("  文件: {}", file_path.display());
-                    info!("  意图: {}", intent);
-                    info!(
-                        "  Route: KB={}, Brain={}, File={}, Shadow={}",
-                        route_plan.to_kb,
-                        route_plan.to_brain,
-                        route_plan.to_file,
-                        route_plan.to_shadow
-                    );
-                    info!("  Promotion: {}", route_plan.promotion);
+            // 根据路由决定允许的扩展名（与真实上传路径一致）
+            let mut allowed_extensions: Vec<String> = config.kb_allowed_extensions.clone();
+            if route_plan.to_file {
+                for extra in [
+                    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif", "ico", "tiff",
+                    "tif", "zip", "tar", "gz", "json", "xml", "yaml", "yml", "toml",
+                ] {
+                    let s = extra.to_string();
+                    if !allowed_extensions.contains(&s) {
+                        allowed_extensions.push(s);
+                    }
                 }
-                return Ok(());
             }
+            let max_file_bytes = config.kb_max_file_size_mb * 1024 * 1024;
+
+            // 验证文件：路径安全、大小、扩展名（与真实上传路径共享校验逻辑）
+            let validated_path = gbrain_core::kb::security::validate_upload_source(
+                &file_path,
+                false,
+                &gbrain_core::config::Config::base_dir(),
+                max_file_bytes,
+                &allowed_extensions,
+            )?;
+
+            // 读取文件内容并校验 MIME 类型
+            let file_content = std::fs::read(&validated_path)?;
+            let ext = validated_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let _mime = gbrain_core::kb::security::detect_and_validate_mime(&file_content, &ext)?;
+
+            // 使用 FromStr 严格解析，未知值直接报错
+            let promotion_policy = promotion.as_ref().map(|p| {
+                p.parse::<gbrain_core::artifact::types::PromotionPolicy>()
+                    .unwrap_or_else(|e| {
+                        error!("{}", e);
+                        std::process::exit(1);
+                    })
+            });
+
+            // 应用 promotion 策略
+            let route_plan = gbrain_core::artifact::types::apply_promotion_policy(
+                route_plan,
+                &promotion_policy,
+                &config.upload_default_promotion_policy,
+            );
+
+            // 输出预览（支持 --json）
+            if cli.json {
+                let real_sha256 = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(&file_content);
+                    format!("{:x}", hasher.finalize())
+                };
+                let preview = gbrain_core::artifact::types::UploadSourceOutput {
+                    artifact_id: 0,
+                    artifact_uid: "dry-run".to_string(),
+                    occurrence_id: 0,
+                    occurrence_uid: "dry-run".to_string(),
+                    sha256: real_sha256,
+                    is_new: true,
+                    route_plan,
+                    projections: vec![],
+                };
+                info!("{}", serde_json::to_string_pretty(&preview)?);
+            } else {
+                info!("Dry-run 上传预览:");
+                info!("  文件: {}", file_path.display());
+                info!("  意图: {}", intent);
+                info!(
+                    "  Route: KB={}, Brain={}, File={}, Shadow={}",
+                    route_plan.to_kb, route_plan.to_brain, route_plan.to_file, route_plan.to_shadow
+                );
+                info!("  Promotion: {}", route_plan.promotion);
+            }
+            return Ok(());
         }
-        _ => {}
     }
 
     // ---------- Config 命令预处理：config.json 型 key 不需要数据库 ----------
@@ -1384,14 +1375,12 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     if !library.external_ocr_allowed {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "库已关闭外部 OCR，无法执行 OCR".to_string(),
-                        )
-                        .into());
+                        ));
                     }
                     if library.redaction_enabled {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "库已启用脱敏，禁止外部 OCR".to_string(),
-                        )
-                        .into());
+                        ));
                     }
                 }
 
@@ -1454,16 +1443,14 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 if !config_local.ocr_enabled {
                     return Err(gbrain_core::error::GBrainError::InvalidInput(
                         "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，无法执行 OCR".to_string(),
-                    )
-                    .into());
+                    ));
                 }
                 // OCR API key 检查
                 if config_local.ocr_api_key.is_none() {
                     return Err(gbrain_core::error::GBrainError::InvalidInput(
                         "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
                             .to_string(),
-                    )
-                    .into());
+                    ));
                 }
 
                 let payload = gbrain_core::kb::jobs::KbOcrPayload {
@@ -1593,14 +1580,12 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     if !library.external_ocr_allowed {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "库已关闭外部 OCR，无法执行 OCR 重试".to_string(),
-                        )
-                        .into());
+                        ));
                     }
                     if library.redaction_enabled {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "库已启用脱敏，禁止外部 OCR".to_string(),
-                        )
-                        .into());
+                        ));
                     }
                 }
 
@@ -1611,15 +1596,13 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，无法执行 OCR 重试"
                                 .to_string(),
-                        )
-                        .into());
+                        ));
                     }
                     if config_local.ocr_api_key.is_none() {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
                                 .to_string(),
-                        )
-                        .into());
+                        ));
                     }
                 }
 
@@ -1633,10 +1616,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
                     row.get::<_, i32>(0)
                 })?;
-                for row in rows {
-                    if let Ok(p) = row {
-                        failed_pages.push(p);
-                    }
+                for p in rows.flatten() {
+                    failed_pages.push(p);
                 }
                 drop(stmt);
 

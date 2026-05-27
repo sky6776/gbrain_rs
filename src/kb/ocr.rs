@@ -66,6 +66,7 @@ impl OcrStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "not_needed" => Self::NotNeeded,
@@ -233,6 +234,7 @@ pub fn persist_ocr_blocks(
 ///
 /// `provider` / `model` 记录实际使用（或意图使用）的 OCR 提供者和模型，
 /// 用于失败诊断和审计。API 错误、超时、拆分失败等场景均应传入。
+#[allow(clippy::too_many_arguments)]
 pub fn update_ocr_page_status(
     conn: &Connection,
     document_id: i64,
@@ -257,6 +259,7 @@ pub fn update_ocr_page_status(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_ocr_pages_status(
     conn: &Connection,
     document_id: i64,
@@ -1126,7 +1129,7 @@ fn sanitize_string(s: &str, sensitive_value: Option<&str>) -> String {
     static POSIX_SINGLE_FILE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
         || {
             regex::Regex::new(
-                r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+\.(pdf|png|jpe?g|gif|bmp|svg|webp|tiff?|json|xml|csv|txt|log|tmp|dat|bin|html?|css|js|py|rs|go|java|md|zip|tar|gz|bz2|xz|7z|docx?|xlsx?|pptx?))"#,
+                r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+\.(?:pdf|png|jpe?g|gif|bmp|svg|webp|tiff?|json|xml|csv|txt|log|tmp|dat|bin|html?|css|js|py|rs|go|java|md|zip|tar|gz|bz2|xz|7z|docx?|xlsx?|pptx?)))"#,
             )
             .unwrap()
         },

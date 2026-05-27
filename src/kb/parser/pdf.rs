@@ -307,10 +307,10 @@ fn resolve_as_dict<'a>(
 }
 
 /// 获取页面的 Resources 字典，解析间接引用并沿父 Pages 节点继承资源
-fn get_inherited_resources<'a>(
-    pdf: &'a lopdf::Document,
+fn get_inherited_resources(
+    pdf: &lopdf::Document,
     page_obj_id: lopdf::ObjectId,
-) -> Option<&'a lopdf::Dictionary> {
+) -> Option<&lopdf::Dictionary> {
     let mut current_id = page_obj_id;
     let mut visited: std::collections::HashSet<lopdf::ObjectId> = std::collections::HashSet::new();
     let mut depth = 0usize;
@@ -658,12 +658,12 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
                                     let img_w = xobj_dict
                                         .get(b"Width")
                                         .ok()
-                                        .and_then(|w| object_to_f64(w))
+                                        .and_then(object_to_f64)
                                         .unwrap_or(100.0);
                                     let img_h = xobj_dict
                                         .get(b"Height")
                                         .ok()
-                                        .and_then(|h| object_to_f64(h))
+                                        .and_then(object_to_f64)
                                         .unwrap_or(100.0);
                                     total_image_area += img_w * img_h;
                                 }
@@ -784,7 +784,7 @@ fn is_text_garbled(text: &str) -> bool {
     let suspicious = text
         .chars()
         .filter(|c| {
-            (c >= &'\u{E000}' && c <= &'\u{F8FF}') // 私有使用区
+            (&'\u{E000}'..=&'\u{F8FF}').contains(&c) // 私有使用区
                 || c == &'\u{FFFD}' // 替换字符
                 || (c.is_control() && *c != '\n' && *c != '\r' && *c != '\t')
         })
@@ -828,8 +828,8 @@ fn analyze_content_stream(
         if PATH_PAINT_OPS.contains(&op) {
             *has_vector_drawing_ops = true;
         }
-        match op {
-            "Tr" => match operation.operands.first().and_then(object_to_f64) {
+        if op == "Tr" {
+            match operation.operands.first().and_then(object_to_f64) {
                 Some(mode) if (mode - 3.0).abs() < f64::EPSILON => {
                     *has_invisible_text = true;
                 }
@@ -837,8 +837,7 @@ fn analyze_content_stream(
                 None => {
                     *content_parse_failed = true;
                 }
-            },
-            _ => {}
+            }
         }
     }
 }

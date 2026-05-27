@@ -138,6 +138,7 @@ pub fn verify_artifact_integrity(path: &Path, expected_sha256: &str) -> Result<b
 /// 4. 创建/复用 source_artifacts 记录
 /// 5. 创建 artifact_occurrences 记录
 /// 6. 根据路由计划创建投影
+#[allow(clippy::too_many_arguments)]
 pub fn upload_source(
     conn: &Connection,
     input: &UploadSourceInput,
@@ -791,6 +792,7 @@ fn ensure_default_library_embedding_index(
 /// 4. 创建 source artifact 和 occurrence
 /// 5. 根据 route_plan 创建投影（brain_page_update / shadow / KB / file）
 /// 6. 可选入 KB
+#[allow(clippy::too_many_arguments)]
 pub fn put_manual_memory(
     conn: &Connection,
     slug: &str,

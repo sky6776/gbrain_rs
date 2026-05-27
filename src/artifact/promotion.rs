@@ -1009,7 +1009,8 @@ fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate
 ///   - 将被 superseded 的旧投影恢复为 active
 ///   - 将旧投影的 version_hash 更新为当前页面的 content_hash
 ///     （因为 rollback 已恢复页面内容，旧投影的 hash 需与页面一致，
-///      否则后续冲突检测基线错误）
+///     否则后续冲突检测基线错误）
+///
 /// 否则已回滚内容仍被 active 投影引用，后续冲突检测基线错误。
 fn rollback_page_update_projections(
     conn: &Connection,

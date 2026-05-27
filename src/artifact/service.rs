@@ -98,7 +98,7 @@ impl<'a> ArtifactService<'a> {
             resolved_intent,
             true,
         )
-        .map_err(|e| GBrainError::InvalidInput(e))?;
+        .map_err(GBrainError::InvalidInput)?;
 
         // P1-1 修复：幂等/冲突检测必须在 dry_run 判断之前完成，
         // 但所有写入操作必须在 dry_run 判断之后、且在同一个事务内执行。
@@ -500,12 +500,11 @@ impl<'a> ArtifactService<'a> {
                     self.config.artifact_auto_create_inbox_library,
                 )
             })
-            .map(|output| {
+            .inspect(|output| {
                 info!(
                     "upload_file complete: artifact_id={}, artifact_uid={}, is_new={}",
                     output.artifact_id, output.artifact_uid, output.is_new
                 );
-                output
             })
     }
 
@@ -711,12 +710,11 @@ impl<'a> ArtifactService<'a> {
                 let c = crate::artifact::review::apply_suggested_change(conn, change_id)?;
                 Ok(candidate_to_review_action_output(c, "applied"))
             })
-            .map(|o| {
+            .inspect(|o| {
                 info!(
                     "apply_suggested_change complete: change_id={}, target_slug={}",
                     o.change_id, o.target_slug
                 );
-                o
             })
     }
 

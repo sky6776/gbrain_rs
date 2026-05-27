@@ -656,7 +656,7 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .map(|s| s.parse())
                     .transpose()
-                    .map_err(|e| crate::error::GBrainError::InvalidInput(e))?;
+                    .map_err(crate::error::GBrainError::InvalidInput)?;
 
                 let input = crate::artifact::types::UploadSourceInput {
                     content,
@@ -1294,10 +1294,8 @@ impl McpServer {
                     let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
                         row.get::<_, i32>(0)
                     })?;
-                    for row in rows {
-                        if let Ok(p) = row {
-                            failed.push(p);
-                        }
+                    for p in rows.flatten() {
+                        failed.push(p);
                     }
                     failed
                 };

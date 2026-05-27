@@ -755,7 +755,7 @@ impl BrainEngine for SqliteEngine {
 
         // 先检查旧库版本，在执行 DDL 之前拒绝不支持的旧库，
         // 避免部分 CREATE TABLE IF NOT EXISTS 已修改旧库后才报错
-        self.check_schema_version_before_ddl(&conn)?;
+        self.check_schema_version_before_ddl(conn)?;
 
         conn.execute_batch(SCHEMA_DDL)?;
 
