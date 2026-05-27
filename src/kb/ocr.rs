@@ -653,12 +653,7 @@ pub fn writeback_ocr_results(
     if full_text.trim().is_empty() {
         // 全文为空：在同一事务内完成 OCR 状态与文档统计更新，
         // 避免先提交 OCR 终态后文档统计失败导致不一致
-        finalize_empty_writeback_in_tx(
-            conn,
-            doc_id,
-            total_page_count,
-            run_id,
-        )?;
+        finalize_empty_writeback_in_tx(conn, doc_id, total_page_count, run_id)?;
         return Ok(WritebackResult {
             blocks_created: blocks.len(),
             nodes_created: 0,
@@ -817,13 +812,7 @@ pub fn writeback_ocr_results(
     let tx = conn.unchecked_transaction()?;
     let result = (|| -> Result<()> {
         // 持久化 nodes
-        crate::kb::pipeline::persist_nodes_and_vectors_inner(
-            conn,
-            doc_id,
-            lib_id,
-            &nodes,
-            run_id,
-        )?;
+        crate::kb::pipeline::persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &nodes, run_id)?;
         // 更新文档统计（词数/分块数），embedding 标记为 pending
         kb.update_document_stats_with_run_guard_inner(
             doc_id,
@@ -1035,7 +1024,10 @@ pub fn sanitize_json_for_storage(
                 .map(|(k, v)| {
                     let key_lower = k.to_lowercase();
                     if SENSITIVE_KEYS.iter().any(|sk| key_lower == *sk) {
-                        (k.clone(), serde_json::Value::String(MASKED_VALUE.to_string()))
+                        (
+                            k.clone(),
+                            serde_json::Value::String(MASKED_VALUE.to_string()),
+                        )
                     } else {
                         (k.clone(), sanitize_json_for_storage(v, sensitive_value))
                     }
@@ -1043,13 +1035,11 @@ pub fn sanitize_json_for_storage(
                 .collect();
             serde_json::Value::Object(sanitized)
         }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(
-                arr.iter()
-                    .map(|v| sanitize_json_for_storage(v, sensitive_value))
-                    .collect(),
-            )
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| sanitize_json_for_storage(v, sensitive_value))
+                .collect(),
+        ),
         serde_json::Value::String(s) => {
             let sanitized = sanitize_string(s, sensitive_value);
             serde_json::Value::String(sanitized)
@@ -1076,17 +1066,25 @@ fn sanitize_string(s: &str, sensitive_value: Option<&str>) -> String {
         result = result.replace(secret, MASKED_VALUE);
     }
     // 掩码 Bearer token
-    result = BEARER_RE.replace_all(&result, "${1}***REDACTED***").to_string();
+    result = BEARER_RE
+        .replace_all(&result, "${1}***REDACTED***")
+        .to_string();
     // 掩码类似 API key 的长十六进制/Base64 字符串（常见于 GLM-OCR 等服务的响应正文）
-    static API_KEY_LIKE_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)(api[_-]?key|token|secret|authorization)["'\s:=]+["']?([a-zA-Z0-9_\-]{20,})"#).unwrap());
+    static API_KEY_LIKE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?i)(api[_-]?key|token|secret|authorization)["'\s:=]+["']?([a-zA-Z0-9_\-]{20,})"#,
+        )
+        .unwrap()
+    });
     result = API_KEY_LIKE_RE
         .replace_all(&result, "${1}***REDACTED***")
         .to_string();
     // 掩码 Windows 绝对路径
     result = WIN_PATH_RE.replace_all(&result, "***PATH***").to_string();
     // 掩码 file:// URL
-    result = FILE_URL_RE.replace_all(&result, "***FILE_URL***").to_string();
+    result = FILE_URL_RE
+        .replace_all(&result, "***FILE_URL***")
+        .to_string();
     // 掩码 OCR 临时目录路径
     result = TEMP_DIR_RE
         .replace_all(&result, "***TEMP_DIR***")
@@ -1095,21 +1093,19 @@ fn sanitize_string(s: &str, sensitive_value: Option<&str>) -> String {
     // 覆盖：127.0.0.0/8、[::1]、localhost、10.0.0.0/8、192.168.0.0/16、
     //        172.16.0.0/12、169.254.0.0/16（link-local）、
     //        [fe80::/10] IPv6 链路本地、[fc00::/7] IPv6 唯一本地地址
-    static INTERNAL_URL_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| {
-            regex::Regex::new(
+    static INTERNAL_URL_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
                 r#"(?i)https?://(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|\[fe[89ab][0-9a-f:.]+\]|\[f[cd][0-9a-f]{2}[0-9a-f:.]+\]|localhost|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})(:\d+)?(/[^\s'"<>]*)?"#,
             )
             .unwrap()
-        });
+    });
     result = INTERNAL_URL_RE
         .replace_all(&result, "***INTERNAL_URL***")
         .to_string();
     // 掩码 UNC 路径（\\server\share\...）
-    static UNC_PATH_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| {
-            regex::Regex::new(r#"\\\\[a-zA-Z0-9_.$-]+(\\[^\s'"<>]*)+"#).unwrap()
-        });
+    static UNC_PATH_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\\\\[a-zA-Z0-9_.$-]+(\\[^\s'"<>]*)+"#).unwrap()
+    });
     result = UNC_PATH_RE
         .replace_all(&result, "***UNC_PATH***")
         .to_string();
@@ -1118,25 +1114,23 @@ fn sanitize_string(s: &str, sensitive_value: Option<&str>) -> String {
     // /tmp/x、/home/user/file），要求至少两级目录以确保是路径而非普通文本。
     // 前缀匹配支持空白、等号、括号、冒号、引号等常见分隔符，
     // 覆盖 path=/data/ocr/a.pdf、open(/private/tmp/x) 等绕过场景。
-    static POSIX_PATH_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| {
-            regex::Regex::new(
-                r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+)"#,
-            )
+    static POSIX_PATH_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+)"#)
             .unwrap()
-        });
+    });
     result = POSIX_PATH_RE
         .replace_all(&result, "${1}***POSIX_PATH***")
         .to_string();
     // 掩码带常见扩展名的单级 POSIX 绝对路径（如 /report.pdf、/image.png）。
     // 前缀匹配与 POSIX_PATH_RE 一致，覆盖 path=/tmp/x.pdf 等绕过场景。
-    static POSIX_SINGLE_FILE_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| {
+    static POSIX_SINGLE_FILE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(
+        || {
             regex::Regex::new(
                 r#"(?m)(^|[\s=(:\x60'"<>])(/([a-zA-Z0-9_.-]+\.(pdf|png|jpe?g|gif|bmp|svg|webp|tiff?|json|xml|csv|txt|log|tmp|dat|bin|html?|css|js|py|rs|go|java|md|zip|tar|gz|bz2|xz|7z|docx?|xlsx?|pptx?))"#,
             )
             .unwrap()
-        });
+        },
+    );
     result = POSIX_SINGLE_FILE_RE
         .replace_all(&result, "${1}***POSIX_PATH***")
         .to_string();

@@ -16,7 +16,7 @@ use crate::sqlite_engine::SqliteEngine;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, LazyLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -961,7 +961,10 @@ impl Drop for OcrPermit {
 
 /// 尝试获取 OCR 并发 permit，最多等待 `timeout`。
 /// 若在超时前获取到槽位则返回 Some(OcrPermit)，否则返回 None。
-pub(crate) fn try_acquire_ocr_permit(max_concurrency: usize, timeout: Duration) -> Option<OcrPermit> {
+pub(crate) fn try_acquire_ocr_permit(
+    max_concurrency: usize,
+    timeout: Duration,
+) -> Option<OcrPermit> {
     let start = std::time::Instant::now();
     let mut count = OCR_ACTIVE_COUNT.lock().ok()?;
     loop {
@@ -989,13 +992,11 @@ pub(crate) fn try_acquire_ocr_permit(max_concurrency: usize, timeout: Duration) 
 pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
     // 获取 OCR 并发 permit，最多等待 5 秒。
     // 若超时未获取到槽位，跳过本次 OCR 处理，让 worker 尝试其他作业类型。
-    let _ocr_permit = match try_acquire_ocr_permit(
-        config.ocr_max_concurrency,
-        Duration::from_secs(5),
-    ) {
-        Some(permit) => permit,
-        None => return Ok(false),
-    };
+    let _ocr_permit =
+        match try_acquire_ocr_permit(config.ocr_max_concurrency, Duration::from_secs(5)) {
+            Some(permit) => permit,
+            None => return Ok(false),
+        };
 
     // 创建 embedder（用于语义分割，与 kb worker 一致）
     let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
@@ -1477,7 +1478,10 @@ fn writeback_native_text_layer(
     embedder: Option<Arc<Embedder>>,
 ) -> Result<OcrExecutionResult> {
     let file_data = std::fs::read(&payload.storage_path).map_err(|e| {
-        GBrainError::FileError(format!("读取 PDF 原文本层失败 {}: {}", payload.storage_path, e))
+        GBrainError::FileError(format!(
+            "读取 PDF 原文本层失败 {}: {}",
+            payload.storage_path, e
+        ))
     })?;
     let parsed = crate::kb::parser::ParserRegistry::new().parse("pdf", &file_data)?;
     let total_pages: i32 = parsed
@@ -1491,11 +1495,7 @@ fn writeback_native_text_layer(
         ));
     }
 
-    crate::kb::ocr::check_ocr_run_guard(
-        conn,
-        payload.document_id,
-        &payload.processing_run_id,
-    )?;
+    crate::kb::ocr::check_ocr_run_guard(conn, payload.document_id, &payload.processing_run_id)?;
 
     let page_analyses: Vec<serde_json::Value> = parsed
         .metadata
@@ -1545,8 +1545,7 @@ fn writeback_native_text_layer(
             font_encoding_suspected: false,
         })
         .collect();
-    let (persisted_ocr_results, attempted_ocr_pages) =
-        load_current_ocr_merge_state(conn, payload)?;
+    let (persisted_ocr_results, attempted_ocr_pages) = load_current_ocr_merge_state(conn, payload)?;
     let fallback_pages: Vec<crate::kb::ocr::OcrWritebackPage> =
         crate::kb::ocr_merge::merge_text_and_ocr(
             &page_analyses,
@@ -1637,10 +1636,7 @@ fn writeback_pages_and_enqueue_reembed(
 fn load_current_ocr_merge_state(
     conn: &Connection,
     payload: &crate::kb::jobs::KbOcrPayload,
-) -> Result<(
-    Vec<crate::kb::ocr_provider::OcrPageResult>,
-    Vec<i32>,
-)> {
+) -> Result<(Vec<crate::kb::ocr_provider::OcrPageResult>, Vec<i32>)> {
     let mut stmt = conn.prepare(
         "SELECT page_number, status, text, markdown, layout_json, \
          layout_visualization_url, raw_response_json, request_id, confidence, provider, model, \
@@ -2136,13 +2132,8 @@ fn execute_ocr_job(
 
     // 合并当前 run 的全部已持久化 OCR 结果，而非仅本次请求返回页。
     // 对 partial 文档重试失败页时，这可保留此前成功页的 OCR 正文。
-    let (persisted_ocr_results, attempted_ocr_pages) =
-        load_current_ocr_merge_state(conn, payload)?;
-    let merged = merge_text_and_ocr(
-        &page_analyses,
-        &persisted_ocr_results,
-        &attempted_ocr_pages,
-    );
+    let (persisted_ocr_results, attempted_ocr_pages) = load_current_ocr_merge_state(conn, payload)?;
+    let merged = merge_text_and_ocr(&page_analyses, &persisted_ocr_results, &attempted_ocr_pages);
 
     // temp_guard 在此处 drop，自动清理临时目录
     drop(temp_guard);

@@ -275,7 +275,7 @@ mod tests {
             image_regions: regions,
             image_area_ratio: image_ratio,
             has_vector_or_unknown_objects: has_vec,
-            width: Some(612),  // 默认 Letter 尺寸
+            width: Some(612), // 默认 Letter 尺寸
             height: Some(792),
             content_parse_failed: false,
             has_vector_drawing_ops: false,
@@ -326,7 +326,8 @@ mod tests {
 
     #[test]
     fn test_detect_mixed_pdf() {
-        let long_text = "这页文字很充足而且没有图片，文本字符数量超过五十个字符的最低阈值要求".repeat(2); // 34*2=68
+        let long_text =
+            "这页文字很充足而且没有图片，文本字符数量超过五十个字符的最低阈值要求".repeat(2); // 34*2=68
         let pages = vec![
             make_page(1, &long_text, 0.0, 0, false),
             make_page(2, "", 0.9, 1, false),

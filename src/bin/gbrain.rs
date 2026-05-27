@@ -454,8 +454,9 @@ fn detect_ocr_pages_for_pdf(
     storage_path: &str,
     config: &Config,
 ) -> Result<gbrain_core::kb::ocr_detector::OcrDetection> {
-    let pdf_data = std::fs::read(storage_path)
-        .map_err(|e| GBrainError::FileError(format!("读取 PDF 文件以自动检测 OCR 页失败: {}", e)))?;
+    let pdf_data = std::fs::read(storage_path).map_err(|e| {
+        GBrainError::FileError(format!("读取 PDF 文件以自动检测 OCR 页失败: {}", e))
+    })?;
     let registry = gbrain_core::kb::parser::ParserRegistry::new();
     let parsed = registry.parse("pdf", &pdf_data)?;
     let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
@@ -1409,8 +1410,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         (parsed_pages, true, reasons)
                     } else {
                         // 自动检测：使用 detector 返回的真实原因
-                        let detection =
-                            detect_ocr_pages_for_pdf(&storage_path, &config_local)?;
+                        let detection = detect_ocr_pages_for_pdf(&storage_path, &config_local)?;
                         let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
                             .reasons_by_page
                             .iter()
@@ -1514,7 +1514,13 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                          '$.ocr_scope', ?3), \
                          updated_at = datetime('now') \
                          WHERE id = ?4 AND processing_run_id = ?5",
-                        rusqlite::params![needs_ocr_pages_str, reasons_str, ocr_scope, doc_id, run_id],
+                        rusqlite::params![
+                            needs_ocr_pages_str,
+                            reasons_str,
+                            ocr_scope,
+                            doc_id,
+                            run_id
+                        ],
                     )?;
 
                     for &page_num in &ocr_pages {

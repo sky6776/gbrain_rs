@@ -970,7 +970,9 @@ impl McpServer {
                             ))
                         },
                     )
-                    .map_err(|e| crate::error::GBrainError::Database(format!("查询文档失败: {}", e)))?;
+                    .map_err(|e| {
+                        crate::error::GBrainError::Database(format!("查询文档失败: {}", e))
+                    })?;
 
                 let (title, storage_path, library_id, run_id) = doc_row;
 
@@ -1004,48 +1006,48 @@ impl McpServer {
                 let config = crate::config::Config::load().unwrap_or_default();
 
                 // 解析页码范围或自动检测：区分显式指定与自动检测
-                let (ocr_pages, _explicit_pages, detection_reasons) = if let Some(ref ps) = pages_str {
-                    let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
-                    // 显式指定：原因统一为 manual_requested
-                    let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
-                        .iter()
-                        .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
-                        .collect();
-                    (parsed_pages, true, reasons)
-                } else {
-                    // 自动检测：使用 detector 返回的真实原因
-                    let registry = crate::kb::parser::ParserRegistry::new();
-                    let parsed = registry.parse("pdf", &pdf_data)?;
-                    let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
-                    let ocr_mode =
-                        crate::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode);
-                    let detection = crate::kb::ocr_detector::detect_ocr_pages(
-                        &page_analyses,
-                        config.ocr_text_density_threshold,
-                        config.ocr_image_area_threshold,
-                        config.ocr_image_count_threshold,
-                        config.ocr_min_low_density_ratio,
-                        &ocr_mode,
-                    );
-                    let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
-                        .reasons_by_page
-                        .iter()
-                        .map(|(k, v)| {
-                            (
-                                k.to_string(),
-                                v.iter()
-                                    .map(|r| {
-                                        serde_json::to_string(r)
-                                            .unwrap_or_default()
-                                            .trim_matches('"')
-                                            .to_string()
-                                    })
-                                    .collect(),
-                            )
-                        })
-                        .collect();
-                    (detection.ocr_pages, false, reasons)
-                };
+                let (ocr_pages, _explicit_pages, detection_reasons) =
+                    if let Some(ref ps) = pages_str {
+                        let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
+                        // 显式指定：原因统一为 manual_requested
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
+                            .iter()
+                            .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                            .collect();
+                        (parsed_pages, true, reasons)
+                    } else {
+                        // 自动检测：使用 detector 返回的真实原因
+                        let registry = crate::kb::parser::ParserRegistry::new();
+                        let parsed = registry.parse("pdf", &pdf_data)?;
+                        let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
+                        let ocr_mode = crate::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode);
+                        let detection = crate::kb::ocr_detector::detect_ocr_pages(
+                            &page_analyses,
+                            config.ocr_text_density_threshold,
+                            config.ocr_image_area_threshold,
+                            config.ocr_image_count_threshold,
+                            config.ocr_min_low_density_ratio,
+                            &ocr_mode,
+                        );
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
+                            .reasons_by_page
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.to_string(),
+                                    v.iter()
+                                        .map(|r| {
+                                            serde_json::to_string(r)
+                                                .unwrap_or_default()
+                                                .trim_matches('"')
+                                                .to_string()
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect();
+                        (detection.ocr_pages, false, reasons)
+                    };
 
                 if ocr_pages.is_empty() {
                     // 持久化本次 none 检测结论，防止状态接口展示上一次运行的选择结果
@@ -1129,7 +1131,13 @@ impl McpServer {
                          '$.ocr_scope', ?3), \
                          updated_at = datetime('now') \
                          WHERE id = ?4 AND processing_run_id = ?5",
-                        rusqlite::params![needs_ocr_pages_str, reasons_str, ocr_scope, doc_id, run_id],
+                        rusqlite::params![
+                            needs_ocr_pages_str,
+                            reasons_str,
+                            ocr_scope,
+                            doc_id,
+                            run_id
+                        ],
                     )?;
 
                     // 先为目标页创建 pending 状态记录，再入队，避免 worker 完成后被
@@ -1203,7 +1211,9 @@ impl McpServer {
                             ))
                         },
                     )
-                    .map_err(|e| crate::error::GBrainError::Database(format!("查询文档失败: {}", e)))?;
+                    .map_err(|e| {
+                        crate::error::GBrainError::Database(format!("查询文档失败: {}", e))
+                    })?;
 
                 let (title, library_id, run_id, page_count, storage_path) = doc_row;
 
@@ -1304,7 +1314,9 @@ impl McpServer {
                 // 仅重置 retry_pages 中失败/empty_ocr 的页状态为 pending
                 let conn = self.engine.connection()?;
                 // 构建页码占位符列表
-                let placeholders: Vec<String> = retry_pages.iter().enumerate()
+                let placeholders: Vec<String> = retry_pages
+                    .iter()
+                    .enumerate()
                     .map(|(i, _)| format!("?{}", i + 3))
                     .collect();
                 let sql = format!(
@@ -1313,10 +1325,8 @@ impl McpServer {
                      AND page_number IN ({}) AND status IN ('failed', 'empty_ocr')",
                     placeholders.join(",")
                 );
-                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                    Box::new(doc_id),
-                    Box::new(run_id.clone()),
-                ];
+                let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+                    vec![Box::new(doc_id), Box::new(run_id.clone())];
                 for &p in &retry_pages {
                     params_vec.push(Box::new(p));
                 }

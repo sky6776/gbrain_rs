@@ -236,8 +236,7 @@ mod tests {
         let pages: Vec<i32> = (1..=101).collect();
         let pdf_data = vec![0u8; 1024];
         let mut temp_guard =
-            crate::kb::temp_guard::TempOcrDir::create("ocr_plan_test", 0, 1_073_741_824)
-                .unwrap();
+            crate::kb::temp_guard::TempOcrDir::create("ocr_plan_test", 0, 1_073_741_824).unwrap();
         let plan = plan_ocr_requests(
             1,
             "run_test",

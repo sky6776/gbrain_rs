@@ -201,7 +201,8 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     // PDF 必须走异步 OCR 流程（process_document_async），同步入口拒绝 PDF
     if payload.extension.to_lowercase() == "pdf" {
         return Err(GBrainError::InvalidInput(
-            "PDF 文档必须使用异步 OCR 流程 (process_document_async)，不允许通过同步入口处理".to_string(),
+            "PDF 文档必须使用异步 OCR 流程 (process_document_async)，不允许通过同步入口处理"
+                .to_string(),
         ));
     }
 
@@ -1539,8 +1540,7 @@ fn maybe_apply_pdf_ocr(
         .collect();
     let needs_ocr_pages_str =
         serde_json::to_string(&detection.ocr_pages).unwrap_or_else(|_| "[]".to_string());
-    let reasons_str =
-        serde_json::to_string(&reasons_json).unwrap_or_else(|_| "{}".to_string());
+    let reasons_str = serde_json::to_string(&reasons_json).unwrap_or_else(|_| "{}".to_string());
     let ocr_scope = match detection.scope() {
         crate::kb::ocr_detector::OcrScope::None => "none",
         crate::kb::ocr_detector::OcrScope::Partial => "partial",
@@ -1703,11 +1703,8 @@ fn maybe_apply_pdf_ocr(
         // 这些文档状态、页状态和 job 入队必须同事务提交，否则 OCR worker
         // 可能在 job 可见后立刻跑完，又被外层/后续状态更新覆盖回 queued/ocr_pending。
         let char_count = parsed.content.chars().count();
-        let granularity = crate::kb::granularity::classify_granularity(
-            "pdf",
-            char_count,
-            total_pages,
-        );
+        let granularity =
+            crate::kb::granularity::classify_granularity("pdf", char_count, total_pages);
         let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
 
         // 入队 OCR job
@@ -1862,12 +1859,8 @@ fn maybe_apply_pdf_ocr(
             // 因此必须在此处根据实际页状态决定是否清空文档级错误。
             // 只读聚合：仅在节点持久化前判断是否需要清空文档错误，
             // 不写入 ocr_status，防止后续 split/节点写入失败时残留错误终态。
-            let (final_ocr_status, _coverage) = crate::kb::ocr::compute_ocr_status(
-                conn,
-                doc_id,
-                total_pages as i32,
-                Some(run_id),
-            )?;
+            let (final_ocr_status, _coverage) =
+                crate::kb::ocr::compute_ocr_status(conn, doc_id, total_pages as i32, Some(run_id))?;
             if final_ocr_status == OcrStatus::Failed {
                 // 全失败：将脱敏后的错误写入文档级 parsing_error
                 let failed_error = "同步内联 OCR 全部页面处理失败";

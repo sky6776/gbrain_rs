@@ -156,10 +156,7 @@ impl DocumentParser for PdfParser {
                 .and_then(|v| v.as_str())
                 .map(|v| v.trim().is_empty())
                 .unwrap_or(true);
-            let char_count = page
-                .get("char_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let char_count = page.get("char_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             if text_empty {
                 reasons.push("empty_text_layer".to_string());
             }
@@ -590,7 +587,8 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
                         let x2 = object_to_f64(&arr[2]);
                         let y2 = object_to_f64(&arr[3]);
                         if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1, y1, x2, y2) {
-                            if x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() {
+                            if x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()
+                            {
                                 let w = x2 - x1;
                                 let h = y2 - y1;
                                 page_area = (w * h).max(1.0);
@@ -617,12 +615,11 @@ fn analyze_page_objects(pdf: &lopdf::Document, page_obj_id: lopdf::ObjectId) -> 
             // 可能包含 appearance stream (/AP)，未参与文本层但应在 OCR 判定中考虑
             if let Ok(annots_obj) = page_dict.get(b"Annots") {
                 // 先尝试直接数组，再尝试间接引用
-                let annots_arr: Option<&Vec<lopdf::Object>> = if let Ok(arr) = annots_obj.as_array() {
+                let annots_arr: Option<&Vec<lopdf::Object>> = if let Ok(arr) = annots_obj.as_array()
+                {
                     Some(arr)
                 } else if let lopdf::Object::Reference(ref_id) = annots_obj {
-                    pdf.get_object(*ref_id)
-                        .ok()
-                        .and_then(|o| o.as_array().ok())
+                    pdf.get_object(*ref_id).ok().and_then(|o| o.as_array().ok())
                 } else {
                     None
                 };
@@ -844,7 +841,6 @@ fn analyze_content_stream(
             _ => {}
         }
     }
-
 }
 
 fn clean_text(text: &str) -> String {

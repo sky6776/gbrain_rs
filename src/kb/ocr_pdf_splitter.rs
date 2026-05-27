@@ -73,9 +73,7 @@ fn generate_split_bytes(
     let pages = doc.get_pages();
     let total_pages = pages.len() as i32;
 
-    if source_start_page < 1
-        || source_end_page > total_pages
-        || source_start_page > source_end_page
+    if source_start_page < 1 || source_end_page > total_pages || source_start_page > source_end_page
     {
         return Err(GBrainError::InvalidInput(format!(
             "无效页码范围: {}..={}，总页数: {}",
@@ -151,7 +149,10 @@ fn split_output_path(
     source_start_page: i32,
     source_end_page: i32,
 ) -> std::path::PathBuf {
-    output_dir.join(format!("split_{}_{}.pdf", source_start_page, source_end_page))
+    output_dir.join(format!(
+        "split_{}_{}.pdf",
+        source_start_page, source_end_page
+    ))
 }
 
 /// Remove a no-longer-needed child file and release its reservation only when

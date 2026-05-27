@@ -29,10 +29,11 @@ pub(crate) fn ocr_temp_dir_try_reserve(bytes: u64, max_bytes: u64) -> bool {
 
 /// 释放临时目录字节预算。
 pub(crate) fn ocr_temp_dir_release(bytes: u64) {
-    OCR_TEMP_DIR_BYTES.fetch_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
-        Some(current.saturating_sub(bytes))
-    })
-    .ok();
+    OCR_TEMP_DIR_BYTES
+        .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(bytes))
+        })
+        .ok();
 }
 
 /// OCR 临时目录的 RAII 清理守卫。
@@ -49,17 +50,12 @@ impl TempOcrDir {
     /// 不再在创建时预留 estimated_bytes 预算，改为按实际写入逐文件计量，
     /// 避免递归拆分场景下预估偏差导致实际占用超过配置上限。
     pub fn create(prefix: &str, _estimated_bytes: u64, _max_bytes: u64) -> std::io::Result<Self> {
-        static NEXT_DIR_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static NEXT_DIR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
         for _ in 0..1000 {
             let id = NEXT_DIR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "{}_{}_{}",
-                prefix,
-                std::process::id(),
-                id
-            ));
+            let path =
+                std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), id));
             match std::fs::create_dir(&path) {
                 Ok(()) => {
                     return Ok(Self {

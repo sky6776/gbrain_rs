@@ -1130,12 +1130,7 @@ fn first_valid_env_u64(names: &[&str]) -> Option<u64> {
             match trimmed.parse::<u64>() {
                 Ok(v) => return Some(v),
                 Err(e) => {
-                    tracing::warn!(
-                        "{} 无效值 '{}': {}，继续尝试后续别名",
-                        name,
-                        trimmed,
-                        e
-                    );
+                    tracing::warn!("{} 无效值 '{}': {}，继续尝试后续别名", name, trimmed, e);
                     continue;
                 }
             }
@@ -1155,12 +1150,7 @@ fn first_valid_env_f64(names: &[&str]) -> Option<f64> {
             match trimmed.parse::<f64>() {
                 Ok(v) => return Some(v),
                 Err(e) => {
-                    tracing::warn!(
-                        "{} 无效值 '{}': {}，继续尝试后续别名",
-                        name,
-                        trimmed,
-                        e
-                    );
+                    tracing::warn!("{} 无效值 '{}': {}，继续尝试后续别名", name, trimmed, e);
                     continue;
                 }
             }
