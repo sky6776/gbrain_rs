@@ -676,8 +676,8 @@ fn resolve_default_library(
     let embedding_dimensions = normalized_embedding_dimensions(config_embedding_dimensions)?;
     conn.execute(
         "INSERT INTO kb_libraries
-            (name, embedding_provider, embedding_model, embedding_dimensions, created_at, updated_at)
-         VALUES ('Inbox', 'openai', ?1, ?2, ?3, ?3)",
+            (name, embedding_provider, embedding_model, embedding_dimensions, raptor_enabled, created_at, updated_at)
+         VALUES ('Inbox', 'openai', ?1, ?2, 1, ?3, ?3)",
         rusqlite::params![embedding_model, embedding_dimensions, now],
     )
     .map_err(|e| GBrainError::Database(format!("自动创建 Inbox 库失败: {}", e)))?;

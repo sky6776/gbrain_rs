@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
-**个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增单入口多投影融合架构（Artifact 原件 → KB/影子页面/候选变更/附件多投影 + 溯源审计 + 回滚）、KB 子系统（异步文档处理管线 + 可选 RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期、时间衰减搜索等特性。基于 SQLite + FTS5 的嵌入式架构；向量检索在可用时使用 sqlite-vec，否则回退到内置 BLOB 存储检索，无需外部数据库。
+**个人知识大脑引擎** — 基于 [gbrain](https://github.com/garrytan/gbrain) 的 Rust 移植，新增单入口多投影融合架构（Artifact 原件 → KB/影子页面/候选变更/附件多投影 + 溯源审计 + 回滚）、KB 子系统（异步文档处理管线 + 新库默认启用的 RAPTOR 递归摘要树）、中文 NLP 全链路支持（jieba 分词 + 拼音 + FTS5 查询重构）、软删除生命周期、时间衰减搜索等特性。基于 SQLite + FTS5 的嵌入式架构；向量检索在可用时使用 sqlite-vec，否则回退到内置 BLOB 存储检索，无需外部数据库。
 
 > 原始 TypeScript 版本由 [Garry Tan](https://github.com/garrytan) 开发。本项目采用 **Vibe coding** 构建。
 
@@ -38,7 +38,7 @@ gbrain serve
 
 - **检索能力** — 统一 facade 查询当前以 FTS5 关键词检索为主；底层 hybrid API 可将关键词与可选向量结果用 RRF 融合并支持多查询扩展，模糊三元组查询作为独立 API 提供
 - **知识图谱** — Wiki 链接提取、类型化链接、图遍历、反向链接对称性验证
-- **KB 子系统** — 异步文档处理管线，库启用后可运行 RAPTOR 递归摘要树和语义分块，多格式解析器（Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本），PDF 页级 OCR 自动检测与回写；代码页面索引走独立代码流程
+- **KB 子系统** — 异步文档处理管线，新建库默认启用 RAPTOR（满足模型配置与库策略时执行）；语义分块仍按库配置启用；支持 Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本解析和 PDF 页级 OCR 自动检测与回写；代码页面索引走独立代码流程
 - **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
 - **单入口多投影融合** — 原件上传（Upload）自动创建 KB 文档、影子页面、页面更新或附件等投影，并通过候选评审形成链接或时间线变更；支持溯源审计、提升、版本链与回滚，内部 Memory Query 含 4 种策略
 - **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，默认暴露 Artifact facade 与 KB OCR 工具
@@ -1137,8 +1137,10 @@ cargo clippy                  # 代码检查
 1. **解析** — 文档解析器（Markdown / PDF / DOCX / XLSX / CSV / HTML / 纯文本）；代码图索引走独立页面流程
 2. **拆分** — 递归拆分器；库启用 `semantic_enabled` 且具备嵌入能力时可使用语义拆分器（Savitzky-Golay 平滑 + chunk_overlap 重叠）
 3. **嵌入** — 向量嵌入生成与持久化
-4. **RAPTOR（可选）** — 库启用 `raptor_enabled` 后构建递归摘要树（K-Means++ 聚类 + LLM 摘要，四级回退链：库级配置 → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`）
+4. **RAPTOR（新库默认开启）** — `raptor_enabled=true` 且满足运行条件时构建递归摘要树（K-Means++ 聚类 + LLM 摘要，四级回退链：库级配置 → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`）
 5. **持久化** — 事务保护的节点/向量写入
+
+`raptor_enabled` 存放在每条 `kb_libraries` 记录中；新建库及自动创建的 `Inbox` 库默认均为 `true`。启用后，文档节点少于 3 个、库禁止外部摘要或无法解析 RAPTOR LLM 凭据时，处理管线会自动跳过摘要树构建。当前 `gbrain config`、CLI 的 `kb` 子命令和 MCP 工具均未暴露关闭开关。
 
 对于 PDF，解析阶段会先生成页级 OCR 判定：空/低密度文本层、图片与矢量内容、批注 appearance 风险、隐藏文本、字体编码疑似异常以及解析/几何不确定页都会保守进入候选集合。需要 OCR 时，系统默认排入异步 OCR job，识别完成后回写文本并触发重嵌入；仅在 `GBRAIN_OCR_SYNC_INLINE=true` 时在处理管线中内联执行。
 
@@ -1158,7 +1160,7 @@ cargo clippy                  # 代码检查
   ├─ Artifact 原件存储（SHA256 去重，按 hash 命名）
   │
   └─ 多投影自动创建：
-      ├─ KB Document 投影 → 文档处理管线（解析→拆分→嵌入→可选 RAPTOR→持久化）
+      ├─ KB Document 投影 → 文档处理管线（解析→拆分→嵌入→默认开启的 RAPTOR→持久化）
       ├─ Shadow Page 投影 → 影子页面（提取内容生成 wiki 页面）
       ├─ Brain Page Update 投影 → 已有页面更新
       ├─ File Attachment 投影 → 文件附件（简单文件引用）

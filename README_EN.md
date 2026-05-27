@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), a KB subsystem (async document processing pipeline + optional RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle, time-decay search, and more. Built on embedded SQLite + FTS5; vector retrieval uses sqlite-vec when available and otherwise falls back to built-in BLOB storage, with no external database required.
+**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), a KB subsystem (async document processing pipeline + RAPTOR recursive summarization enabled by default for new libraries), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle, time-decay search, and more. Built on embedded SQLite + FTS5; vector retrieval uses sqlite-vec when available and otherwise falls back to built-in BLOB storage, with no external database required.
 
 > The original TypeScript version was developed by [Garry Tan](https://github.com/garrytan). Built with **Vibe coding**.
 
@@ -38,7 +38,7 @@ Keyword retrieval and local storage require no database or external service setu
 
 - **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async document processing pipeline, with optional RAPTOR recursive summarization and semantic chunking when enabled for a library; multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext) and automatic page-level PDF OCR detection/writeback; code-page indexing is a separate path
+- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when model configuration and library policy allow it; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext) and automatic page-level PDF OCR detection/writeback; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
@@ -1108,8 +1108,10 @@ Async five-stage document processing pipeline:
 1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
 2. **Split** — Recursive splitter; semantic splitting (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
 3. **Embed** — Vector embedding generation and persistence
-4. **RAPTOR (optional)** — When a library enables `raptor_enabled`, build a recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
+4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and runtime prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
 5. **Persist** — Transaction-protected node/vector writes
+
+`raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Once enabled, the pipeline automatically skips RAPTOR when a document has fewer than three nodes, external summarization is disallowed, or no RAPTOR LLM credential can be resolved. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
 
 For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline.
 
@@ -1129,7 +1131,7 @@ Upload Source (Single Entry Point)
   +-- Artifact Original Storage (SHA256 dedup, named by hash)
   |
   +-- Multi-Projection Auto-Creation:
-      +-- KB Document Projection -> Document processing pipeline (parse->split->embed->optional RAPTOR->persist)
+      +-- KB Document Projection -> Document processing pipeline (parse->split->embed->RAPTOR enabled by default->persist)
       +-- Shadow Page Projection -> Shadow page (extract content -> generate wiki page)
       +-- Brain Page Update Projection -> Existing-page update
       +-- File Attachment Projection -> File attachment (simple file reference)

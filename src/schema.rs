@@ -345,7 +345,7 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     name TEXT NOT NULL,
     semantic_segmentation_enabled INTEGER NOT NULL DEFAULT 0,
-    raptor_enabled INTEGER NOT NULL DEFAULT 0,
+    raptor_enabled INTEGER NOT NULL DEFAULT 1,
     raptor_llm_base_url TEXT NOT NULL DEFAULT '',
     raptor_llm_secret_ref TEXT NOT NULL DEFAULT '',
     raptor_llm_model TEXT NOT NULL DEFAULT '',

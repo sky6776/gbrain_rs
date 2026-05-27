@@ -226,7 +226,7 @@ impl<'a> KbEngine<'a> {
             let chunk_overlap = input.chunk_overlap.unwrap_or(50).clamp(0, 1000) as i32;
             let batch_max_docs = input.batch_max_documents.unwrap_or(3).clamp(1, 5) as i32;
             let batch_max_chunks = input.batch_max_chunks.unwrap_or(10).clamp(1, 20) as i32;
-            let raptor_enabled = input.raptor_enabled.unwrap_or(false) as i32;
+            let raptor_enabled = input.raptor_enabled.unwrap_or(true) as i32;
             let semantic = input.semantic_segmentation_enabled.unwrap_or(false) as i32;
 
             // Get next sort_order from MAX+1
