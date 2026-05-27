@@ -3,9 +3,9 @@
 中文 | [English](./README_EN.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), KB subsystem (async document processing pipeline + RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle (restore/purge-deleted), time-decay search, and more. Built on SQLite + sqlite-vec + FTS5 with a zero-config embedded architecture — ready to use out of the box.
+**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), a KB subsystem (async document processing pipeline + optional RAPTOR recursive summarization tree), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle, time-decay search, and more. Built on embedded SQLite + FTS5; vector retrieval uses sqlite-vec when available and otherwise falls back to built-in BLOB storage, with no external database required.
 
 > The original TypeScript version was developed by [Garry Tan](https://github.com/garrytan). Built with **Vibe coding**.
 
@@ -14,8 +14,8 @@
 ## Quick Start
 
 ```bash
-# 1. Build
-cargo build --release
+# 1. Build and install
+cargo install --path .
 
 # 2. Initialize a knowledge base
 gbrain init
@@ -30,27 +30,27 @@ gbrain query "who is Alice"
 gbrain serve
 ```
 
-No database or external services to configure — works out of the box. AI features like embeddings and query expansion are optional and activate automatically when API keys are configured.
+Keyword retrieval and local storage require no database or external service setup. Embeddings, query expansion, and reranking are optional and activate only on the corresponding lower-level or KB retrieval paths when API keys are configured.
 
 ---
 
 ## Features
 
-- **Hybrid Search** — BM25 keywords + vector cosine similarity + fuzzy trigrams, merged via Reciprocal Rank Fusion (RRF), with multi-query expansion
+- **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async five-stage document processing pipeline (parse → split → embed → RAPTOR → persist), RAPTOR recursive summarization tree, document upload and processing, multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext/code), automatic page-level PDF OCR detection and writeback, semantic chunking (Savitzky-Golay smoothing + chunk_overlap overlap)
+- **KB Subsystem** — Async document processing pipeline, with optional RAPTOR recursive summarization and semantic chunking when enabled for a library; multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext) and automatic page-level PDF OCR detection/writeback; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
-- **Single-Entry Multi-Projection Fusion** — Artifact upload automatically routes to multiple projections (KB document / shadow page / candidate changes / file attachment / links / timeline), provenance audit ledger, candidate review & promotion workflow, version chain with rollback (Projection Supersede / Rollback), unified memory query (Memory Query, 4 strategies)
-- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade tools
+- **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
+- **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
 - **Autopilot** — Self-maintenance daemon thread, auto-runs in background when `gbrain serve` starts. Periodically embeds stale content and runs integrity checks (default every 3600s, configurable via `GBRAIN_AUTOPILOT_INTERVAL`, at least 60s, disable via `GBRAIN_AUTOPILOT_ENABLED`)
 - **Safety Guards** — Path traversal protection, slug validation, remote-call input sanitization, parameterized queries against SQL injection
-- **Code Knowledge Graph** — Tree-sitter AST code chunking + regex symbol indexing with symbol definitions, references, and call graph (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
-- **Audio Transcription** — Groq Whisper (default) or OpenAI Whisper support
-- **Writer Modes** — Strict (full validation) / Lint (zero-LLM quality checks) / Off (free write) strategies
-- **Soft-Delete Lifecycle** — Delete → restore → permanent purge, with time-based batch cleanup
+- **Code Knowledge Graph** — Code pages imported or reindexed as code can use Tree-sitter AST chunking and regex symbol indexing for definitions, references, and call graphs (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
+- **Audio Transcription Module** — The library API supports Groq Whisper (default) or OpenAI Whisper; no CLI/MCP command is currently exposed
+- **Writer Validation Library API** — `BrainWriter` provides Strict/Lint/Off modes; the unified Artifact CLI/MCP interface does not expose mode selection
+- **Soft-Delete Lifecycle** — Artifact deletion and restore are exposed; permanent and time-based purge are currently engine-level operations
 
 ---
 
@@ -67,22 +67,20 @@ gbrain init                    # Initialize knowledge base to ~/.gbrain/
 
 ## Data Directory
 
-After initialization, the `~/.gbrain/` directory structure is:
+As features are used, the `~/.gbrain/` directory may contain:
 
 ```
 ~/.gbrain/
-  brain.db           # SQLite database (FTS5 + sqlite-vec)
+  brain.db           # SQLite database (FTS5 + vector BLOB fallback; sqlite-vec when available)
   config.json        # Runtime config (generated via gbrain config set)
   bin/               # Executable copy (copied during gbrain init)
   artifacts/         # Artifact original file storage (named by SHA256; KB documents reference this store)
-  kb/                # KB subsystem metadata storage
   cache/             # Cache directory
-  kb_files/          # KB file storage (only active when GBRAIN_KB_STORAGE_DIR is customized)
   logs/              # Log files
     gbrain.log
 ```
 
-Customize the root directory via the `GBRAIN_DIR` environment variable.
+KB documents created by Artifact upload reference originals in `artifacts/`; KB metadata is stored in `brain.db`. Customize the root directory via the `GBRAIN_DIR` environment variable.
 
 ---
 
@@ -95,6 +93,8 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `--db <PATH>` | Database path |
 | `--json` | Output as JSON |
 | `--dry-run` | Preview operations without executing |
+
+Global options must precede the subcommand, for example `gbrain --json query "Alice"`.
 
 ### Knowledge Operations
 
@@ -111,6 +111,9 @@ Customize the root directory via the `GBRAIN_DIR` environment variable.
 | `gbrain restore <id_or_uid> [--dry-run]` | Restore a soft-deleted knowledge source |
 | `gbrain reprocess <id_or_uid> [--dry-run]` | Reprocess knowledge source |
 | `gbrain health` | Check knowledge source consistency |
+| `gbrain kb ocr-status <doc_id>` | View KB document OCR status |
+| `gbrain kb ocr-run <doc_id> [--pages]` | Trigger or enqueue OCR manually |
+| `gbrain kb ocr-retry <doc_id> [--pages]` | Retry failed or empty-result OCR pages |
 | `gbrain serve` | Run as MCP stdio server |
 
 #### Examples
@@ -230,14 +233,14 @@ gbrain --db /path/to/custom/brain.db init
 gbrain --db /path/to/custom/brain.db put people/alice --content "Hello"
 
 # JSON output (for scripting)
-gbrain query "Alice" --json
-gbrain get 1 --include-projections --json
-gbrain health --json
-gbrain review list --status pending --json
+gbrain --json query "Alice"
+gbrain --json get 1 --include-projections
+gbrain --json health
+gbrain --json review list --status pending
 
 # Dry-run previews (all supporting commands)
 gbrain put people/bob --content "test" --dry-run
-gbrain upload report.pdf --dry-run --json
+gbrain --json upload report.pdf --dry-run
 gbrain delete 5 --dry-run
 gbrain detach 5 --from people/alice --dry-run
 gbrain restore 5 --dry-run
@@ -252,6 +255,12 @@ gbrain put people/new-hire --content "New hire info..." --intent promote
 
 # upload promote + auto-accept low-risk
 gbrain upload meeting-notes.md --intent promote --promotion auto-low-risk --target people/alice
+
+# ===== KB OCR =====
+# Inspect status, run OCR for selected pages, and retry failed or empty pages
+gbrain kb ocr-status 1
+gbrain kb ocr-run 1 --pages "1,3,5-10"
+gbrain kb ocr-retry 1
 ```
 
 ### Review Operations
@@ -279,10 +288,10 @@ gbrain review apply 1
 | Subcommand | Description |
 |------------|-------------|
 | `gbrain config show` | Show common config values (quick overview of 15 core items) |
-| `gbrain config get <key>` | Get a single config value (supports all 23 keys listed below) |
-| `gbrain config set <key> <value>` | Set a config value (auto-saves to config.json) |
+| `gbrain config get <key>` | Get a single config value (supports all 29 keys listed below) |
+| `gbrain config set <key> <value>` | Set a config value (also accepts two set-only OCR threshold keys) |
 
-> **Note:** `config show` only displays the 15 most used core keys; `config get <key>` can access all 23 config items listed in the table below.
+> **Note:** `config show` only displays the 15 most used core keys; `config get <key>` can access all 29 config items listed in the table below. `config set` also accepts `ocr_text_density_threshold` and `ocr_timeout_seconds_per_page`, which are saved to `config.json` but are not currently returned by `config get`.
 
 **Available config keys:**
 
@@ -299,7 +308,7 @@ gbrain review apply 1
 | `log_to_console` | boolean | Enable console logging | `true` |
 | `auto_link` | boolean | Auto-extract links on write | `true` |
 | `auto_timeline` | boolean | Auto-extract timeline on write | `true` |
-| `post_write_lint` | boolean | Run lint after write | `false` |
+| `post_write_lint` | boolean | Run validator checks after write and log the result | `false` |
 | `kb_enabled` | boolean | Enable KB subsystem | `true` |
 | `kb_raptor_model` | string | KB RAPTOR LLM model | `gpt-4o-mini` |
 | `kb_max_file_size_mb` | integer | KB max file size (MB) | `50` |
@@ -311,6 +320,12 @@ gbrain review apply 1
 | `artifact_manual_memory_to_kb` | boolean | Write memory intent to KB | `true` |
 | `autopilot_enabled` | boolean | Enable autopilot background maintenance | `true` |
 | `autopilot_interval_secs` | integer | Autopilot maintenance interval (seconds, min 60) | `3600` |
+| `ocr_enabled` | boolean | Enable PDF OCR | `true` |
+| `ocr_base_url` | string | GLM-OCR endpoint | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
+| `ocr_model` | string | OCR model | `glm-ocr` |
+| `ocr_mode` | string | OCR selection mode: auto/all_pages | `auto` |
+| `ocr_submit_mode` | string | OCR submission mode: pdf_first/pdf_range | `pdf_first` |
+| `ocr_profile` | string | OCR profile: general/table/formula/handwriting | `general` |
 
 ---
 
@@ -394,6 +409,15 @@ gbrain review apply 1
 |-----------|------|----------|-------------|
 | `id_or_uid` | string | Yes | Artifact ID or UID |
 | `--dry-run` | flag | No | Preview reprocess impact, don't execute |
+
+### `gbrain kb OCR`
+
+| Command/Parameter | Type | Required | Description |
+|-------------------|------|----------|-------------|
+| `ocr-status <doc_id>` | integer | Yes | View OCR status for a KB document |
+| `ocr-run <doc_id>` | integer | Yes | Trigger or enqueue OCR for a KB document |
+| `ocr-retry <doc_id>` | integer | Yes | Retry failed or empty-result OCR pages |
+| `--pages <RANGES>` | string | No | Page ranges to run or retry, e.g. `1,3,5-10` |
 
 ### `gbrain review list`
 
@@ -484,7 +508,7 @@ CLI uses `remote=false` directly, bypassing remote security restrictions.
 
 ## MCP Tools
 
-gbrain exposes only Artifact unified knowledge operation facade tools (`artifact_*`) via JSON-RPC 2.0 over stdio.
+gbrain exposes Artifact unified knowledge operation facade tools (`artifact_*`) and KB OCR extension tools via JSON-RPC 2.0 over stdio.
 
 | Tool | Description |
 |------|-------------|
@@ -503,6 +527,14 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 | `artifact_review_apply` | Apply a suggested change |
 | `artifact_review_reject` | Reject a suggested change |
 | `artifact_review_rollback` | Roll back an applied suggested change |
+
+### KB OCR Extensions
+
+| Tool | Description |
+|------|-------------|
+| `kb_document_status` | View KB document processing and OCR status |
+| `kb_ocr_run` | Trigger or enqueue OCR for a KB document |
+| `kb_ocr_retry` | Retry failed or empty-result OCR pages |
 
 #### Examples
 
@@ -632,7 +664,7 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 | `none` | — | No auto-promotion; no shadows or candidates |
 | `shadow` | — | Create shadow pages only, no candidates |
 | `candidate` | — | Generate candidates for human review (default) |
-| `auto-low-risk` | `auto` | Auto-accept low-risk candidates (entity mentions, link suggestions, etc.); high-risk still needs review |
+| `auto-low-risk` | — | Auto-accept low-risk candidates (entity mentions, link suggestions, etc.); high-risk still needs review |
 
 ---
 
@@ -660,7 +692,7 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 | `page_slug` | string | No | Associated page slug (for attachments) |
 | `library_id` | integer | No | KB library ID (optional, defaults to auto-selecting Inbox) |
 | `folder_id` | integer | No | KB folder ID |
-| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk(alias auto) |
+| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk |
 | `dry_run` | boolean | No | Return routing plan only, don't write |
 
 ### `artifact_query`
@@ -687,6 +719,7 @@ gbrain exposes only Artifact unified knowledge operation facade tools (`artifact
 | `id_or_uid` | string | Yes | Artifact ID or UID (e.g., '1' or 'art_ab12cd34ef56') |
 | `include_projections` | boolean | No | Include projection details |
 | `include_sources` | boolean | No | Include source tracing |
+| `include_content` | boolean | No | Include original content |
 
 ### `artifact_delete`
 
@@ -753,6 +786,26 @@ No parameters.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `change_id` | integer | Yes | Change ID |
+
+### `kb_document_status`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | KB document ID |
+
+### `kb_ocr_run`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | KB document ID |
+| `pages` | string | No | Page ranges, e.g. `1,3,5-10` |
+
+### `kb_ocr_retry`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document_id` | integer | Yes | KB document ID |
+| `pages` | string | No | Retry only the specified page ranges |
 
 ### Known Limitations
 
@@ -826,6 +879,8 @@ The current KB document pipeline uses Markdown/recursive chunking or embedding-b
 | `GBRAIN_CHUNKER_MODEL` | LLM chunking model | `gpt-4o-mini` |
 
 ### Audio Transcription
+
+Transcription is available through the library module; no corresponding CLI or MCP tool is currently exposed.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -928,7 +983,7 @@ External OCR is additionally gated by library privacy policy: PDF pages are sent
 |----------|-------------|---------|
 | `GBRAIN_AUTO_LINK` | Auto-extract links on write | `true` |
 | `GBRAIN_AUTO_TIMELINE` | Auto-extract timeline on write | `true` |
-| `GBRAIN_POST_WRITE_LINT` | Run lint after write | `false` |
+| `GBRAIN_POST_WRITE_LINT` | Run validator checks after write and log the result | `false` |
 
 ### Debug
 
@@ -942,7 +997,7 @@ External OCR is additionally gated by library privacy policy: PDF pages are sent
 
 ## Writer Modes
 
-gbrain provides three write strategies for page content processing:
+The `BrainWriter` library API provides three page-write strategies. The current `gbrain put` and `artifact_put` interfaces do not accept a `mode` parameter; `post_write_lint` only runs `validators` checks and logs results, rather than executing the six auto-fix rules from `lint.rs` below.
 
 | Mode | Description |
 |------|-------------|
@@ -951,6 +1006,8 @@ gbrain provides three write strategies for page content processing:
 | `Off` | Free write — skips all validation, writes directly |
 
 ### Lint Rules
+
+Rules implemented in `lint.rs` (not currently exposed as a CLI/MCP command):
 
 | Rule | Description |
 |------|-------------|
@@ -998,7 +1055,7 @@ Based on Tree-sitter AST chunking + regex symbol indexing, supporting the follow
 | C | `tree-sitter-c` |
 | C++ | `tree-sitter-cpp` |
 
-Code knowledge graph features (symbol definitions, references, call graphs) are built into the KB document processing pipeline and are triggered automatically during document upload and processing.
+Tree-sitter indexing runs when code pages are written or when `Operations::reindex_code_page` is invoked. With `gbrain upload --intent auto`, recognized code extensions are directed to the existing code import/sync flow; upload does not automatically create KB or code-graph projections. The current `artifact_query` facade also does not expose `graph` mode.
 
 ---
 
@@ -1022,7 +1079,7 @@ Tests use in-memory SQLite (`:memory:`) — no extra configuration needed.
 
 Three-layer design:
 
-1. **Engine Layer** — `BrainEngine` trait → `SqliteEngine` (SQLite + FTS5 + sqlite-vec). Synchronous, direct database operations.
+1. **Engine Layer** — `BrainEngine` trait → `SqliteEngine` (SQLite + FTS5; sqlite-vec accelerates vector retrieval when available, otherwise BLOB fallback is used). Synchronous, direct database operations.
 
 2. **Operations Layer** — Business logic: auto-chunking, tag extraction, link inference, safety validation, batch operations.
 
@@ -1030,26 +1087,28 @@ Three-layer design:
 
 ### Search Pipeline
 
-9-step hybrid search pipeline (+ two-stage code graph expansion + dedup):
+Lower-level hybrid search pipeline (used by internal or programmatic search paths; the public `gbrain query` / `artifact_query` facade currently does not generate query vectors or LLM query expansions):
 
 1. FTS5 BM25 keyword search (weights: title 10x, compiled_truth 5x, timeline 2x)
-2. sqlite-vec cosine similarity
-3. Fallback to expanded OR query when vector results < 3
-4. RRF fusion (k=60) with multi-list support
+2. Optional vector search (sqlite-vec when available, otherwise BLOB fallback)
+3. Supplement with an expanded OR keyword query when vector results are fewer than 3
+4. RRF fusion (k=60) and normalization, accepting supplied expanded vector-result lists
 5. compiled_truth weighted boost
-6. Backlink boost
-7. Recency boost (time decay)
-8. Intent type boost (entity/time/event)
-9. 6-layer dedup (slug top-3 → cross-source dedup → text similarity → type diversity → per-page cap → compiled_truth guarantee)
+6. When a query embedding is supplied, blend cosine similarity with normalized RRF for reranking
+7. Backlink boost
+8. Recency boost (time decay)
+9. Intent type boost (entity/time/event)
+10. Optional two-stage code graph expansion (`walk_depth` / `near_symbol`)
+11. 6-layer dedup (slug top-3 → cross-source dedup → text similarity → type diversity → per-page cap → compiled_truth guarantee)
 
 ### KB Subsystem Architecture
 
 Async five-stage document processing pipeline:
 
-1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext / code)
-2. **Split** — Recursive splitter / Semantic splitter (Savitzky-Golay smoothing + chunk_overlap overlap), switchable via `semantic_enabled` flag
+1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
+2. **Split** — Recursive splitter; semantic splitting (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
 3. **Embed** — Vector embedding generation and persistence
-4. **RAPTOR** — Recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
+4. **RAPTOR (optional)** — When a library enables `raptor_enabled`, build a recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
 5. **Persist** — Transaction-protected node/vector writes
 
 For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline.
@@ -1070,12 +1129,11 @@ Upload Source (Single Entry Point)
   +-- Artifact Original Storage (SHA256 dedup, named by hash)
   |
   +-- Multi-Projection Auto-Creation:
-      +-- KB Document Projection -> Document processing pipeline (parse->split->embed->RAPTOR->persist)
+      +-- KB Document Projection -> Document processing pipeline (parse->split->embed->optional RAPTOR->persist)
       +-- Shadow Page Projection -> Shadow page (extract content -> generate wiki page)
-      +-- Promotion Candidate Projection -> Candidate changes (entity mentions/link suggestions/timeline events/fact claims)
+      +-- Brain Page Update Projection -> Existing-page update
       +-- File Attachment Projection -> File attachment (simple file reference)
-      +-- Brain Link Projection -> Auto links
-      +-- Brain Timeline Projection -> Auto timeline
+      +-- Promotion Candidate -> Candidate changes (may include link/timeline suggestions)
 ```
 
 **Core Concepts:**
@@ -1095,6 +1153,8 @@ Upload Source (Single Entry Point)
 | `evidence_first` | Search KB document evidence first, ideal for queries requiring original sources |
 | `provenance` | Trace fact origins, return provenance records |
 | `timeline_first` | Sort by timeline first, ideal for time-related queries |
+
+These four are internal Memory Query strategies. The CLI/MCP facade currently exposes only `auto` / `memory` / `evidence` / `timeline` modes and does not provide `provenance` or `graph` mode.
 
 ---
 
