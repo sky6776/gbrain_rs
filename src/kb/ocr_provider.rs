@@ -15,7 +15,7 @@ pub trait OcrProvider: Send + Sync {
     ) -> crate::error::Result<Vec<OcrPageResult>>;
 }
 
-/// OCR 输入（当前只支持 PDF）
+/// OCR 输入
 #[derive(Debug, Clone)]
 pub enum OcrInput {
     /// PDF 页段输入
@@ -33,6 +33,17 @@ pub enum OcrInput {
         /// 文档 ID（用于生成稳定 request_id）
         document_id: i64,
         /// 处理运行 ID（用于生成稳定 request_id）
+        run_id: String,
+    },
+    /// 单张图片输入（GLM-OCR 支持 JPG/PNG）。
+    Image {
+        /// 图片内容（URL 或 base64）。
+        file: OcrFilePayload,
+        /// 图片 MIME 类型：image/png 或 image/jpeg。
+        mime_type: String,
+        /// 文档 ID（用于生成稳定 request_id）。
+        document_id: i64,
+        /// 处理运行 ID（用于生成稳定 request_id）。
         run_id: String,
     },
 }

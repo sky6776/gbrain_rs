@@ -12,6 +12,8 @@ pub struct GlmOcrProvider {
 }
 
 const PDF_DATA_URI_PREFIX: &str = "data:application/pdf;base64,";
+const PNG_DATA_URI_PREFIX: &str = "data:image/png;base64,";
+const JPEG_DATA_URI_PREFIX: &str = "data:image/jpeg;base64,";
 
 impl GlmOcrProvider {
     pub fn new(api_key: &str) -> Self {
@@ -27,6 +29,16 @@ impl OcrProvider for GlmOcrProvider {
     }
 
     fn recognize(&self, input: &OcrInput, options: &OcrOptions) -> Result<Vec<OcrPageResult>> {
+        if let OcrInput::Image {
+            file,
+            mime_type,
+            document_id,
+            run_id,
+        } = input
+        {
+            return self.recognize_image(file, mime_type, *document_id, run_id, options);
+        }
+
         let OcrInput::PdfRange {
             file,
             request_start_page_id,
@@ -35,7 +47,10 @@ impl OcrProvider for GlmOcrProvider {
             source_end_page,
             document_id,
             run_id,
-        } = input;
+        } = input
+        else {
+            unreachable!("image OCR inputs are handled before PDF processing")
+        };
 
         let timeout = std::time::Duration::from_secs(
             options.timeout_seconds_per_page
@@ -158,6 +173,76 @@ enum SinglePageError {
 }
 
 impl GlmOcrProvider {
+    /// 识别单张 JPG/PNG。图片请求不携带 PDF 页码范围参数。
+    fn recognize_image(
+        &self,
+        file: &crate::kb::ocr_provider::OcrFilePayload,
+        mime_type: &str,
+        document_id: i64,
+        run_id: &str,
+        options: &OcrOptions,
+    ) -> Result<Vec<OcrPageResult>> {
+        let file_content = match file {
+            crate::kb::ocr_provider::OcrFilePayload::Base64(data) => {
+                image_base64_to_data_uri(data, mime_type)?
+            }
+            crate::kb::ocr_provider::OcrFilePayload::Url(url) => url.clone(),
+        };
+        let request_id = generate_request_id(document_id, run_id, 1, 1);
+        let mut body = serde_json::json!({
+            "model": options.model,
+            "file": file_content,
+            "enable_layout": options.enable_layout,
+            "request_id": request_id,
+        });
+        if options.return_crop_images {
+            body["return_crop_images"] = serde_json::json!(true);
+        }
+        if options.need_layout_visualization {
+            body["need_layout_visualization"] = serde_json::json!(true);
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(
+                options.timeout_seconds_per_page,
+            ))
+            .build()
+            .map_err(|e| GBrainError::Http(format!("创建 HTTP client 失败: {}", e)))?;
+        let response = client
+            .post(&options.base_url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .map_err(|e| GBrainError::Http(format!("GLM-OCR 请求失败: {}", e)))?;
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().unwrap_or_default();
+            return Err(GBrainError::Http(format!(
+                "GLM-OCR API 错误 (status={}): {}",
+                status, error_text
+            )));
+        }
+
+        let response_json: serde_json::Value = response
+            .json()
+            .map_err(|e| GBrainError::Serialization(format!("GLM-OCR 响应解析失败: {}", e)))?;
+        let mut glm_response: GlmOcrResponse = serde_json::from_value(response_json.clone())
+            .map_err(|e| GBrainError::Serialization(format!("GLM-OCR 响应结构解析失败: {}", e)))?;
+        glm_response.raw_json = response_json;
+
+        normalize_glm_ocr_response(
+            &glm_response,
+            1,
+            1,
+            1,
+            self.name(),
+            &options.model,
+            Some(&request_id),
+            &options.ocr_profile,
+        )
+    }
+
     /// 发送单页 OCR 请求并解析响应
     ///
     /// 返回 Ok(results) 表示成功，Err(SinglePageError) 表示失败（可区分是否可重试）。
@@ -408,6 +493,20 @@ fn pdf_base64_to_data_uri(encoded_pdf: &str) -> String {
     format!("{}{}", PDF_DATA_URI_PREFIX, encoded_pdf)
 }
 
+fn image_base64_to_data_uri(encoded_image: &str, mime_type: &str) -> Result<String> {
+    let prefix = match mime_type {
+        "image/png" => PNG_DATA_URI_PREFIX,
+        "image/jpeg" => JPEG_DATA_URI_PREFIX,
+        _ => {
+            return Err(GBrainError::InvalidInput(format!(
+                "GLM-OCR 不支持图片 MIME 类型: {}",
+                mime_type
+            )))
+        }
+    };
+    Ok(format!("{}{}", prefix, encoded_image))
+}
+
 /// 从 URL 中移除可能包含凭证的敏感部分（userinfo、query、fragment），
 /// 仅保留 `scheme://host:port/path`，用于审计日志脱敏
 fn sanitize_url_for_log(url: &str) -> String {
@@ -513,5 +612,18 @@ mod tests {
                 .expect("data URI should contain valid base64"),
             data
         );
+    }
+
+    #[test]
+    fn test_image_base64_is_wrapped_with_supported_mime() {
+        assert_eq!(
+            image_base64_to_data_uri("YWJj", "image/png").unwrap(),
+            "data:image/png;base64,YWJj"
+        );
+        assert_eq!(
+            image_base64_to_data_uri("YWJj", "image/jpeg").unwrap(),
+            "data:image/jpeg;base64,YWJj"
+        );
+        assert!(image_base64_to_data_uri("YWJj", "image/webp").is_err());
     }
 }

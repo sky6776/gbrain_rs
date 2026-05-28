@@ -17,6 +17,13 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
 
+const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const OCR_IMAGE_TOTAL_PAGES: i32 = 1;
+
+fn is_ocr_image_extension(ext: &str) -> bool {
+    crate::artifact::types::is_ocr_image_file(&ext.to_lowercase())
+}
+
 /// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
 ///
 /// 严格区分 byte offset 和 char offset：
@@ -199,9 +206,10 @@ pub struct PipelineConfig {
 /// 成功时返回词数/分块数。失败时文档状态设为 STATUS_FAILED。
 pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result<ProcessResult> {
     // PDF 必须走异步 OCR 流程（process_document_async），同步入口拒绝 PDF
-    if payload.extension.to_lowercase() == "pdf" {
+    let payload_ext = payload.extension.to_lowercase();
+    if payload_ext == "pdf" || is_ocr_image_extension(&payload_ext) {
         return Err(GBrainError::InvalidInput(
-            "PDF 文档必须使用异步 OCR 流程 (process_document_async)，不允许通过同步入口处理"
+            "PDF/image OCR documents must use process_document_async; sync processing is not supported"
                 .to_string(),
         ));
     }
@@ -444,6 +452,30 @@ pub async fn process_document_async(
         );
         GBrainError::FileError(format!("无法读取 {}: {}", storage_path, e))
     })?;
+
+    if is_ocr_image_extension(ext) {
+        let ocr_config = crate::config::Config::load().unwrap_or_default();
+        enqueue_image_ocr(
+            conn,
+            doc_id,
+            lib_id,
+            run_id,
+            storage_path,
+            ext,
+            &library,
+            &file_data,
+            &ocr_config,
+        )?;
+        tracing::info!(
+            doc_id,
+            "Image OCR job queued; main KB pipeline returned early"
+        );
+        return Ok(ProcessResult {
+            word_total: 0,
+            split_total: 0,
+            deferred_ocr: true,
+        });
+    }
 
     let parsed = registry.parse(ext, &file_data).inspect_err(|e| {
         let _ = kb.update_document_status_with_run_guard(
@@ -1042,7 +1074,9 @@ pub async fn ingest_directory(
         )));
     }
 
-    let supported_extensions: &[&str] = &["pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md"];
+    let supported_extensions: &[&str] = &[
+        "pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md", "png", "jpg", "jpeg",
+    ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     collect_supported_files(dir_path, supported_extensions, &mut files);
@@ -1106,7 +1140,7 @@ pub async fn ingest_directory(
             file_size: file_data.len() as i64,
             content_hash,
             extension: ext.clone(),
-            mime_type: format!("text/{}", ext),
+            mime_type: crate::kb::types::mime_type_for_ext(&ext).to_string(),
             source_type: "ingest".to_string(),
             storage_path: file_path.to_string_lossy().to_string(),
             original_path: file_path.to_string_lossy().to_string(),
@@ -1397,6 +1431,249 @@ fn report_progress(on_progress: Option<&ProgressCallback>, phase: &str, message:
 /// 4. OCR 或外部 OCR 被关闭时，更新 ocr_status=needed，返回原 parsed
 /// 5. 同步内联模式：规划 → 调用 GLM-OCR → 规范化 → 合并 → 返回新 parsed
 /// 6. 异步模式：入队 kb_ocr_document job，返回 None 阻断后续本地索引
+#[allow(clippy::too_many_arguments)]
+fn enqueue_image_ocr(
+    conn: &Connection,
+    doc_id: i64,
+    lib_id: i64,
+    run_id: &str,
+    storage_path: &str,
+    ext: &str,
+    library: &Library,
+    file_data: &[u8],
+    config: &crate::config::Config,
+) -> Result<()> {
+    let ext_lower = ext.to_lowercase();
+    // 校验文件内容 MIME，防止伪装扩展名的非图片文件进入外部 OCR
+    let mime_type = match crate::kb::security::detect_and_validate_mime(file_data, &ext_lower) {
+        Ok(mime) => mime,
+        Err(e) => {
+            // MIME 校验失败时标记文档为 failed，防止伪装文件在目录导入时留下处理中状态
+            let fallback_mime = crate::kb::types::mime_type_for_ext(&ext_lower);
+            let _ = mark_image_ocr_unavailable(
+                conn,
+                doc_id,
+                run_id,
+                &ext_lower,
+                fallback_mime,
+                config,
+                "failed",
+                crate::kb::ocr::OcrStatus::Failed,
+                &format!("图片 MIME 校验失败: {}", e),
+            );
+            return Err(e);
+        }
+    };
+
+    if file_data.len() > MAX_OCR_IMAGE_BYTES {
+        let reason = format!(
+            "GLM-OCR image input exceeds 10MB limit ({} bytes)",
+            file_data.len()
+        );
+        mark_image_ocr_unavailable(
+            conn,
+            doc_id,
+            run_id,
+            &ext_lower,
+            &mime_type,
+            config,
+            "failed",
+            crate::kb::ocr::OcrStatus::Failed,
+            &reason,
+        )?;
+        return Err(GBrainError::InvalidInput(reason));
+    }
+
+    if !config.ocr_enabled || !library.external_ocr_allowed {
+        let reason = if !config.ocr_enabled && !library.external_ocr_allowed {
+            "global OCR and library external OCR are disabled"
+        } else if !config.ocr_enabled {
+            "global OCR is disabled (GBRAIN_OCR_ENABLED=false)"
+        } else {
+            "library policy disables external OCR"
+        };
+        mark_image_ocr_unavailable(
+            conn,
+            doc_id,
+            run_id,
+            &ext_lower,
+            &mime_type,
+            config,
+            "needed",
+            crate::kb::ocr::OcrStatus::Needed,
+            reason,
+        )?;
+        return Err(GBrainError::InvalidInput(reason.to_string()));
+    }
+
+    if library.redaction_enabled {
+        let reason = "library redaction is enabled; external OCR is not allowed";
+        mark_image_ocr_unavailable(
+            conn,
+            doc_id,
+            run_id,
+            &ext_lower,
+            &mime_type,
+            config,
+            "needed",
+            crate::kb::ocr::OcrStatus::Needed,
+            reason,
+        )?;
+        return Err(GBrainError::InvalidInput(reason.to_string()));
+    }
+
+    if config.ocr_api_key.is_none() {
+        let reason = "missing OCR API key (GBRAIN_OCR_API_KEY or ZHIPU_API_KEY)";
+        mark_image_ocr_unavailable(
+            conn,
+            doc_id,
+            run_id,
+            &ext_lower,
+            &mime_type,
+            config,
+            "failed",
+            crate::kb::ocr::OcrStatus::Failed,
+            reason,
+        )?;
+        return Err(GBrainError::InvalidInput(reason.to_string()));
+    }
+
+    let needs_ocr_pages = serde_json::json!([1]).to_string();
+    let reasons_by_page = serde_json::json!({ "1": ["image_input"] }).to_string();
+    let ocr_payload = crate::kb::jobs::KbOcrPayload {
+        kind: "kb_ocr_document".to_string(),
+        document_id: doc_id,
+        library_id: lib_id,
+        processing_run_id: run_id.to_string(),
+        storage_path: storage_path.to_string(),
+        pages: vec![1],
+        submit_mode: config.ocr_submit_mode.clone(),
+        provider: "glm_ocr".to_string(),
+        model: config.ocr_model.clone(),
+        return_crop_images: config.ocr_return_crop_images,
+        need_layout_visualization: config.ocr_need_layout_visualization,
+    };
+
+    let tx = conn.unchecked_transaction()?;
+    let enqueue_result = (|| -> Result<i64> {
+        let rows = conn.execute(
+            "UPDATE kb_documents SET document_granularity = 'micro', chunk_strategy = 'whole_document', \
+             content_char_count = 0, page_count = ?1, parsing_status = ?2, parsing_progress = ?3, \
+             document_status = 'ocr_pending', ocr_status = ?4, ocr_text_coverage = 0.0, \
+             metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+             '$.needs_ocr_pages', json(?5), '$.ocr_reasons_by_page', json(?6), \
+             '$.ocr_scope', 'full', '$.ocr_input_format', ?7, '$.ocr_input_mime', ?8), \
+             updated_at = datetime('now') WHERE id = ?9 AND processing_run_id = ?10",
+            rusqlite::params![
+                OCR_IMAGE_TOTAL_PAGES,
+                STATUS_PROCESSING,
+                30,
+                crate::kb::ocr::OcrStatus::Queued.as_str(),
+                needs_ocr_pages,
+                reasons_by_page,
+                ext_lower,
+                mime_type,
+                doc_id,
+                run_id
+            ],
+        )?;
+        if rows == 0 {
+            return Err(GBrainError::InvalidInput(
+                "document processing_run_id changed; skipping image OCR enqueue".to_string(),
+            ));
+        }
+
+        crate::kb::ocr::update_ocr_page_status(
+            conn,
+            doc_id,
+            1,
+            "pending",
+            "image upload queued for OCR",
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )?;
+        crate::kb::jobs::enqueue_kb_ocr_job(conn, &ocr_payload)
+    })();
+    match enqueue_result {
+        Ok(_) => tx.commit()?,
+        Err(e) => {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mark_image_ocr_unavailable(
+    conn: &Connection,
+    doc_id: i64,
+    run_id: &str,
+    ext: &str,
+    mime_type: &str,
+    config: &crate::config::Config,
+    page_status: &str,
+    ocr_status: crate::kb::ocr::OcrStatus,
+    reason: &str,
+) -> Result<()> {
+    let needs_ocr_pages = serde_json::json!([1]).to_string();
+    let reasons_by_page = serde_json::json!({ "1": ["image_input"] }).to_string();
+
+    let tx = conn.unchecked_transaction()?;
+    let result = (|| -> Result<()> {
+        // 图片 OCR 不可用时，文档无法提取任何文本，必须将 document_status 和 index_status
+        // 也设为 failed，否则文档会卡在 queued/ocr_pending 状态
+        let rows = conn.execute(
+            "UPDATE kb_documents SET document_granularity = 'micro', chunk_strategy = 'whole_document', \
+             content_char_count = 0, page_count = ?1, parsing_status = ?2, parsing_progress = ?3, \
+             parsing_error = ?4, ocr_status = ?5, ocr_text_coverage = 0.0, \
+             document_status = 'failed', index_status = 'failed', \
+             metadata_json = json_set(COALESCE(metadata_json, '{}'), \
+             '$.needs_ocr_pages', json(?6), '$.ocr_reasons_by_page', json(?7), \
+             '$.ocr_scope', 'full', '$.ocr_input_format', ?8, '$.ocr_input_mime', ?9), \
+             updated_at = datetime('now') WHERE id = ?10 AND processing_run_id = ?11",
+            rusqlite::params![
+                OCR_IMAGE_TOTAL_PAGES,
+                STATUS_FAILED,
+                100,
+                reason,
+                ocr_status.as_str(),
+                needs_ocr_pages,
+                reasons_by_page,
+                ext,
+                mime_type,
+                doc_id,
+                run_id
+            ],
+        )?;
+        if rows == 0 {
+            return Err(GBrainError::InvalidInput(
+                "document processing_run_id changed; skipping image OCR state update".to_string(),
+            ));
+        }
+        crate::kb::ocr::update_ocr_page_status(
+            conn,
+            doc_id,
+            1,
+            page_status,
+            reason,
+            "glm_ocr",
+            &config.ocr_model,
+            run_id,
+        )
+    })();
+    match result {
+        Ok(_) => tx.commit()?,
+        Err(e) => {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn maybe_apply_pdf_ocr(
     conn: &Connection,

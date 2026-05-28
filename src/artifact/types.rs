@@ -775,12 +775,12 @@ pub struct ArtifactEvent {
 /// KB 支持的文档扩展名列表
 ///
 /// 设计文档 §6.2: PDF/DOCX/XLSX/CSV/HTML/TXT/MD 走 KB 投影路径。
-/// 图片和二进制文件不支持 KB 解析，走附件路径。
+/// GLM-OCR 支持的 JPG/PNG 图片走 KB OCR 投影路径，其他图片走附件路径。
 /// 修复：移除 doc/xls — ParserRegistry 未注册对应 parser，
 /// 旧版二进制 Office 文件走 text fallback 要求 UTF-8 会失败
 pub const KB_SUPPORTED_EXTENSIONS: &[&str] = &[
     "pdf", "docx", "xlsx", "csv", "tsv", "html", "htm", "txt", "md", "markdown", "rst", "json",
-    "xml", "yaml", "yml", "toml",
+    "xml", "yaml", "yml", "toml", "png", "jpg", "jpeg",
 ];
 
 /// 代码文件扩展名列表
@@ -793,10 +793,13 @@ pub const CODE_EXTENSIONS: &[&str] = &[
 
 /// 图片扩展名列表
 ///
-/// 设计文档 §6.2: 图片/二进制不支持 KB 解析，走附件路径。
+/// 默认不支持 OCR 的图片仍走附件路径。
 pub const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "tiff", "tif", "webp", "avif",
 ];
+
+/// GLM-OCR 图片输入支持的扩展名。
+pub const OCR_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg"];
 
 /// 判断扩展名是否为 KB 支持的文档类型
 pub fn is_kb_supported(extension: &str) -> bool {
@@ -813,6 +816,11 @@ pub fn is_image_file(extension: &str) -> bool {
     IMAGE_EXTENSIONS.contains(&extension)
 }
 
+/// 判断扩展名是否为可直接提交给 GLM-OCR 的图片文件。
+pub fn is_ocr_image_file(extension: &str) -> bool {
+    OCR_IMAGE_EXTENSIONS.contains(&extension)
+}
+
 /// 根据意图、扩展名和 MIME 类型推断路由计划
 ///
 /// 设计文档 §6.2 路由规则:
@@ -826,7 +834,8 @@ pub fn is_image_file(extension: &str) -> bool {
 /// | Raw Markdown with auto               | yes      | yes| yes    | no   | candidate |
 /// | Markdown with gbrain frontmatter     | optional | no | no     | no   | direct put_page |
 /// | Code file/repo with auto             | optional | no | no     | no   | code import/sync |
-/// | Image/binary unsupported by KB       | yes      | no | optional| yes | no        |
+/// | JPG/PNG with auto                    | yes      | yes| yes    | no   | candidate |
+/// | Other image/binary unsupported by KB | yes      | no | optional| yes | no        |
 pub fn infer_route_plan(extension: &str, _mime_type: &str, intent: &UploadIntent) -> RoutePlan {
     match intent {
         // 明确意图：直接按意图路由，不根据文件类型调整
@@ -873,7 +882,18 @@ pub fn infer_route_plan(extension: &str, _mime_type: &str, intent: &UploadIntent
                 };
             }
 
-            // 图片/二进制 → 不进 KB，走附件路径
+            // GLM-OCR 支持的图片 → KB OCR + shadow + candidate
+            if is_ocr_image_file(&ext) {
+                return RoutePlan {
+                    to_kb: true,
+                    to_shadow: true,
+                    to_file: false,
+                    to_brain: false,
+                    promotion: PromotionPolicy::Candidate,
+                };
+            }
+
+            // 其他图片/二进制 → 不进 KB，走附件路径
             if is_image_file(&ext) || !is_kb_supported(&ext) {
                 return RoutePlan {
                     to_kb: false,
@@ -1341,4 +1361,33 @@ pub struct PutResolution {
     pub artifact_id: Option<i64>,
     pub artifact_uid: Option<String>,
     pub detail: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_route_sends_glm_ocr_images_to_kb() {
+        let plan = infer_route_plan("png", "image/png", &UploadIntent::Auto);
+        assert!(plan.to_kb);
+        assert!(plan.to_shadow);
+        assert!(!plan.to_file);
+        assert!(!plan.to_brain);
+        assert_eq!(plan.promotion, PromotionPolicy::Candidate);
+
+        let jpg_plan = infer_route_plan("jpg", "image/jpeg", &UploadIntent::Auto);
+        assert!(jpg_plan.to_kb);
+        assert!(jpg_plan.to_shadow);
+    }
+
+    #[test]
+    fn auto_route_keeps_non_ocr_images_as_attachments() {
+        let plan = infer_route_plan("webp", "image/webp", &UploadIntent::Auto);
+        assert!(!plan.to_kb);
+        assert!(!plan.to_shadow);
+        assert!(plan.to_file);
+        assert!(!plan.to_brain);
+        assert_eq!(plan.promotion, PromotionPolicy::None);
+    }
 }

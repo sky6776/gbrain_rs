@@ -384,12 +384,7 @@ fn query_kb_evidence(
         } else {
             doc_title
         };
-        // 修复：按字符截断而非字节，避免中文等多字节字符在 UTF-8 边界 panic
-        let snippet = if content.chars().count() > 200 {
-            format!("{}...", content.chars().take(200).collect::<String>())
-        } else {
-            content.clone()
-        };
+        let snippet = query_centered_snippet(&content, query);
 
         // 修复：当 filter_slug 存在时，SQL JOIN 已带出 artifact_id，
         // 直接查 artifact 填充，避免 shadow_page_slug 已非空时跳过补全分支
@@ -422,6 +417,75 @@ fn query_kb_evidence(
         hits.len()
     );
     Ok(hits)
+}
+
+const EVIDENCE_SNIPPET_CHARS: usize = 200;
+
+/// Return evidence context near the text that caused the KB FTS hit.
+///
+/// KB nodes can hold an entire imported document. Returning the first characters
+/// of such a node hides a match later in the document and makes a valid hit look
+/// unrelated to callers.
+fn query_centered_snippet(content: &str, query: &str) -> String {
+    let content_len = content.chars().count();
+    if content_len <= EVIDENCE_SNIPPET_CHARS {
+        return content.to_string();
+    }
+
+    let folded_content = content.to_ascii_lowercase();
+    let folded_query = query.trim().to_ascii_lowercase();
+    let exact_match = (!folded_query.is_empty())
+        .then(|| {
+            folded_content
+                .find(&folded_query)
+                .map(|start| (start, folded_query.len()))
+        })
+        .flatten();
+
+    let token_match = || {
+        crate::nlp::chinese::tokenize_content(query)
+            .split_whitespace()
+            .filter_map(|term| {
+                let term = term.to_ascii_lowercase();
+                folded_content
+                    .find(&term)
+                    .map(|start| (start, term.len(), term.chars().count()))
+            })
+            .max_by_key(|(_, _, chars)| *chars)
+            .map(|(start, len, _)| (start, len))
+    };
+
+    let Some((match_byte_start, match_byte_len)) = exact_match.or_else(token_match) else {
+        return format!(
+            "{}...",
+            content
+                .chars()
+                .take(EVIDENCE_SNIPPET_CHARS)
+                .collect::<String>()
+        );
+    };
+
+    // to_ascii_lowercase preserves byte offsets, so these byte boundaries are
+    // also valid in the original UTF-8 content.
+    let match_char_start = content[..match_byte_start].chars().count();
+    let match_char_len = content[match_byte_start..match_byte_start + match_byte_len]
+        .chars()
+        .count()
+        .min(EVIDENCE_SNIPPET_CHARS);
+    let before_match = (EVIDENCE_SNIPPET_CHARS - match_char_len) / 2;
+    let mut start = match_char_start.saturating_sub(before_match);
+    if start + EVIDENCE_SNIPPET_CHARS > content_len {
+        start = content_len.saturating_sub(EVIDENCE_SNIPPET_CHARS);
+    }
+    let end = (start + EVIDENCE_SNIPPET_CHARS).min(content_len);
+    let excerpt: String = content.chars().skip(start).take(end - start).collect();
+
+    format!(
+        "{}{}{}",
+        if start > 0 { "..." } else { "" },
+        excerpt,
+        if end < content_len { "..." } else { "" }
+    )
 }
 
 /// 查询时间线事件（§11.1 TimelineFirst 策略）

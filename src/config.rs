@@ -223,6 +223,10 @@ impl Default for Config {
                 "yaml".into(),
                 "yml".into(),
                 "toml".into(),
+                // GLM-OCR 可直接解析的单图格式。
+                "png".into(),
+                "jpg".into(),
+                "jpeg".into(),
             ],
             kb_storage_dir: None,
             kb_worker_enabled: true,

@@ -38,7 +38,7 @@ Keyword retrieval and local storage require no database or external service setu
 
 - **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when model configuration and library policy allow it; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext) and automatic page-level PDF OCR detection/writeback; code-page indexing is a separate path
+- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when model configuration and library policy allow it; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
@@ -320,7 +320,7 @@ gbrain review apply 1
 | `artifact_manual_memory_to_kb` | boolean | Write memory intent to KB | `true` |
 | `autopilot_enabled` | boolean | Enable autopilot background maintenance | `true` |
 | `autopilot_interval_secs` | integer | Autopilot maintenance interval (seconds, min 60) | `3600` |
-| `ocr_enabled` | boolean | Enable PDF OCR | `true` |
+| `ocr_enabled` | boolean | Enable PDF/image OCR | `true` |
 | `ocr_base_url` | string | GLM-OCR endpoint | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
 | `ocr_model` | string | OCR model | `glm-ocr` |
 | `ocr_mode` | string | OCR selection mode: auto/all_pages | `auto` |
@@ -819,7 +819,7 @@ No parameters.
 
 ## Environment Variables
 
-> **API Compatibility Note**: Except for PDF OCR, which uses the Zhipu GLM-OCR `layout_parsing` endpoint, general model and audio calls support only OpenAI-compatible API formats (`/embeddings`, `/chat/completions`, `/audio/transcriptions`). Anthropic/Claude API is not supported. Set the relevant `*_BASE_URL` for compatible services; the OCR endpoint is protected by its own safety gate.
+> **API Compatibility Note**: Except for PDF/image OCR, which uses the Zhipu GLM-OCR `layout_parsing` endpoint, general model and audio calls support only OpenAI-compatible API formats (`/embeddings`, `/chat/completions`, `/audio/transcriptions`). Anthropic/Claude API is not supported. Set the relevant `*_BASE_URL` for compatible services; the OCR endpoint is protected by its own safety gate.
 
 ### LLM Configuration Groups
 
@@ -831,7 +831,7 @@ LLM configuration is split by call type and feature:
 | **Query Expansion / Reranking** | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL` / `GBRAIN_EXPANSION_MODEL` | Search query expansion, search reranking via chat/completions |
 | **KB RAPTOR** | Library `raptor_llm_*`, `GBRAIN_KB_RAPTOR_*`, `GBRAIN_EXPANSION_*`, `GBRAIN_CHUNKER_*` | RAPTOR tree summarization |
 | **LLM Chunker (reserved)** | `GBRAIN_CHUNKER_API_KEY` / `GBRAIN_CHUNKER_BASE_URL` / `GBRAIN_CHUNKER_MODEL` | Reserved for LLM-guided chunking; not wired into the current KB document pipeline, and also used as a RAPTOR fallback |
-| **PDF OCR (GLM-OCR)** | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` / `GBRAIN_OCR_MODEL` | Page-level PDF layout recognition, text writeback, and re-embedding |
+| **PDF/Image OCR (GLM-OCR)** | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` / `GBRAIN_OCR_MODEL` | Page-level PDF layout recognition, JPG/PNG single-image recognition, text writeback, and re-embedding |
 
 ### API Key Fallback Chain
 
@@ -843,10 +843,10 @@ Expansion:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
 LLM Chunker (reserved): GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
 KB RAPTOR:     library raptor_llm_secret_ref → GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_CHUNKER_API_KEY
 Reranking:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
-PDF OCR:       GBRAIN_OCR_API_KEY → ZHIPU_API_KEY
+PDF/Image OCR: GBRAIN_OCR_API_KEY → ZHIPU_API_KEY
 ```
 
-Setting `GBRAIN_OPENAI_API_KEY` enables embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`. PDF OCR uses separate GLM-OCR credentials and does not fall back to `GBRAIN_OPENAI_API_KEY`.
+Setting `GBRAIN_OPENAI_API_KEY` enables embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`. PDF/image OCR uses separate GLM-OCR credentials and does not fall back to `GBRAIN_OPENAI_API_KEY`.
 
 ### Base Configuration
 
@@ -894,15 +894,17 @@ Transcription is available through the library module; no corresponding CLI or M
 | `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI transcription API key | — |
 | `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI transcription base URL | — |
 
-### PDF OCR (GLM-OCR)
+### PDF/Image OCR (GLM-OCR)
 
 PDF parsing performs page-level OCR selection first. In `auto` mode, only pages with an empty or low-density text layer, images/vector or annotation risk, invisible or apparently garbled text, content parsing failures, or uncertain page geometry are sent to OCR. The decision is persisted as `ocr_scope` (`none` / `partial` / `full`), `needs_ocr_pages`, and `ocr_reasons_by_page`.
 
-External OCR is additionally gated by library privacy policy: PDF pages are sent to the external OCR service only when `external_ocr_allowed=true` and `redaction_enabled=false`. Otherwise, extractable native text is retained and the file is not submitted to the service.
+JPG/PNG uploads are queued directly as single-page OCR documents. Recognized text is written back as KB text nodes and re-embedded. Single images follow GLM-OCR's 10 MiB limit; images have no PDF-style native text layer, so if OCR is disabled, missing credentials, or blocked by library policy, there is no local text fallback.
+
+External OCR is additionally gated by library privacy policy: PDF pages and JPG/PNG images are sent to the external OCR service only when `external_ocr_allowed=true` and `redaction_enabled=false`. Otherwise, PDF extractable native text is retained, while images are marked needed/failed until policy or credentials are restored and OCR is retried.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GBRAIN_OCR_ENABLED` | Global switch for PDF OCR | `true` |
+| `GBRAIN_OCR_ENABLED` | Global switch for PDF/image OCR | `true` |
 | `GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT` | Allow external OCR by default for newly created KB libraries | `true` |
 | `GBRAIN_OCR_API_KEY` | GLM-OCR API key; read only from the environment | — |
 | `ZHIPU_API_KEY` | Compatibility alias for the OCR API key, used only if `GBRAIN_OCR_API_KEY` is empty | — |
@@ -942,7 +944,7 @@ External OCR is additionally gated by library privacy policy: PDF pages are sent
 | `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL`, then `GBRAIN_CHUNKER_BASE_URL`, then the OpenAI default endpoint |
 | `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | `gpt-4o-mini`; if the KB/library model is empty, the resolver can use `GBRAIN_EXPANSION_MODEL`, then `GBRAIN_CHUNKER_MODEL` |
 | `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | `50` |
-| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv` |
+| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv,png,jpg,jpeg` |
 | `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |
 | `GBRAIN_KB_WORKER_ENABLED` | Enable KB background worker | `true` |
 | `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | `30` |
@@ -957,7 +959,7 @@ External OCR is additionally gated by library privacy policy: PDF pages are sent
 |---------|----------|-------------------|------------|
 | Document chunk embedding (vectorization) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
 | Semantic chunking (paragraph similarity) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
-| Page-level PDF OCR and text writeback | GLM-OCR `layout_parsing` | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` (custom URL requires `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL=true`) | `GBRAIN_OCR_MODEL` |
+| Page-level PDF/image OCR and text writeback | GLM-OCR `layout_parsing` | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` (custom URL requires `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL=true`) | `GBRAIN_OCR_MODEL` |
 | RAPTOR hierarchical summarization | Chat Completions | Library `raptor_llm_*` → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*` | Library/KB model → `GBRAIN_EXPANSION_MODEL` → `GBRAIN_CHUNKER_MODEL` → `gpt-4o-mini` when no KB model is set |
 | Search reranking | Chat Completions | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL`, falling back to `GBRAIN_OPENAI_*` | `GBRAIN_EXPANSION_MODEL` / `expansion_model` → `gpt-4o-mini` |
 
@@ -1115,7 +1117,7 @@ Async five-stage document processing pipeline:
 
 `raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Once enabled, the pipeline automatically skips RAPTOR when a document has fewer than three nodes, external summarization is disallowed, or no RAPTOR LLM credential can be resolved. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
 
-For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline.
+For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline. For JPG/PNG uploads, the pipeline creates a single-page OCR document immediately and generates KB nodes after OCR completes.
 
 ### Chinese NLP Module
 

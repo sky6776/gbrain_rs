@@ -244,6 +244,72 @@ fn artifact_query_include_sources_returns_citations() {
     let _ = &result.sources;
 }
 
+#[test]
+fn artifact_query_evidence_snippet_centers_a_late_match_for_all_kb_file_types() {
+    for extension in gbrain_core::artifact::types::KB_SUPPORTED_EXTENSIONS {
+        let engine = make_engine();
+        let config = make_config();
+        let svc = make_svc(&engine, &config);
+        let conn = engine.connection().expect("connection");
+
+        conn.execute(
+            "INSERT INTO kb_libraries (name) VALUES ('test-library')",
+            [],
+        )
+        .expect("insert library");
+        let library_id = conn.last_insert_rowid();
+        let original_name = format!("late-match-document.{}", extension);
+        let content_hash = format!("late-match-document-{}", extension);
+        conn.execute(
+            "INSERT INTO kb_documents \
+             (library_id, original_name, content_hash, extension, mime_type, document_status) \
+             VALUES (?1, ?2, ?3, ?4, 'application/octet-stream', 'ready')",
+            rusqlite::params![library_id, original_name, content_hash, extension],
+        )
+        .expect("insert document");
+        let document_id = conn.last_insert_rowid();
+
+        let content = format!(
+            "{}The Vendor Logo is displayed on the startup screen and can be replaced by configuration.",
+            "Serial communication and protocol setup details. ".repeat(12)
+        );
+        let content_tokens = gbrain_core::nlp::chinese::tokenize_content(&content);
+        conn.execute(
+            "INSERT INTO kb_document_nodes \
+             (library_id, document_id, content, content_tokens, level, chunk_order) \
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![library_id, document_id, content, content_tokens],
+        )
+        .expect("insert searchable node");
+
+        let result = svc
+            .query_facade(&gbrain_core::artifact::types::ArtifactQueryInput {
+                query: "vendor logo".to_string(),
+                mode: Some("evidence".to_string()),
+                limit: Some(10),
+                filter_slug: None,
+                include_sources: Some(false),
+            })
+            .expect("query evidence");
+
+        assert_eq!(
+            result.evidence.len(),
+            1,
+            "the {} KB node should be returned",
+            extension
+        );
+        assert!(
+            result.evidence[0]
+                .snippet
+                .to_ascii_lowercase()
+                .contains("vendor logo"),
+            "{} result snippet should expose the matching context: {}",
+            extension,
+            result.evidence[0].snippet
+        );
+    }
+}
+
 // --- Test 6: artifact_get with include_sources queries by artifact_id ---
 
 #[test]

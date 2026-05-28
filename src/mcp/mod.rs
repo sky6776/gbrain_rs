@@ -956,9 +956,9 @@ impl McpServer {
                 let conn = self.engine.connection()?;
 
                 // 查询文档信息
-                let doc_row: (String, String, i64, String) = conn
+                let doc_row: (String, String, i64, String, String) = conn
                     .query_row(
-                        "SELECT title, storage_path, library_id, processing_run_id \
+                        "SELECT title, storage_path, library_id, processing_run_id, extension \
                          FROM kb_documents WHERE id = ?1",
                         rusqlite::params![doc_id],
                         |row| {
@@ -967,6 +967,7 @@ impl McpServer {
                                 row.get::<_, String>(1)?,
                                 row.get::<_, i64>(2)?,
                                 row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
                             ))
                         },
                     )
@@ -974,7 +975,8 @@ impl McpServer {
                         crate::error::GBrainError::Database(format!("查询文档失败: {}", e))
                     })?;
 
-                let (title, storage_path, library_id, run_id) = doc_row;
+                let (title, storage_path, library_id, run_id, extension) = doc_row;
+                let is_image = crate::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略
                 let kb = crate::kb::engine::KbEngine::new(conn);
@@ -990,24 +992,52 @@ impl McpServer {
                     ));
                 }
 
-                let pdf_data = std::fs::read(&storage_path).map_err(|e| {
-                    crate::error::GBrainError::FileError(format!(
-                        "读取 PDF 文件以确定页数失败: {}",
-                        e
-                    ))
-                })?;
-                let total_pages = crate::kb::parser::pdf::count_pdf_pages(&pdf_data)? as i32;
-                if total_pages <= 0 {
-                    return Err(crate::error::GBrainError::InvalidInput(
-                        "无法确定 PDF 总页数".to_string(),
-                    ));
-                }
+                let total_pages = if is_image {
+                    // 图片文档固定 1 页，不需要 PDF 解析器
+                    1
+                } else {
+                    let pdf_data = std::fs::read(&storage_path).map_err(|e| {
+                        crate::error::GBrainError::FileError(format!(
+                            "读取 PDF 文件以确定页数失败: {}",
+                            e
+                        ))
+                    })?;
+                    let total = crate::kb::parser::pdf::count_pdf_pages(&pdf_data)? as i32;
+                    if total <= 0 {
+                        return Err(crate::error::GBrainError::InvalidInput(
+                            "无法确定 PDF 总页数".to_string(),
+                        ));
+                    }
+                    total
+                };
 
                 let config = crate::config::Config::load().unwrap_or_default();
 
                 // 解析页码范围或自动检测：区分显式指定与自动检测
                 let (ocr_pages, _explicit_pages, detection_reasons) =
-                    if let Some(ref ps) = pages_str {
+                    if is_image {
+                        if let Some(ref ps) = pages_str {
+                            // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
+                            let parsed_pages = parse_mcp_page_ranges(ps, 1)?;
+                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                                parsed_pages
+                                    .iter()
+                                    .map(|p| {
+                                        (p.to_string(), vec!["image_input".to_string()])
+                                    })
+                                    .collect();
+                            (parsed_pages, true, reasons)
+                        } else {
+                            // 图片文档未指定页码：默认第 1 页
+                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                                std::iter::once((
+                                    "1".to_string(),
+                                    vec!["image_input".to_string()],
+                                ))
+                                .collect();
+                            (vec![1], true, reasons)
+                        }
+                    } else if let Some(ref ps) = pages_str {
                         let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
                         // 显式指定：原因统一为 manual_requested
                         let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
@@ -1017,6 +1047,12 @@ impl McpServer {
                         (parsed_pages, true, reasons)
                     } else {
                         // 自动检测：使用 detector 返回的真实原因
+                        let pdf_data = std::fs::read(&storage_path).map_err(|e| {
+                            crate::error::GBrainError::FileError(format!(
+                                "读取 PDF 文件以自动检测 OCR 页失败: {}",
+                                e
+                            ))
+                        })?;
                         let registry = crate::kb::parser::ParserRegistry::new();
                         let parsed = registry.parse("pdf", &pdf_data)?;
                         let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
@@ -1101,8 +1137,13 @@ impl McpServer {
                 let enqueue_result = (|| -> Result<i64> {
                     let rows = conn.execute(
                         "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         document_status = CASE WHEN ?3 THEN 'ocr_pending' ELSE document_status END, \
+                         index_status = CASE WHEN ?3 THEN 'pending' ELSE index_status END, \
+                         parsing_error = CASE WHEN ?3 THEN '' ELSE parsing_error END, \
+                         parsing_status = CASE WHEN ?3 THEN 1 ELSE parsing_status END, \
+                         parsing_progress = CASE WHEN ?3 THEN 0 ELSE parsing_progress END, \
                          updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
-                        rusqlite::params![doc_id, run_id],
+                        rusqlite::params![doc_id, run_id, is_image],
                     )?;
                     if rows == 0 {
                         return Err(crate::error::GBrainError::InvalidInput(
@@ -1196,9 +1237,9 @@ impl McpServer {
                 let pages_str = arguments["pages"].as_str().map(|s| s.to_string());
                 let conn = self.engine.connection()?;
 
-                let doc_row: (String, i64, String, i32, String) = conn
+                let doc_row: (String, i64, String, i32, String, String) = conn
                     .query_row(
-                        "SELECT title, library_id, processing_run_id, page_count, storage_path \
+                        "SELECT title, library_id, processing_run_id, page_count, storage_path, extension \
                          FROM kb_documents WHERE id = ?1",
                         rusqlite::params![doc_id],
                         |row| {
@@ -1208,6 +1249,7 @@ impl McpServer {
                                 row.get::<_, String>(2)?,
                                 row.get::<_, i32>(3)?,
                                 row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?,
                             ))
                         },
                     )
@@ -1215,7 +1257,8 @@ impl McpServer {
                         crate::error::GBrainError::Database(format!("查询文档失败: {}", e))
                     })?;
 
-                let (title, library_id, run_id, page_count, storage_path) = doc_row;
+                let (title, library_id, run_id, page_count, storage_path, extension) = doc_row;
+                let is_image = crate::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略（与 kb_ocr_run 保持一致）
                 let kb = crate::kb::engine::KbEngine::new(conn);
@@ -1244,10 +1287,13 @@ impl McpServer {
                     ));
                 }
 
-                // 查询需要重试的页（failed 或 empty_ocr）
+                // 查询需要重试的页（failed、empty_ocr 或 needed）
                 // 支持页码范围格式（如 "1-3,5,7-10"），与 kb_ocr_run 保持一致
                 let retry_pages = if let Some(ref ps) = pages_str {
-                    let retry_page_limit = if page_count > 0 {
+                    let retry_page_limit = if is_image {
+                        // 图片文档固定 1 页
+                        1
+                    } else if page_count > 0 {
                         page_count
                     } else {
                         let data = std::fs::read(&storage_path).map_err(|e| {
@@ -1278,7 +1324,7 @@ impl McpServer {
                                 |row| row.get(0),
                             )
                             .unwrap_or_default();
-                        if status == "failed" || status == "empty_ocr" {
+                        if status == "failed" || status == "empty_ocr" || status == "needed" {
                             retry.push(*p);
                         }
                     }
@@ -1289,7 +1335,7 @@ impl McpServer {
                     let mut failed = Vec::new();
                     let mut stmt = conn2.prepare(
                         "SELECT page_number FROM kb_document_ocr_pages \
-                         WHERE document_id = ?1 AND processing_run_id = ?2 AND status IN ('failed', 'empty_ocr') ORDER BY page_number",
+                         WHERE document_id = ?1 AND processing_run_id = ?2 AND status IN ('failed', 'empty_ocr', 'needed') ORDER BY page_number",
                     )?;
                     let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
                         row.get::<_, i32>(0)
@@ -1320,7 +1366,7 @@ impl McpServer {
                 let sql = format!(
                     "UPDATE kb_document_ocr_pages SET status = 'pending', error = '' \
                      WHERE document_id = ?1 AND processing_run_id = ?2 \
-                     AND page_number IN ({}) AND status IN ('failed', 'empty_ocr')",
+                     AND page_number IN ({}) AND status IN ('failed', 'empty_ocr', 'needed')",
                     placeholders.join(",")
                 );
                 let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
@@ -1351,8 +1397,13 @@ impl McpServer {
 
                     let rows = conn.execute(
                         "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         document_status = CASE WHEN ?3 THEN 'ocr_pending' ELSE document_status END, \
+                         index_status = CASE WHEN ?3 THEN 'pending' ELSE index_status END, \
+                         parsing_error = CASE WHEN ?3 THEN '' ELSE parsing_error END, \
+                         parsing_status = CASE WHEN ?3 THEN 1 ELSE parsing_status END, \
+                         parsing_progress = CASE WHEN ?3 THEN 0 ELSE parsing_progress END, \
                          updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
-                        rusqlite::params![doc_id, run_id],
+                        rusqlite::params![doc_id, run_id, is_image],
                     )?;
                     if rows == 0 {
                         return Err(crate::error::GBrainError::InvalidInput(

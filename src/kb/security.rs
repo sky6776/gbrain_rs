@@ -74,7 +74,7 @@ pub fn validated_extension_with(path: &Path, allowed_extensions: &[String]) -> R
 
 /// 从文件内容检测并验证 MIME 类型。
 /// 使用 `infer` crate 进行基于内容的检测，回退到基于扩展名的推断。
-/// 对于二进制格式（pdf, docx, xlsx），内容检测的 MIME 与扩展名不匹配时直接拒绝。
+/// 对于二进制格式（pdf, docx, xlsx, png, jpg），内容检测的 MIME 与扩展名不匹配时直接拒绝。
 /// 对于文本格式（txt, md, csv, html），允许回退到扩展名推断（因为 infer 对短文本检测不准）。
 pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
     // 先尝试基于内容的检测
@@ -114,7 +114,7 @@ pub fn detect_and_validate_mime(data: &[u8], ext: &str) -> Result<String> {
 
 /// 判断扩展名是否属于二进制格式（需要严格 MIME 校验）
 fn is_binary_extension(ext: &str) -> bool {
-    matches!(ext, "pdf" | "docx" | "xlsx")
+    matches!(ext, "pdf" | "docx" | "xlsx" | "png" | "jpg" | "jpeg")
 }
 
 /// 验证 ZIP 内部结构，防止任意 ZIP 伪装为 DOCX/XLSX。
@@ -166,6 +166,8 @@ fn mime_matches_extension(mime: &str, ext: &str) -> bool {
         "html" | "htm" => mime == "text/html",
         "txt" => mime.starts_with("text/"),
         "md" => mime.starts_with("text/"),
+        "png" => mime == "image/png",
+        "jpg" | "jpeg" => mime == "image/jpeg",
         _ => false, // 拒绝未知扩展名 (安全边界应默认拒绝)
     }
 }
@@ -197,4 +199,25 @@ pub fn store_kb_file(
 
     // Return the storage path as string
     Ok(storage_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_extensions_are_strict_binary_formats() {
+        assert!(is_binary_extension("png"));
+        assert!(is_binary_extension("jpg"));
+        assert!(is_binary_extension("jpeg"));
+    }
+
+    #[test]
+    fn image_mime_must_match_extension() {
+        assert!(mime_matches_extension("image/png", "png"));
+        assert!(mime_matches_extension("image/jpeg", "jpg"));
+        assert!(mime_matches_extension("image/jpeg", "jpeg"));
+        assert!(!mime_matches_extension("image/webp", "png"));
+        assert!(!mime_matches_extension("image/png", "jpg"));
+    }
 }

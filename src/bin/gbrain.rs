@@ -1346,9 +1346,9 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let conn = ops.engine.connection()?;
 
                 // 查询文档信息
-                let doc_row: (String, String, i64, String) = conn
+                let doc_row: (String, String, i64, String, String) = conn
                     .query_row(
-                        "SELECT title, storage_path, library_id, processing_run_id \
+                        "SELECT title, storage_path, library_id, processing_run_id, extension \
                          FROM kb_documents WHERE id = ?1",
                         rusqlite::params![doc_id],
                         |row| {
@@ -1357,6 +1357,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                                 row.get::<_, String>(1)?,
                                 row.get::<_, i64>(2)?,
                                 row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
                             ))
                         },
                     )
@@ -1364,7 +1365,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         gbrain_core::error::GBrainError::Database(format!("查询文档失败: {}", e))
                     })?;
 
-                let (title, storage_path, library_id, run_id) = doc_row;
+                let (title, storage_path, library_id, run_id, extension) = doc_row;
+                let is_image = gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略
                 {
@@ -1384,12 +1386,39 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     }
                 }
 
-                let total_pages = resolve_pdf_page_count(conn, doc_id, &storage_path)?;
+                let total_pages = if is_image {
+                    // 图片文档固定 1 页，不需要 PDF 解析器
+                    1
+                } else {
+                    resolve_pdf_page_count(conn, doc_id, &storage_path)?
+                };
                 let config_local = gbrain_core::config::Config::load().unwrap_or_default();
 
                 // 解析页码：区分显式指定与自动检测
                 let (ocr_pages, _explicit_pages, detection_reasons) =
-                    if let Some(ref pages_str) = pages {
+                    if is_image {
+                        if let Some(ref pages_str_val) = pages {
+                            // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
+                            let parsed_pages = parse_page_ranges(pages_str_val, 1)?;
+                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                                parsed_pages
+                                    .iter()
+                                    .map(|p| {
+                                        (p.to_string(), vec!["image_input".to_string()])
+                                    })
+                                    .collect();
+                            (parsed_pages, true, reasons)
+                        } else {
+                            // 图片文档未指定页码：默认第 1 页
+                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                                std::iter::once((
+                                    "1".to_string(),
+                                    vec!["image_input".to_string()],
+                                ))
+                                .collect();
+                            (vec![1], true, reasons)
+                        }
+                    } else if let Some(ref pages_str) = pages {
                         let parsed_pages = parse_page_ranges(pages_str, total_pages)?;
                         // 显式指定：原因统一为 manual_requested
                         let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
@@ -1471,8 +1500,13 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let enqueue_result = (|| -> Result<i64> {
                     let rows = conn.execute(
                         "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         document_status = CASE WHEN ?3 THEN 'ocr_pending' ELSE document_status END, \
+                         index_status = CASE WHEN ?3 THEN 'pending' ELSE index_status END, \
+                         parsing_error = CASE WHEN ?3 THEN '' ELSE parsing_error END, \
+                         parsing_status = CASE WHEN ?3 THEN 1 ELSE parsing_status END, \
+                         parsing_progress = CASE WHEN ?3 THEN 0 ELSE parsing_progress END, \
                          updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
-                        rusqlite::params![doc_id, run_id],
+                        rusqlite::params![doc_id, run_id, is_image],
                     )?;
                     if rows == 0 {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
@@ -1552,9 +1586,9 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let conn = ops.engine.connection()?;
 
                 // 查询文档信息
-                let doc_row: (String, i64, String) = conn
+                let doc_row: (String, i64, String, String) = conn
                     .query_row(
-                        "SELECT title, library_id, processing_run_id \
+                        "SELECT title, library_id, processing_run_id, extension \
                          FROM kb_documents WHERE id = ?1",
                         rusqlite::params![doc_id],
                         |row| {
@@ -1562,6 +1596,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                                 row.get::<_, String>(0)?,
                                 row.get::<_, i64>(1)?,
                                 row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
                             ))
                         },
                     )
@@ -1569,7 +1604,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         gbrain_core::error::GBrainError::Database(format!("查询文档失败: {}", e))
                     })?;
 
-                let (title, library_id, run_id) = doc_row;
+                let (title, library_id, run_id, extension) = doc_row;
+                let is_image = gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略
                 {
@@ -1606,12 +1642,12 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     }
                 }
 
-                // 查询失败的页
+                // 查询失败的页（含 needed：图片被策略拦住后标为 needed，策略恢复后应可重试）
                 let mut failed_pages = Vec::new();
                 let mut stmt = conn.prepare(
                     "SELECT page_number FROM kb_document_ocr_pages \
                      WHERE document_id = ?1 AND processing_run_id = ?2 \
-                     AND status IN ('failed', 'empty_ocr') ORDER BY page_number",
+                     AND status IN ('failed', 'empty_ocr', 'needed') ORDER BY page_number",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![doc_id, run_id], |row| {
                     row.get::<_, i32>(0)
@@ -1655,14 +1691,19 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     conn.execute(
                         "UPDATE kb_document_ocr_pages SET status = 'pending', error = '' \
                          WHERE document_id = ?1 AND processing_run_id = ?2 \
-                         AND status IN ('failed', 'empty_ocr')",
+                         AND status IN ('failed', 'empty_ocr', 'needed')",
                         rusqlite::params![doc_id, run_id],
                     )?;
 
                     let rows = conn.execute(
                         "UPDATE kb_documents SET ocr_status = 'queued', ocr_text_coverage = 0.0, \
+                         document_status = CASE WHEN ?3 THEN 'ocr_pending' ELSE document_status END, \
+                         index_status = CASE WHEN ?3 THEN 'pending' ELSE index_status END, \
+                         parsing_error = CASE WHEN ?3 THEN '' ELSE parsing_error END, \
+                         parsing_status = CASE WHEN ?3 THEN 1 ELSE parsing_status END, \
+                         parsing_progress = CASE WHEN ?3 THEN 0 ELSE parsing_progress END, \
                          updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
-                        rusqlite::params![doc_id, run_id],
+                        rusqlite::params![doc_id, run_id, is_image],
                     )?;
                     if rows == 0 {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(

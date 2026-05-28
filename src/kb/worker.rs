@@ -1310,40 +1310,63 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
                 )?;
             }
 
-            // OCR 任务耗尽重试后，仍须把 PDF 可抽取的原文本层写入索引。
+            // OCR 任务耗尽重试后，PDF 仍可用原文本层兜底；图片没有原文本层，只更新 shadow 失败摘要。
             // 在还有重试机会时保留 ocr_pending，避免每次失败都重复重建节点。
             if !ocr_job_has_attempts_remaining(conn, job_db_id)? {
-                match writeback_native_text_layer(conn, &payload, embedder.clone()) {
-                    Ok(fallback_result) => {
-                        if !fallback_result.reembed_enqueued {
-                            if let Err(finalize_error) = finalize_artifact_after_kb_success(
-                                conn,
-                                payload.document_id,
-                                &payload.processing_run_id,
-                                "ocr_permanent_failure_native_fallback",
-                            ) {
-                                fail_kb_job(
+                if is_image_ocr_payload(&payload) {
+                    // 图片无原文本层兜底，OCR 耗尽重试即文档彻底失败；
+                    // 必须更新 document_status/index_status，否则文档卡在 ocr_pending
+                    conn.execute(
+                        "UPDATE kb_documents SET document_status = 'failed', index_status = 'failed', \
+                         parsing_status = 3, parsing_progress = 100, \
+                         updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
+                        rusqlite::params![payload.document_id, payload.processing_run_id],
+                    )?;
+                    if let Err(update_error) = update_shadow_pages_after_kb_failure(
+                        conn,
+                        payload.document_id,
+                        &payload.processing_run_id,
+                        &safe_error_message,
+                    ) {
+                        warn!(
+                            document_id = payload.document_id,
+                            error = %update_error,
+                            "OCR worker: failed to update artifact shadow page after image OCR failure"
+                        );
+                    }
+                } else {
+                    match writeback_native_text_layer(conn, &payload, embedder.clone()) {
+                        Ok(fallback_result) => {
+                            if !fallback_result.reembed_enqueued {
+                                if let Err(finalize_error) = finalize_artifact_after_kb_success(
                                     conn,
-                                    job_db_id,
-                                    &format!(
-                                        "{}; 原文本层已写回但 artifact promotion 入队失败: {}",
-                                        safe_error_message, finalize_error
-                                    ),
-                                )?;
-                                return Ok(true);
+                                    payload.document_id,
+                                    &payload.processing_run_id,
+                                    "ocr_permanent_failure_native_fallback",
+                                ) {
+                                    fail_kb_job(
+                                        conn,
+                                        job_db_id,
+                                        &format!(
+                                            "{}; 原文本层已写回但 artifact promotion 入队失败: {}",
+                                            safe_error_message, finalize_error
+                                        ),
+                                    )?;
+                                    return Ok(true);
+                                }
                             }
                         }
-                    }
-                    Err(fallback_error) => {
-                        fail_kb_job(
-                            conn,
-                            job_db_id,
-                            &format!(
-                                "{}; 原文本层 fallback 失败: {}",
-                                safe_error_message, fallback_error
-                            ),
-                        )?;
-                        return Ok(true);
+                        Err(fallback_error) => {
+                            fail_kb_job(
+                                conn,
+                                job_db_id,
+                                &format!(
+                                    "{}; 原文本层 fallback 失败: {}",
+                                    safe_error_message, fallback_error
+                                ),
+                            )?;
+                            return Ok(true);
+                        }
                     }
                 }
             }
@@ -1358,6 +1381,19 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
 const MAX_OCR_RETRIES: u32 = 3;
 /// OCR 请求初始退避时间（秒），每次重试翻倍
 const INITIAL_RETRY_BACKOFF_SECS: u64 = 2;
+const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+fn ocr_payload_extension(payload: &crate::kb::jobs::KbOcrPayload) -> String {
+    std::path::Path::new(&payload.storage_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+}
+
+fn is_image_ocr_payload(payload: &crate::kb::jobs::KbOcrPayload) -> bool {
+    crate::artifact::types::is_ocr_image_file(&ocr_payload_extension(payload))
+}
 
 #[derive(Debug, Clone, Copy)]
 struct OcrExecutionResult {
@@ -1383,6 +1419,10 @@ fn complete_ocr_with_native_text_fallback(
     embedder: Option<Arc<Embedder>>,
     context: &str,
 ) -> Result<bool> {
+    if is_image_ocr_payload(payload) {
+        return complete_image_ocr_without_text_fallback(conn, job_db_id, payload, context);
+    }
+
     match writeback_native_text_layer(conn, payload, embedder) {
         Ok(result) => {
             info!(
@@ -1473,11 +1513,81 @@ fn complete_ocr_with_native_text_fallback(
     }
 }
 
+fn complete_image_ocr_without_text_fallback(
+    conn: &Connection,
+    job_db_id: i64,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    context: &str,
+) -> Result<bool> {
+    let doc_total_pages = {
+        let kb = KbEngine::new(conn);
+        kb.get_document(payload.document_id)
+            .map(|d| d.page_count)
+            .unwrap_or(payload.pages.len().max(1) as i32)
+            .max(1)
+    };
+    let final_ocr_status = crate::kb::ocr::update_document_ocr_status(
+        conn,
+        payload.document_id,
+        doc_total_pages,
+        Some(&payload.processing_run_id),
+    )?;
+    let message = format!(
+        "image OCR is unavailable ({}); no native text layer exists for fallback",
+        context
+    );
+    let kb = KbEngine::new(conn);
+    kb.update_document_status_with_run_guard(
+        payload.document_id,
+        Some(crate::kb::types::STATUS_FAILED),
+        Some(100),
+        Some(&message),
+        None,
+        None,
+        None,
+        Some(&payload.processing_run_id),
+    )?;
+    // 图片没有原文本层兜底，OCR 不可用即文档彻底失败；必须同时更新 document_status/index_status，
+    // 否则文档会卡在 queued/ocr_pending 状态
+    conn.execute(
+        "UPDATE kb_documents SET document_status = 'failed', index_status = 'failed', \
+         updated_at = datetime('now') WHERE id = ?1 AND processing_run_id = ?2",
+        rusqlite::params![payload.document_id, payload.processing_run_id],
+    )?;
+    if let Err(e) = update_shadow_pages_after_kb_failure(
+        conn,
+        payload.document_id,
+        &payload.processing_run_id,
+        &message,
+    ) {
+        warn!(
+            job_db_id,
+            document_id = payload.document_id,
+            error = %e,
+            "OCR worker: failed to update artifact shadow page after image OCR fallback miss"
+        );
+    }
+    info!(
+        job_db_id,
+        document_id = payload.document_id,
+        ocr_status = final_ocr_status.as_str(),
+        "OCR worker: image OCR cannot use native text fallback"
+    );
+    complete_kb_job(conn, job_db_id)?;
+    Ok(true)
+}
+
 fn writeback_native_text_layer(
     conn: &Connection,
     payload: &crate::kb::jobs::KbOcrPayload,
     embedder: Option<Arc<Embedder>>,
 ) -> Result<OcrExecutionResult> {
+    if is_image_ocr_payload(payload) {
+        return Err(GBrainError::InvalidInput(
+            "image OCR payload has no native text layer fallback".to_string(),
+        ));
+    }
+
     let file_data = std::fs::read(&payload.storage_path).map_err(|e| {
         GBrainError::FileError(format!(
             "读取 PDF 原文本层失败 {}: {}",
@@ -1730,6 +1840,221 @@ fn is_retryable_ocr_error(error: &str) -> bool {
         || lower.contains("hyper")
 }
 
+fn execute_image_ocr_job(
+    conn: &Connection,
+    payload: &crate::kb::jobs::KbOcrPayload,
+    config: &Config,
+    embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
+) -> Result<OcrExecutionResult> {
+    use crate::kb::ocr_glm::{build_ocr_options_from_config, GlmOcrProvider};
+    use crate::kb::ocr_provider::{OcrFilePayload, OcrInput, OcrProvider};
+    use base64::Engine;
+
+    let ext = ocr_payload_extension(payload);
+    let file_data = std::fs::read(&payload.storage_path).map_err(|e| {
+        GBrainError::FileError(format!(
+            "read image OCR file failed {}: {}",
+            payload.storage_path, e
+        ))
+    })?;
+    // 在任何写入前先校验 run guard，防止旧 OCR job 覆盖新一轮处理的文档状态
+    crate::kb::ocr::check_ocr_run_guard(conn, payload.document_id, &payload.processing_run_id)?;
+
+    // 基于文件内容校验 MIME，防止伪装扩展名的文件或已被替换的文件进入外部 OCR
+    let mime_type = match crate::kb::security::detect_and_validate_mime(&file_data, &ext) {
+        Ok(mime) => mime,
+        Err(e) => {
+            let reason = format!("OCR worker MIME 校验失败: {}", e);
+            let _ = crate::kb::ocr::update_ocr_page_status(
+                conn,
+                payload.document_id,
+                1,
+                "failed",
+                &reason,
+                &payload.provider,
+                &payload.model,
+                &payload.processing_run_id,
+            );
+            let _ = conn.execute(
+                "UPDATE kb_documents SET document_status = 'failed', parsing_error = ?1, \
+                 parsing_status = 3, parsing_progress = 100, updated_at = datetime('now') \
+                 WHERE id = ?2 AND processing_run_id = ?3",
+                rusqlite::params![reason, payload.document_id, payload.processing_run_id],
+            );
+            return Err(e);
+        }
+    };
+    if file_data.len() > MAX_OCR_IMAGE_BYTES {
+        let reason = format!(
+            "GLM-OCR image input exceeds 10MB limit ({} bytes)",
+            file_data.len()
+        );
+        crate::kb::ocr::update_ocr_page_status(
+            conn,
+            payload.document_id,
+            1,
+            "failed",
+            &reason,
+            &payload.provider,
+            &payload.model,
+            &payload.processing_run_id,
+        )?;
+        return Err(GBrainError::InvalidInput(reason));
+    }
+
+    crate::kb::ocr::check_ocr_run_guard(conn, payload.document_id, &payload.processing_run_id)?;
+
+    let mut options = build_ocr_options_from_config(config);
+    options.model = payload.model.clone();
+    options.return_crop_images = payload.return_crop_images;
+    options.need_layout_visualization = payload.need_layout_visualization;
+
+    let api_key = config.ocr_api_key.as_deref().unwrap_or("");
+    let provider = GlmOcrProvider::new(api_key);
+    let input = OcrInput::Image {
+        file: OcrFilePayload::Base64(base64::engine::general_purpose::STANDARD.encode(&file_data)),
+        mime_type: mime_type.to_string(),
+        document_id: payload.document_id,
+        run_id: payload.processing_run_id.clone(),
+    };
+
+    let mut retry_count = 0u32;
+    let results = loop {
+        let call_started = std::time::Instant::now();
+        let recognition = provider.recognize(&input, &options);
+        let latency_ms = call_started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+
+        match recognition {
+            Ok(results) => {
+                let mut results =
+                    crate::kb::ocr::sanitize_ocr_page_results(&results, Some(api_key));
+                results.retain(|result| result.page_number == 1);
+                crate::kb::ocr::log_ocr_external_model_call(
+                    conn,
+                    payload.library_id,
+                    payload.document_id,
+                    &payload.provider,
+                    &payload.model,
+                    latency_ms,
+                    true,
+                    "",
+                    &results,
+                    Some(api_key),
+                );
+                if results.is_empty() {
+                    let reason = "image OCR request returned no page 1 result";
+                    crate::kb::ocr::update_ocr_page_status(
+                        conn,
+                        payload.document_id,
+                        1,
+                        "failed",
+                        reason,
+                        &payload.provider,
+                        &payload.model,
+                        &payload.processing_run_id,
+                    )?;
+                    return Err(GBrainError::InvalidInput(reason.to_string()));
+                }
+                break results;
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+                let safe_error =
+                    crate::kb::ocr::sanitize_error_text_with_secret(&error_str, Some(api_key));
+                crate::kb::ocr::log_ocr_external_model_call(
+                    conn,
+                    payload.library_id,
+                    payload.document_id,
+                    &payload.provider,
+                    &payload.model,
+                    latency_ms,
+                    false,
+                    &error_str,
+                    &[],
+                    Some(api_key),
+                );
+                if is_retryable_ocr_error(&error_str) && retry_count < MAX_OCR_RETRIES {
+                    retry_count += 1;
+                    let backoff_secs = INITIAL_RETRY_BACKOFF_SECS * 2u64.pow(retry_count - 1);
+                    tracing::warn!(
+                        document_id = payload.document_id,
+                        retry = retry_count,
+                        max_retries = MAX_OCR_RETRIES,
+                        backoff_secs,
+                        error = %safe_error,
+                        "image OCR request hit retryable error; backing off"
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                    continue;
+                }
+
+                crate::kb::ocr::update_ocr_page_status(
+                    conn,
+                    payload.document_id,
+                    1,
+                    "failed",
+                    &safe_error,
+                    &payload.provider,
+                    &payload.model,
+                    &payload.processing_run_id,
+                )?;
+                return Err(GBrainError::Http(format!(
+                    "image OCR execution failed: {}",
+                    safe_error
+                )));
+            }
+        }
+    };
+
+    crate::kb::ocr::persist_ocr_page_results(
+        conn,
+        payload.document_id,
+        &payload.processing_run_id,
+        &results,
+        Some(api_key),
+    )?;
+    crate::kb::ocr::persist_ocr_blocks(
+        conn,
+        payload.document_id,
+        &payload.processing_run_id,
+        &results,
+        Some(api_key),
+    )?;
+
+    let (persisted_ocr_results, _) = load_current_ocr_merge_state(conn, payload)?;
+    let ocr_pages: Vec<crate::kb::ocr::OcrWritebackPage> = persisted_ocr_results
+        .into_iter()
+        .filter(|result| result.page_number == 1)
+        .map(|result| {
+            let text = if result.text.trim().is_empty() {
+                result.markdown
+            } else {
+                result.text
+            };
+            crate::kb::ocr::OcrWritebackPage {
+                page_number: 1,
+                text,
+            }
+        })
+        .collect();
+    if ocr_pages.is_empty() {
+        return Err(GBrainError::InvalidInput(
+            "image OCR result was not persisted for page 1".to_string(),
+        ));
+    }
+
+    // 图片没有 PDF 原文本兜底：若 OCR 返回全空，直接返回错误让外层 Err 处理器统一接管，
+    // 避免走 Ok 分支触发 finalize_artifact_after_kb_success（错误地 promotion）
+    // 以及 compute_ocr_status 返回 Partial 后被清空 parsing_error
+    if ocr_pages.iter().all(|p| p.text.trim().is_empty()) {
+        return Err(GBrainError::InvalidInput(
+            "图片 OCR 无文本：API 返回 page 1 但 text/markdown 均为空，无可提取内容".to_string(),
+        ));
+    }
+
+    writeback_pages_and_enqueue_reembed(conn, payload, &ocr_pages, 1, embedder)
+}
+
 /// 执行 OCR 作业核心逻辑：读取 PDF → 规划 → 调用 GLM-OCR → 合并 → 回写
 fn execute_ocr_job(
     conn: &Connection,
@@ -1737,6 +2062,10 @@ fn execute_ocr_job(
     config: &Config,
     embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
 ) -> Result<OcrExecutionResult> {
+    if is_image_ocr_payload(payload) {
+        return execute_image_ocr_job(conn, payload, config, embedder);
+    }
+
     use crate::kb::ocr_glm::{build_ocr_options_from_config, pdf_to_base64, GlmOcrProvider};
     use crate::kb::ocr_merge::merge_text_and_ocr;
     use crate::kb::ocr_planner::plan_ocr_requests;

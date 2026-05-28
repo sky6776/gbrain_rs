@@ -21,6 +21,8 @@ pub fn mime_type_for_ext(ext: &str) -> &'static str {
         "html" | "htm" => "text/html",
         "txt" => "text/plain",
         "md" => "text/markdown",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
         _ => "application/octet-stream",
     }
 }
