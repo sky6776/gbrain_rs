@@ -818,8 +818,7 @@ fn rerank_evidence_candidates(
     };
 
     // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
-    let should_audit =
-        external_allowed && rerank_cfg.model_rerank_enabled && !api_key.is_empty();
+    let should_audit = external_allowed && rerank_cfg.model_rerank_enabled && !api_key.is_empty();
     if should_audit {
         // 仅收集实际发给外部模型的候选库（与 candidate_texts 截断一致）
         let distinct_library_ids: HashSet<i64> = candidates
@@ -953,7 +952,12 @@ fn resolve_evidence_rerank_policy(
             }
         }
     }
-    Ok((external_allowed, redaction_enabled, rerank_enabled, rerank_provider))
+    Ok((
+        external_allowed,
+        redaction_enabled,
+        rerank_enabled,
+        rerank_provider,
+    ))
 }
 
 const RERANK_EXCERPT_CHARS: usize = 1200;
