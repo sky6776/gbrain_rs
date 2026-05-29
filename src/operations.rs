@@ -178,7 +178,7 @@ impl OperationDef {
 pub struct OpContext {
     pub remote: bool,
     pub working_dir: std::path::PathBuf,
-    /// Dry-run mode: preview without committing (mirrors TS OperationContext.dryRun)
+    /// Dry-run mode: preview before saving (mirrors TS OperationContext.dryRun)
     pub dry_run: bool,
     /// P1-7: Sub-agent ID for namespace enforcement (mirrors TS viaSubagent)
     /// When set, put_page is restricted to wiki/agents/<subagent_id>/... namespace
@@ -540,7 +540,7 @@ impl<'a> Operations<'a> {
     /// Get a page by slug
     pub fn get_page(&self, slug: &str) -> Result<Option<Page>> {
         validate_page_slug(slug)?;
-        trace!(slug = %slug, "Getting page");
+        trace!(slug = %slug, "Loading page");
         self.engine.get_page(slug)
     }
 
@@ -675,7 +675,7 @@ impl<'a> Operations<'a> {
             });
         }
 
-        info!(slug = %slug, title = %title, "Putting page");
+        info!(slug = %slug, title = %title, "Writing page");
 
         // Parse markdown content
         let parsed = parse_markdown(content);
@@ -929,7 +929,7 @@ impl<'a> Operations<'a> {
 
     /// Get backlinks for a page
     pub fn get_backlinks(&self, slug: &str) -> Result<Vec<Link>> {
-        trace!(slug = %slug, "Getting backlinks");
+        trace!(slug = %slug, "Loading backlinks");
         self.engine.get_backlinks(slug)
     }
 
@@ -980,19 +980,19 @@ impl<'a> Operations<'a> {
 
     /// Get brain statistics
     pub fn get_stats(&self) -> Result<BrainStats> {
-        trace!("Getting brain stats");
+        trace!("Loading brain stats");
         self.engine.get_stats()
     }
 
     /// Get brain health
     pub fn get_health(&self) -> Result<BrainHealth> {
-        trace!("Getting brain health");
+        trace!("Loading brain health");
         self.engine.get_health()
     }
 
     /// Get ingest log
     pub fn get_ingest_log(&self, limit: Option<usize>) -> Result<Vec<IngestLogEntry>> {
-        trace!(limit = limit.unwrap_or(20), "Getting ingest log");
+        trace!(limit = limit.unwrap_or(20), "Loading ingest log");
         self.engine.get_ingest_log(limit)
     }
 
@@ -1025,7 +1025,7 @@ impl<'a> Operations<'a> {
 
     /// Get file URL by storage path
     pub fn file_url_by_path(&self, storage_path: &str) -> Result<String> {
-        trace!(storage_path = %storage_path, "Getting file URL");
+        trace!(storage_path = %storage_path, "Loading file URL");
         self.engine.file_url_by_storage_path(storage_path)
     }
 

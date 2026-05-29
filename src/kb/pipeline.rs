@@ -590,7 +590,7 @@ pub async fn process_document_async(
     )?;
 
     // --- 阶段 2: 分割 ---
-    report_progress(on_progress, "splitting", "分割为节点");
+    report_progress(on_progress, "chunking", "分割为节点");
     let splitter_config = SplitterConfig {
         file_path: storage_path.to_string(),
         chunk_size: library.chunk_size,
@@ -1323,6 +1323,16 @@ pub(crate) fn persist_nodes_and_vectors_inner(
 
         let db_id = conn.last_insert_rowid();
         id_map.insert(node.id, db_id);
+
+        if node.level == 0 {
+            crate::kb::passage::rebuild_passages_for_node(
+                conn,
+                db_id,
+                node.library_id,
+                doc_id,
+                &node.content,
+            )?;
+        }
     }
 
     // 更新 parent_id 关系 (临时 ID → 数据库 ID)
@@ -1401,7 +1411,7 @@ pub fn embedding_to_blob(vector: &[f32]) -> Vec<u8> {
 }
 
 /// Count words in text, using jieba tokenization for Chinese content
-/// and whitespace splitting for other text.
+/// and whitespace chunking for other text.
 fn count_words(text: &str) -> usize {
     if crate::nlp::chinese::has_chinese(text) {
         let tokens = crate::nlp::chinese::tokenize_content(text);

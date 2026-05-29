@@ -1,0 +1,315 @@
+//! Passage view index for robust KB retrieval.
+//!
+//! This module builds format-agnostic retrieval spans from KB nodes. It is a
+//! fallback surface for long PDFs, OCR text, fragmented notes, and documents
+//! without reliable headings.
+
+use crate::error::Result;
+use rusqlite::{params, Connection};
+
+const WINDOW_CHARS: usize = 720;
+const WINDOW_OVERLAP: usize = 120;
+const ATOMIC_MIN_CHARS: usize = 24;
+const ATOMIC_MAX_CHARS: usize = 900;
+const MAX_ATOMIC_PASSAGES_PER_NODE: usize = 512;
+const MAX_WINDOW_PASSAGES_PER_NODE: usize = 512;
+
+#[derive(Debug, Clone)]
+struct PassageDraft {
+    view_type: &'static str,
+    passage_order: i32,
+    source_start: i32,
+    source_end: i32,
+    content: String,
+    quality_score: f64,
+}
+
+/// Normalize text for passage search while keeping content human-readable.
+pub fn clean_text_for_search(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    let mut last_was_newline = false;
+
+    for ch in text.chars() {
+        let mapped = match ch {
+            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => '\n',
+            '\r' => '\n',
+            _ => ch,
+        };
+
+        if mapped == '\n' {
+            if !last_was_newline {
+                out.push('\n');
+            }
+            last_was_newline = true;
+            last_was_space = false;
+        } else if mapped.is_whitespace() {
+            if !last_was_space && !last_was_newline {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(mapped);
+            last_was_space = false;
+            last_was_newline = false;
+        }
+    }
+
+    out.trim().to_string()
+}
+
+/// Rebuild all passage views for one KB node.
+pub fn rebuild_passages_for_node(
+    conn: &Connection,
+    node_id: i64,
+    library_id: i64,
+    document_id: i64,
+    content: &str,
+) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM kb_passage_spans WHERE node_id = ?1",
+        params![node_id],
+    )?;
+
+    let drafts = build_passage_drafts(content);
+    for draft in &drafts {
+        let content_tokens = crate::nlp::chinese::tokenize_content(&draft.content);
+        conn.execute(
+            "INSERT INTO kb_passage_spans \
+             (library_id, document_id, node_id, view_type, passage_order, \
+              source_start, source_end, content, content_tokens, quality_score, metadata_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '{}')",
+            params![
+                library_id,
+                document_id,
+                node_id,
+                draft.view_type,
+                draft.passage_order,
+                draft.source_start,
+                draft.source_end,
+                draft.content,
+                content_tokens,
+                draft.quality_score,
+            ],
+        )?;
+    }
+
+    Ok(drafts.len())
+}
+
+/// Rebuild passage views for every level-0 node in a document.
+pub fn rebuild_document_passages(conn: &Connection, document_id: i64) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id, library_id, document_id, content \
+         FROM kb_document_nodes WHERE document_id = ?1 AND level = 0 \
+         ORDER BY chunk_order",
+    )?;
+    let rows = stmt.query_map(params![document_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+
+    let mut count = 0;
+    for row in rows {
+        let (node_id, library_id, doc_id, content) = row?;
+        count += rebuild_passages_for_node(conn, node_id, library_id, doc_id, &content)?;
+    }
+    Ok(count)
+}
+
+/// Ensure passage rows exist for a document. This is intentionally cheap and
+/// only rebuilds when no rows exist, so manually seeded tests and imported data
+/// from partial pipelines still get the robust retrieval surface.
+pub fn ensure_document_passages(conn: &Connection, document_id: i64) -> Result<usize> {
+    let existing: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM kb_passage_spans WHERE document_id = ?1",
+        params![document_id],
+        |row| row.get(0),
+    )?;
+    if existing > 0 {
+        return Ok(0);
+    }
+    rebuild_document_passages(conn, document_id)
+}
+
+fn build_passage_drafts(content: &str) -> Vec<PassageDraft> {
+    let mut atomic = Vec::new();
+    let mut windows = Vec::new();
+    let char_count = content.chars().count();
+
+    if char_count == 0 {
+        return Vec::new();
+    }
+
+    add_atomic_passages(content, &mut atomic);
+    add_window_passages(content, &mut windows);
+
+    atomic.truncate(MAX_ATOMIC_PASSAGES_PER_NODE);
+    windows.truncate(MAX_WINDOW_PASSAGES_PER_NODE);
+
+    let mut drafts = Vec::with_capacity(atomic.len() + windows.len());
+    drafts.extend(atomic);
+    drafts.extend(windows);
+    if drafts.is_empty() {
+        drafts.push(PassageDraft {
+            view_type: "raw",
+            passage_order: 0,
+            source_start: 0,
+            source_end: char_count as i32,
+            content: clean_text_for_search(content),
+            quality_score: estimate_quality(content),
+        });
+    }
+
+    drafts
+}
+
+fn add_atomic_passages(content: &str, drafts: &mut Vec<PassageDraft>) {
+    let mut current = String::new();
+    let mut start: Option<usize> = None;
+    let mut order = 0;
+
+    for (idx, ch) in content.chars().enumerate() {
+        let is_boundary = matches!(ch, '\n' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}');
+        if is_boundary {
+            if flush_atomic(&mut current, &mut start, idx, order, drafts) {
+                order += 1;
+            }
+        } else {
+            if start.is_none() {
+                start = Some(idx);
+            }
+            current.push(ch);
+        }
+    }
+    let _ = flush_atomic(
+        &mut current,
+        &mut start,
+        content.chars().count(),
+        order,
+        drafts,
+    );
+}
+
+fn flush_atomic(
+    current: &mut String,
+    start: &mut Option<usize>,
+    end: usize,
+    order: i32,
+    drafts: &mut Vec<PassageDraft>,
+) -> bool {
+    let Some(s) = *start else {
+        current.clear();
+        return false;
+    };
+    let cleaned = clean_text_for_search(current);
+    let len = cleaned.chars().count();
+    let inserted = if (ATOMIC_MIN_CHARS..=ATOMIC_MAX_CHARS).contains(&len) {
+        drafts.push(PassageDraft {
+            view_type: "atomic",
+            passage_order: order,
+            source_start: s as i32,
+            source_end: end as i32,
+            quality_score: estimate_quality(&cleaned),
+            content: cleaned,
+        });
+        true
+    } else {
+        false
+    };
+    current.clear();
+    *start = None;
+    inserted
+}
+
+fn add_window_passages(content: &str, drafts: &mut Vec<PassageDraft>) {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.is_empty() {
+        return;
+    }
+
+    let base_step = WINDOW_CHARS.saturating_sub(WINDOW_OVERLAP).max(1);
+    let window_chars = if chars.len() > MAX_WINDOW_PASSAGES_PER_NODE * base_step {
+        let required_step =
+            (chars.len() + MAX_WINDOW_PASSAGES_PER_NODE - 1) / MAX_WINDOW_PASSAGES_PER_NODE;
+        required_step + WINDOW_OVERLAP
+    } else {
+        WINDOW_CHARS
+    };
+    let step = window_chars.saturating_sub(WINDOW_OVERLAP).max(1);
+    let mut start = 0;
+    let mut order = 0;
+    while start < chars.len() && drafts.len() < MAX_WINDOW_PASSAGES_PER_NODE {
+        let end = (start + window_chars).min(chars.len());
+        let raw: String = chars[start..end].iter().collect();
+        let cleaned = clean_text_for_search(&raw);
+        if cleaned.chars().count() >= ATOMIC_MIN_CHARS {
+            drafts.push(PassageDraft {
+                view_type: "window",
+                passage_order: order,
+                source_start: start as i32,
+                source_end: end as i32,
+                quality_score: estimate_quality(&cleaned),
+                content: cleaned,
+            });
+        }
+        if end == chars.len() {
+            break;
+        }
+        start += step;
+        order += 1;
+    }
+}
+
+fn estimate_quality(text: &str) -> f64 {
+    let total = text.chars().count();
+    if total == 0 {
+        return 0.0;
+    }
+    let useful = text
+        .chars()
+        .filter(|c| c.is_alphanumeric() || crate::nlp::chinese::is_chinese(*c))
+        .count();
+    ((useful as f64 / total as f64) * 1.2).clamp(0.1, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_text_treats_zero_width_as_boundary() {
+        let cleaned = clean_text_for_search("A\u{200d}B\r\nC");
+        assert!(cleaned.contains("A\nB"));
+        assert!(cleaned.contains("C"));
+    }
+
+    #[test]
+    fn builds_windows_for_long_unstructured_text() {
+        let text = "手机积分交易相关逻辑。".repeat(120);
+        let drafts = build_passage_drafts(&text);
+        assert!(drafts.iter().any(|p| p.view_type == "window"));
+        assert!(drafts.len() > 1);
+    }
+
+    #[test]
+    fn windows_are_not_starved_by_many_atomic_fragments() {
+        let mut text = String::new();
+        for i in 0..700 {
+            text.push_str(&format!(
+                "普通碎片记录和流程配置说明用于制造很多短段落 {i}\n"
+            ));
+        }
+        text.push_str("后段关键记录: 手机积分交易应该命中 LP 命令并返回附近内容。");
+
+        let drafts = build_passage_drafts(&text);
+        assert!(drafts.iter().any(|p| p.view_type == "window"));
+        assert!(drafts
+            .iter()
+            .any(|p| p.content.contains("积分") && p.content.contains("LP")));
+    }
+}

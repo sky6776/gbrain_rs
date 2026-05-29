@@ -96,7 +96,7 @@ KB evidence → suggested changes → review → apply/reject → brain page upd
 | `memory` | Personal notes, meeting notes | Shadow page + KB projection |
 | `promote` | Files with entity information | KB projection + review candidates |
 
-Use `dry_run=true` to preview the routing plan without committing.
+Use `dry_run=true` to preview the routing plan before saving.
 
 ### Phase 2: Query Knowledge
 

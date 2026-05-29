@@ -155,7 +155,7 @@ pub fn hybrid_search(
     );
 
     // P2-1: Search fallback strategy — when vector returns <3 results,
-    // broaden the keyword query by splitting into OR terms and run a
+    // broaden the keyword query by expanding into OR terms and run a
     // second FTS5 pass. The fallback results are fused with half RRF weight
     // to avoid overwhelming the primary keyword results.
     let fallback_keyword_results = if vector_results.len() < 3 {

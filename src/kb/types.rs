@@ -541,7 +541,7 @@ impl ParsedBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Parsing,
-    Splitting,
+    Chunking,
     Embedding,
     Raptor,
     Persist,

@@ -61,7 +61,7 @@ Obsidian-specific:
 
 ## Notion Migration
 
-1. Export from Notion: Settings > Export > Markdown & CSV
+1. Export from Notion: Preferences > Export > Markdown & CSV
 2. Notion exports nested directories with UUIDs in filenames
 3. Strip UUIDs from filenames for clean slugs
 4. Map Notion's database properties to frontmatter

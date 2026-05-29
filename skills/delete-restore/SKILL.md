@@ -55,7 +55,7 @@ Delete an artifact by ID or UID:
 **MCP:** `artifact_delete` with `id_or_uid`
 **CLI:** `gbrain delete <id-or-uid>`
 
-Use `dry_run=true` to preview impact before committing:
+Use `dry_run=true` to preview impact before saving:
 
 **MCP:** `artifact_delete` with `id_or_uid` and `dry_run=true`
 **CLI:** `gbrain delete <id-or-uid> --dry-run`

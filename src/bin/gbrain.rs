@@ -27,7 +27,7 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Dry-run mode: preview operations without committing
+    /// Dry-run mode: preview operations before saving
     #[arg(long)]
     dry_run: bool,
 }
@@ -1366,7 +1366,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     })?;
 
                 let (title, storage_path, library_id, run_id, extension) = doc_row;
-                let is_image = gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
+                let is_image =
+                    gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略
                 {
@@ -1395,59 +1396,52 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let config_local = gbrain_core::config::Config::load().unwrap_or_default();
 
                 // 解析页码：区分显式指定与自动检测
-                let (ocr_pages, _explicit_pages, detection_reasons) =
-                    if is_image {
-                        if let Some(ref pages_str_val) = pages {
-                            // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
-                            let parsed_pages = parse_page_ranges(pages_str_val, 1)?;
-                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
-                                parsed_pages
-                                    .iter()
-                                    .map(|p| {
-                                        (p.to_string(), vec!["image_input".to_string()])
-                                    })
-                                    .collect();
-                            (parsed_pages, true, reasons)
-                        } else {
-                            // 图片文档未指定页码：默认第 1 页
-                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
-                                std::iter::once((
-                                    "1".to_string(),
-                                    vec!["image_input".to_string()],
-                                ))
-                                .collect();
-                            (vec![1], true, reasons)
-                        }
-                    } else if let Some(ref pages_str) = pages {
-                        let parsed_pages = parse_page_ranges(pages_str, total_pages)?;
-                        // 显式指定：原因统一为 manual_requested
+                let (ocr_pages, _explicit_pages, detection_reasons) = if is_image {
+                    if let Some(ref pages_str_val) = pages {
+                        // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
+                        let parsed_pages = parse_page_ranges(pages_str_val, 1)?;
                         let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
                             .iter()
-                            .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                            .map(|p| (p.to_string(), vec!["image_input".to_string()]))
                             .collect();
                         (parsed_pages, true, reasons)
                     } else {
-                        // 自动检测：使用 detector 返回的真实原因
-                        let detection = detect_ocr_pages_for_pdf(&storage_path, &config_local)?;
-                        let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
-                            .reasons_by_page
-                            .iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.to_string(),
-                                    v.iter()
-                                        .map(|r| {
-                                            serde_json::to_string(r)
-                                                .unwrap_or_default()
-                                                .trim_matches('"')
-                                                .to_string()
-                                        })
-                                        .collect(),
-                                )
-                            })
-                            .collect();
-                        (detection.ocr_pages, false, reasons)
-                    };
+                        // 图片文档未指定页码：默认第 1 页
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                            std::iter::once(("1".to_string(), vec!["image_input".to_string()]))
+                                .collect();
+                        (vec![1], true, reasons)
+                    }
+                } else if let Some(ref pages_str) = pages {
+                    let parsed_pages = parse_page_ranges(pages_str, total_pages)?;
+                    // 显式指定：原因统一为 manual_requested
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
+                        .iter()
+                        .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                        .collect();
+                    (parsed_pages, true, reasons)
+                } else {
+                    // 自动检测：使用 detector 返回的真实原因
+                    let detection = detect_ocr_pages_for_pdf(&storage_path, &config_local)?;
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
+                        .reasons_by_page
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.to_string(),
+                                v.iter()
+                                    .map(|r| {
+                                        serde_json::to_string(r)
+                                            .unwrap_or_default()
+                                            .trim_matches('"')
+                                            .to_string()
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    (detection.ocr_pages, false, reasons)
+                };
 
                 if ocr_pages.is_empty() {
                     info!(
@@ -1605,7 +1599,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     })?;
 
                 let (title, library_id, run_id, extension) = doc_row;
-                let is_image = gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
+                let is_image =
+                    gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
                 // 检查库隐私策略
                 {

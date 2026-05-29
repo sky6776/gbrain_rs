@@ -8,8 +8,10 @@
 //! 5. TimelineFirst: 先查时间线事件，再查 gbrain 上下文（§11.1/§11.2）
 
 use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info};
 
+use crate::config::Config;
 use crate::error::{GBrainError, Result};
 use crate::search::hybrid::{hybrid_search, HybridOpts};
 use crate::search::intent::{classify_intent, Intent};
@@ -87,6 +89,7 @@ pub fn unified_query(
                     &input.query,
                     limit - brain_hits.len() as i64,
                     input.filter_slug.as_deref(),
+                    config,
                 )?;
             }
 
@@ -103,8 +106,13 @@ pub fn unified_query(
         QueryStrategy::EvidenceFirst => {
             // 1. 先查 KB
             // 修复：把 filter_slug 下推到 query_kb_evidence
-            evidence_hits =
-                query_kb_evidence(conn, &input.query, limit, input.filter_slug.as_deref())?;
+            evidence_hits = query_kb_evidence(
+                conn,
+                &input.query,
+                limit,
+                input.filter_slug.as_deref(),
+                config,
+            )?;
 
             // 2. 给 KB hit 附加 artifact 和 shadow page 信息
             // 修复：query_kb_evidence 创建 EvidenceHit 时 projections 恒为空，
@@ -286,28 +294,178 @@ fn query_kb_evidence(
     query: &str,
     limit: i64,
     filter_slug: Option<&str>,
+    config: &Config,
 ) -> Result<Vec<EvidenceHit>> {
-    // 使用 KB FTS5 搜索
-    // kb_doc_fts 的 content_rowid 是 kb_document_nodes.id，
-    // 而 document_id 列存储的是 kb_documents.id（父文档 ID）。
-    // 因此 JOIN 应使用 FTS 的 rowid 与 kb_document_nodes.id 关联，
-    // 而不是用 fts.document_id（那是 kb_documents.id）。
-    // 修复：复用 build_fts_match_query 对自然语言分词+转义，
-    // 避免原始 query 中的 ?、:、-、引号、中文等触发 FTS 语法错误或召回很差
-    let fts_query = crate::nlp::chinese::build_fts_match_query(query);
+    let plan = EvidenceQueryPlan::from_query(query);
+    if plan.relaxed_match.is_empty() && plan.strict_match.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let limit_usize = limit.clamp(1, 100) as usize;
+    let fetch_k = (limit_usize * 8).max(50).min(500);
+
+    let mut routes: Vec<Vec<EvidenceCandidate>> = Vec::new();
+
+    if let Some(strict_match) = &plan.strict_match {
+        let strict_nodes = query_node_candidates(conn, strict_match, fetch_k, filter_slug, 1.3)?;
+        ensure_passages_for_candidates(conn, &strict_nodes)?;
+        routes.push(strict_nodes);
+        routes.push(query_passage_candidates(
+            conn,
+            strict_match,
+            fetch_k,
+            filter_slug,
+            1.6,
+        )?);
+    }
+
+    let relaxed_nodes =
+        query_node_candidates(conn, &plan.relaxed_match, fetch_k, filter_slug, 0.8)?;
+    ensure_passages_for_candidates(conn, &relaxed_nodes)?;
+    routes.push(relaxed_nodes);
+    routes.push(query_passage_candidates(
+        conn,
+        &plan.relaxed_match,
+        fetch_k,
+        filter_slug,
+        1.0,
+    )?);
+
+    let mut candidates = merge_evidence_routes(routes);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for candidate in &mut candidates {
+        focus_evidence_candidate_content(candidate, &plan);
+        candidate.local_score = score_evidence_candidate(candidate, &plan);
+    }
+
+    candidates = rerank_evidence_candidates(conn, query, candidates, &plan, config)?;
+    candidates = dedup_evidence_by_document(candidates);
+    candidates.truncate(limit_usize);
+
+    debug!(
+        "query_kb_evidence: query={}, filter_slug={:?}, count={}, core_terms={:?}",
+        query,
+        filter_slug,
+        candidates.len(),
+        plan.core_terms
+    );
+
+    candidates
+        .into_iter()
+        .map(|candidate| candidate.into_hit(conn, query, filter_slug))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct EvidenceQueryPlan {
+    core_terms: Vec<String>,
+    weak_terms: Vec<String>,
+    relaxed_match: String,
+    strict_match: Option<String>,
+}
+
+impl EvidenceQueryPlan {
+    fn from_query(query: &str) -> Self {
+        let relaxed_match = crate::nlp::chinese::build_fts_match_query(query);
+        let original_lower = query.to_lowercase();
+        let mut seen = HashSet::new();
+        let mut core_terms = Vec::new();
+        let mut weak_terms = Vec::new();
+
+        for token in crate::nlp::chinese::tokenize_content(query).split_whitespace() {
+            let token = crate::nlp::chinese::normalize_token(token);
+            if token.is_empty() || !seen.insert(token.clone()) {
+                continue;
+            }
+            if is_weak_query_token(&token) {
+                weak_terms.push(token);
+                continue;
+            }
+            let has_chinese = crate::nlp::chinese::has_chinese(&token);
+            let appears_as_ascii = !has_chinese && original_lower.contains(&token);
+            if has_chinese || appears_as_ascii || is_domain_abbreviation(&token) {
+                let char_len = token.chars().count();
+                if char_len >= 2 || is_domain_abbreviation(&token) {
+                    core_terms.push(token);
+                }
+            }
+        }
+
+        let strict_match = if core_terms.len() >= 2 {
+            Some(build_and_match_query(&core_terms))
+        } else {
+            None
+        };
+
+        Self {
+            core_terms,
+            weak_terms,
+            relaxed_match,
+            strict_match,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EvidenceCandidate {
+    candidate_id: i64,
+    passage_id: Option<i64>,
+    kb_document_id: i64,
+    library_id: i64,
+    title: String,
+    content: String,
+    level: i64,
+    artifact_id: i64,
+    view_type: String,
+    route_score: f64,
+    local_score: f64,
+    final_score: f64,
+}
+
+impl EvidenceCandidate {
+    fn into_hit(
+        self,
+        conn: &Connection,
+        query: &str,
+        filter_slug: Option<&str>,
+    ) -> Result<EvidenceHit> {
+        let artifact = if self.artifact_id > 0 {
+            super::store::find_artifact_by_id(conn, self.artifact_id)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        Ok(EvidenceHit {
+            kb_document_id: self.kb_document_id,
+            title: self.title,
+            snippet: query_centered_snippet(&self.content, query),
+            relevance: self.final_score.max(self.local_score).max(self.route_score),
+            artifact,
+            shadow_page_slug: filter_slug.map(|s| s.to_string()),
+            projections: Vec::new(),
+        })
+    }
+}
+
+fn query_node_candidates(
+    conn: &Connection,
+    fts_query: &str,
+    fetch_k: usize,
+    filter_slug: Option<&str>,
+    route_weight: f64,
+) -> Result<Vec<EvidenceCandidate>> {
     if fts_query.is_empty() {
         return Ok(Vec::new());
     }
-    // 修复：当提供 filter_slug 时，通过 artifact_projections 双 JOIN 限定 slug，
-    // 下推 slug 过滤到 SQL 查询阶段，避免先全局 LIMIT 再后置 retain 导致目标 slug 的命中被挤掉。
-    // 第一个 JOIN：kb_document 投影 → 获取 artifact_id
-    // 第二个 JOIN：brain_shadow_page 投影 → 匹配 projection_ref = 'slug:{filter_slug}'
-    // 修复：带出 ap_kb.artifact_id，用于后续填充 EvidenceHit.artifact，
-    // 避免 filter_slug 命中时 shadow_page_slug 已非空而跳过 artifact 补全分支
+
     let sql = if filter_slug.is_some() {
-        "SELECT dn.id, dn.document_id, dn.content, dn.level,
-            d.original_name, d.title, d.summary,
-            ap_kb.artifact_id
+        "SELECT dn.id, dn.document_id, dn.library_id, dn.content, dn.level,
+            d.original_name, d.title, ap_kb.artifact_id, bm25(kb_doc_fts) AS bm25_score
          FROM kb_doc_fts fts
          JOIN kb_document_nodes dn ON dn.id = fts.rowid
          JOIN kb_documents d ON d.id = dn.document_id
@@ -321,102 +479,710 @@ fn query_kb_evidence(
          WHERE kb_doc_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
-         ORDER BY rank
+         ORDER BY bm25_score ASC
          LIMIT ?2"
     } else {
-        "SELECT dn.id, dn.document_id, dn.content, dn.level,
-            d.original_name, d.title, d.summary,
-            0 AS artifact_id
+        "SELECT dn.id, dn.document_id, dn.library_id, dn.content, dn.level,
+            d.original_name, d.title, 0 AS artifact_id, bm25(kb_doc_fts) AS bm25_score
          FROM kb_doc_fts fts
          JOIN kb_document_nodes dn ON dn.id = fts.rowid
          JOIN kb_documents d ON d.id = dn.document_id
          WHERE kb_doc_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
-         ORDER BY rank
+         ORDER BY bm25_score ASC
          LIMIT ?2"
     };
 
     let mut stmt = conn
         .prepare(sql)
-        .map_err(|e| GBrainError::Database(format!("准备 KB 搜索失败: {}", e)))?;
+        .map_err(|e| GBrainError::Database(format!("准备 KB node 搜索失败: {}", e)))?;
 
-    // 修复：filter_slug 参数格式为 'slug:{slug}'，与 artifact_projections.projection_ref 匹配
-    // 使用统一闭包避免 Rust 闭包类型不匹配问题
-    // 修复：增加 artifact_id 字段，用于填充 EvidenceHit.artifact
-    #[allow(clippy::type_complexity)]
-    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(i64, i64, String, i64, String, String, String, i64)> {
+    let map_row = |rank: usize, row: &rusqlite::Row<'_>| -> rusqlite::Result<EvidenceCandidate> {
         let node_id: i64 = row.get(0)?;
         let kb_document_id: i64 = row.get(1)?;
-        let content: String = row.get(2)?;
-        let level: i64 = row.get(3)?;
-        let original_name: String = row.get(4)?;
-        let doc_title: String = row.get(5)?;
-        let doc_summary: String = row.get(6)?;
+        let library_id: i64 = row.get(2)?;
+        let content: String = row.get(3)?;
+        let level: i64 = row.get(4)?;
+        let original_name: String = row.get(5)?;
+        let doc_title: String = row.get(6)?;
         let artifact_id: i64 = row.get(7)?;
-        Ok((node_id, kb_document_id, content, level, original_name, doc_title, doc_summary, artifact_id))
-    };
-
-    let rows = if let Some(slug) = filter_slug {
-        let slug_ref = format!("slug:{}", slug);
-        stmt.query_map(params![fts_query, limit, slug_ref], map_row)
-            .map_err(|e| GBrainError::Database(format!("KB 搜索失败: {}", e)))?
-    } else {
-        stmt.query_map(params![fts_query, limit], map_row)
-            .map_err(|e| GBrainError::Database(format!("KB 搜索失败: {}", e)))?
-    };
-
-    let mut hits = Vec::new();
-    for row in rows {
-        let (
-            _node_id,
-            kb_document_id,
-            content,
-            level,
-            original_name,
-            doc_title,
-            _doc_summary,
-            artifact_id,
-        ) = row.map_err(|e| GBrainError::Database(format!("映射 KB 行失败: {}", e)))?;
-
         let title = if doc_title.is_empty() {
             original_name
         } else {
             doc_title
         };
-        let snippet = query_centered_snippet(&content, query);
-
-        // 修复：当 filter_slug 存在时，SQL JOIN 已带出 artifact_id，
-        // 直接查 artifact 填充，避免 shadow_page_slug 已非空时跳过补全分支
-        let artifact = if artifact_id > 0 {
-            super::store::find_artifact_by_id(conn, artifact_id)
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
-
-        hits.push(EvidenceHit {
+        Ok(EvidenceCandidate {
+            candidate_id: -node_id,
+            passage_id: None,
             kb_document_id,
+            library_id,
             title,
-            snippet,
-            relevance: 1.0 / (level as f64 + 1.0), // 简化评分
-            artifact,
-            // 修复：当 filter_slug 已在 SQL 中通过 JOIN 过滤时，
-            // 这些 hit 已确认属于该 slug，直接填入 shadow_page_slug。
-            // 否则兜底 retain 要求 shadow_page_slug == filter_slug 会把所有 hit 清空。
-            shadow_page_slug: filter_slug.map(|s| s.to_string()),
-            projections: Vec::new(),
-        });
+            content,
+            level,
+            artifact_id,
+            view_type: "node".to_string(),
+            route_score: route_weight / (60.0 + rank as f64 + 1.0),
+            local_score: 0.0,
+            final_score: 0.0,
+        })
+    };
+
+    let mut out = Vec::new();
+    if let Some(slug) = filter_slug {
+        let slug_ref = format!("slug:{}", slug);
+        let mut rows = stmt
+            .query(params![fts_query, fetch_k as i64, slug_ref])
+            .map_err(|e| GBrainError::Database(format!("KB node 搜索失败: {}", e)))?;
+        let mut rank = 0;
+        while let Some(row) = rows.next()? {
+            out.push(map_row(rank, row)?);
+            rank += 1;
+        }
+    } else {
+        let mut rows = stmt
+            .query(params![fts_query, fetch_k as i64])
+            .map_err(|e| GBrainError::Database(format!("KB node 搜索失败: {}", e)))?;
+        let mut rank = 0;
+        while let Some(row) = rows.next()? {
+            out.push(map_row(rank, row)?);
+            rank += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn query_passage_candidates(
+    conn: &Connection,
+    fts_query: &str,
+    fetch_k: usize,
+    filter_slug: Option<&str>,
+    route_weight: f64,
+) -> Result<Vec<EvidenceCandidate>> {
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
     }
 
-    debug!(
-        "query_kb_evidence: query={}, filter_slug={:?}, count={}",
-        query,
-        filter_slug,
-        hits.len()
-    );
-    Ok(hits)
+    let sql = if filter_slug.is_some() {
+        "SELECT ps.id, ps.node_id, ps.document_id, ps.library_id, ps.content,
+            ps.view_type, dn.level, d.original_name, d.title,
+            ap_kb.artifact_id, bm25(kb_passage_fts) AS bm25_score
+         FROM kb_passage_fts fts
+         JOIN kb_passage_spans ps ON ps.id = fts.rowid
+         JOIN kb_document_nodes dn ON dn.id = ps.node_id
+         JOIN kb_documents d ON d.id = ps.document_id
+         JOIN artifact_projections ap_kb ON ap_kb.projection_type = 'kb_document'
+              AND ap_kb.projection_ref = 'kb_document:' || ps.document_id
+              AND ap_kb.status = 'active'
+         JOIN artifact_projections ap_sp ON ap_sp.artifact_id = ap_kb.artifact_id
+              AND ap_sp.projection_type = 'brain_shadow_page'
+              AND ap_sp.projection_ref = ?3
+              AND ap_sp.status = 'active'
+         WHERE kb_passage_fts MATCH ?1
+           AND d.document_status != 'deleted'
+           AND d.deleted_at IS NULL
+         ORDER BY bm25_score ASC
+         LIMIT ?2"
+    } else {
+        "SELECT ps.id, ps.node_id, ps.document_id, ps.library_id, ps.content,
+            ps.view_type, dn.level, d.original_name, d.title,
+            0 AS artifact_id, bm25(kb_passage_fts) AS bm25_score
+         FROM kb_passage_fts fts
+         JOIN kb_passage_spans ps ON ps.id = fts.rowid
+         JOIN kb_document_nodes dn ON dn.id = ps.node_id
+         JOIN kb_documents d ON d.id = ps.document_id
+         WHERE kb_passage_fts MATCH ?1
+           AND d.document_status != 'deleted'
+           AND d.deleted_at IS NULL
+         ORDER BY bm25_score ASC
+         LIMIT ?2"
+    };
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| GBrainError::Database(format!("准备 KB passage 搜索失败: {}", e)))?;
+
+    let map_row = |rank: usize, row: &rusqlite::Row<'_>| -> rusqlite::Result<EvidenceCandidate> {
+        let passage_id: i64 = row.get(0)?;
+        let _node_id: i64 = row.get(1)?;
+        let kb_document_id: i64 = row.get(2)?;
+        let library_id: i64 = row.get(3)?;
+        let content: String = row.get(4)?;
+        let view_type: String = row.get(5)?;
+        let level: i64 = row.get(6)?;
+        let original_name: String = row.get(7)?;
+        let doc_title: String = row.get(8)?;
+        let artifact_id: i64 = row.get(9)?;
+        let title = if doc_title.is_empty() {
+            original_name
+        } else {
+            doc_title
+        };
+        Ok(EvidenceCandidate {
+            candidate_id: passage_id,
+            passage_id: Some(passage_id),
+            kb_document_id,
+            library_id,
+            title,
+            content,
+            level,
+            artifact_id,
+            view_type,
+            route_score: route_weight / (60.0 + rank as f64 + 1.0),
+            local_score: 0.0,
+            final_score: 0.0,
+        })
+    };
+
+    let mut out = Vec::new();
+    if let Some(slug) = filter_slug {
+        let slug_ref = format!("slug:{}", slug);
+        let mut rows = stmt
+            .query(params![fts_query, fetch_k as i64, slug_ref])
+            .map_err(|e| GBrainError::Database(format!("KB passage 搜索失败: {}", e)))?;
+        let mut rank = 0;
+        while let Some(row) = rows.next()? {
+            out.push(map_row(rank, row)?);
+            rank += 1;
+        }
+    } else {
+        let mut rows = stmt
+            .query(params![fts_query, fetch_k as i64])
+            .map_err(|e| GBrainError::Database(format!("KB passage 搜索失败: {}", e)))?;
+        let mut rank = 0;
+        while let Some(row) = rows.next()? {
+            out.push(map_row(rank, row)?);
+            rank += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn ensure_passages_for_candidates(
+    conn: &Connection,
+    candidates: &[EvidenceCandidate],
+) -> Result<()> {
+    let mut docs = HashSet::new();
+    for candidate in candidates {
+        docs.insert(candidate.kb_document_id);
+    }
+    for doc_id in docs {
+        crate::kb::passage::ensure_document_passages(conn, doc_id)?;
+    }
+    Ok(())
+}
+
+fn merge_evidence_routes(routes: Vec<Vec<EvidenceCandidate>>) -> Vec<EvidenceCandidate> {
+    let mut merged: HashMap<i64, EvidenceCandidate> = HashMap::new();
+    for route in routes {
+        for candidate in route {
+            merged
+                .entry(candidate.candidate_id)
+                .and_modify(|existing| {
+                    existing.route_score += candidate.route_score;
+                    if candidate.content.chars().count() < existing.content.chars().count()
+                        && candidate.passage_id.is_some()
+                    {
+                        existing.content = candidate.content.clone();
+                        existing.view_type = candidate.view_type.clone();
+                        existing.passage_id = candidate.passage_id;
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    let mut out: Vec<EvidenceCandidate> = merged.into_values().collect();
+    out.sort_by(|a, b| {
+        b.route_score
+            .partial_cmp(&a.route_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+fn dedup_evidence_by_document(candidates: Vec<EvidenceCandidate>) -> Vec<EvidenceCandidate> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if seen.insert(candidate.kb_document_id) {
+            out.push(candidate);
+        }
+    }
+    out
+}
+
+fn focus_evidence_candidate_content(candidate: &mut EvidenceCandidate, plan: &EvidenceQueryPlan) {
+    if candidate.content.chars().count() <= RERANK_EXCERPT_CHARS {
+        return;
+    }
+    if let Some(excerpt) =
+        query_focused_excerpt(&candidate.content, &plan.core_terms, RERANK_EXCERPT_CHARS)
+    {
+        candidate.content = excerpt;
+    }
+}
+
+fn rerank_evidence_candidates(
+    conn: &Connection,
+    query: &str,
+    mut candidates: Vec<EvidenceCandidate>,
+    plan: &EvidenceQueryPlan,
+    config: &Config,
+) -> Result<Vec<EvidenceCandidate>> {
+    candidates.sort_by(|a, b| {
+        let b_score = b.local_score + b.route_score * 5.0;
+        let a_score = a.local_score + a.route_score * 5.0;
+        b_score
+            .partial_cmp(&a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // P1: 读取库级 rerank_enabled / rerank_provider，与 kb_search 策略保持一致
+    let (external_allowed, redaction_enabled, lib_rerank_enabled, rerank_provider_str) =
+        resolve_evidence_rerank_policy(conn, &candidates)?;
+    let rerank_cfg = crate::kb::rerank::RerankConfig {
+        model_rerank_enabled: lib_rerank_enabled,
+        rerank_provider: if rerank_provider_str.is_empty() {
+            "chat_completions".to_string()
+        } else {
+            rerank_provider_str
+        },
+        rerank_model: config.expansion_model.clone(),
+        rerank_timeout_ms: 5000,
+        rerank_max_candidates: 50,
+        external_rerank_allowed: external_allowed,
+    };
+
+    let local_candidates: Vec<(i64, crate::kb::rerank::LocalRankSignals)> = candidates
+        .iter()
+        .map(|c| {
+            (
+                c.candidate_id,
+                crate::kb::rerank::LocalRankSignals {
+                    fts_score: c.route_score,
+                    exact_match_score: c.local_score,
+                    granularity_score: view_type_score(&c.view_type),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+
+    let candidate_texts: Vec<crate::kb::rerank::RerankCandidate> = candidates
+        .iter()
+        .take(rerank_cfg.rerank_max_candidates)
+        .map(|c| {
+            let text = if redaction_enabled && external_allowed {
+                crate::kb::privacy::redact_content(&c.content)
+            } else {
+                c.content.clone()
+            };
+            crate::kb::rerank::RerankCandidate {
+                doc_id: c.candidate_id,
+                text,
+            }
+        })
+        .collect();
+
+    let api_key = config.expansion_api_key_resolved().unwrap_or("");
+    let base_url = config
+        .expansion_base_url_resolved()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.openai.com/v1");
+    let weights = vec![0.25, 0.0, 0.0, 0.65, 0.0, 0.0];
+    let (scored, rerank_info) = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+            &rerank_cfg,
+            query,
+            &local_candidates,
+            &candidate_texts,
+            &weights,
+            None,
+            base_url,
+            api_key,
+        )),
+        Err(_) => (
+            crate::kb::rerank::local_rerank(&local_candidates, &weights),
+            crate::kb::rerank::RerankResult {
+                model_rerank_attempted: false,
+                model_rerank_succeeded: false,
+                fallback_used: true,
+                fallback_reason: Some(crate::kb::rerank::FallbackReason::ApiError),
+                provider: "local".to_string(),
+                candidates_reranked: candidates.len(),
+            },
+        ),
+    };
+
+    // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
+    let should_audit =
+        external_allowed && rerank_cfg.model_rerank_enabled && !api_key.is_empty();
+    if should_audit {
+        // 仅收集实际发给外部模型的候选库（与 candidate_texts 截断一致）
+        let distinct_library_ids: HashSet<i64> = candidates
+            .iter()
+            .take(rerank_cfg.rerank_max_candidates)
+            .map(|c| c.library_id)
+            .collect();
+        let succeeded = rerank_info.model_rerank_succeeded;
+        let error_msg = if succeeded {
+            ""
+        } else {
+            rerank_info
+                .fallback_reason
+                .as_ref()
+                .map(|r| r.as_str())
+                .unwrap_or("unknown")
+        };
+        for lib_id in distinct_library_ids {
+            let _ = crate::kb::privacy::log_external_model_call(
+                conn,
+                Some(lib_id),
+                None,
+                "rerank",
+                &rerank_cfg.rerank_provider,
+                &rerank_cfg.rerank_model,
+                query.len() as i32,
+                candidate_texts.len() as i32,
+                0,
+                0.0,
+                succeeded,
+                error_msg,
+            );
+        }
+    }
+
+    let model_succeeded = rerank_info.model_rerank_succeeded;
+    let score_by_id: HashMap<i64, f64> = scored.into_iter().collect();
+    let (local_min, local_max) = score_bounds(candidates.iter().map(|c| c.local_score));
+    let (route_min, route_max) = score_bounds(candidates.iter().map(|c| c.route_score));
+    for candidate in &mut candidates {
+        candidate.final_score = if model_succeeded {
+            if let Some(model_score) = score_by_id.get(&candidate.candidate_id).copied() {
+                let local = normalize_score(candidate.local_score, local_min, local_max);
+                let route = normalize_score(candidate.route_score, route_min, route_max);
+                model_score.clamp(0.0, 1.0) * 0.75 + local * 0.20 + route * 0.05
+            } else {
+                // 模型未返回该候选分数（如部分 batch 失败），保留本地排序分
+                candidate.local_score * 0.80 + candidate.route_score * 0.20
+            }
+        } else {
+            candidate.local_score * 0.80 + candidate.route_score * 0.20
+        };
+    }
+
+    candidates.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    apply_quality_guard(&mut candidates, plan);
+    Ok(candidates)
+}
+
+fn score_bounds(scores: impl Iterator<Item = f64>) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for score in scores {
+        if score < min {
+            min = score;
+        }
+        if score > max {
+            max = score;
+        }
+    }
+    if min.is_finite() && max.is_finite() {
+        (min, max)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+fn normalize_score(score: f64, min: f64, max: f64) -> f64 {
+    let width = max - min;
+    if width.abs() < f64::EPSILON {
+        return if score > 0.0 { 1.0 } else { 0.0 };
+    }
+    ((score - min) / width).clamp(0.0, 1.0)
+}
+
+fn resolve_evidence_rerank_policy(
+    conn: &Connection,
+    candidates: &[EvidenceCandidate],
+) -> Result<(bool, bool, bool, String)> {
+    // 返回: (external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider)
+    let mut library_ids = HashSet::new();
+    for candidate in candidates {
+        library_ids.insert(candidate.library_id);
+    }
+
+    let mut external_allowed = true;
+    let mut redaction_enabled = false;
+    let mut rerank_enabled = true;
+    let mut rerank_provider = String::new();
+    for library_id in library_ids {
+        let policy = conn.query_row(
+            "SELECT external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider \
+             FROM kb_libraries WHERE id = ?1",
+            params![library_id],
+            |row| {
+                Ok((
+                    row.get::<_, i32>(0)?,
+                    row.get::<_, i32>(1)?,
+                    row.get::<_, i32>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        );
+        if let Ok((allowed, redact, re_enabled, re_provider)) = policy {
+            if allowed == 0 {
+                external_allowed = false;
+            }
+            if redact != 0 {
+                redaction_enabled = true;
+            }
+            // 任一库禁用 rerank 则全局禁用，取最保守策略
+            if re_enabled == 0 {
+                rerank_enabled = false;
+            }
+            if rerank_provider.is_empty() && !re_provider.is_empty() {
+                rerank_provider = re_provider;
+            }
+        }
+    }
+    Ok((external_allowed, redaction_enabled, rerank_enabled, rerank_provider))
+}
+
+const RERANK_EXCERPT_CHARS: usize = 1200;
+
+fn query_focused_excerpt(content: &str, terms: &[String], limit: usize) -> Option<String> {
+    if terms.is_empty() {
+        return None;
+    }
+
+    let folded = content.to_ascii_lowercase();
+    let chars: Vec<char> = content.chars().collect();
+    let content_len = chars.len();
+    if content_len <= limit {
+        return Some(content.to_string());
+    }
+
+    let mut positions = Vec::new();
+    for term in terms {
+        let term = term.to_ascii_lowercase();
+        if term.is_empty() {
+            continue;
+        }
+
+        let mut search_from = 0;
+        let mut hits_for_term = 0;
+        while search_from < folded.len() && hits_for_term < 32 {
+            let Some(relative) = folded[search_from..].find(&term) else {
+                break;
+            };
+            let byte_pos = search_from + relative;
+            let char_pos = content[..byte_pos].chars().count();
+            positions.push(char_pos);
+            search_from = byte_pos + term.len();
+            hits_for_term += 1;
+        }
+    }
+    if positions.is_empty() {
+        return None;
+    }
+
+    let mut best_start = 0usize;
+    let mut best_score = f64::MIN;
+    for pos in positions {
+        let mut start = pos.saturating_sub(limit / 2);
+        if start + limit > content_len {
+            start = content_len.saturating_sub(limit);
+        }
+        let end = (start + limit).min(content_len);
+        let excerpt: String = chars[start..end].iter().collect();
+        let folded_excerpt = excerpt.to_ascii_lowercase();
+        let coverage = terms
+            .iter()
+            .filter(|term| folded_excerpt.contains(&term.to_ascii_lowercase()))
+            .count();
+        let center = start + (end - start) / 2;
+        let distance = center.abs_diff(pos) as f64;
+        let score = coverage as f64 * 1000.0 - distance;
+        if score > best_score {
+            best_score = score;
+            best_start = start;
+        }
+    }
+
+    let end = (best_start + limit).min(content_len);
+    let excerpt: String = chars[best_start..end].iter().collect();
+    Some(format!(
+        "{}{}{}",
+        if best_start > 0 { "..." } else { "" },
+        excerpt,
+        if end < content_len { "..." } else { "" }
+    ))
+}
+
+fn score_evidence_candidate(candidate: &EvidenceCandidate, plan: &EvidenceQueryPlan) -> f64 {
+    let content = candidate.content.to_lowercase();
+    let title = candidate.title.to_lowercase();
+    let mut score = candidate.route_score * 5.0;
+
+    let mut covered = 0usize;
+    let mut positions = Vec::new();
+    for term in &plan.core_terms {
+        let term_lower = term.to_lowercase();
+        let content_pos = content.find(&term_lower);
+        let title_hit = title.contains(&term_lower);
+        if content_pos.is_some() || title_hit {
+            covered += 1;
+            score += 2.5 + (term.chars().count() as f64 * 0.15).min(0.8);
+            if title_hit {
+                score += 1.0;
+            }
+            if let Some(pos) = content_pos {
+                positions.push(pos);
+            }
+        }
+    }
+
+    if !plan.core_terms.is_empty() {
+        score += 4.0 * (covered as f64 / plan.core_terms.len() as f64);
+    }
+    if covered >= 2 {
+        score += 2.5;
+    }
+    if covered == plan.core_terms.len() && covered > 0 {
+        score += 2.0;
+    }
+    if let Some(span) = position_span(&positions) {
+        if span <= 120 {
+            score += 3.0;
+        } else if span <= 300 {
+            score += 1.5;
+        }
+    }
+
+    for term in &plan.weak_terms {
+        if content.contains(term) || title.contains(term) {
+            score += 0.15;
+        }
+    }
+
+    score += view_type_score(&candidate.view_type);
+    score += 1.0 / (candidate.level as f64 + 1.0);
+
+    let len = candidate.content.chars().count();
+    if len > 2500 {
+        score -= 1.5;
+    } else if len <= 900 {
+        score += 0.8;
+    }
+
+    score.max(0.0)
+}
+
+fn apply_quality_guard(candidates: &mut [EvidenceCandidate], plan: &EvidenceQueryPlan) {
+    if plan.core_terms.len() < 2 || candidates.len() < 2 {
+        return;
+    }
+    let required = plan.core_terms.len().min(2);
+    let top_coverage = core_coverage(&candidates[0].content, &candidates[0].title, plan);
+    if top_coverage >= required {
+        return;
+    }
+    if let Some((idx, _)) = candidates
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, c)| core_coverage(&c.content, &c.title, plan) >= required)
+        .max_by(|(_, a), (_, b)| {
+            a.local_score
+                .partial_cmp(&b.local_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
+        candidates.swap(0, idx);
+    }
+}
+
+fn core_coverage(content: &str, title: &str, plan: &EvidenceQueryPlan) -> usize {
+    let content = content.to_lowercase();
+    let title = title.to_lowercase();
+    plan.core_terms
+        .iter()
+        .filter(|term| {
+            let term = term.to_lowercase();
+            content.contains(&term) || title.contains(&term)
+        })
+        .count()
+}
+
+fn position_span(positions: &[usize]) -> Option<usize> {
+    if positions.len() < 2 {
+        return None;
+    }
+    let min = positions.iter().min()?;
+    let max = positions.iter().max()?;
+    Some(max.saturating_sub(*min))
+}
+
+fn view_type_score(view_type: &str) -> f64 {
+    match view_type {
+        "atomic" => 1.4,
+        "window" => 1.0,
+        "clean" => 0.8,
+        "node" => 0.2,
+        _ => 0.5,
+    }
+}
+
+fn build_and_match_query(terms: &[String]) -> String {
+    terms
+        .iter()
+        .take(5)
+        .filter_map(|term| {
+            let escaped = crate::nlp::chinese::escape_fts5_token(term);
+            (!escaped.is_empty()).then(|| format!("{}*", escaped))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn is_domain_abbreviation(token: &str) -> bool {
+    matches!(token, "lp" | "gp" | "vi" | "api" | "sdk")
+}
+
+fn is_weak_query_token(token: &str) -> bool {
+    matches!(
+        token,
+        "请" | "告诉"
+            | "告诉我"
+            | "我"
+            | "你"
+            | "一下"
+            | "相关"
+            | "逻辑"
+            | "相关逻辑"
+            | "请问"
+            | "什么"
+            | "怎么"
+            | "怎样"
+            | "如何"
+            | "是否"
+            | "有关"
+            | "内容"
+            | "信息"
+            | "的"
+            | "是"
+            | "和"
+            | "与"
+            | "及"
+    )
 }
 
 const EVIDENCE_SNIPPET_CHARS: usize = 200;

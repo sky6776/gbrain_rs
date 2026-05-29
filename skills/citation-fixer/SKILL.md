@@ -2,7 +2,7 @@
 name: citation-fixer
 version: 1.2.0
 description: |
-  Audit and fix citation formatting across brain pages. Ensures every fact has
+  Audit and fix citation format across brain pages. Ensures every fact has
   an inline [Source: ...] citation matching the standard format. Uses the
   artifact facade only; broken external references are flagged unless a
   deterministic source URL is already available.
@@ -124,7 +124,7 @@ the source of truth; gbrain_rs stores brain content in SQLite/artifact storage.
 ### Batch safety
 
 - Target small batches first (10-20 candidates).
-- Patch only deterministic formatting or URLs already present in evidence.
+- Patch only deterministic format issues or URLs already present in evidence.
 - Use `artifact_put` with `dry_run=true` where practical before updating pages.
 
 ## Output format

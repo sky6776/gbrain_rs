@@ -68,7 +68,7 @@ the findings as review signals; apply corrections with an explicit
 | Missing frontmatter | Pages without YAML `---` header | Add valid frontmatter in the explicit update |
 | Broken references | Wikilinks `[[slug]]` pointing to non-existent pages | Create the target page or change the link |
 | Empty sections | Headers with no content below them | Add content or remove the empty heading |
-| Unclosed code fences | ``` blocks without closing ``` | Close the fence before committing |
+| Unclosed code fences | ``` blocks without closing ``` | Close the fence before saving |
 
 ## Phases
 
@@ -83,7 +83,7 @@ Before writing content, select the appropriate intent:
 
 ### Phase 2: Write with Dry-Run Preview
 
-Preview what will be written before committing:
+Preview what will be written before saving:
 
 **CLI:** `gbrain put <slug> --content "..." --dry-run` — preview routing plan
 **CLI:** `gbrain upload ./doc.md --dry-run --intent evidence` — preview a document upload

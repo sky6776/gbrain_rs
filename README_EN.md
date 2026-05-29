@@ -846,7 +846,7 @@ Reranking:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
 PDF/Image OCR: GBRAIN_OCR_API_KEY → ZHIPU_API_KEY
 ```
 
-Setting `GBRAIN_OPENAI_API_KEY` enables embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`. PDF/image OCR uses separate GLM-OCR credentials and does not fall back to `GBRAIN_OPENAI_API_KEY`.
+Set `GBRAIN_OPENAI_API_KEY` to enable embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`. PDF/image OCR uses separate GLM-OCR credentials and does not fall back to `GBRAIN_OPENAI_API_KEY`.
 
 ### Base Configuration
 
@@ -917,7 +917,7 @@ External OCR is additionally gated by library privacy policy: PDF pages and JPG/
 | `GBRAIN_OCR_SUBMIT_MODE` | PDF submission mode: `pdf_first` / `pdf_range` | `pdf_first` |
 | `GBRAIN_OCR_SYNC_INLINE` | Execute OCR inline; background async jobs are used by default | `false` |
 | `GBRAIN_OCR_TEXT_DENSITY_THRESHOLD` | Character threshold for a low-density text layer | `50` |
-| `GBRAIN_OCR_MIN_LOW_DENSITY_RATIO` | Compatibility setting for low-density ratio; currently retained as statistics and does not veto page selection | `0.5` |
+| `GBRAIN_OCR_MIN_LOW_DENSITY_RATIO` | Compatibility option for low-density ratio; currently retained as statistics and does not veto page selection | `0.5` |
 | `GBRAIN_OCR_IMAGE_AREA_THRESHOLD` | Image area coverage threshold | `0.08` |
 | `GBRAIN_OCR_IMAGE_COUNT_THRESHOLD` | Embedded image count threshold | `1` |
 | `GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE` / `GLM_OCR_TIMEOUT` / `GLMOCR_TIMEOUT` | Per-page request timeout in seconds, in priority order | `60` |
@@ -1110,7 +1110,7 @@ Lower-level hybrid search pipeline (used by internal or programmatic search path
 Async five-stage document processing pipeline:
 
 1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
-2. **Split** — Recursive splitter; semantic splitting (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
+2. **Split** — Recursive splitter; semantic split mode (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
 3. **Embed** — Vector embedding generation and persistence
 4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and runtime prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
 5. **Persist** — Transaction-protected node/vector writes

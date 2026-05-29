@@ -1,6 +1,6 @@
 # Quality Convention
 
-Cross-cutting quality rules for all brain-writing skills.
+Cross-scope quality rules for all brain-writing skills.
 
 ## Citations (MANDATORY)
 

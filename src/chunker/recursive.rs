@@ -1,7 +1,7 @@
 //! Recursive text chunker
 //! Mirrors gbrain's src/core/chunkers/recursive.ts
 //!
-//! Uses 5-level delimiter hierarchy with word-count-based splitting
+//! Uses 5-level delimiter hierarchy with word-count-based chunking
 //! and greedy merge to avoid chunks that are too small.
 //! P2-3: Word-based chunk size (not character-based)
 //! P2-4: Sentence boundary alignment for chunk overlap

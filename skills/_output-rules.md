@@ -1,6 +1,6 @@
 # Output Rules
 
-Cross-cutting output quality standards for all brain-writing skills.
+Cross-scope output quality standards for all brain-writing skills.
 
 ## Deterministic Links
 

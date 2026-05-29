@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 30;
+pub const SCHEMA_VERSION: i32 = 31;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -706,6 +706,64 @@ CREATE TRIGGER IF NOT EXISTS kb_nodes_fts_delete
 AFTER DELETE ON kb_document_nodes BEGIN
     INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, document_id, level)
     VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.level);
+END;
+
+-- KB passage 多视图索引
+-- 这是面向检索可靠性的兜底索引：不依赖标题或文档结构，
+-- 从每个 KB node 生成固定滑窗、清洗文本片段和原子段落片段。
+CREATE TABLE IF NOT EXISTS kb_passage_spans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    node_id INTEGER NOT NULL REFERENCES kb_document_nodes(id) ON DELETE CASCADE,
+    view_type TEXT NOT NULL DEFAULT 'window',
+    passage_order INTEGER NOT NULL DEFAULT 0,
+    source_start INTEGER,
+    source_end INTEGER,
+    content TEXT NOT NULL,
+    content_tokens TEXT NOT NULL DEFAULT '',
+    quality_score REAL NOT NULL DEFAULT 1.0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(node_id, view_type, passage_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_passage_library_id ON kb_passage_spans(library_id);
+CREATE INDEX IF NOT EXISTS idx_kb_passage_document_id ON kb_passage_spans(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_passage_node_id ON kb_passage_spans(node_id);
+CREATE INDEX IF NOT EXISTS idx_kb_passage_view_type ON kb_passage_spans(view_type);
+CREATE INDEX IF NOT EXISTS idx_kb_passage_doc_order
+    ON kb_passage_spans(document_id, node_id, view_type, passage_order);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_passage_fts USING fts5(
+    tokens,
+    library_id,
+    document_id UNINDEXED,
+    node_id UNINDEXED,
+    view_type UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_passage_fts_insert
+AFTER INSERT ON kb_passage_spans BEGIN
+    INSERT INTO kb_passage_fts(rowid, tokens, library_id, document_id, node_id, view_type)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.node_id, new.view_type);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_passage_fts_update
+AFTER UPDATE OF content_tokens, library_id, document_id, node_id, view_type ON kb_passage_spans BEGIN
+    INSERT INTO kb_passage_fts(kb_passage_fts, rowid, tokens, library_id, document_id, node_id, view_type)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.node_id, old.view_type);
+    INSERT INTO kb_passage_fts(rowid, tokens, library_id, document_id, node_id, view_type)
+    VALUES (new.id, new.content_tokens, new.library_id, new.document_id, new.node_id, new.view_type);
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_passage_fts_delete
+AFTER DELETE ON kb_passage_spans BEGIN
+    INSERT INTO kb_passage_fts(kb_passage_fts, rowid, tokens, library_id, document_id, node_id, view_type)
+    VALUES('delete', old.id, old.content_tokens, old.library_id, old.document_id, old.node_id, old.view_type);
 END;
 
 -- KB 文档名称 FTS5 索引

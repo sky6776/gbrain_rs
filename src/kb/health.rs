@@ -251,7 +251,7 @@ pub fn repair_embeddings(conn: &Connection) -> Result<i64> {
 
 /// P5-007: 重建单文档索引
 ///
-/// Marks the document for re-processing by setting index_status = 'rebuilding'
+/// Marks the document for re-processing by changing index_status = 'rebuilding'
 /// and document_status = 'queued', assigns a new processing_run_id, and enqueues
 /// a kb_process_document job. The actual pipeline execution happens asynchronously
 /// via the worker.

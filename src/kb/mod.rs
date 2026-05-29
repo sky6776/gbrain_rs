@@ -1,6 +1,6 @@
 //! KB (Knowledge Base) subsystem for gbrain_rs
 //!
-//! Handles document upload, parsing, splitting, embedding, RAPTOR summarization,
+//! Handles document upload, parsing, chunking, embedding, RAPTOR summarization,
 //! and hybrid search (vector + FTS5 + RRF).
 
 pub mod backup;
@@ -25,6 +25,7 @@ pub mod ocr_planner;
 pub mod ocr_provider;
 pub mod ocr_response;
 pub mod parser;
+pub mod passage;
 pub mod pipeline;
 pub mod planner;
 pub mod privacy;

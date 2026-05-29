@@ -201,7 +201,7 @@ fn heading_level(paragraph: &str) -> usize {
 
 /// Apply Savitzky-Golay smoothing to a signal
 ///
-/// Uses a simplified moving average with polynomial fitting weights.
+/// Uses a simplified moving average with polynomial fit weights.
 /// For a proper implementation, this would compute the SG coefficients
 /// from the window size and polynomial order. Here we use a weighted
 /// moving average as an approximation.

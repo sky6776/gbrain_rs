@@ -64,5 +64,5 @@ This skill guarantees:
 - Adding tasks without a priority level
 - Completing tasks without recording the completion date
 - Deferring tasks without a reason
-- Letting the task list grow unbounded (review weekly)
+- Allowing the task list to grow unbounded (review weekly)
 - Storing tasks outside the brain (they should be searchable)

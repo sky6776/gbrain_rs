@@ -1014,76 +1014,69 @@ impl McpServer {
                 let config = crate::config::Config::load().unwrap_or_default();
 
                 // 解析页码范围或自动检测：区分显式指定与自动检测
-                let (ocr_pages, _explicit_pages, detection_reasons) =
-                    if is_image {
-                        if let Some(ref ps) = pages_str {
-                            // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
-                            let parsed_pages = parse_mcp_page_ranges(ps, 1)?;
-                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
-                                parsed_pages
-                                    .iter()
-                                    .map(|p| {
-                                        (p.to_string(), vec!["image_input".to_string()])
-                                    })
-                                    .collect();
-                            (parsed_pages, true, reasons)
-                        } else {
-                            // 图片文档未指定页码：默认第 1 页
-                            let reasons: std::collections::BTreeMap<String, Vec<String>> =
-                                std::iter::once((
-                                    "1".to_string(),
-                                    vec!["image_input".to_string()],
-                                ))
-                                .collect();
-                            (vec![1], true, reasons)
-                        }
-                    } else if let Some(ref ps) = pages_str {
-                        let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
-                        // 显式指定：原因统一为 manual_requested
+                let (ocr_pages, _explicit_pages, detection_reasons) = if is_image {
+                    if let Some(ref ps) = pages_str {
+                        // 图片文档：用户显式传入页码时，仍校验（max_page=1，非法页码会报错）
+                        let parsed_pages = parse_mcp_page_ranges(ps, 1)?;
                         let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
                             .iter()
-                            .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                            .map(|p| (p.to_string(), vec!["image_input".to_string()]))
                             .collect();
                         (parsed_pages, true, reasons)
                     } else {
-                        // 自动检测：使用 detector 返回的真实原因
-                        let pdf_data = std::fs::read(&storage_path).map_err(|e| {
-                            crate::error::GBrainError::FileError(format!(
-                                "读取 PDF 文件以自动检测 OCR 页失败: {}",
-                                e
-                            ))
-                        })?;
-                        let registry = crate::kb::parser::ParserRegistry::new();
-                        let parsed = registry.parse("pdf", &pdf_data)?;
-                        let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
-                        let ocr_mode = crate::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode);
-                        let detection = crate::kb::ocr_detector::detect_ocr_pages(
-                            &page_analyses,
-                            config.ocr_text_density_threshold,
-                            config.ocr_image_area_threshold,
-                            config.ocr_image_count_threshold,
-                            config.ocr_min_low_density_ratio,
-                            &ocr_mode,
-                        );
-                        let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
-                            .reasons_by_page
-                            .iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.to_string(),
-                                    v.iter()
-                                        .map(|r| {
-                                            serde_json::to_string(r)
-                                                .unwrap_or_default()
-                                                .trim_matches('"')
-                                                .to_string()
-                                        })
-                                        .collect(),
-                                )
-                            })
-                            .collect();
-                        (detection.ocr_pages, false, reasons)
-                    };
+                        // 图片文档未指定页码：默认第 1 页
+                        let reasons: std::collections::BTreeMap<String, Vec<String>> =
+                            std::iter::once(("1".to_string(), vec!["image_input".to_string()]))
+                                .collect();
+                        (vec![1], true, reasons)
+                    }
+                } else if let Some(ref ps) = pages_str {
+                    let parsed_pages = parse_mcp_page_ranges(ps, total_pages)?;
+                    // 显式指定：原因统一为 manual_requested
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = parsed_pages
+                        .iter()
+                        .map(|p| (p.to_string(), vec!["manual_requested".to_string()]))
+                        .collect();
+                    (parsed_pages, true, reasons)
+                } else {
+                    // 自动检测：使用 detector 返回的真实原因
+                    let pdf_data = std::fs::read(&storage_path).map_err(|e| {
+                        crate::error::GBrainError::FileError(format!(
+                            "读取 PDF 文件以自动检测 OCR 页失败: {}",
+                            e
+                        ))
+                    })?;
+                    let registry = crate::kb::parser::ParserRegistry::new();
+                    let parsed = registry.parse("pdf", &pdf_data)?;
+                    let page_analyses = pdf_page_analyses_from_metadata(&parsed)?;
+                    let ocr_mode = crate::kb::ocr_provider::OcrMode::from_str(&config.ocr_mode);
+                    let detection = crate::kb::ocr_detector::detect_ocr_pages(
+                        &page_analyses,
+                        config.ocr_text_density_threshold,
+                        config.ocr_image_area_threshold,
+                        config.ocr_image_count_threshold,
+                        config.ocr_min_low_density_ratio,
+                        &ocr_mode,
+                    );
+                    let reasons: std::collections::BTreeMap<String, Vec<String>> = detection
+                        .reasons_by_page
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.to_string(),
+                                v.iter()
+                                    .map(|r| {
+                                        serde_json::to_string(r)
+                                            .unwrap_or_default()
+                                            .trim_matches('"')
+                                            .to_string()
+                                    })
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    (detection.ocr_pages, false, reasons)
+                };
 
                 if ocr_pages.is_empty() {
                     // 持久化本次 none 检测结论，防止状态接口展示上一次运行的选择结果

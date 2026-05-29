@@ -1,4 +1,4 @@
-//! Frontmatter parsing + body splitting
+//! Frontmatter parsing + body split
 //! Mirrors gbrain's src/core/markdown.ts
 //!
 //! Supports YAML frontmatter extraction, timeline sentinel detection,
