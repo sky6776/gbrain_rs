@@ -3028,51 +3028,42 @@ fn rebuild_raptor_after_reembed(
     Ok(())
 }
 
+/// # 问题 #2 + #15 修复：扁平化 worker 调度
+/// 按优先级依次调度：kb → ocr → reembed → artifact → synonyms。
+/// 每个 worker 同级调度，任意 worker 出错不影响后续 worker 执行。
+/// 旧版将 synonym mining 嵌套在 artifact 的 Ok(false) 分支内，
+/// artifact 出错时 synonym mining 永远不会被调度（饥饿问题）。
+fn run_priority_workers(engine: &SqliteEngine, config: &Config) -> bool {
+    let workers: &[(&str, fn(&SqliteEngine, &Config) -> Result<bool>)] = &[
+        ("kb", run_kb_worker_once),
+        ("ocr", run_ocr_worker_once),
+        ("reembed", run_reembed_worker_once),
+        ("artifact", run_artifact_worker_once),
+        ("synonyms", run_mine_synonyms_worker_once),
+    ];
+
+    for (name, worker_fn) in workers {
+        match worker_fn(engine, config) {
+            Ok(true) => return true, // 有作业被处理，立即返回重新轮询
+            Ok(false) => continue,   // 无作业，尝试下一个
+            Err(e) => {
+                // #2 修复：出错后继续尝试下一个 worker，不跳过后续 worker
+                warn!(worker = *name, error = %e, "worker 处理循环出错");
+            }
+        }
+    }
+    false
+}
+
 /// 以守护进程模式运行 KB worker：持续轮询并处理所有类型的 KB 作业。
 /// 包括 kb_process_document（文档解析/切分/嵌入）、kb_ocr_document（异步 OCR）、
-/// kb_reembed（文档级重嵌入）、kb_reembed_node（单节点修复）。
+/// kb_reembed（文档级重嵌入）、kb_reembed_node（单节点修复）、kb_mine_synonyms（同义词挖掘）。
 ///
 /// `interval_secs` 为无作业时的轮询间隔。
 pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs: u64) -> ! {
     info!(interval_secs, "KB worker: 启动守护进程模式");
     loop {
-        // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，再处理 synonym mining 作业
-        let had_work = match run_kb_worker_once(engine, config) {
-            Ok(true) => true,
-            Ok(false) => match run_ocr_worker_once(engine, config) {
-                Ok(true) => true,
-                Ok(false) => match run_reembed_worker_once(engine, config) {
-                    Ok(true) => true,
-                    Ok(false) => match run_artifact_worker_once(engine, config) {
-                        Ok(true) => true,
-                        Ok(false) => match run_mine_synonyms_worker_once(engine, config) {
-                            Ok(true) => true,
-                            Ok(false) => false,
-                            Err(e) => {
-                                warn!(error = %e, "synonym mining worker: 处理循环出错");
-                                false
-                            }
-                        },
-                        Err(e) => {
-                            warn!(error = %e, "artifact promote worker: 处理循环出错");
-                            false
-                        }
-                    },
-                    Err(e) => {
-                        warn!(error = %e, "re-embed worker: 处理循环出错");
-                        false
-                    }
-                },
-                Err(e) => {
-                    warn!(error = %e, "OCR worker: 处理循环出错");
-                    false
-                }
-            },
-            Err(e) => {
-                warn!(error = %e, "KB worker: 处理循环出错");
-                false
-            }
-        };
+        let had_work = run_priority_workers(engine, config);
         if !had_work {
             // 无待处理作业，等待后重试
             std::thread::sleep(std::time::Duration::from_secs(interval_secs));
@@ -3162,44 +3153,8 @@ pub fn spawn_kb_worker_pool(
                         info!(worker = i, "KB worker: 收到停止信号，退出");
                         break;
                     }
-                    // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，再处理 synonym mining，最后处理 artifact promote 作业
-                    let had_work = match run_kb_worker_once(&engine, &config) {
-                        Ok(true) => true,
-                        Ok(false) => match run_ocr_worker_once(&engine, &config) {
-                            Ok(true) => true,
-                            Ok(false) => match run_reembed_worker_once(&engine, &config) {
-                                Ok(true) => true,
-                                Ok(false) => match run_artifact_worker_once(&engine, &config) {
-                                    Ok(true) => true,
-                                    Ok(false) => match run_mine_synonyms_worker_once(&engine, &config) {
-                                        Ok(true) => true,
-                                        Ok(false) => false,
-                                        Err(e) => {
-                                            warn!(worker = i, error = %e, "synonym mining worker: 出错");
-                                            false
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!(worker = i, error = %e, "artifact promote worker: 出错");
-                                        false
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!(worker = i, error = %e, "re-embed worker: 出错");
-                                    false
-                                }
-                            },
-                            Err(e) => {
-                                warn!(worker = i, error = %e, "OCR worker: 出错");
-                                false
-                            }
-                        },
-                        Err(e) => {
-                            warn!(worker = i, error = %e, "KB worker: 处理循环出错");
-                            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
-                            continue;
-                        }
-                    };
+                    // #15 修复：使用扁平化调度，消除 5 层嵌套 match
+                    let had_work = run_priority_workers(&engine, &config);
                     if had_work {
                         continue;
                     }

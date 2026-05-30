@@ -553,7 +553,7 @@ impl<'a> ArtifactService<'a> {
         let requested_mode = input.mode.as_deref().unwrap_or("auto");
         let strategy = facade_query_strategy(requested_mode)?;
         let conn = self.engine.connection()?;
-        let fallback_plan = query::build_query_fallback_plan(&input.query, &conn);
+        let fallback_plan = query::build_query_fallback_plan(&input.query, &conn, None);
         let mut fallback_state = QueryFallbackState {
             core_terms: fallback_plan.core_terms.clone(),
             ..Default::default()

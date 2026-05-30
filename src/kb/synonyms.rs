@@ -9,6 +9,9 @@ use tracing::{info, warn};
 
 use crate::embedding::Embedder;
 use crate::error::{GBrainError, Result};
+// #8 修复：复用 crate 共享工具函数，消除重复实现
+use crate::kb::pipeline::embedding_to_blob;
+use crate::search::vector::cosine_similarity;
 
 // ---------------------------------------------------------------------------
 // Runtime lookup (PR-2)
@@ -17,18 +20,28 @@ use crate::error::{GBrainError, Result};
 /// Maximum number of synonyms returned per token at query time.
 pub const MAX_RUNTIME_SYNONYMS: usize = 3;
 
-/// Return the first active embedding index ID, or `None` if none exists.
+/// 返回指定 library（或全局）的 active embedding index ID。
 ///
-/// Token synonyms are shared across libraries — they are keyed by
-/// `embedding_index_id` which follows the current `GBRAIN_EMBEDDING_MODEL`.
-/// Any active index suffices because all active indexes use the same model.
-pub fn active_embedding_index_id(conn: &Connection) -> Option<i64> {
-    conn.query_row(
-        "SELECT id FROM kb_embedding_indexes WHERE is_active = 1 LIMIT 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    )
-    .ok()
+/// # 问题 #1 修复：跨库 embedding 索引不一致
+/// 新增 `library_id` 参数。当为 `Some` 时限定在该 library 内查找，
+/// 避免不同 library 使用不同 embedding model 时注入错误模型的同义词。
+pub fn active_embedding_index_id(conn: &Connection, library_id: Option<i64>) -> Option<i64> {
+    match library_id {
+        Some(lib_id) => conn
+            .query_row(
+                "SELECT id FROM kb_embedding_indexes WHERE library_id = ?1 AND is_active = 1 LIMIT 1",
+                params![lib_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok(),
+        None => conn
+            .query_row(
+                "SELECT id FROM kb_embedding_indexes WHERE is_active = 1 LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok(),
+    }
 }
 
 /// Look up synonym expansions for `token` from `kb_token_synonyms`.
@@ -38,8 +51,13 @@ pub fn active_embedding_index_id(conn: &Connection) -> Option<i64> {
 /// - no active embedding index exists (cold start)
 /// - the `kb_token_synonyms` table does not yet exist
 /// - no synonyms have been mined for this token
-pub fn lookup_token_synonyms(conn: &Connection, token: &str, limit: usize) -> Vec<String> {
-    let Some(active_idx_id) = active_embedding_index_id(conn) else {
+pub fn lookup_token_synonyms(
+    conn: &Connection,
+    token: &str,
+    limit: usize,
+    library_id: Option<i64>,
+) -> Vec<String> {
+    let Some(active_idx_id) = active_embedding_index_id(conn, library_id) else {
         return Vec::new();
     };
     let Ok(mut stmt) = conn.prepare(
@@ -58,6 +76,59 @@ pub fn lookup_token_synonyms(conn: &Connection, token: &str, limit: usize) -> Ve
     }
 }
 
+/// 批量查找多个 token 的同义词扩展。
+///
+/// # 问题 #13 修复：N+1 查询优化
+/// 只解析一次 active embedding index，用单次 `WHERE token IN (...)` 查询，
+/// 避免逐个 token 调用 `lookup_token_synonyms` 的 N+1 SQL round-trip。
+pub fn batch_lookup_token_synonyms(
+    conn: &Connection,
+    tokens: &[String],
+    limit_per_token: usize,
+    library_id: Option<i64>,
+) -> HashMap<String, Vec<String>> {
+    let Some(active_idx_id) = active_embedding_index_id(conn, library_id) else {
+        return HashMap::new();
+    };
+    if tokens.is_empty() {
+        return HashMap::new();
+    }
+
+    // 构建 IN 子句
+    let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+    let sql = format!(
+        "SELECT token, synonym FROM kb_token_synonyms \
+         WHERE embedding_index_id = ? AND token IN ({}) \
+         ORDER BY token, score DESC",
+        placeholders.join(",")
+    );
+
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return HashMap::new();
+    };
+
+    // 参数：active_idx_id + 各 token
+    let params: Vec<&dyn rusqlite::ToSql> = std::iter::once(&active_idx_id as &dyn rusqlite::ToSql)
+        .chain(tokens.iter().map(|t| t as &dyn rusqlite::ToSql))
+        .collect();
+
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
+
+    let mut result: HashMap<String, Vec<String>> = HashMap::new();
+    if let Ok(iter) = rows {
+        for row in iter.flatten() {
+            let (token, synonym) = row;
+            let entry = result.entry(token).or_insert_with(Vec::new);
+            if entry.len() < limit_per_token {
+                entry.push(synonym);
+            }
+        }
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Offline mining (PR-3)
 // ---------------------------------------------------------------------------
@@ -74,6 +145,8 @@ pub const DEFAULT_MINING_BATCH_SIZE: usize = 200;
 pub const DEFAULT_MINING_CONCURRENCY: usize = 4;
 /// embedding batch 最大重试次数
 const MAX_EMBED_RETRIES: usize = 3;
+/// brute-force KNN 的 token 数量上限（#10 修复：防止 O(n²) 阻塞 worker）
+const BRUTE_FORCE_MAX_TOKENS: usize = 10_000;
 
 /// Options controlling the offline synonym mining job.
 #[derive(Debug)]
@@ -119,44 +192,23 @@ pub struct MineSynonymsStats {
 
 // -- helpers ----------------------------------------------------------------
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f64 = a
-        .iter()
-        .zip(b.iter())
-        .map(|(x, y)| f64::from(*x) * f64::from(*y))
-        .sum();
-    let na: f64 = a
-        .iter()
-        .map(|x| f64::from(*x) * f64::from(*x))
-        .sum::<f64>()
-        .sqrt();
-    let nb: f64 = b
-        .iter()
-        .map(|x| f64::from(*x) * f64::from(*x))
-        .sum::<f64>()
-        .sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    (dot / (na * nb)) as f32
-}
-
 fn is_substring_or_superstring(a: &str, b: &str) -> bool {
     a.contains(b) || b.contains(a)
 }
 
+/// 将 BLOB 反序列化为 f32 向量。
+/// 编码使用共享的 `pipeline::embedding_to_blob`。
 fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
-fn f32_to_blob(v: &[f32]) -> Vec<u8> {
-    v.iter().flat_map(|f| f.to_le_bytes()).collect()
-}
-
 // -- step 1: extract candidate tokens with DF --------------------------------
 
+/// # 问题 #9 修复：流式处理
+/// 逐行读取 content 并立即 tokenize，不再将全量 content 加载到 Vec<String>，
+/// 避免大量节点时占用过多内存。
 fn extract_candidate_tokens(
     conn: &Connection,
     opts: &MineSynonymsOpts,
@@ -165,32 +217,27 @@ fn extract_candidate_tokens(
     let mut df: HashMap<String, usize> = HashMap::new();
     let mut total_nodes: usize = 0;
 
-    // Collect all node content strings, then process for DF
-    let contents: Vec<String> = match lib_id {
-        Some(id) => {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT content FROM kb_document_nodes WHERE library_id = ?1 AND level = 0",
-                )
-                .map_err(|e| GBrainError::Database(e.to_string()))?;
-            let mapped = stmt
-                .query_map(params![id], |row| row.get::<_, String>(0))
-                .map_err(|e| GBrainError::Database(e.to_string()))?;
-            mapped.filter_map(|r| r.ok()).collect()
-        }
-        None => {
-            let mut stmt = conn
-                .prepare("SELECT content FROM kb_document_nodes WHERE level = 0")
-                .map_err(|e| GBrainError::Database(e.to_string()))?;
-            let mapped = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| GBrainError::Database(e.to_string()))?;
-            mapped.filter_map(|r| r.ok()).collect()
-        }
+    // 统一 SQL，流式处理避免全量加载到内存
+    let sql = match lib_id {
+        Some(_) => "SELECT content FROM kb_document_nodes WHERE library_id = ?1 AND level = 0",
+        None => "SELECT content FROM kb_document_nodes WHERE level = 0",
     };
 
-    for content in &contents {
-        let tokens_str = crate::nlp::chinese::tokenize_content(content);
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+    // 使用 stmt.query() 而非 query_map() 避免闭包类型不匹配
+    let mut rows = match lib_id {
+        Some(id) => stmt.query(params![id]),
+        None => stmt.query([]),
+    }
+    .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+    // 逐行 tokenize，content 用完即释放
+    while let Ok(Some(row)) = rows.next() {
+        let content: String = row.get(0).map_err(|e| GBrainError::Database(e.to_string()))?;
+        let tokens_str = crate::nlp::chinese::tokenize_content(&content);
         let unique: std::collections::HashSet<String> = tokens_str
             .split_whitespace()
             .map(|s| s.to_string())
@@ -217,7 +264,7 @@ fn extract_candidate_tokens(
         .filter(|(token, _)| token.chars().count() >= min_chars)
         .collect();
 
-    // Important words first
+    // 重要词排前面
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(candidates)
 }
@@ -251,31 +298,23 @@ fn load_existing_token_embeddings(
 
 // -- step 3: embed and store (带重试 + 并发) ----------------------------------
 
-/// embedding batch 带指数退避重试。
-/// 成功返回 `Some(vectors)`，最终失败返回 `None`。
+/// # 问题 #8 修复：使用 crate::backoff 替代手写重试
+/// 使用 `with_backoff_sync` 提供带 jitter 的指数退避，避免惊群效应。
 fn embed_batch_with_retry(
     embedder: &Embedder,
     rt: &tokio::runtime::Runtime,
     texts: &[&str],
 ) -> Option<Vec<Vec<f32>>> {
-    for attempt in 0..MAX_EMBED_RETRIES {
-        match rt.block_on(embedder.embed_batch(texts)) {
-            Ok(v) => return Some(v),
-            Err(e) => {
-                warn!(
-                    attempt = attempt + 1,
-                    max = MAX_EMBED_RETRIES,
-                    error = %e,
-                    "Batch embedding 失败"
-                );
-                if attempt + 1 < MAX_EMBED_RETRIES {
-                    // 指数退避：2^attempt 秒
-                    std::thread::sleep(std::time::Duration::from_secs(1u64 << attempt));
-                }
-            }
-        }
-    }
-    None
+    crate::backoff::with_backoff_sync(
+        || rt.block_on(embedder.embed_batch(texts)),
+        crate::backoff::BackoffOpts {
+            max_retries: MAX_EMBED_RETRIES as u32,
+            base_ms: 1000,
+            max_ms: 30_000,
+            jitter: true,
+        },
+    )
+    .ok()
 }
 
 /// embed 新 token 并写入 kb_token_embeddings。
@@ -283,6 +322,12 @@ fn embed_batch_with_retry(
 /// - 按 `concurrency` 分组并发 embed（`std::thread::scope`）
 /// - 写入 DB 仍然串行（`Connection` 非线程安全）
 /// - 每个 batch 失败时自动重试最多 `MAX_EMBED_RETRIES` 次
+///
+/// # 问题 #12 修复
+/// 返回新嵌入的 token→vector 映射，调用方可直接 merge 而非全量重载。
+///
+/// # 问题 #14 修复
+/// 批量 INSERT 包裹在事务内，减少 WAL commit 次数。
 fn embed_and_store_tokens(
     conn: &Connection,
     embedder: &Embedder,
@@ -291,9 +336,15 @@ fn embed_and_store_tokens(
     index_id: i64,
     batch_size: usize,
     concurrency: usize,
-) -> Result<usize> {
+) -> Result<(usize, HashMap<String, Vec<f32>>)> {
     let chunks: Vec<_> = tokens.chunks(batch_size).collect();
     let mut embedded = 0usize;
+    // #12: 收集新嵌入结果，供调用方 merge
+    let mut new_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
+
+    // #14: 用事务包裹批量写入，减少 WAL commit
+    conn.execute("BEGIN", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
 
     // 按 concurrency 分组处理
     for group in chunks.chunks(concurrency.max(1)) {
@@ -334,22 +385,31 @@ fn embed_and_store_tokens(
                 }
                 Some(vectors) => {
                     for ((token, doc_freq), vec) in chunk.iter().zip(vectors.iter()) {
-                        let blob = f32_to_blob(vec);
+                        let blob = embedding_to_blob(vec);
                         conn.execute(
                             "INSERT OR REPLACE INTO kb_token_embeddings \
                              (token, embedding_index_id, embedding, doc_freq) \
                              VALUES (?1, ?2, ?3, ?4)",
                             params![token, index_id, blob, *doc_freq as i64],
                         )
-                        .map_err(|e| GBrainError::Database(e.to_string()))?;
+                        .map_err(|e| {
+                            // 写入失败时回滚事务
+                            let _ = conn.execute("ROLLBACK", []);
+                            GBrainError::Database(e.to_string())
+                        })?;
                         embedded += 1;
+                        new_embeddings.insert(token.clone(), vec.clone());
                     }
                     info!(batch = chunk.len(), embedded, "Embedded token batch");
                 }
             }
         }
     }
-    Ok(embedded)
+
+    conn.execute("COMMIT", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+    Ok((embedded, new_embeddings))
 }
 
 // -- step 4: KNN mining (sqlite-vec + 内存回退) ------------------------------
@@ -359,11 +419,26 @@ fn token_vec_table_name(index_id: i64) -> String {
     format!("vec_token_{}", index_id)
 }
 
-/// 内存暴力 KNN（O(n²)），用于测试和 sqlite-vec 不可用时的回退
+/// 内存暴力 KNN（O(n²)），用于测试和 sqlite-vec 不可用时的回退。
+///
+/// # 修复汇总
+/// - #4: 修正 off-by-one（self 已排除，truncate 用 knn_k 而非 knn_k-1）
+/// - #5: substring 过滤前置到候选收集阶段，避免浪费邻居槽位
+/// - #10: token 数量超限时跳过 brute-force，防止 O(n²) 阻塞 worker
 fn knn_mine_brute_force(
     all: &HashMap<String, Vec<f32>>,
     opts: &MineSynonymsOpts,
 ) -> Vec<(String, String, f32)> {
+    // #10: brute-force O(n²) 上限保护
+    if all.len() > BRUTE_FORCE_MAX_TOKENS {
+        warn!(
+            tokens = all.len(),
+            limit = BRUTE_FORCE_MAX_TOKENS,
+            "token 数量超限，跳过 brute-force KNN（改用 sqlite-vec）"
+        );
+        return Vec::new();
+    }
+
     let tokens: Vec<String> = all.keys().cloned().collect();
     let mut pairs = Vec::new();
 
@@ -375,6 +450,10 @@ fn knn_mine_brute_force(
             if i == j {
                 continue;
             }
+            // #5 修复：substring 过滤前置，避免浪费邻居槽位
+            if is_substring_or_superstring(token_a, token_b) {
+                continue;
+            }
             let sim = cosine_similarity(emb_a, &all[token_b]);
             if sim >= opts.similarity_threshold as f32 {
                 neighbors.push((sim, token_b.clone()));
@@ -382,12 +461,10 @@ fn knn_mine_brute_force(
         }
 
         neighbors.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        neighbors.truncate(opts.knn_k.saturating_sub(1));
+        // #4 修复：修正 off-by-one — self 已在循环中排除，直接用 knn_k
+        neighbors.truncate(opts.knn_k);
 
         for (score, token_b) in neighbors {
-            if is_substring_or_superstring(token_a, &token_b) {
-                continue;
-            }
             pairs.push((token_a.clone(), token_b, score));
         }
     }
@@ -397,6 +474,11 @@ fn knn_mine_brute_force(
 /// 使用 sqlite-vec 虚表做 KNN 挖掘。
 ///
 /// 流程：创建临时虚表 → 批量 INSERT → 逐 token KNN 查询 → 清理虚表。
+///
+/// # 修复汇总
+/// - #6: rowid 越界检查，防止中断重启后 panic
+/// - #11: 语句 prepare 提到循环外，避免每轮重复 SQL 解析
+/// - #14: 虚表批量 INSERT 包裹在事务内
 fn knn_mine_via_vec(
     conn: &Connection,
     index_id: i64,
@@ -414,11 +496,16 @@ fn knn_mine_via_vec(
     ))
     .map_err(|e| GBrainError::Database(e.to_string()))?;
 
-    // 2. 清空旧数据并批量插入
+    // 2. 清空旧数据并用事务批量插入
     conn.execute_batch(&format!("DELETE FROM {}", table))
         .map_err(|e| GBrainError::Database(e.to_string()))?;
 
     let tokens: Vec<String> = all.keys().cloned().collect();
+
+    // #14: 用事务包裹虚表批量写入
+    conn.execute("BEGIN", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
     {
         let mut stmt = conn
             .prepare(&format!(
@@ -428,11 +515,14 @@ fn knn_mine_via_vec(
             .map_err(|e| GBrainError::Database(e.to_string()))?;
 
         for (i, token) in tokens.iter().enumerate() {
-            let blob = f32_to_blob(&all[token]);
+            let blob = embedding_to_blob(&all[token]);
             stmt.execute(params![(i + 1) as i64, blob])
                 .map_err(|e| GBrainError::Database(e.to_string()))?;
         }
     }
+
+    conn.execute("COMMIT", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
 
     // 3. 对每个 token 执行 KNN 查询
     //    cosine 距离 = 1 - cosine_similarity
@@ -440,18 +530,20 @@ fn knn_mine_via_vec(
     let k = opts.knn_k + 1; // +1 因为查询自身会出现在结果中
     let mut pairs = Vec::new();
 
-    for (i, token_a) in tokens.iter().enumerate() {
-        let query_blob = f32_to_blob(&all[token_a]);
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT rowid, distance FROM {} \
-                 WHERE embedding MATCH ?1 AND k = ?2 \
-                 ORDER BY distance",
-                table
-            ))
-            .map_err(|e| GBrainError::Database(e.to_string()))?;
+    // #11 修复：将语句 prepare 提到循环外，避免每轮重复 SQL 解析
+    let mut knn_stmt = conn
+        .prepare(&format!(
+            "SELECT rowid, distance FROM {} \
+             WHERE embedding MATCH ?1 AND k = ?2 \
+             ORDER BY distance",
+            table
+        ))
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
 
-        let neighbors: Vec<(i64, f32)> = stmt
+    for (i, token_a) in tokens.iter().enumerate() {
+        let query_blob = embedding_to_blob(&all[token_a]);
+
+        let neighbors: Vec<(i64, f32)> = knn_stmt
             .query_map(params![query_blob, k as i64], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))
             })
@@ -464,7 +556,17 @@ fn knn_mine_via_vec(
             .collect();
 
         for (rowid, distance) in neighbors {
-            let token_b = &tokens[(rowid - 1) as usize];
+            // #6 修复：rowid 边界检查 — 防止中断重启后虚表不一致导致 panic
+            let idx = (rowid - 1) as usize;
+            if idx >= tokens.len() {
+                warn!(
+                    rowid,
+                    tokens_len = tokens.len(),
+                    "KNN 返回的 rowid 超出 tokens 范围，跳过"
+                );
+                continue;
+            }
+            let token_b = &tokens[idx];
             let score = 1.0 - distance; // cosine distance → similarity
             if is_substring_or_superstring(token_a, token_b) {
                 continue;
@@ -500,6 +602,7 @@ fn knn_mine(
 
 // -- step 5: write synonyms bidirectionally ----------------------------------
 
+/// # 问题 #14 修复：事务包裹批量 INSERT
 fn write_synonyms_bidirectional(
     conn: &Connection,
     pairs: Vec<(String, String, f32)>,
@@ -512,12 +615,16 @@ fn write_synonyms_bidirectional(
             .entry(token.clone())
             .or_default()
             .push((synonym.clone(), *score));
-        // Reverse direction
+        // 反向
         by_token
             .entry(synonym.clone())
             .or_default()
             .push((token.clone(), *score));
     }
+
+    // 事务包裹批量写入
+    conn.execute("BEGIN", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
 
     let mut written = 0usize;
     for (token, mut synonyms) in by_token {
@@ -530,10 +637,17 @@ fn write_synonyms_bidirectional(
                  VALUES (?1, ?2, ?3, ?4)",
                 params![token, synonym, score, index_id],
             )
-            .map_err(|e| GBrainError::Database(e.to_string()))?;
+            .map_err(|e| {
+                let _ = conn.execute("ROLLBACK", []);
+                GBrainError::Database(e.to_string())
+            })?;
             written += 1;
         }
     }
+
+    conn.execute("COMMIT", [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
     Ok(written)
 }
 
@@ -544,6 +658,11 @@ fn write_synonyms_bidirectional(
 /// Steps: extract tokens → embed → KNN → write synonyms.
 /// Requires an active embedding index and a configured `Embedder`.
 /// The `rt` tokio runtime is used for async embedding calls.
+///
+/// # 修复汇总
+/// - #3: full=true 时清除旧 synonym 表，避免低分旧 pair 残留
+/// - #7: dimensions 不匹配时报错而非静默覆盖
+/// - #12: 合并新 embedding 而非全量重载
 pub fn mine_synonyms(
     conn: &Connection,
     embedder: &Embedder,
@@ -553,7 +672,7 @@ pub fn mine_synonyms(
 ) -> Result<MineSynonymsStats> {
     let mut stats = MineSynonymsStats::default();
 
-    // 1. Resolve active embedding index
+    // 1. 按库查找 active embedding index
     let (index_id, dims): (i64, i32) = {
         let sql = match opts.library_id {
             Some(_) => {
@@ -580,6 +699,14 @@ pub fn mine_synonyms(
             ))
         })?
     };
+
+    // #7 修复：验证调用方 dimensions 与 DB 一致，不匹配时报错
+    if dimensions > 0 && dimensions != dims {
+        return Err(GBrainError::Database(format!(
+            "维度不一致: 调用方={}, 数据库={}. 请检查 GBRAIN_EMBEDDING_MODEL 配置.",
+            dimensions, dims
+        )));
+    }
     let dims = if dimensions > 0 { dimensions } else { dims };
     info!(index_id, dims, "Starting synonym mining");
 
@@ -612,7 +739,7 @@ pub fn mine_synonyms(
 
     // 5. Embed new tokens
     if !new_tokens.is_empty() {
-        let embedded = embed_and_store_tokens(
+        let (embedded, new_embs) = embed_and_store_tokens(
             conn,
             embedder,
             rt,
@@ -622,14 +749,26 @@ pub fn mine_synonyms(
             opts.concurrency,
         )?;
         stats.new_embeddings = embedded;
-        // Reload all embeddings (old + new)
-        all_embeddings = load_existing_token_embeddings(conn, index_id)?;
+        // #12 修复：合并新向量到已有 embedding，避免全量重载
+        for (token, vec) in new_embs {
+            all_embeddings.insert(token, vec);
+        }
     }
     stats.total_embeddings = all_embeddings.len();
 
     // 6. KNN mine（优先 sqlite-vec，回退到内存暴力搜索）
     let pairs = knn_mine(conn, index_id, dims, &all_embeddings, opts);
     info!(candidate_pairs = pairs.len(), "KNN mining complete");
+
+    // #3 修复：full=true 时先清除该 index 的旧 synonym，避免低分旧 pair 残留
+    if opts.full {
+        conn.execute(
+            "DELETE FROM kb_token_synonyms WHERE embedding_index_id = ?1",
+            params![index_id],
+        )
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+        info!(index_id, "已清除旧 synonym 表（full=true 全量重挖）");
+    }
 
     // 7. Write synonyms bidirectionally
     let written = write_synonyms_bidirectional(conn, pairs, index_id, opts.max_synonyms_per_token)?;
@@ -654,7 +793,7 @@ mod tests {
         conn
     }
 
-    /// Insert a library + active embedding index and return the index id.
+    /// 插入 library + active embedding index，返回 index id
     fn insert_active_index(conn: &Connection, library_id: i64) -> i64 {
         conn.execute(
             "INSERT OR IGNORE INTO kb_libraries (id, name) VALUES (?1, 'test')",
@@ -676,7 +815,7 @@ mod tests {
     #[test]
     fn empty_when_no_active_index() {
         let conn = test_conn();
-        let result = lookup_token_synonyms(&conn, "积分", 3);
+        let result = lookup_token_synonyms(&conn, "积分", 3, None);
         assert!(result.is_empty());
     }
 
@@ -684,7 +823,7 @@ mod tests {
     fn empty_when_table_empty() {
         let conn = test_conn();
         insert_active_index(&conn, 1);
-        let result = lookup_token_synonyms(&conn, "积分", 3);
+        let result = lookup_token_synonyms(&conn, "积分", 3, None);
         assert!(result.is_empty());
     }
 
@@ -705,7 +844,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = lookup_token_synonyms(&conn, "积分", 3);
+        let result = lookup_token_synonyms(&conn, "积分", 3, None);
         assert_eq!(result, vec!["points", "lp"]);
     }
 
@@ -732,16 +871,16 @@ mod tests {
         )
         .unwrap();
 
-        let result = lookup_token_synonyms(&conn, "积分", 2);
+        let result = lookup_token_synonyms(&conn, "积分", 2, None);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "points"); // highest score first
+        assert_eq!(result[0], "points"); // 最高分在前
     }
 
     #[test]
     fn no_match_returns_empty() {
         let conn = test_conn();
         insert_active_index(&conn, 1);
-        let result = lookup_token_synonyms(&conn, "nonexistent_token", 3);
+        let result = lookup_token_synonyms(&conn, "nonexistent_token", 3, None);
         assert!(result.is_empty());
     }
 
@@ -779,8 +918,47 @@ mod tests {
         )
         .unwrap();
 
-        let result = lookup_token_synonyms(&conn, "积分", 3);
+        let result = lookup_token_synonyms(&conn, "积分", 3, None);
         assert!(result.is_empty());
+    }
+
+    /// #1 修复测试：验证按 library_id 查找 active index
+    #[test]
+    fn library_scoped_index_lookup() {
+        let conn = test_conn();
+        // Library 1: active index (id=1, dims=1536)
+        conn.execute(
+            "INSERT INTO kb_libraries (id, name) VALUES (1, 'lib1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kb_embedding_indexes \
+             (id, library_id, provider, model, dimensions, index_type, is_active) \
+             VALUES (1, 1, 'openai', 'text-embedding-3-large', 1536, 'dense', 1)",
+            [],
+        )
+        .unwrap();
+        // Library 2: active index (id=2, dims=768) — 不同模型
+        conn.execute(
+            "INSERT INTO kb_libraries (id, name) VALUES (2, 'lib2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kb_embedding_indexes \
+             (id, library_id, provider, model, dimensions, index_type, is_active) \
+             VALUES (2, 2, 'openai', 'text-embedding-3-small', 768, 'dense', 1)",
+            [],
+        )
+        .unwrap();
+
+        // 按 library_id=1 查找 → 应返回 index 1
+        assert_eq!(active_embedding_index_id(&conn, Some(1)), Some(1));
+        // 按 library_id=2 查找 → 应返回 index 2
+        assert_eq!(active_embedding_index_id(&conn, Some(2)), Some(2));
+        // 全局查找 → 返回任意一个（行为未定，只验证不 panic）
+        assert!(active_embedding_index_id(&conn, None).is_some());
     }
 
     // -- PR-3 mining tests ---------------------------------------------------
@@ -805,7 +983,7 @@ mod tests {
     #[test]
     fn blob_roundtrip() {
         let original = vec![1.0_f32, -2.5, 0.0, 3.14];
-        let blob = f32_to_blob(&original);
+        let blob = embedding_to_blob(&original);
         let restored = blob_to_f32(&blob);
         assert_eq!(original, restored);
     }
@@ -819,7 +997,7 @@ mod tests {
         let written = write_synonyms_bidirectional(&conn, pairs, idx_id, 5).unwrap();
         assert_eq!(written, 2); // A→B + B→A
 
-        // Verify both directions
+        // 验证双向
         let ab: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT synonym FROM kb_token_synonyms WHERE token = '积分' AND embedding_index_id = ?1")
@@ -854,25 +1032,20 @@ mod tests {
             ("a".to_string(), "d".to_string(), 0.7),
         ];
         let written = write_synonyms_bidirectional(&conn, pairs, idx_id, 2).unwrap();
-        // a has 3 synonyms → capped to 2 (b, c)
-        // b has 1 synonym (a) → 1
-        // c has 1 synonym (a) → 1
-        // d has 1 synonym (a) → but a→d was capped, so d still gets a→d? No...
-        // Actually: a gets b,c,d but capped to 2 (b,c)
-        // b gets a → 1
-        // c gets a → 1
-        // d gets a → 1 (the reverse direction is independent)
+        // a 有 3 个 synonym → 截断到 2 (b, c)
+        // b 有 1 个 synonym (a) → 1
+        // c 有 1 个 synonym (a) → 1
+        // d 有 1 个 synonym (a) → 1（反向独立于正向截断）
         assert_eq!(written, 5); // a→b, a→c, b→a, c→a, d→a
     }
 
     #[test]
     fn knn_mine_basic() {
-        // Construct embeddings where token_a and token_b are similar,
-        // token_c is orthogonal.
+        // 构造 embedding：a 和 b 相似，c 正交
         let all: HashMap<String, Vec<f32>> = HashMap::from([
             ("a".to_string(), vec![1.0, 0.0]),
-            ("b".to_string(), vec![0.95, 0.05]), // very close to a
-            ("c".to_string(), vec![0.0, 1.0]),   // orthogonal
+            ("b".to_string(), vec![0.95, 0.05]), // 与 a 非常接近
+            ("c".to_string(), vec![0.0, 1.0]),   // 正交
         ]);
         let opts = MineSynonymsOpts {
             knn_k: 3,
@@ -880,7 +1053,7 @@ mod tests {
             ..Default::default()
         };
         let pairs = knn_mine_brute_force(&all, &opts);
-        // a↔b should be found, c should have no pairs above 0.9
+        // a↔b 应被发现，c 无高于 0.9 的 pair
         assert!(pairs.iter().any(|(a, b, _)| a == "a" && b == "b"));
         assert!(pairs.iter().any(|(a, b, _)| a == "b" && b == "a"));
         assert!(!pairs.iter().any(|(a, _, _)| a == "c"));
@@ -890,7 +1063,7 @@ mod tests {
     fn knn_mine_filters_substrings() {
         let all: HashMap<String, Vec<f32>> = HashMap::from([
             ("trans".to_string(), vec![1.0, 0.0]),
-            ("transaction".to_string(), vec![0.99, 0.01]), // similar AND substring
+            ("transaction".to_string(), vec![0.99, 0.01]), // 相似且包含关系
         ]);
         let opts = MineSynonymsOpts {
             knn_k: 3,
@@ -898,14 +1071,34 @@ mod tests {
             ..Default::default()
         };
         let pairs = knn_mine_brute_force(&all, &opts);
-        assert!(pairs.is_empty()); // filtered because "trans" ⊂ "transaction"
+        assert!(pairs.is_empty()); // "trans" ⊂ "transaction" 被过滤
+    }
+
+    /// #4 修复测试：验证 brute-force 返回 knn_k 个而非 knn_k-1 个
+    #[test]
+    fn knn_mine_brute_force_returns_k_neighbors() {
+        let all: HashMap<String, Vec<f32>> = HashMap::from([
+            ("a".to_string(), vec![1.0, 0.0]),
+            ("b".to_string(), vec![0.99, 0.01]),
+            ("c".to_string(), vec![0.98, 0.02]),
+            ("d".to_string(), vec![0.97, 0.03]),
+        ]);
+        let opts = MineSynonymsOpts {
+            knn_k: 3,
+            similarity_threshold: 0.9,
+            ..Default::default()
+        };
+        let pairs = knn_mine_brute_force(&all, &opts);
+        // token "a" 应有 3 个 neighbor (b, c, d)，而非旧版的 2 个 (off-by-one)
+        let a_neighbors: Vec<_> = pairs.iter().filter(|(t, _, _)| t == "a").collect();
+        assert_eq!(a_neighbors.len(), 3, "knn_k=3 应返回 3 个邻居，而非 2 个");
     }
 
     #[test]
     fn extract_candidates_respects_df_bounds() {
         let conn = test_conn();
         insert_active_index(&conn, 1);
-        // Insert a parent document (FK requirement)
+        // 插入父文档（FK 约束）
         conn.execute(
             "INSERT INTO kb_documents \
              (id, library_id, original_name, content_hash, extension, mime_type) \
@@ -913,8 +1106,8 @@ mod tests {
             [],
         )
         .unwrap();
-        // 10 nodes with "积分" (common word), 3 nodes with "生僻" (rare word),
-        // 5 nodes without either (background noise)
+        // 10 个节点含 "积分"（常见词），3 个节点含 "生僻"（罕见词），
+        // 5 个节点不含任何关键词（背景噪声）
         for i in 0..10u32 {
             conn.execute(
                 "INSERT INTO kb_document_nodes (library_id, document_id, content, level) \
@@ -941,20 +1134,20 @@ mod tests {
         }
 
         let opts = MineSynonymsOpts {
-            min_doc_freq: 5,         // "生僻" won't pass (DF=3)
-            max_doc_freq_ratio: 0.9, // "积分" will pass (DF=10/18=56%)
+            min_doc_freq: 5,         // "生僻" 不通过 (DF=3)
+            max_doc_freq_ratio: 0.9, // "积分" 通过 (DF=10/18=56%)
             min_token_char_len: 2,
             ..Default::default()
         };
         let tokens = extract_candidate_tokens(&conn, &opts).unwrap();
         let token_set: Vec<&str> = tokens.iter().map(|(t, _)| t.as_str()).collect();
-        // "积分" should appear (DF=10 >= 5, 10/18=56% <= 90%)
+        // "积分" 应出现 (DF=10 >= 5, 10/18=56% <= 90%)
         assert!(
             token_set.iter().any(|t| t.contains("积分")),
             "expected 积分 in {:?}",
             token_set
         );
-        // "生僻" should NOT appear (DF=3 < min_doc_freq=5)
+        // "生僻" 不应出现 (DF=3 < min_doc_freq=5)
         assert!(
             !token_set.iter().any(|t| t.contains("生僻")),
             "生僻 should have been filtered by min_doc_freq"

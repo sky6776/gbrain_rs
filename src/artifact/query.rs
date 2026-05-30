@@ -632,20 +632,30 @@ impl EvidenceQueryPlan {
         (!self.core_terms.is_empty()).then(|| self.core_terms.join(" "))
     }
 
-    fn expanded_core_terms(&self, conn: &Connection) -> Vec<String> {
+    /// # 问题 #1 + #13 修复
+    /// 新增 `library_id` 参数用于按库查找同义词。
+    /// 使用 `batch_lookup_token_synonyms` 一次 SQL 查询替代 N+1 round-trip。
+    fn expanded_core_terms(&self, conn: &Connection, library_id: Option<i64>) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut terms = Vec::new();
+
+        // #13: 批量查找同义词 — 一次 SQL 查询替代逐个 token 调用
+        let synonym_map = crate::kb::synonyms::batch_lookup_token_synonyms(
+            conn,
+            &self.core_terms,
+            crate::kb::synonyms::MAX_RUNTIME_SYNONYMS,
+            library_id,
+        );
+
         for term in &self.core_terms {
             if seen.insert(term.clone()) {
                 terms.push(term.clone());
             }
-            for syn in crate::kb::synonyms::lookup_token_synonyms(
-                conn,
-                term,
-                crate::kb::synonyms::MAX_RUNTIME_SYNONYMS,
-            ) {
-                if seen.insert(syn.clone()) {
-                    terms.push(syn);
+            if let Some(synonyms) = synonym_map.get(term) {
+                for syn in synonyms {
+                    if seen.insert(syn.clone()) {
+                        terms.push(syn.clone());
+                    }
                 }
             }
         }
@@ -661,9 +671,11 @@ pub(crate) struct QueryFallbackPlan {
     pub expanded_display_query: Option<String>,
 }
 
-pub(crate) fn build_query_fallback_plan(query: &str, conn: &Connection) -> QueryFallbackPlan {
+/// # 问题 #1 修复：新增 `library_id` 参数
+/// 用于按库查找 active embedding index，避免跨库索引不一致。
+pub(crate) fn build_query_fallback_plan(query: &str, conn: &Connection, library_id: Option<i64>) -> QueryFallbackPlan {
     let plan = EvidenceQueryPlan::from_query(query);
-    let expanded_terms = plan.expanded_core_terms(conn);
+    let expanded_terms = plan.expanded_core_terms(conn, library_id);
     QueryFallbackPlan {
         core_terms: plan.core_terms.clone(),
         core_query: plan.core_query(),
