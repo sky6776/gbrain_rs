@@ -552,7 +552,8 @@ impl<'a> ArtifactService<'a> {
         let include_sources = input.include_sources.unwrap_or(false);
         let requested_mode = input.mode.as_deref().unwrap_or("auto");
         let strategy = facade_query_strategy(requested_mode)?;
-        let fallback_plan = query::build_query_fallback_plan(&input.query);
+        let conn = self.engine.connection()?;
+        let fallback_plan = query::build_query_fallback_plan(&input.query, &conn);
         let mut fallback_state = QueryFallbackState {
             core_terms: fallback_plan.core_terms.clone(),
             ..Default::default()
@@ -987,7 +988,9 @@ impl<'a> ArtifactService<'a> {
                     // 修复：默认 max_chars 省略时，必须用与内部检索预算一致的默认上限（1600），
                     // 否则 service 不做最终硬截断，joined content 仍可能超过内部 1600 预算，
                     // 且 content_matches 会携带未受预算约束的 snippet。
-                    let effective_max = content_options.max_chars.unwrap_or(DEFAULT_FOCUSED_MAX_CHARS);
+                    let effective_max = content_options
+                        .max_chars
+                        .unwrap_or(DEFAULT_FOCUSED_MAX_CHARS);
                     // 单 snippet 兜底截断：避免单条 snippet 超出整体预算（取整体预算为上限）。
                     let snippet_cap = effective_max.max(1);
                     content_matches = focused

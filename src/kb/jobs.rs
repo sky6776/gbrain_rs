@@ -161,6 +161,70 @@ pub fn fail_kb_job(conn: &Connection, job_db_id: i64, error: &str) -> Result<()>
 }
 
 // ---------------------------------------------------------------------------
+// E6: Token synonym mining job
+// ---------------------------------------------------------------------------
+
+/// E6: Synonym mining job payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KbMineSynonymsPayload {
+    pub kind: String, // "kb_mine_synonyms"
+    /// Library ID to mine (None = all libraries)
+    pub library_id: Option<i64>,
+    /// Full rebuild (ignore existing embeddings)
+    pub full: bool,
+}
+
+/// Enqueue a synonym mining job. Only enqueues if one isn't already pending.
+pub fn enqueue_mine_synonyms_job(
+    conn: &Connection,
+    library_id: Option<i64>,
+    full: bool,
+) -> Result<i64> {
+    let queue = JobQueue::new(conn);
+    // Avoid duplicate pending jobs
+    let existing = conn
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE job_type = 'kb_mine_synonyms' AND status = 'pending'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if existing > 0 {
+        return Ok(0);
+    }
+    let payload = KbMineSynonymsPayload {
+        kind: "kb_mine_synonyms".to_string(),
+        library_id,
+        full,
+    };
+    queue.enqueue(JobInput {
+        job_type: "kb_mine_synonyms".to_string(),
+        payload: serde_json::to_value(&payload)
+            .map_err(|e| GBrainError::Serialization(e.to_string()))?,
+        priority: Some(-1), // low priority — runs after other jobs
+        max_attempts: Some(2),
+    })
+}
+
+/// Claim the next pending synonym mining job.
+pub fn claim_next_mine_synonyms_job(
+    conn: &Connection,
+) -> Result<Option<(i64, KbMineSynonymsPayload)>> {
+    let queue = JobQueue::new(conn);
+    match queue.dequeue_by_type("kb_mine_synonyms") {
+        Ok(Some(job)) => {
+            let payload: KbMineSynonymsPayload =
+                serde_json::from_value(job.payload).map_err(|e| {
+                    GBrainError::Serialization(format!("invalid mine_synonyms payload: {}", e))
+                })?;
+            Ok(Some((job.id, payload)))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // P5-026/P6-010: Job management helpers (list/pause/resume)
 // ---------------------------------------------------------------------------
 

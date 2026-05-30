@@ -268,6 +268,15 @@ pub enum KbCommands {
         /// 文档 ID
         doc_id: i64,
     },
+    /// 挖掘 token 语义同义词（E6 离线挖掘）
+    MineSynonyms {
+        /// 仅挖掘指定库
+        #[arg(long)]
+        library_id: Option<i64>,
+        /// 全量重挖（忽略已有 embedding）
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 /// 解析页码范围字符串（如 "1,3,5-10" → vec![1,3,5,6,7,8,9,10]）。
@@ -1728,6 +1737,44 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 info!(
                     "已入队 OCR 重试: document_id={}, title='{}', failed_pages={:?}, job_row_id={}",
                     doc_id, title, failed_pages, job_row_id
+                );
+            }
+
+            KbCommands::MineSynonyms { library_id, full } => {
+                let api_key = config.openai_api_key.as_deref().ok_or_else(|| {
+                    GBrainError::InvalidInput(
+                        "未配置 embedding API key（设置 GBRAIN_OPENAI_API_KEY）".to_string(),
+                    )
+                })?;
+                let embedder = gbrain_core::embedding::Embedder::new(
+                    api_key,
+                    config.openai_base_url.as_deref(),
+                    Some(&config.embedding_model),
+                    Some(config.embedding_dimensions),
+                );
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
+                let conn = ops.engine.connection()?;
+                let opts = gbrain_core::kb::synonyms::MineSynonymsOpts {
+                    library_id,
+                    full,
+                    ..Default::default()
+                };
+                let stats = gbrain_core::kb::synonyms::mine_synonyms(
+                    &conn,
+                    &embedder,
+                    config.embedding_dimensions as i32,
+                    &rt,
+                    &opts,
+                )?;
+                info!(
+                    candidates = stats.candidates,
+                    new_embeddings = stats.new_embeddings,
+                    total_embeddings = stats.total_embeddings,
+                    synonyms_written = stats.synonyms_written,
+                    "同义词挖掘完成"
                 );
             }
         },

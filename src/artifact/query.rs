@@ -442,8 +442,7 @@ fn enrich_evidence_with_artifact_metadata(
                     .unwrap_or_else(|| slug.to_string());
                 hit.shadow_page_slug = Some(normalized);
             } else {
-                hit.shadow_page_slug =
-                    projection::find_shadow_page_slug(conn, proj.artifact_id)?;
+                hit.shadow_page_slug = projection::find_shadow_page_slug(conn, proj.artifact_id)?;
             }
         }
     }
@@ -633,17 +632,20 @@ impl EvidenceQueryPlan {
         (!self.core_terms.is_empty()).then(|| self.core_terms.join(" "))
     }
 
-    fn expanded_core_terms(&self) -> Vec<String> {
+    fn expanded_core_terms(&self, conn: &Connection) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut terms = Vec::new();
         for term in &self.core_terms {
             if seen.insert(term.clone()) {
                 terms.push(term.clone());
             }
-            for expansion in fixed_query_expansions(term) {
-                let expansion = expansion.to_string();
-                if seen.insert(expansion.clone()) {
-                    terms.push(expansion);
+            for syn in crate::kb::synonyms::lookup_token_synonyms(
+                conn,
+                term,
+                crate::kb::synonyms::MAX_RUNTIME_SYNONYMS,
+            ) {
+                if seen.insert(syn.clone()) {
+                    terms.push(syn);
                 }
             }
         }
@@ -659,9 +661,9 @@ pub(crate) struct QueryFallbackPlan {
     pub expanded_display_query: Option<String>,
 }
 
-pub(crate) fn build_query_fallback_plan(query: &str) -> QueryFallbackPlan {
+pub(crate) fn build_query_fallback_plan(query: &str, conn: &Connection) -> QueryFallbackPlan {
     let plan = EvidenceQueryPlan::from_query(query);
-    let expanded_terms = plan.expanded_core_terms();
+    let expanded_terms = plan.expanded_core_terms(conn);
     QueryFallbackPlan {
         core_terms: plan.core_terms.clone(),
         core_query: plan.core_query(),
@@ -1695,12 +1697,6 @@ fn build_and_match_query(terms: &[String]) -> String {
 
 fn is_domain_abbreviation(token: &str) -> bool {
     matches!(token, "lp" | "gp" | "vi" | "api" | "sdk")
-}
-
-fn fixed_query_expansions(token: &str) -> &'static [&'static str] {
-    match token {
-        _ => &[],
-    }
 }
 
 fn matched_terms(content: &str, title: &str, plan: &EvidenceQueryPlan) -> Vec<String> {

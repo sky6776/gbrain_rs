@@ -134,6 +134,18 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
 
             complete_kb_job(conn, job_db_id)?;
 
+            // E6: enqueue synonym mining job after successful document processing.
+            // The dedup guard inside ensures at most one mining job is pending at any time.
+            if let Err(e) =
+                crate::kb::jobs::enqueue_mine_synonyms_job(conn, Some(payload.library_id), false)
+            {
+                warn!(
+                    document_id = payload.document_id,
+                    error = %e,
+                    "KB worker: synonym mining job 入队失败（非致命）"
+                );
+            }
+
             Ok(true)
         }
         Err(e) => {
@@ -927,6 +939,69 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
     }
 }
 
+// ---------------------------------------------------------------------------
+// E6: Token synonym mining worker
+// ---------------------------------------------------------------------------
+
+/// Process a single synonym mining job, if one is pending.
+/// Returns `true` if a job was processed, `false` if no job was available.
+pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
+    let conn = engine.connection()?;
+    let Some((job_db_id, payload)) = crate::kb::jobs::claim_next_mine_synonyms_job(&conn)? else {
+        return Ok(false);
+    };
+
+    info!(job_db_id, "Synonym mining worker: 认领作业");
+
+    let Some(api_key) = config.openai_api_key.as_deref() else {
+        crate::kb::jobs::fail_kb_job(&conn, job_db_id, "No embedding API key configured")?;
+        return Ok(true);
+    };
+
+    let embedder = Embedder::new(
+        api_key,
+        config.openai_base_url.as_deref(),
+        Some(&config.embedding_model),
+        Some(config.embedding_dimensions),
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
+
+    let opts = crate::kb::synonyms::MineSynonymsOpts {
+        library_id: payload.library_id,
+        full: payload.full,
+        ..Default::default()
+    };
+
+    match crate::kb::synonyms::mine_synonyms(
+        &conn,
+        &embedder,
+        config.embedding_dimensions as i32,
+        &rt,
+        &opts,
+    ) {
+        Ok(stats) => {
+            info!(
+                job_db_id,
+                candidates = stats.candidates,
+                new_embeddings = stats.new_embeddings,
+                total_embeddings = stats.total_embeddings,
+                synonyms_written = stats.synonyms_written,
+                "Synonym mining worker: 挖掘完成"
+            );
+            crate::kb::jobs::complete_kb_job(&conn, job_db_id)?;
+            Ok(true)
+        }
+        Err(e) => {
+            warn!(job_db_id, error = %e, "Synonym mining worker: 挖掘失败");
+            crate::kb::jobs::fail_kb_job(&conn, job_db_id, &e.to_string())?;
+            Ok(true)
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Phase 3: OCR 异步作业处理
 // ---------------------------------------------------------------------------
@@ -2961,7 +3036,7 @@ fn rebuild_raptor_after_reembed(
 pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs: u64) -> ! {
     info!(interval_secs, "KB worker: 启动守护进程模式");
     loop {
-        // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业
+        // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，再处理 synonym mining 作业
         let had_work = match run_kb_worker_once(engine, config) {
             Ok(true) => true,
             Ok(false) => match run_ocr_worker_once(engine, config) {
@@ -2970,7 +3045,14 @@ pub fn run_kb_worker_loop(engine: &SqliteEngine, config: &Config, interval_secs:
                     Ok(true) => true,
                     Ok(false) => match run_artifact_worker_once(engine, config) {
                         Ok(true) => true,
-                        Ok(false) => false,
+                        Ok(false) => match run_mine_synonyms_worker_once(engine, config) {
+                            Ok(true) => true,
+                            Ok(false) => false,
+                            Err(e) => {
+                                warn!(error = %e, "synonym mining worker: 处理循环出错");
+                                false
+                            }
+                        },
                         Err(e) => {
                             warn!(error = %e, "artifact promote worker: 处理循环出错");
                             false
@@ -3080,7 +3162,7 @@ pub fn spawn_kb_worker_pool(
                         info!(worker = i, "KB worker: 收到停止信号，退出");
                         break;
                     }
-                    // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，最后处理 artifact promote 作业
+                    // 先处理文档处理作业，再处理 OCR 作业，再处理 re-embed 作业，再处理 synonym mining，最后处理 artifact promote 作业
                     let had_work = match run_kb_worker_once(&engine, &config) {
                         Ok(true) => true,
                         Ok(false) => match run_ocr_worker_once(&engine, &config) {
@@ -3089,7 +3171,14 @@ pub fn spawn_kb_worker_pool(
                                 Ok(true) => true,
                                 Ok(false) => match run_artifact_worker_once(&engine, &config) {
                                     Ok(true) => true,
-                                    Ok(false) => false,
+                                    Ok(false) => match run_mine_synonyms_worker_once(&engine, &config) {
+                                        Ok(true) => true,
+                                        Ok(false) => false,
+                                        Err(e) => {
+                                            warn!(worker = i, error = %e, "synonym mining worker: 出错");
+                                            false
+                                        }
+                                    },
                                     Err(e) => {
                                         warn!(worker = i, error = %e, "artifact promote worker: 出错");
                                         false

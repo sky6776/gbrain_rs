@@ -1024,6 +1024,34 @@ CREATE TABLE IF NOT EXISTS artifact_events (
 CREATE INDEX IF NOT EXISTS idx_artifact_events_artifact ON artifact_events(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_events_occurrence ON artifact_events(occurrence_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_events_type ON artifact_events(event_type);
+
+-- Token 语义向量（离线挖掘用）
+CREATE TABLE IF NOT EXISTS kb_token_embeddings (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    token               TEXT    NOT NULL,
+    embedding_index_id  INTEGER NOT NULL,
+    embedding           BLOB    NOT NULL,
+    doc_freq            INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(token, embedding_index_id),
+    FOREIGN KEY (embedding_index_id)
+        REFERENCES kb_embedding_indexes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_token_emb_idx
+    ON kb_token_embeddings(embedding_index_id);
+
+-- Token 同义词（运行时查询路径唯一被查的表）
+CREATE TABLE IF NOT EXISTS kb_token_synonyms (
+    token               TEXT    NOT NULL,
+    synonym             TEXT    NOT NULL,
+    score               REAL    NOT NULL,
+    embedding_index_id  INTEGER NOT NULL,
+    PRIMARY KEY (token, synonym, embedding_index_id),
+    FOREIGN KEY (embedding_index_id)
+        REFERENCES kb_embedding_indexes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_token_syn_lookup
+    ON kb_token_synonyms(embedding_index_id, token, score DESC);
 "#;
 
 /// Generate sqlite-vec virtual table DDL
