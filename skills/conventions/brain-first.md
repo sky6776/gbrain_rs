@@ -61,6 +61,10 @@ thousands of pages. The answer is almost always there.
 ## Rules
 
 - **Score > 0.5 = use it.** Don't reach for external APIs when the brain answered.
+- **Answer-bearing excerpts are enough.** If `artifact_query` returns a passage
+  that directly answers the user, synthesize from that passage instead of loading
+  the whole artifact "for completeness." Full artifact reads are for missing
+  context, not for broadening the topic.
 - **User's direct statements are highest-authority data.** The brain captures
   what the user said in meetings, conversations, and notes. External sources
   are supplementary.

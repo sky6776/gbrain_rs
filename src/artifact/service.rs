@@ -37,6 +37,33 @@ pub const TEXT_FILE_EXTENSIONS: &[&str] = &[
     "htm",
 ];
 
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactContentOptions<'a> {
+    pub content_query: Option<&'a str>,
+    pub content_mode: Option<&'a str>,
+    pub max_chars: Option<usize>,
+    pub passage_id: Option<i64>,
+}
+
+impl ArtifactContentOptions<'_> {
+    fn requests_focused_content(&self) -> bool {
+        // content_mode="full" 明确要求全文，优先级最高，不进入 focused 模式
+        if matches!(self.content_mode, Some("full")) {
+            return false;
+        }
+        // 只有非空 content_query 才视为 focused 请求；
+        // 空字符串（常见于 MCP/表单调用）不应触发 focused 模式，
+        // 否则 include_content=true 也拿不到全文
+        let has_non_empty_query = self
+            .content_query
+            .map(|q| !q.trim().is_empty())
+            .unwrap_or(false);
+        matches!(self.content_mode, Some("focused"))
+            || has_non_empty_query
+            || self.passage_id.is_some()
+    }
+}
+
 /// Artifact 应用服务 — 统一知识操作编排入口
 pub struct ArtifactService<'a> {
     engine: &'a SqliteEngine,
@@ -522,39 +549,95 @@ impl<'a> ArtifactService<'a> {
     /// 返回 ArtifactQueryOutput，隐藏内部 ID
     pub fn query_facade(&self, input: &ArtifactQueryInput) -> Result<ArtifactQueryOutput> {
         let start = std::time::Instant::now();
-
-        // 将用户友好的 mode 映射到内部 QueryStrategy。
-        // 修复：graph 尚未实现，未知 mode 不应静默退回 BrainFirst，避免误导调用方。
-        let strategy = match input.mode.as_deref().unwrap_or("auto") {
-            "memory" | "auto" => crate::artifact::types::QueryStrategy::BrainFirst,
-            "evidence" => crate::artifact::types::QueryStrategy::EvidenceFirst,
-            "timeline" => crate::artifact::types::QueryStrategy::TimelineFirst,
-            "graph" => {
-                return Err(crate::error::GBrainError::InvalidInput(
-                    "artifact_query mode=graph 尚未实现，请使用 mode=auto/memory/evidence/timeline"
-                        .into(),
-                ));
-            }
-            other => {
-                return Err(crate::error::GBrainError::InvalidInput(format!(
-                    "未知查询模式: {}，有效值: auto/memory/evidence/timeline",
-                    other
-                )));
-            }
+        let include_sources = input.include_sources.unwrap_or(false);
+        let requested_mode = input.mode.as_deref().unwrap_or("auto");
+        let strategy = facade_query_strategy(requested_mode)?;
+        let fallback_plan = query::build_query_fallback_plan(&input.query);
+        let mut fallback_state = QueryFallbackState {
+            core_terms: fallback_plan.core_terms.clone(),
+            ..Default::default()
         };
 
-        let include_sources = input.include_sources.unwrap_or(false);
-
-        let internal_input = UnifiedQueryInput {
-            query: input.query.clone(),
-            strategy,
+        let mut query_text = input.query.clone();
+        let mut mode_text = requested_mode.to_string();
+        let mut internal_result = self.query(UnifiedQueryInput {
+            query: query_text.clone(),
+            strategy: strategy.clone(),
             limit: input.limit.map(|l| l as i64),
             filter_slug: input.filter_slug.clone(),
             include_evidence: true,
             include_provenance: include_sources,
-        };
+        })?;
+        fallback_state.record_query("original_query", &query_text);
 
-        let internal_result = self.query(internal_input)?;
+        let mut candidates = Vec::new();
+        if !is_query_result_useful(&internal_result, &fallback_plan.core_terms) {
+            let fallback_reason = if internal_result.total_hits == 0 {
+                "primary_no_hits"
+            } else {
+                "primary_low_quality"
+            };
+            fallback_state.fallback_reason = Some(fallback_reason.to_string());
+
+            let attempts = build_fallback_attempts(
+                requested_mode,
+                strategy.clone(),
+                &fallback_plan,
+                input.filter_slug.clone(),
+            );
+
+            for attempt in attempts {
+                fallback_state.record_query(&attempt.stage, &attempt.display_query);
+                let result = self.query(UnifiedQueryInput {
+                    query: attempt.query.clone(),
+                    strategy: attempt.strategy.clone(),
+                    limit: input.limit.map(|l| l as i64),
+                    filter_slug: input.filter_slug.clone(),
+                    include_evidence: true,
+                    include_provenance: include_sources,
+                })?;
+                if is_query_result_useful(&result, &fallback_plan.core_terms) {
+                    fallback_state.fallback_used = true;
+                    fallback_state.fallback_stage = Some(attempt.stage);
+                    query_text = attempt.query;
+                    mode_text = attempt.mode;
+                    internal_result = result;
+                    break;
+                }
+            }
+
+            if !fallback_state.fallback_used
+                && !is_query_result_useful(&internal_result, &fallback_plan.core_terms)
+            {
+                let conn = self.engine.connection()?;
+                candidates = find_title_slug_candidates(
+                    conn,
+                    &fallback_plan.core_terms,
+                    input.limit.unwrap_or(10).clamp(1, 25),
+                    input.filter_slug.as_deref(),
+                )?;
+                if !candidates.is_empty() {
+                    fallback_state.fallback_used = true;
+                    fallback_state.fallback_stage = Some("title_slug".to_string());
+                    fallback_state.needs_focused_context = true;
+                    internal_result.brain_hits.clear();
+                    internal_result.evidence_hits.clear();
+                    internal_result.timeline_hits.clear();
+                    internal_result.provenance_records.clear();
+                    internal_result.total_hits = candidates.len() as i64;
+                } else {
+                    fallback_state.fallback_used = true;
+                    fallback_state.fallback_stage = Some("no_results".to_string());
+                    fallback_state.no_results = true;
+                    internal_result.brain_hits.clear();
+                    internal_result.evidence_hits.clear();
+                    internal_result.timeline_hits.clear();
+                    internal_result.provenance_records.clear();
+                    internal_result.total_hits = 0;
+                }
+            }
+        }
+
         let elapsed = start.elapsed();
 
         // 将 provenance_records 转换为用户友好的 SourceRef 列表
@@ -593,9 +676,68 @@ impl<'a> ArtifactService<'a> {
             !internal_result.brain_hits.is_empty() || !internal_result.evidence_hits.is_empty();
 
         // 转换为用户友好的输出格式
+        let evidence_results: Vec<crate::artifact::types::EvidenceResult> = internal_result
+            .evidence_hits
+            .into_iter()
+            .map(|e| {
+                // P2-4 修复：evidence 的 fallback source 也受 include_sources 控制，
+                // 当 include_sources=false 时不应返回任何 source 信息
+                let hit_sources: Vec<crate::artifact::types::SourceRef> = if include_sources {
+                    e.artifact
+                        .as_ref()
+                        .map(|a| {
+                            let from_provenance: Vec<crate::artifact::types::SourceRef> =
+                                all_sources
+                                    .iter()
+                                    .filter(|s| s.artifact_uid == a.artifact_uid)
+                                    .cloned()
+                                    .collect();
+                            // 如果 provenance 已有此 artifact 的来源，直接用
+                            if !from_provenance.is_empty() {
+                                from_provenance
+                            } else {
+                                // 否则从 artifact 直接构造基础 SourceRef
+                                vec![crate::artifact::types::SourceRef {
+                                    artifact_uid: a.artifact_uid.clone(),
+                                    original_name: Some(a.original_name.clone()),
+                                    quote_text: None,
+                                    confidence: 0.5,
+                                    brain_slug: None,
+                                    brain_field: None,
+                                }]
+                            }
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let artifact_uid = e.artifact.as_ref().map(|a| a.artifact_uid.clone());
+                crate::artifact::types::EvidenceResult {
+                    title: e.title,
+                    snippet: e.snippet,
+                    score: e.relevance,
+                    matched_terms: e.matched_terms,
+                    artifact_uid,
+                    shadow_page_slug: e.shadow_page_slug,
+                    passage_id: e.passage_id,
+                    view_type: e.view_type,
+                    source_start: e.source_start,
+                    source_end: e.source_end,
+                    needs_more_context: e.needs_more_context,
+                    sources: hit_sources,
+                }
+            })
+            .collect();
+        let confidence = derive_query_confidence(
+            internal_result.total_hits as usize,
+            &evidence_results,
+            candidates.len(),
+            &fallback_state,
+        );
+
         Ok(ArtifactQueryOutput {
-            query: input.query.clone(),
-            mode: input.mode.clone().unwrap_or_else(|| "auto".to_string()),
+            query: query_text,
+            mode: mode_text,
             memories: internal_result
                 .brain_hits
                 .into_iter()
@@ -614,49 +756,7 @@ impl<'a> ArtifactService<'a> {
                     }
                 })
                 .collect(),
-            evidence: internal_result
-                .evidence_hits
-                .into_iter()
-                .map(|e| {
-                    // P2-4 修复：evidence 的 fallback source 也受 include_sources 控制，
-                    // 当 include_sources=false 时不应返回任何 source 信息
-                    let hit_sources: Vec<crate::artifact::types::SourceRef> = if include_sources {
-                        e.artifact
-                            .as_ref()
-                            .map(|a| {
-                                let from_provenance: Vec<crate::artifact::types::SourceRef> =
-                                    all_sources
-                                        .iter()
-                                        .filter(|s| s.artifact_uid == a.artifact_uid)
-                                        .cloned()
-                                        .collect();
-                                // 如果 provenance 已有此 artifact 的来源，直接用
-                                if !from_provenance.is_empty() {
-                                    from_provenance
-                                } else {
-                                    // 否则从 artifact 直接构造基础 SourceRef
-                                    vec![crate::artifact::types::SourceRef {
-                                        artifact_uid: a.artifact_uid.clone(),
-                                        original_name: Some(a.original_name.clone()),
-                                        quote_text: None,
-                                        confidence: 0.5,
-                                        brain_slug: None,
-                                        brain_field: None,
-                                    }]
-                                }
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    crate::artifact::types::EvidenceResult {
-                        title: e.title,
-                        snippet: e.snippet,
-                        score: e.relevance,
-                        sources: hit_sources,
-                    }
-                })
-                .collect(),
+            evidence: evidence_results,
             timeline: internal_result
                 .timeline_hits
                 .into_iter()
@@ -667,11 +767,24 @@ impl<'a> ArtifactService<'a> {
                 })
                 .collect(),
             graph: Vec::new(),
+            candidates,
             meta: crate::artifact::types::QueryMeta {
                 total: internal_result.total_hits as usize,
                 elapsed_ms: elapsed.as_millis() as u64,
                 used_vector,
                 used_keyword: true,
+                fallback_used: fallback_state.fallback_used,
+                fallback_stage: fallback_state.fallback_stage,
+                fallback_reason: fallback_state.fallback_reason,
+                fallback_queries: if fallback_state.fallback_used {
+                    fallback_state.fallback_queries
+                } else {
+                    Vec::new()
+                },
+                core_terms: fallback_state.core_terms,
+                confidence: Some(confidence),
+                needs_focused_context: fallback_state.needs_focused_context,
+                no_results: fallback_state.no_results,
             },
             sources: all_sources,
         })
@@ -779,6 +892,24 @@ impl<'a> ArtifactService<'a> {
         include_sources: bool,
         include_content: bool,
     ) -> Result<Option<crate::artifact::types::ArtifactDetailOutput>> {
+        self.get_artifact_detail_with_content_options(
+            id_or_uid,
+            include_projections,
+            include_sources,
+            include_content,
+            ArtifactContentOptions::default(),
+        )
+    }
+
+    /// 获取 Artifact 详情，并支持 focused content 读取。
+    pub fn get_artifact_detail_with_content_options(
+        &self,
+        id_or_uid: &str,
+        include_projections: bool,
+        include_sources: bool,
+        include_content: bool,
+        content_options: ArtifactContentOptions<'_>,
+    ) -> Result<Option<crate::artifact::types::ArtifactDetailOutput>> {
         let artifact_id = self.resolve_artifact_id(id_or_uid)?;
         let conn = self.engine.connection()?;
         let artifact = store::find_artifact_by_id(conn, artifact_id)
@@ -847,7 +978,60 @@ impl<'a> ArtifactService<'a> {
                         .collect(),
                 );
 
-                let content = if include_content {
+                let mut content_matches = Vec::new();
+                let mut content_mode = None;
+                let mut content_query = content_options.content_query.map(str::to_string);
+                let content = if content_options.requests_focused_content() {
+                    let focused =
+                        load_artifact_focused_content(conn, artifact_id, &content_options)?;
+                    // 修复：默认 max_chars 省略时，必须用与内部检索预算一致的默认上限（1600），
+                    // 否则 service 不做最终硬截断，joined content 仍可能超过内部 1600 预算，
+                    // 且 content_matches 会携带未受预算约束的 snippet。
+                    let effective_max = content_options.max_chars.unwrap_or(DEFAULT_FOCUSED_MAX_CHARS);
+                    // 单 snippet 兜底截断：避免单条 snippet 超出整体预算（取整体预算为上限）。
+                    let snippet_cap = effective_max.max(1);
+                    content_matches = focused
+                        .iter()
+                        .map(|m| {
+                            // P3 修复：service 侧二次截断时，原 query 返回的 source_start/source_end
+                            // 描述的是未截断 snippet 在源文件中的范围，截断后两者不再一致。
+                            // 调用方若按 source_end 去回切源文件会得到与 snippet 不匹配的区段。
+                            // 策略：保留 source_start 作为起点引用，截断时把 source_end 清空，
+                            // 让调用方明确知道"该范围被截断、不再精确"。
+                            let original_len = m.snippet.chars().count();
+                            let snippet = truncate_with_ellipsis(&m.snippet, snippet_cap);
+                            let truncated = snippet.chars().count() != original_len;
+                            let source_end = if truncated { None } else { m.source_end };
+                            crate::artifact::types::FocusedContentMatch {
+                                snippet,
+                                score: m.score,
+                                kb_document_id: m.kb_document_id,
+                                passage_id: m.passage_id,
+                                view_type: m.view_type.clone(),
+                                source_start: m.source_start,
+                                source_end,
+                            }
+                        })
+                        .collect();
+                    content_mode = Some("focused".to_string());
+                    if content_query.is_none() && content_options.passage_id.is_some() {
+                        content_query = Some(format!(
+                            "passage_id:{}",
+                            content_options.passage_id.unwrap()
+                        ));
+                    }
+                    (!focused.is_empty()).then(|| {
+                        let joined = focused
+                            .iter()
+                            .map(|m| m.snippet.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n---\n\n");
+                        // 硬截断兜底：确保最终输出不超出 effective_max 预算。
+                        // 截断时预留省略号长度（3字符），保证追加 "..." 后不超 max。
+                        truncate_with_ellipsis(&joined, effective_max)
+                    })
+                } else if include_content {
+                    content_mode = Some("full".to_string());
                     load_artifact_content(conn, artifact_id, &a)?
                 } else {
                     None
@@ -867,6 +1051,9 @@ impl<'a> ArtifactService<'a> {
                     sources,
                     occurrences,
                     content,
+                    content_mode,
+                    content_query,
+                    content_matches,
                 }))
             }
             None => Ok(None),
@@ -1256,6 +1443,280 @@ impl<'a> ArtifactService<'a> {
     }
 }
 
+#[derive(Default)]
+struct QueryFallbackState {
+    fallback_used: bool,
+    fallback_stage: Option<String>,
+    fallback_reason: Option<String>,
+    fallback_queries: Vec<String>,
+    core_terms: Vec<String>,
+    needs_focused_context: bool,
+    no_results: bool,
+}
+
+impl QueryFallbackState {
+    fn record_query(&mut self, stage: &str, query: &str) {
+        let entry = format!("{}: {}", stage, query);
+        if !self.fallback_queries.iter().any(|q| q == &entry) {
+            self.fallback_queries.push(entry);
+        }
+    }
+}
+
+struct FallbackAttempt {
+    stage: String,
+    query: String,
+    display_query: String,
+    mode: String,
+    strategy: crate::artifact::types::QueryStrategy,
+}
+
+fn facade_query_strategy(mode: &str) -> Result<crate::artifact::types::QueryStrategy> {
+    match mode {
+        "memory" | "auto" => Ok(crate::artifact::types::QueryStrategy::BrainFirst),
+        "evidence" => Ok(crate::artifact::types::QueryStrategy::EvidenceFirst),
+        "timeline" => Ok(crate::artifact::types::QueryStrategy::TimelineFirst),
+        "graph" => Err(crate::error::GBrainError::InvalidInput(
+            "artifact_query mode=graph 尚未实现，请使用 mode=auto/memory/evidence/timeline".into(),
+        )),
+        other => Err(crate::error::GBrainError::InvalidInput(format!(
+            "未知查询模式: {}，有效值: auto/memory/evidence/timeline",
+            other
+        ))),
+    }
+}
+
+fn build_fallback_attempts(
+    requested_mode: &str,
+    original_strategy: crate::artifact::types::QueryStrategy,
+    plan: &query::QueryFallbackPlan,
+    filter_slug: Option<String>,
+) -> Vec<FallbackAttempt> {
+    let mut attempts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push_attempt =
+        |stage: &str,
+         query: Option<String>,
+         display_query: Option<String>,
+         mode: &str,
+         strategy: crate::artifact::types::QueryStrategy| {
+            let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+                return;
+            };
+            let key = format!("{}|{}|{:?}|{:?}", stage, query, strategy, filter_slug);
+            if !seen.insert(key) {
+                return;
+            }
+            attempts.push(FallbackAttempt {
+                stage: stage.to_string(),
+                display_query: display_query.unwrap_or_else(|| query.clone()),
+                query,
+                mode: mode.to_string(),
+                strategy,
+            });
+        };
+
+    push_attempt(
+        "core_terms",
+        plan.core_query.clone(),
+        plan.core_query.clone(),
+        requested_mode,
+        original_strategy.clone(),
+    );
+    push_attempt(
+        "core_terms_or",
+        plan.expanded_query.clone(),
+        plan.expanded_display_query.clone(),
+        requested_mode,
+        original_strategy,
+    );
+    push_attempt(
+        "evidence_mode",
+        plan.expanded_query
+            .clone()
+            .or_else(|| plan.core_query.clone()),
+        plan.expanded_display_query
+            .clone()
+            .or_else(|| plan.core_query.clone()),
+        "evidence",
+        crate::artifact::types::QueryStrategy::EvidenceFirst,
+    );
+
+    attempts
+}
+
+fn is_query_result_useful(result: &UnifiedQueryResult, core_terms: &[String]) -> bool {
+    if result.total_hits <= 0 {
+        return false;
+    }
+    if !result.brain_hits.is_empty() || !result.timeline_hits.is_empty() {
+        return true;
+    }
+    if result.evidence_hits.is_empty() {
+        return false;
+    }
+    if core_terms.len() < 2 {
+        return true;
+    }
+    let required = core_terms.len().min(2);
+    result.evidence_hits.iter().any(|hit| {
+        hit.matched_terms.len() >= required
+            || core_term_coverage(&hit.snippet, &hit.title, core_terms) >= required
+    })
+}
+
+fn core_term_coverage(text: &str, title: &str, core_terms: &[String]) -> usize {
+    let combined = format!("{} {}", title, text).to_lowercase();
+    core_terms
+        .iter()
+        .filter(|term| combined.contains(&term.to_lowercase()))
+        .count()
+}
+
+fn find_title_slug_candidates(
+    conn: &Connection,
+    core_terms: &[String],
+    limit: usize,
+    filter_slug: Option<&str>,
+) -> Result<Vec<crate::artifact::types::DocumentCandidate>> {
+    if core_terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 当 filter_slug 存在时，构造 SQL IN 子句来约束 canonical_slug，
+    // 避免全库扫描后返回不属于目标 slug 范围的候选
+    let slug_variants: Vec<String> = filter_slug
+        .map(|s| query::slug_value_variants(s))
+        .unwrap_or_default();
+
+    let (where_extra, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+        if slug_variants.is_empty() {
+            (String::new(), Vec::new())
+        } else {
+            let placeholders: Vec<String> = slug_variants
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> = slug_variants
+                .iter()
+                .map(|v| Box::new(v.clone()) as Box<dyn rusqlite::types::ToSql>)
+                .collect();
+            (
+                format!(" AND sa.canonical_slug IN ({})", placeholders.join(",")),
+                params,
+            )
+        };
+
+    let sql = format!(
+        "SELECT DISTINCT sa.artifact_uid, sa.canonical_slug, sa.original_name,
+                COALESCE(d.title, ''), COALESCE(d.original_name, '')
+         FROM source_artifacts sa
+         LEFT JOIN artifact_projections ap
+              ON ap.artifact_id = sa.id
+             AND ap.projection_type = 'kb_document'
+             AND ap.projection_ref LIKE 'kb_document:%'
+             AND ap.status = 'active'
+         LEFT JOIN kb_documents d
+              ON d.id = CAST(substr(ap.projection_ref, length('kb_document:') + 1) AS INTEGER)
+             AND d.deleted_at IS NULL
+         WHERE sa.status = 'active'{where_extra}
+         ORDER BY sa.updated_at DESC
+         LIMIT 1000"
+    );
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| GBrainError::Database(format!("准备标题候选查询失败: {}", e)))?;
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| GBrainError::Database(format!("标题候选查询失败: {}", e)))?;
+
+    let required = if core_terms.len() >= 3 { 2 } else { 1 };
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (artifact_uid, slug, artifact_name, doc_title, doc_name) = row?;
+        let combined =
+            format!("{} {} {} {}", slug, artifact_name, doc_title, doc_name).to_lowercase();
+        let coverage = core_terms
+            .iter()
+            .filter(|term| combined.contains(&term.to_lowercase()))
+            .count();
+        if coverage < required {
+            continue;
+        }
+        let title = if !doc_title.trim().is_empty() {
+            doc_title
+        } else if !doc_name.trim().is_empty() {
+            doc_name.clone()
+        } else {
+            artifact_name.clone()
+        };
+        candidates.push(crate::artifact::types::DocumentCandidate {
+            title,
+            original_name: Some(if doc_name.is_empty() {
+                artifact_name
+            } else {
+                doc_name
+            }),
+            artifact_uid: Some(artifact_uid.clone()),
+            slug: Some(slug),
+            score: coverage as f64 / core_terms.len().max(1) as f64,
+            reason: "title_slug_original_name".to_string(),
+            suggested_action: format!(
+                "artifact_get(id_or_uid=\"{}\", content_mode=\"focused\", content_query=\"{}\")",
+                artifact_uid,
+                core_terms.join(" ")
+            ),
+        });
+    }
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.truncate(limit);
+    Ok(candidates)
+}
+
+fn derive_query_confidence(
+    total_hits: usize,
+    evidence: &[crate::artifact::types::EvidenceResult],
+    candidate_count: usize,
+    fallback: &QueryFallbackState,
+) -> String {
+    if fallback.no_results || total_hits == 0 {
+        return "none".to_string();
+    }
+    if candidate_count > 0 {
+        return "low".to_string();
+    }
+    let required = fallback.core_terms.len().min(2);
+    if required > 0
+        && evidence
+            .iter()
+            .any(|e| e.matched_terms.len() >= required && !fallback.fallback_used)
+    {
+        return "high".to_string();
+    }
+    if fallback.fallback_stage.as_deref() == Some("core_terms_or")
+        || fallback.fallback_stage.as_deref() == Some("evidence_mode")
+    {
+        return "medium".to_string();
+    }
+    "medium".to_string()
+}
+
 fn load_artifact_content(
     conn: &Connection,
     artifact_id: i64,
@@ -1265,6 +1726,41 @@ fn load_artifact_content(
         return Ok(Some(content));
     }
     load_artifact_content_from_storage(artifact)
+}
+
+/// 默认 focused content 总预算（字符数）。
+/// 来源：与 `query::query_focused_content_for_artifact` 内部检索预算保持一致，
+/// 调用方未显式传入 `max_chars` 时按此值兜底，避免输出失控。
+const DEFAULT_FOCUSED_MAX_CHARS: usize = 1600;
+
+fn load_artifact_focused_content(
+    conn: &Connection,
+    artifact_id: i64,
+    options: &ArtifactContentOptions<'_>,
+) -> Result<Vec<query::FocusedContentCandidate>> {
+    query::query_focused_content_for_artifact(
+        conn,
+        artifact_id,
+        options.content_query,
+        options.max_chars.unwrap_or(DEFAULT_FOCUSED_MAX_CHARS),
+        options.passage_id,
+        5,
+    )
+}
+
+/// 通用字符截断助手：超出 `max` 时保留 `max - 3` 字符并追加 "..."。
+/// 当 `max < 4` 时直接截取 `max` 字符不追加省略号，避免长度反而超出。
+fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+    let len = text.chars().count();
+    if len <= max {
+        return text.to_string();
+    }
+    if max < 4 {
+        return text.chars().take(max).collect();
+    }
+    let budget = max.saturating_sub(3);
+    let truncated: String = text.chars().take(budget).collect();
+    format!("{}...", truncated)
 }
 
 fn load_artifact_content_from_kb(conn: &Connection, artifact_id: i64) -> Result<Option<String>> {

@@ -686,11 +686,24 @@ pub async fn process_document_async(
         .enumerate()
         .map(|(i, chunk)| {
             let (c_start, c_end) = chunk_offsets[i];
-            let (title_path, page_num, src_start, src_end) = if block_spans.is_empty() {
-                (String::new(), None, None, None)
+            // P2 修复：node 的 source_start/source_end 必须是 chunk 在源文件中的字符偏移，
+            // 而不是其重叠最佳 block 的 src_start/src_end。
+            // 旧实现的问题：
+            //   - markdown/text/csv/docx 等 parser 没有 blocks（blocks=None / block_spans 为空），
+            //     除第一个 chunk 外其余 chunk 的 source_start 全部退化为 None / 0，
+            //     导致 passage 计算的绝对偏移定位错误。
+            //   - PDF/HTML/XLSX 在同一个长 block 内的多个 chunk，全部继承同一个 block 起始，
+            //     失去 chunk 粒度的定位精度。
+            // 修复后：source_start/source_end 始终取 c_start/c_end；page_number/title_path
+            // 继续使用 block 信息（这些字段语义本就是关联到 block）。
+            let (title_path, page_num) = if block_spans.is_empty() {
+                (String::new(), None)
             } else {
-                find_best_block(c_start, c_end, &block_spans)
+                let (tp, pn, _bs, _be) = find_best_block(c_start, c_end, &block_spans);
+                (tp, pn)
             };
+            let src_start = Some(c_start as i32);
+            let src_end = Some(c_end as i32);
             let embedding_text =
                 crate::kb::context::build_embedding_text(doc_title, &title_path, page_num, chunk);
             RaptorNode {
@@ -1325,12 +1338,16 @@ pub(crate) fn persist_nodes_and_vectors_inner(
         id_map.insert(node.id, db_id);
 
         if node.level == 0 {
+            // 修复：传入 node 在源文件中的字符基址，让 passage 的 source_start/source_end
+            // 成为源文件绝对偏移；缺失时退化为 0，与历史行为兼容
+            let node_base_offset = node.source_start.unwrap_or(0).max(0);
             crate::kb::passage::rebuild_passages_for_node(
                 conn,
                 db_id,
                 node.library_id,
                 doc_id,
                 &node.content,
+                node_base_offset,
             )?;
         }
     }

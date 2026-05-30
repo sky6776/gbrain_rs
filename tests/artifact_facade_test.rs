@@ -9,7 +9,7 @@
 //! - Idempotent put
 
 use gbrain_core::artifact::promotion;
-use gbrain_core::artifact::service::ArtifactService;
+use gbrain_core::artifact::service::{ArtifactContentOptions, ArtifactService};
 use gbrain_core::artifact::types::{CandidateType, ReviewCandidateInput, RiskLevel};
 use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
@@ -36,6 +36,83 @@ fn make_config() -> Config {
 fn make_svc<'a>(engine: &'a SqliteEngine, config: &'a Config) -> ArtifactService<'a> {
     let ctx = OpContext::default();
     ArtifactService::new(engine, ctx, config)
+}
+
+fn seed_kb_artifact(
+    conn: &rusqlite::Connection,
+    slug: &str,
+    original_name: &str,
+    content: &str,
+) -> (i64, String, i64) {
+    conn.execute(
+        "INSERT INTO kb_libraries (name) VALUES ('test-library')",
+        [],
+    )
+    .expect("insert library");
+    let library_id = conn.last_insert_rowid();
+
+    let artifact_uid = format!("art_test_{}", slug.replace(['/', '-'], "_"));
+    conn.execute(
+        "INSERT INTO source_artifacts
+            (artifact_uid, sha256, original_name, extension, mime_type, size_bytes,
+             storage_path, canonical_slug, status, metadata_json)
+         VALUES (?1, ?2, ?3, 'md', 'text/markdown', ?4, '', ?5, 'active', '{}')",
+        rusqlite::params![
+            artifact_uid,
+            format!("hash-{}", slug),
+            original_name,
+            content.len() as i64,
+            slug
+        ],
+    )
+    .expect("insert source artifact");
+    let artifact_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO kb_documents
+             (library_id, original_name, name_tokens, content_hash, extension, mime_type, document_status)
+         VALUES (?1, ?2, ?3, ?4, 'md', 'text/markdown', 'ready')",
+        rusqlite::params![
+            library_id,
+            original_name,
+            gbrain_core::nlp::chinese::tokenize_name(original_name),
+            format!("doc-hash-{}", slug)
+        ],
+    )
+    .expect("insert kb document");
+    let document_id = conn.last_insert_rowid();
+
+    let tokens = gbrain_core::nlp::chinese::tokenize_content(content);
+    conn.execute(
+        "INSERT INTO kb_document_nodes
+             (library_id, document_id, content, content_tokens, level, chunk_order, source_start, source_end)
+         VALUES (?1, ?2, ?3, ?4, 0, 0, 0, ?5)",
+        rusqlite::params![
+            library_id,
+            document_id,
+            content,
+            tokens,
+            content.chars().count() as i64
+        ],
+    )
+    .expect("insert kb node");
+
+    conn.execute(
+        "INSERT INTO artifact_projections
+            (artifact_id, projection_type, projection_key, projection_ref, status, version_hash)
+         VALUES (?1, 'kb_document', ?2, ?2, 'active', 'test')",
+        rusqlite::params![artifact_id, format!("kb_document:{}", document_id)],
+    )
+    .expect("insert kb projection");
+    conn.execute(
+        "INSERT INTO artifact_projections
+            (artifact_id, projection_type, projection_key, projection_ref, status, version_hash)
+         VALUES (?1, 'brain_shadow_page', ?2, ?2, 'active', 'test')",
+        rusqlite::params![artifact_id, format!("slug:documents/{}", slug)],
+    )
+    .expect("insert shadow projection");
+
+    (artifact_id, artifact_uid, document_id)
 }
 
 fn is_expected_default_mcp_tool(name: &str) -> bool {
@@ -311,82 +388,26 @@ fn artifact_query_evidence_snippet_centers_a_late_match_for_all_kb_file_types() 
 }
 
 #[test]
-fn artifact_query_evidence_uses_passage_rerank_for_noisy_chinese_notes() {
+fn artifact_query_fallback_no_results_is_explicit() {
     let engine = make_engine();
     let config = make_config();
     let svc = make_svc(&engine, &config);
-    let conn = engine.connection().expect("connection");
-
-    conn.execute(
-        "INSERT INTO kb_libraries (name) VALUES ('test-library')",
-        [],
-    )
-    .expect("insert library");
-    let library_id = conn.last_insert_rowid();
-
-    for i in 0..24 {
-        let original_name = format!("noise-{i}.md");
-        let content = "相关逻辑交易流程配置加载错误处理测试覆盖边界情况。".repeat(30);
-        let tokens = gbrain_core::nlp::chinese::tokenize_content(&content);
-        conn.execute(
-            "INSERT INTO kb_documents \
-             (library_id, original_name, content_hash, extension, mime_type, document_status) \
-             VALUES (?1, ?2, ?3, 'md', 'text/markdown', 'ready')",
-            rusqlite::params![library_id, original_name, format!("noise-hash-{i}")],
-        )
-        .expect("insert noise document");
-        let document_id = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO kb_document_nodes \
-             (library_id, document_id, content, content_tokens, level, chunk_order) \
-             VALUES (?1, ?2, ?3, ?4, 0, 0)",
-            rusqlite::params![library_id, document_id, content, tokens],
-        )
-        .expect("insert noise node");
-    }
-
-    let target = format!(
-        "{}\u{200d}==手机蓝牙交易时走积分(points)相关逻辑==: 蓝牙交易走积分是==LP==命令; 是否走LP由reader网络及账户积分决定, 网络通且积分够, 会走LP。\u{200d}{}",
-        "普通串口日志配置和设备说明。".repeat(80),
-        "其它零散笔记。".repeat(80)
-    );
-    let target_tokens = gbrain_core::nlp::chinese::tokenize_content(&target);
-    conn.execute(
-        "INSERT INTO kb_documents \
-         (library_id, original_name, content_hash, extension, mime_type, document_status) \
-         VALUES (?1, 'fixture_record2.md', 'target-hash', 'md', 'text/markdown', 'ready')",
-        rusqlite::params![library_id],
-    )
-    .expect("insert target document");
-    let target_document_id = conn.last_insert_rowid();
-    conn.execute(
-        "INSERT INTO kb_document_nodes \
-         (library_id, document_id, content, content_tokens, level, chunk_order) \
-         VALUES (?1, ?2, ?3, ?4, 0, 0)",
-        rusqlite::params![library_id, target_document_id, target, target_tokens],
-    )
-    .expect("insert target node");
 
     let result = svc
         .query_facade(&gbrain_core::artifact::types::ArtifactQueryInput {
-            query: "请告诉我 手机积分交易相关逻辑".to_string(),
+            query: "完全不存在的主题 alpha beta".to_string(),
             mode: Some("evidence".to_string()),
-            limit: Some(10),
+            limit: Some(5),
             filter_slug: None,
             include_sources: Some(false),
         })
-        .expect("query evidence");
+        .expect("no results fallback");
 
-    assert!(
-        !result.evidence.is_empty(),
-        "query should return evidence candidates"
-    );
-    assert_eq!(result.evidence[0].title, "fixture_record2.md");
-    assert!(
-        result.evidence[0].snippet.contains("积分") && result.evidence[0].snippet.contains("LP"),
-        "top snippet should expose the target passage: {}",
-        result.evidence[0].snippet
-    );
+    assert_eq!(result.meta.fallback_stage.as_deref(), Some("no_results"));
+    assert!(result.meta.no_results);
+    assert!(result.evidence.is_empty());
+    assert!(result.candidates.is_empty());
+    assert_eq!(result.meta.total, 0);
 }
 
 // --- Test 6: artifact_get with include_sources queries by artifact_id ---

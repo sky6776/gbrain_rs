@@ -47,9 +47,13 @@ This skill guarantees:
    - Hybrid search gbrain for semantic+keyword with expansion (query)
    - Unified artifact query for cross-subsystem search (artifact_query)
    - Use `filter_slug` when narrowing to a known entity or page
-3. **Read top results.** Read the top 3-5 pages from gbrain to get full context.
-4. **Synthesize answer** with citations. Every claim traces back to a specific page slug.
-5. **Flag gaps.** If the brain doesn't have info, say "the brain doesn't have information on X" rather than hallucinating.
+3. **Use focused results first.** Treat `artifact_query` excerpts as the primary
+   evidence. Only load full artifact detail when the excerpt is insufficient for
+   the user's exact question.
+4. **If there are no useful hits, use the no-hit fallback.** Rewrite the query
+   conservatively before reading full artifacts.
+5. **Synthesize answer** with citations. Every claim traces back to a specific page slug.
+6. **Flag gaps.** If the brain doesn't have info, say "the brain doesn't have information on X" rather than hallucinating.
 
 ## Anti-Patterns
 
@@ -57,6 +61,9 @@ This skill guarantees:
 - Hallucinating facts not in the brain
 - Silently picking one source when sources conflict
 - Loading full pages when search chunks are sufficient
+- Reading arbitrary top pages after a no-hit search
+- Expanding the user's topic with nearby but unasked terms from a full document
+  and then presenting those nearby sections as relevant
 - Ignoring source precedence (user statements are highest authority)
 
 ## Output Format
@@ -86,8 +93,37 @@ whether to load a full page.
   These are often enough to answer the question directly.
 - Only use `gbrain get <uid>` to load the full artifact detail when a search result confirms
   the page is relevant and you need more context.
-- **"Tell me about X"** -- get the full detail (the user wants the complete picture).
+- When full artifact detail is loaded, keep extraction anchored to terms from the
+  user's question and the original search result. Do not add new follow-up search
+  terms merely because they appear near the relevant passage.
+- If a full document contains adjacent but separate sections, include only the
+  sections that directly answer the user's question. Same-document proximity is
+  not relevance.
+- **"Tell me about X"** -- answer from the focused excerpts when they contain the
+  answer; get full detail only when the user asks for a complete page/entity
+  overview or the excerpt is clearly incomplete.
 - **"Did anyone mention Y?"** -- search results are enough (the user wants a yes/no with evidence).
+
+## No-Hit Fallback
+
+When the first `artifact_query` returns no useful result, do not jump straight to
+full artifact reads. Use this order:
+
+1. Retry with a conservative keyword query built from the user's original words.
+   Keep domain abbreviations and explicit terms from the question.
+2. Try `mode: "evidence"` for document-heavy questions and `mode: "memory"` for
+   curated-page questions.
+3. Use only safe expansions: direct synonyms, translations, abbreviations, and
+   terms already present in confirmed result titles, slugs, or artifact names.
+4. If a specific document is confirmed relevant by title, slug, prior context, or
+   the user's wording, then load full artifact detail and extract only sections
+   anchored to the original question.
+5. If no document is confirmed relevant, report the gap instead of reading random
+   top results.
+
+Unsafe expansions include terms that appear only because they are adjacent in a
+full document. Do not turn those terms into new search topics unless the user asks
+about them or a focused result already proves they are relevant.
 
 ### Source precedence
 

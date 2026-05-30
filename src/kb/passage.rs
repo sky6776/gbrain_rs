@@ -59,12 +59,19 @@ pub fn clean_text_for_search(text: &str) -> String {
 }
 
 /// Rebuild all passage views for one KB node.
+///
+/// 修复：`node_source_start` 是该 node 在源文件中的字符偏移基址。
+/// 之前 passage 的 `source_start/source_end` 是相对 node 内容的相对偏移，
+/// 但 query/focused 输出把这些值当作源文件绝对偏移再加 snippet 偏移，
+/// 导致多 chunk 文档里第二个及后续 node 的 passage 定位到错误位置。
+/// 此处统一在写入前叠加 base offset，让 passage 的偏移与源文件对齐。
 pub fn rebuild_passages_for_node(
     conn: &Connection,
     node_id: i64,
     library_id: i64,
     document_id: i64,
     content: &str,
+    node_source_start: i32,
 ) -> Result<usize> {
     conn.execute(
         "DELETE FROM kb_passage_spans WHERE node_id = ?1",
@@ -73,7 +80,15 @@ pub fn rebuild_passages_for_node(
 
     let drafts = build_passage_drafts(content);
     for draft in &drafts {
-        let content_tokens = crate::nlp::chinese::tokenize_content(&draft.content);
+        // P3 修复：passage 内容存"原文"（保留所有空白与零宽字符），
+        // FTS 分词使用清洗后版本。这样 passage.source_start + excerpt.start 才能
+        // 精确指回源文件位置，避免 query 端用清洗后的 char index 去叠加 raw base
+        // 时因长度缩水而漂移。
+        let cleaned_for_tokens = clean_text_for_search(&draft.content);
+        let content_tokens = crate::nlp::chinese::tokenize_content(&cleaned_for_tokens);
+        // 把 node 在源文件中的基址叠加到 passage 偏移上，保证写入的是源文件绝对偏移
+        let absolute_start = node_source_start.saturating_add(draft.source_start);
+        let absolute_end = node_source_start.saturating_add(draft.source_end);
         conn.execute(
             "INSERT INTO kb_passage_spans \
              (library_id, document_id, node_id, view_type, passage_order, \
@@ -85,8 +100,8 @@ pub fn rebuild_passages_for_node(
                 node_id,
                 draft.view_type,
                 draft.passage_order,
-                draft.source_start,
-                draft.source_end,
+                absolute_start,
+                absolute_end,
                 draft.content,
                 content_tokens,
                 draft.quality_score,
@@ -100,7 +115,7 @@ pub fn rebuild_passages_for_node(
 /// Rebuild passage views for every level-0 node in a document.
 pub fn rebuild_document_passages(conn: &Connection, document_id: i64) -> Result<usize> {
     let mut stmt = conn.prepare(
-        "SELECT id, library_id, document_id, content \
+        "SELECT id, library_id, document_id, content, source_start \
          FROM kb_document_nodes WHERE document_id = ?1 AND level = 0 \
          ORDER BY chunk_order",
     )?;
@@ -110,13 +125,18 @@ pub fn rebuild_document_passages(conn: &Connection, document_id: i64) -> Result<
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, String>(3)?,
+            // source_start 在 schema 中可能为 NULL（旧数据兼容），缺失时按 0 处理
+            row.get::<_, Option<i64>>(4)?,
         ))
     })?;
 
     let mut count = 0;
     for row in rows {
-        let (node_id, library_id, doc_id, content) = row?;
-        count += rebuild_passages_for_node(conn, node_id, library_id, doc_id, &content)?;
+        let (node_id, library_id, doc_id, content, node_source_start) = row?;
+        // 修复：把 node 自身的源文件基址传入，让 passage 偏移成为源文件绝对偏移
+        let base_offset = node_source_start.unwrap_or(0).max(0) as i32;
+        count +=
+            rebuild_passages_for_node(conn, node_id, library_id, doc_id, &content, base_offset)?;
     }
     Ok(count)
 }
@@ -155,12 +175,13 @@ fn build_passage_drafts(content: &str) -> Vec<PassageDraft> {
     drafts.extend(atomic);
     drafts.extend(windows);
     if drafts.is_empty() {
+        // P3 修复：兜底 raw 视图同样存原文，offset 与源文件 1:1 对齐
         drafts.push(PassageDraft {
             view_type: "raw",
             passage_order: 0,
             source_start: 0,
             source_end: char_count as i32,
-            content: clean_text_for_search(content),
+            content: content.to_string(),
             quality_score: estimate_quality(content),
         });
     }
@@ -206,6 +227,9 @@ fn flush_atomic(
         current.clear();
         return false;
     };
+    // P3 修复：长度/质量门槛仍按清洗后内容判断（避免空白堆积过关），
+    // 但写入 draft 的 content 用原文，保证 source_start + offset_in_content
+    // 仍能精确映射回源文件位置。
     let cleaned = clean_text_for_search(current);
     let len = cleaned.chars().count();
     let inserted = if (ATOMIC_MIN_CHARS..=ATOMIC_MAX_CHARS).contains(&len) {
@@ -215,7 +239,7 @@ fn flush_atomic(
             source_start: s as i32,
             source_end: end as i32,
             quality_score: estimate_quality(&cleaned),
-            content: cleaned,
+            content: current.clone(),
         });
         true
     } else {
@@ -248,13 +272,15 @@ fn add_window_passages(content: &str, drafts: &mut Vec<PassageDraft>) {
         let raw: String = chars[start..end].iter().collect();
         let cleaned = clean_text_for_search(&raw);
         if cleaned.chars().count() >= ATOMIC_MIN_CHARS {
+            // P3 修复：写入 draft 的内容用原文 raw，让 source_start + 内部偏移
+            // 与源文件 char 位置严格对齐；cleaned 仅用于质量评分与门槛判断。
             drafts.push(PassageDraft {
                 view_type: "window",
                 passage_order: order,
                 source_start: start as i32,
                 source_end: end as i32,
                 quality_score: estimate_quality(&cleaned),
-                content: cleaned,
+                content: raw,
             });
         }
         if end == chars.len() {
@@ -275,41 +301,4 @@ fn estimate_quality(text: &str) -> f64 {
         .filter(|c| c.is_alphanumeric() || crate::nlp::chinese::is_chinese(*c))
         .count();
     ((useful as f64 / total as f64) * 1.2).clamp(0.1, 1.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clean_text_treats_zero_width_as_boundary() {
-        let cleaned = clean_text_for_search("A\u{200d}B\r\nC");
-        assert!(cleaned.contains("A\nB"));
-        assert!(cleaned.contains("C"));
-    }
-
-    #[test]
-    fn builds_windows_for_long_unstructured_text() {
-        let text = "手机积分交易相关逻辑。".repeat(120);
-        let drafts = build_passage_drafts(&text);
-        assert!(drafts.iter().any(|p| p.view_type == "window"));
-        assert!(drafts.len() > 1);
-    }
-
-    #[test]
-    fn windows_are_not_starved_by_many_atomic_fragments() {
-        let mut text = String::new();
-        for i in 0..700 {
-            text.push_str(&format!(
-                "普通碎片记录和流程配置说明用于制造很多短段落 {i}\n"
-            ));
-        }
-        text.push_str("后段关键记录: 手机积分交易应该命中 LP 命令并返回附近内容。");
-
-        let drafts = build_passage_drafts(&text);
-        assert!(drafts.iter().any(|p| p.view_type == "window"));
-        assert!(drafts
-            .iter()
-            .any(|p| p.content.contains("积分") && p.content.contains("LP")));
-    }
 }

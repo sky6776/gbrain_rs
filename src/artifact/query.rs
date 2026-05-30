@@ -91,6 +91,13 @@ pub fn unified_query(
                     input.filter_slug.as_deref(),
                     config,
                 )?;
+                // 修复：BrainFirst 分支同样需要补全 KB evidence 的 artifact / shadow_page_slug，
+                // 否则调用方拿到 passage_id 后无法继续 artifact_get focused 读取上下文
+                enrich_evidence_with_artifact_metadata(
+                    conn,
+                    &mut evidence_hits,
+                    input.filter_slug.as_deref(),
+                )?;
             }
 
             // 3. 给 brain hit 附加 provenance
@@ -115,36 +122,13 @@ pub fn unified_query(
             )?;
 
             // 2. 给 KB hit 附加 artifact 和 shadow page 信息
-            // 修复：query_kb_evidence 创建 EvidenceHit 时 projections 恒为空，
-            // 从 hit.projections 找 kb_document_id 永远找不到。
-            // 应直接用 hit.kb_document_id 查 artifact_projections
-            // 修复：当 filter_slug 存在且 shadow_page_slug 已由 SQL JOIN 正确填入时，
-            // 跳过无约束的 projection 查找，避免同一 kb_document 被多个 artifact 复用时
-            // 拿到错误 artifact 的投影并覆盖正确的 shadow_page_slug。
-            for hit in &mut evidence_hits {
-                if hit.kb_document_id > 0 && hit.shadow_page_slug.is_none() {
-                    let kb_doc_id = hit.kb_document_id;
-                    // 查找关联的 artifact 投影
-                    let proj = store::find_projection_by_ref(
-                        conn,
-                        "kb_document",
-                        &format!("kb_document:{}", kb_doc_id),
-                    )
-                    .map_err(|e| GBrainError::Database(format!("查找投影失败: {}", e)))?;
-                    if let Some(proj) = proj {
-                        let artifact =
-                            store::find_artifact_by_id(conn, proj.artifact_id).map_err(|e| {
-                                GBrainError::Database(format!("查找 artifact 失败: {}", e))
-                            })?;
-                        hit.artifact = artifact;
-
-                        // 查找影子页面
-                        let shadow_slug =
-                            projection::find_shadow_page_slug(conn, proj.artifact_id)?;
-                        hit.shadow_page_slug = shadow_slug;
-                    }
-                }
-            }
+            // 修复：抽出 enrich_evidence_with_artifact_metadata helper，
+            // 让 BrainFirst 的 evidence fallback 也能复用同样的补全逻辑
+            enrich_evidence_with_artifact_metadata(
+                conn,
+                &mut evidence_hits,
+                input.filter_slug.as_deref(),
+            )?;
 
             // 3. 查 gbrain 上下文
             if brain_hits.len() < limit as usize {
@@ -222,11 +206,21 @@ pub fn unified_query(
     // 修复：filter_slug 已下推到各查询函数，不再需要后置 retain。
     // 保留此块作为防御性兜底，确保即使下推逻辑有遗漏也不会泄漏非目标 slug 的结果
     if let Some(slug) = &input.filter_slug {
-        brain_hits.retain(|hit| hit.slug == *slug);
-        evidence_hits.retain(|hit| hit.shadow_page_slug.as_deref() == Some(slug.as_str()));
-        timeline_hits.retain(|hit| hit.shadow_page_slug.as_deref() == Some(slug.as_str()));
+        brain_hits.retain(|hit| slug_matches_filter(&hit.slug, slug));
+        evidence_hits.retain(|hit| {
+            hit.shadow_page_slug
+                .as_deref()
+                .map(|s| slug_matches_filter(s, slug))
+                .unwrap_or(false)
+        });
+        timeline_hits.retain(|hit| {
+            hit.shadow_page_slug
+                .as_deref()
+                .map(|s| slug_matches_filter(s, slug))
+                .unwrap_or(false)
+        });
         // 修复：同步过滤 provenance_records，只保留目标 slug 的来源记录
-        provenance_records.retain(|rec| rec.brain_slug == *slug);
+        provenance_records.retain(|rec| slug_matches_filter(&rec.brain_slug, slug));
     }
 
     let total_hits =
@@ -240,6 +234,37 @@ pub fn unified_query(
         provenance_records,
         total_hits,
     })
+}
+
+pub(crate) fn slug_value_variants(slug: &str) -> Vec<String> {
+    let normalized = slug.strip_prefix("slug:").unwrap_or(slug).trim_matches('/');
+    let without_documents = normalized.strip_prefix("documents/").unwrap_or(normalized);
+    let mut variants = vec![normalized.to_string()];
+    if without_documents != normalized {
+        variants.push(without_documents.to_string());
+    }
+    let documents_slug = format!("documents/{}", without_documents);
+    if !variants.iter().any(|v| v == &documents_slug) {
+        variants.push(documents_slug);
+    }
+    variants
+}
+
+fn slug_ref_variants(slug: &str) -> (String, String) {
+    let values = slug_value_variants(slug);
+    let first = values.first().cloned().unwrap_or_default();
+    let second = values.get(1).cloned().unwrap_or_else(|| first.clone());
+    (format!("slug:{}", first), format!("slug:{}", second))
+}
+
+fn slug_matches_filter(candidate: &str, filter: &str) -> bool {
+    // 同时规范化 candidate 和 filter，确保 slug: 前缀、documents/ 前缀
+    // 等各种形式都能正确匹配
+    let filter_variants = slug_value_variants(filter);
+    let candidate_variants = slug_value_variants(candidate);
+    candidate_variants
+        .iter()
+        .any(|cv| filter_variants.iter().any(|fv| cv == fv))
 }
 
 /// 查询 gbrain
@@ -256,7 +281,7 @@ fn query_brain(
     // 修复：使用 include_slugs 精确限定搜索范围，不再扩大 limit * 3 后后置过滤
     let search_opts = crate::types::SearchOpts {
         limit: Some(limit as usize),
-        include_slugs: filter_slug.map(|s| vec![s.to_string()]),
+        include_slugs: filter_slug.map(slug_value_variants),
         ..Default::default()
     };
     let hybrid_opts = HybridOpts::default();
@@ -355,8 +380,204 @@ fn query_kb_evidence(
 
     candidates
         .into_iter()
-        .map(|candidate| candidate.into_hit(conn, query, filter_slug))
+        .map(|candidate| candidate.into_hit(conn, query, filter_slug, &plan))
         .collect()
+}
+
+/// 修复：把 evidence 的 artifact / shadow_page_slug 补全抽成 helper，
+/// 让 BrainFirst 与 EvidenceFirst 分支共享同一份补全逻辑。
+///
+/// 调用契约：
+/// - 当 `hit.artifact` 已通过 SQL JOIN 填出（即 `EvidenceCandidate.into_hit` 内部
+///   `artifact_id > 0` 的路径）时跳过，避免被无约束的 projection 反查覆盖；
+/// - 当 `hit.shadow_page_slug` 已由 filter_slug 决策或 SQL 显式回填时跳过，
+///   避免同一 kb_document 被多个 artifact 复用时拿到错误投影；
+/// - 其余情况按 `kb_document_id` 反查活跃 `kb_document` 投影，并据此补出 artifact
+///   与 shadow_page_slug，使调用方可以继续 `artifact_get(... content_mode="focused")`。
+fn enrich_evidence_with_artifact_metadata(
+    conn: &Connection,
+    evidence_hits: &mut [EvidenceHit],
+    filter_slug: Option<&str>,
+) -> Result<()> {
+    for hit in evidence_hits.iter_mut() {
+        if hit.kb_document_id <= 0 {
+            continue;
+        }
+        // 已经具备 artifact 且 shadow_page_slug 也已就位，无需再做无约束反查
+        if hit.artifact.is_some() && hit.shadow_page_slug.is_some() {
+            continue;
+        }
+        // 仅在缺失对应字段时补全：
+        // - 若 SQL JOIN 已经填出 artifact（filter_slug 路径），仅补 shadow_page_slug；
+        // - 否则两者一起补。
+        let kb_doc_id = hit.kb_document_id;
+        let needs_artifact = hit.artifact.is_none();
+        let needs_shadow = hit.shadow_page_slug.is_none();
+        if !needs_artifact && !needs_shadow {
+            continue;
+        }
+
+        let proj = store::find_projection_by_ref(
+            conn,
+            "kb_document",
+            &format!("kb_document:{}", kb_doc_id),
+        )
+        .map_err(|e| GBrainError::Database(format!("查找 KB 投影失败: {}", e)))?;
+        let Some(proj) = proj else {
+            continue;
+        };
+
+        if needs_artifact {
+            let artifact = store::find_artifact_by_id(conn, proj.artifact_id)
+                .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?;
+            hit.artifact = artifact;
+        }
+
+        if needs_shadow {
+            // filter_slug 存在时优先使用过滤值（已规范化），避免被无约束 projection 覆盖
+            if let Some(slug) = filter_slug {
+                let normalized = slug_value_variants(slug)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| slug.to_string());
+                hit.shadow_page_slug = Some(normalized);
+            } else {
+                hit.shadow_page_slug =
+                    projection::find_shadow_page_slug(conn, proj.artifact_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FocusedContentCandidate {
+    pub snippet: String,
+    pub score: f64,
+    pub kb_document_id: Option<i64>,
+    pub passage_id: Option<i64>,
+    pub view_type: Option<String>,
+    pub source_start: Option<i64>,
+    pub source_end: Option<i64>,
+}
+
+pub(crate) fn query_focused_content_for_artifact(
+    conn: &Connection,
+    artifact_id: i64,
+    query: Option<&str>,
+    max_chars: usize,
+    passage_id: Option<i64>,
+    limit: usize,
+) -> Result<Vec<FocusedContentCandidate>> {
+    let document_ids = active_kb_document_ids_for_artifact(conn, artifact_id)?;
+    if document_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_chars = max_chars.clamp(200, 10_000);
+    let limit = limit.clamp(1, 10);
+
+    if let Some(passage_id) = passage_id {
+        return load_focused_passage_by_id(conn, &document_ids, passage_id, query, max_chars);
+    }
+
+    let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    for document_id in &document_ids {
+        crate::kb::passage::ensure_document_passages(conn, *document_id)?;
+    }
+
+    let plan = EvidenceQueryPlan::from_query(query);
+    let mut routes = Vec::new();
+    if let Some(strict_match) = &plan.strict_match {
+        routes.push(query_passage_candidates_for_document_ids(
+            conn,
+            strict_match,
+            &document_ids,
+            limit * 8,
+            artifact_id,
+            1.6,
+        )?);
+    }
+    routes.push(query_passage_candidates_for_document_ids(
+        conn,
+        &plan.relaxed_match,
+        &document_ids,
+        limit * 8,
+        artifact_id,
+        1.0,
+    )?);
+
+    let mut candidates = merge_evidence_routes(routes);
+    for candidate in &mut candidates {
+        focus_evidence_candidate_content(candidate, &plan);
+        candidate.local_score = score_evidence_candidate(candidate, &plan);
+        candidate.final_score = candidate.local_score * 0.85 + candidate.route_score * 0.15;
+    }
+    candidates.sort_by(|a, b| {
+        b.final_score
+            .partial_cmp(&a.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out = Vec::new();
+    let mut used_chars = 0usize;
+    let mut seen_passages = HashSet::new();
+    for mut candidate in candidates {
+        if out.len() >= limit || used_chars >= max_chars {
+            break;
+        }
+        if let Some(pid) = candidate.passage_id {
+            if !seen_passages.insert(pid) {
+                continue;
+            }
+        }
+
+        let remaining = max_chars.saturating_sub(used_chars);
+        if candidate.content.chars().count() > remaining {
+            if let Some(excerpt) =
+                query_focused_excerpt_details(&candidate.content, &plan.core_terms, remaining)
+            {
+                let base_start = candidate.source_start.unwrap_or(0);
+                candidate.source_start = Some(base_start + excerpt.start as i64);
+                candidate.source_end = Some(base_start + excerpt.end as i64);
+                candidate.content = excerpt.text;
+            } else {
+                // 兜底截断：当 core_terms 为空或无法定位时（如查询只有弱词），
+                // 直接截取前 remaining 字符，避免完整 passage 超出 max_chars。
+                // remaining 足够容纳省略号时预留 3 字符预算；过小则不追加省略号
+                let (budget, add_ellipsis) = if remaining > 3 {
+                    (remaining - 3, true)
+                } else {
+                    (remaining.max(1), false)
+                };
+                let truncated: String = candidate.content.chars().take(budget).collect();
+                let base_start = candidate.source_start.unwrap_or(0);
+                candidate.source_start = Some(base_start);
+                candidate.source_end = Some(base_start + truncated.chars().count() as i64);
+                candidate.content = if add_ellipsis {
+                    format!("{}...", truncated)
+                } else {
+                    truncated
+                };
+            }
+        }
+        // 分隔符预算：最终 join 用 "\n\n---\n\n"（7字符），此处按 8 预留（含安全余量）
+        used_chars += candidate.content.chars().count() + 8;
+        out.push(FocusedContentCandidate {
+            snippet: candidate.content,
+            score: candidate.final_score.max(candidate.local_score),
+            kb_document_id: Some(candidate.kb_document_id),
+            passage_id: candidate.passage_id,
+            view_type: Some(candidate.view_type),
+            source_start: candidate.source_start,
+            source_end: candidate.source_end,
+        });
+    }
+
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +628,46 @@ impl EvidenceQueryPlan {
             strict_match,
         }
     }
+
+    fn core_query(&self) -> Option<String> {
+        (!self.core_terms.is_empty()).then(|| self.core_terms.join(" "))
+    }
+
+    fn expanded_core_terms(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut terms = Vec::new();
+        for term in &self.core_terms {
+            if seen.insert(term.clone()) {
+                terms.push(term.clone());
+            }
+            for expansion in fixed_query_expansions(term) {
+                let expansion = expansion.to_string();
+                if seen.insert(expansion.clone()) {
+                    terms.push(expansion);
+                }
+            }
+        }
+        terms
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueryFallbackPlan {
+    pub core_terms: Vec<String>,
+    pub core_query: Option<String>,
+    pub expanded_query: Option<String>,
+    pub expanded_display_query: Option<String>,
+}
+
+pub(crate) fn build_query_fallback_plan(query: &str) -> QueryFallbackPlan {
+    let plan = EvidenceQueryPlan::from_query(query);
+    let expanded_terms = plan.expanded_core_terms();
+    QueryFallbackPlan {
+        core_terms: plan.core_terms.clone(),
+        core_query: plan.core_query(),
+        expanded_query: (!expanded_terms.is_empty()).then(|| expanded_terms.join(" ")),
+        expanded_display_query: (!expanded_terms.is_empty()).then(|| expanded_terms.join(" OR ")),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +681,9 @@ struct EvidenceCandidate {
     level: i64,
     artifact_id: i64,
     view_type: String,
+    source_start: Option<i64>,
+    source_end: Option<i64>,
+    was_truncated: bool,
     route_score: f64,
     local_score: f64,
     final_score: f64,
@@ -431,6 +695,7 @@ impl EvidenceCandidate {
         conn: &Connection,
         query: &str,
         filter_slug: Option<&str>,
+        plan: &EvidenceQueryPlan,
     ) -> Result<EvidenceHit> {
         let artifact = if self.artifact_id > 0 {
             super::store::find_artifact_by_id(conn, self.artifact_id)
@@ -440,13 +705,46 @@ impl EvidenceCandidate {
             None
         };
 
+        // 规范化 filter_slug：去掉 slug: 前缀，避免带前缀的原始值写入 shadow_page_slug
+        // 导致后续 slug_matches_filter 比较时 candidate 侧也需额外规范化
+        let normalized_filter_slug = filter_slug.map(|s| {
+            slug_value_variants(s)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| s.to_string())
+        });
+        let shadow_page_slug = normalized_filter_slug.or_else(|| {
+            artifact
+                .as_ref()
+                .and_then(|a| projection::find_shadow_page_slug(conn, a.id).ok().flatten())
+        });
+
+        let matched_terms = matched_terms(&self.content, &self.title, plan);
+
+        // 生成 snippet 并同步调整 source_start/source_end，
+        // 使偏移量与实际片段对应，避免后续高亮/定位偏移
+        let snippet_excerpt = query_centered_snippet_ex(&self.content, query, &plan.core_terms);
+        let snippet_source_start = self
+            .source_start
+            .map(|base| base + snippet_excerpt.start as i64);
+        let snippet_source_end = self
+            .source_start
+            .map(|base| base + snippet_excerpt.end as i64);
+
         Ok(EvidenceHit {
             kb_document_id: self.kb_document_id,
             title: self.title,
-            snippet: query_centered_snippet(&self.content, query),
+            snippet: snippet_excerpt.text,
             relevance: self.final_score.max(self.local_score).max(self.route_score),
+            matched_terms,
+            passage_id: self.passage_id,
+            view_type: Some(self.view_type),
+            source_start: snippet_source_start,
+            source_end: snippet_source_end,
+            needs_more_context: self.was_truncated
+                || self.content.chars().count() > EVIDENCE_SNIPPET_CHARS,
             artifact,
-            shadow_page_slug: filter_slug.map(|s| s.to_string()),
+            shadow_page_slug,
             projections: Vec::new(),
         })
     }
@@ -465,7 +763,8 @@ fn query_node_candidates(
 
     let sql = if filter_slug.is_some() {
         "SELECT dn.id, dn.document_id, dn.library_id, dn.content, dn.level,
-            d.original_name, d.title, ap_kb.artifact_id, bm25(kb_doc_fts) AS bm25_score
+            d.original_name, d.title, ap_kb.artifact_id, dn.source_start, dn.source_end,
+            bm25(kb_doc_fts) AS bm25_score
          FROM kb_doc_fts fts
          JOIN kb_document_nodes dn ON dn.id = fts.rowid
          JOIN kb_documents d ON d.id = dn.document_id
@@ -474,7 +773,7 @@ fn query_node_candidates(
               AND ap_kb.status = 'active'
          JOIN artifact_projections ap_sp ON ap_sp.artifact_id = ap_kb.artifact_id
               AND ap_sp.projection_type = 'brain_shadow_page'
-              AND ap_sp.projection_ref = ?3
+               AND (ap_sp.projection_ref = ?3 OR ap_sp.projection_ref = ?4)
               AND ap_sp.status = 'active'
          WHERE kb_doc_fts MATCH ?1
            AND d.document_status != 'deleted'
@@ -483,7 +782,8 @@ fn query_node_candidates(
          LIMIT ?2"
     } else {
         "SELECT dn.id, dn.document_id, dn.library_id, dn.content, dn.level,
-            d.original_name, d.title, 0 AS artifact_id, bm25(kb_doc_fts) AS bm25_score
+            d.original_name, d.title, 0 AS artifact_id, dn.source_start, dn.source_end,
+            bm25(kb_doc_fts) AS bm25_score
          FROM kb_doc_fts fts
          JOIN kb_document_nodes dn ON dn.id = fts.rowid
          JOIN kb_documents d ON d.id = dn.document_id
@@ -507,6 +807,8 @@ fn query_node_candidates(
         let original_name: String = row.get(5)?;
         let doc_title: String = row.get(6)?;
         let artifact_id: i64 = row.get(7)?;
+        let source_start: Option<i64> = row.get(8)?;
+        let source_end: Option<i64> = row.get(9)?;
         let title = if doc_title.is_empty() {
             original_name
         } else {
@@ -522,6 +824,9 @@ fn query_node_candidates(
             level,
             artifact_id,
             view_type: "node".to_string(),
+            source_start,
+            source_end,
+            was_truncated: false,
             route_score: route_weight / (60.0 + rank as f64 + 1.0),
             local_score: 0.0,
             final_score: 0.0,
@@ -530,9 +835,14 @@ fn query_node_candidates(
 
     let mut out = Vec::new();
     if let Some(slug) = filter_slug {
-        let slug_ref = format!("slug:{}", slug);
+        let (slug_ref, documents_slug_ref) = slug_ref_variants(slug);
         let mut rows = stmt
-            .query(params![fts_query, fetch_k as i64, slug_ref])
+            .query(params![
+                fts_query,
+                fetch_k as i64,
+                slug_ref,
+                documents_slug_ref
+            ])
             .map_err(|e| GBrainError::Database(format!("KB node 搜索失败: {}", e)))?;
         let mut rank = 0;
         while let Some(row) = rows.next()? {
@@ -565,7 +875,7 @@ fn query_passage_candidates(
 
     let sql = if filter_slug.is_some() {
         "SELECT ps.id, ps.node_id, ps.document_id, ps.library_id, ps.content,
-            ps.view_type, dn.level, d.original_name, d.title,
+            ps.view_type, dn.level, d.original_name, d.title, ps.source_start, ps.source_end,
             ap_kb.artifact_id, bm25(kb_passage_fts) AS bm25_score
          FROM kb_passage_fts fts
          JOIN kb_passage_spans ps ON ps.id = fts.rowid
@@ -576,7 +886,7 @@ fn query_passage_candidates(
               AND ap_kb.status = 'active'
          JOIN artifact_projections ap_sp ON ap_sp.artifact_id = ap_kb.artifact_id
               AND ap_sp.projection_type = 'brain_shadow_page'
-              AND ap_sp.projection_ref = ?3
+               AND (ap_sp.projection_ref = ?3 OR ap_sp.projection_ref = ?4)
               AND ap_sp.status = 'active'
          WHERE kb_passage_fts MATCH ?1
            AND d.document_status != 'deleted'
@@ -585,7 +895,7 @@ fn query_passage_candidates(
          LIMIT ?2"
     } else {
         "SELECT ps.id, ps.node_id, ps.document_id, ps.library_id, ps.content,
-            ps.view_type, dn.level, d.original_name, d.title,
+            ps.view_type, dn.level, d.original_name, d.title, ps.source_start, ps.source_end,
             0 AS artifact_id, bm25(kb_passage_fts) AS bm25_score
          FROM kb_passage_fts fts
          JOIN kb_passage_spans ps ON ps.id = fts.rowid
@@ -612,7 +922,9 @@ fn query_passage_candidates(
         let level: i64 = row.get(6)?;
         let original_name: String = row.get(7)?;
         let doc_title: String = row.get(8)?;
-        let artifact_id: i64 = row.get(9)?;
+        let source_start: Option<i64> = row.get(9)?;
+        let source_end: Option<i64> = row.get(10)?;
+        let artifact_id: i64 = row.get(11)?;
         let title = if doc_title.is_empty() {
             original_name
         } else {
@@ -628,6 +940,9 @@ fn query_passage_candidates(
             level,
             artifact_id,
             view_type,
+            source_start,
+            source_end,
+            was_truncated: false,
             route_score: route_weight / (60.0 + rank as f64 + 1.0),
             local_score: 0.0,
             final_score: 0.0,
@@ -636,9 +951,14 @@ fn query_passage_candidates(
 
     let mut out = Vec::new();
     if let Some(slug) = filter_slug {
-        let slug_ref = format!("slug:{}", slug);
+        let (slug_ref, documents_slug_ref) = slug_ref_variants(slug);
         let mut rows = stmt
-            .query(params![fts_query, fetch_k as i64, slug_ref])
+            .query(params![
+                fts_query,
+                fetch_k as i64,
+                slug_ref,
+                documents_slug_ref
+            ])
             .map_err(|e| GBrainError::Database(format!("KB passage 搜索失败: {}", e)))?;
         let mut rank = 0;
         while let Some(row) = rows.next()? {
@@ -652,6 +972,176 @@ fn query_passage_candidates(
         let mut rank = 0;
         while let Some(row) = rows.next()? {
             out.push(map_row(rank, row)?);
+            rank += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn active_kb_document_ids_for_artifact(conn: &Connection, artifact_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(substr(projection_ref, length('kb_document:') + 1) AS INTEGER)
+             FROM artifact_projections
+             WHERE artifact_id = ?1
+               AND projection_type = 'kb_document'
+               AND projection_ref LIKE 'kb_document:%'
+               AND status = 'active'",
+        )
+        .map_err(|e| GBrainError::Database(format!("准备 artifact KB 文档查询失败: {}", e)))?;
+    let rows = stmt
+        .query_map(params![artifact_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| GBrainError::Database(format!("查询 artifact KB 文档失败: {}", e)))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row?);
+    }
+    Ok(ids)
+}
+
+fn load_focused_passage_by_id(
+    conn: &Connection,
+    document_ids: &[i64],
+    passage_id: i64,
+    query: Option<&str>,
+    max_chars: usize,
+) -> Result<Vec<FocusedContentCandidate>> {
+    // 修复：直接通过 passage_id 读取时必须像常规 passage 搜索那样过滤已软删的 KB 文档，
+    // 否则即便 artifact projection 仍记录某文档为 active，软删后该文档的 passage 仍可被读到，
+    // 与常规 focused 检索路径行为不一致，造成"幽灵证据"。
+    let mut stmt = conn
+        .prepare(
+            "SELECT ps.id, ps.document_id, ps.content, ps.view_type, \
+                    ps.source_start, ps.source_end, ps.quality_score \
+             FROM kb_passage_spans ps \
+             JOIN kb_documents d ON d.id = ps.document_id \
+             WHERE ps.id = ?1 \
+               AND d.document_status != 'deleted' \
+               AND d.deleted_at IS NULL",
+        )
+        .map_err(|e| GBrainError::Database(format!("准备 KB passage 读取失败: {}", e)))?;
+    let row = stmt.query_row(params![passage_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, f64>(6)?,
+        ))
+    });
+
+    let Ok((pid, document_id, mut content, view_type, mut source_start, mut source_end, score)) =
+        row
+    else {
+        return Ok(Vec::new());
+    };
+    if !document_ids.contains(&document_id) {
+        return Ok(Vec::new());
+    }
+
+    let terms = query
+        .map(EvidenceQueryPlan::from_query)
+        .map(|plan| plan.core_terms)
+        .unwrap_or_default();
+    if content.chars().count() > max_chars {
+        if let Some(excerpt) = query_focused_excerpt_details(&content, &terms, max_chars) {
+            let base_start = source_start.unwrap_or(0);
+            source_start = Some(base_start + excerpt.start as i64);
+            source_end = Some(base_start + excerpt.end as i64);
+            content = excerpt.text;
+        } else {
+            // 兜底截断：预留 3 字符给后缀省略号，确保不超 max_chars
+            let budget = max_chars.saturating_sub(3).max(1);
+            let truncated: String = content.chars().take(budget).collect();
+            source_start = source_start.or(Some(0));
+            source_end = source_start.map(|start| start + truncated.chars().count() as i64);
+            content = format!("{}...", truncated);
+        }
+    }
+
+    Ok(vec![FocusedContentCandidate {
+        snippet: content,
+        score,
+        kb_document_id: Some(document_id),
+        passage_id: Some(pid),
+        view_type: Some(view_type),
+        source_start,
+        source_end,
+    }])
+}
+
+fn query_passage_candidates_for_document_ids(
+    conn: &Connection,
+    fts_query: &str,
+    document_ids: &[i64],
+    fetch_k: usize,
+    artifact_id: i64,
+    route_weight: f64,
+) -> Result<Vec<EvidenceCandidate>> {
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for document_id in document_ids {
+        let mut stmt = conn
+            .prepare(
+                "SELECT ps.id, ps.node_id, ps.document_id, ps.library_id, ps.content,
+                    ps.view_type, dn.level, d.original_name, d.title, ps.source_start, ps.source_end,
+                    bm25(kb_passage_fts) AS bm25_score
+                 FROM kb_passage_fts fts
+                 JOIN kb_passage_spans ps ON ps.id = fts.rowid
+                 JOIN kb_document_nodes dn ON dn.id = ps.node_id
+                 JOIN kb_documents d ON d.id = ps.document_id
+                 WHERE kb_passage_fts MATCH ?1
+                   AND ps.document_id = ?2
+                   AND d.document_status != 'deleted'
+                   AND d.deleted_at IS NULL
+                 ORDER BY bm25_score ASC
+                 LIMIT ?3",
+            )
+            .map_err(|e| {
+                GBrainError::Database(format!("准备 artifact focused passage 搜索失败: {}", e))
+            })?;
+        let mut rows = stmt
+            .query(params![fts_query, *document_id, fetch_k as i64])
+            .map_err(|e| GBrainError::Database(format!("artifact focused 搜索失败: {}", e)))?;
+        let mut rank = 0;
+        while let Some(row) = rows.next()? {
+            let passage_id: i64 = row.get(0)?;
+            let kb_document_id: i64 = row.get(2)?;
+            let library_id: i64 = row.get(3)?;
+            let content: String = row.get(4)?;
+            let view_type: String = row.get(5)?;
+            let level: i64 = row.get(6)?;
+            let original_name: String = row.get(7)?;
+            let doc_title: String = row.get(8)?;
+            let source_start: Option<i64> = row.get(9)?;
+            let source_end: Option<i64> = row.get(10)?;
+            let title = if doc_title.is_empty() {
+                original_name
+            } else {
+                doc_title
+            };
+            out.push(EvidenceCandidate {
+                candidate_id: passage_id,
+                passage_id: Some(passage_id),
+                kb_document_id,
+                library_id,
+                title,
+                content,
+                level,
+                artifact_id,
+                view_type,
+                source_start,
+                source_end,
+                was_truncated: false,
+                route_score: route_weight / (60.0 + rank as f64 + 1.0),
+                local_score: 0.0,
+                final_score: 0.0,
+            });
             rank += 1;
         }
     }
@@ -686,6 +1176,8 @@ fn merge_evidence_routes(routes: Vec<Vec<EvidenceCandidate>>) -> Vec<EvidenceCan
                         existing.content = candidate.content.clone();
                         existing.view_type = candidate.view_type.clone();
                         existing.passage_id = candidate.passage_id;
+                        existing.source_start = candidate.source_start;
+                        existing.source_end = candidate.source_end;
                     }
                 })
                 .or_insert(candidate);
@@ -716,9 +1208,14 @@ fn focus_evidence_candidate_content(candidate: &mut EvidenceCandidate, plan: &Ev
         return;
     }
     if let Some(excerpt) =
-        query_focused_excerpt(&candidate.content, &plan.core_terms, RERANK_EXCERPT_CHARS)
+        query_focused_excerpt_details(&candidate.content, &plan.core_terms, RERANK_EXCERPT_CHARS)
     {
-        candidate.content = excerpt;
+        let base_start = candidate.source_start.unwrap_or(0);
+        candidate.source_start = Some(base_start + excerpt.start as i64);
+        candidate.source_end = Some(base_start + excerpt.end as i64);
+        candidate.was_truncated = excerpt.truncated;
+        // 使用不含省略号的纯文本，避免后续 snippet 偏移被人工字符污染
+        candidate.content = excerpt.raw_text;
     }
 }
 
@@ -962,8 +1459,30 @@ fn resolve_evidence_rerank_policy(
 
 const RERANK_EXCERPT_CHARS: usize = 1200;
 
-fn query_focused_excerpt(content: &str, terms: &[String], limit: usize) -> Option<String> {
+#[derive(Debug, Clone)]
+struct FocusedExcerpt {
+    /// 含前后省略号的展示文本
+    text: String,
+    /// 不含省略号的纯切片文本，用于后续偏移计算
+    raw_text: String,
+    start: usize,
+    end: usize,
+    truncated: bool,
+}
+
+fn query_focused_excerpt_details(
+    content: &str,
+    terms: &[String],
+    limit: usize,
+) -> Option<FocusedExcerpt> {
     if terms.is_empty() {
+        return None;
+    }
+
+    // 修复：当 limit 极小（< 7）时，预留 6 字符省略号后会出现 text 长度反而 > limit
+    // 的逆转（如 limit=1 时返回 "...x..." 长度 7）。
+    // 直接返回 None 让上层走兜底截断路径，由其保证最终长度 <= limit。
+    if limit < 7 {
         return None;
     }
 
@@ -971,8 +1490,17 @@ fn query_focused_excerpt(content: &str, terms: &[String], limit: usize) -> Optio
     let chars: Vec<char> = content.chars().collect();
     let content_len = chars.len();
     if content_len <= limit {
-        return Some(content.to_string());
+        return Some(FocusedExcerpt {
+            text: content.to_string(),
+            raw_text: content.to_string(),
+            start: 0,
+            end: content_len,
+            truncated: false,
+        });
     }
+
+    // 为前后省略号预留空间（前后各 "..." = 3+3 = 6 字符），确保最终 text 不超过 limit
+    let budget = limit.saturating_sub(6).max(1);
 
     let mut positions = Vec::new();
     for term in terms {
@@ -1001,11 +1529,11 @@ fn query_focused_excerpt(content: &str, terms: &[String], limit: usize) -> Optio
     let mut best_start = 0usize;
     let mut best_score = f64::MIN;
     for pos in positions {
-        let mut start = pos.saturating_sub(limit / 2);
-        if start + limit > content_len {
-            start = content_len.saturating_sub(limit);
+        let mut start = pos.saturating_sub(budget / 2);
+        if start + budget > content_len {
+            start = content_len.saturating_sub(budget);
         }
-        let end = (start + limit).min(content_len);
+        let end = (start + budget).min(content_len);
         let excerpt: String = chars[start..end].iter().collect();
         let folded_excerpt = excerpt.to_ascii_lowercase();
         let coverage = terms
@@ -1021,14 +1549,22 @@ fn query_focused_excerpt(content: &str, terms: &[String], limit: usize) -> Optio
         }
     }
 
-    let end = (best_start + limit).min(content_len);
+    let end = (best_start + budget).min(content_len);
     let excerpt: String = chars[best_start..end].iter().collect();
-    Some(format!(
-        "{}{}{}",
-        if best_start > 0 { "..." } else { "" },
-        excerpt,
-        if end < content_len { "..." } else { "" }
-    ))
+    let has_prefix = best_start > 0;
+    let has_suffix = end < content_len;
+    Some(FocusedExcerpt {
+        text: format!(
+            "{}{}{}",
+            if has_prefix { "..." } else { "" },
+            &excerpt,
+            if has_suffix { "..." } else { "" }
+        ),
+        raw_text: excerpt,
+        start: best_start,
+        end,
+        truncated: has_prefix || has_suffix,
+    })
 }
 
 fn score_evidence_candidate(candidate: &EvidenceCandidate, plan: &EvidenceQueryPlan) -> f64 {
@@ -1161,6 +1697,25 @@ fn is_domain_abbreviation(token: &str) -> bool {
     matches!(token, "lp" | "gp" | "vi" | "api" | "sdk")
 }
 
+fn fixed_query_expansions(token: &str) -> &'static [&'static str] {
+    match token {
+        _ => &[],
+    }
+}
+
+fn matched_terms(content: &str, title: &str, plan: &EvidenceQueryPlan) -> Vec<String> {
+    let content = content.to_lowercase();
+    let title = title.to_lowercase();
+    plan.core_terms
+        .iter()
+        .filter(|term| {
+            let term = term.to_lowercase();
+            content.contains(&term) || title.contains(&term)
+        })
+        .cloned()
+        .collect()
+}
+
 fn is_weak_query_token(token: &str) -> bool {
     matches!(
         token,
@@ -1189,17 +1744,27 @@ fn is_weak_query_token(token: &str) -> bool {
     )
 }
 
-const EVIDENCE_SNIPPET_CHARS: usize = 200;
+const EVIDENCE_SNIPPET_CHARS: usize = 700;
 
-/// Return evidence context near the text that caused the KB FTS hit.
+/// 返回 evidence 命中文本附近的片段，同时返回字符偏移量。
 ///
-/// KB nodes can hold an entire imported document. Returning the first characters
-/// of such a node hides a match later in the document and makes a valid hit look
-/// unrelated to callers.
-fn query_centered_snippet(content: &str, query: &str) -> String {
+/// KB 节点可能包含整个导入文档。直接返回前 N 个字符会隐藏
+/// 文档后部的命中，使有效命中看起来与查询无关。
+/// 返回 FocusedExcerpt 以便调用方同步调整 source_start/source_end。
+fn query_centered_snippet_ex(content: &str, query: &str, terms: &[String]) -> FocusedExcerpt {
     let content_len = content.chars().count();
     if content_len <= EVIDENCE_SNIPPET_CHARS {
-        return content.to_string();
+        return FocusedExcerpt {
+            text: content.to_string(),
+            raw_text: content.to_string(),
+            start: 0,
+            end: content_len,
+            truncated: false,
+        };
+    }
+
+    if let Some(excerpt) = query_focused_excerpt_details(content, terms, EVIDENCE_SNIPPET_CHARS) {
+        return excerpt;
     }
 
     let folded_content = content.to_ascii_lowercase();
@@ -1226,36 +1791,49 @@ fn query_centered_snippet(content: &str, query: &str) -> String {
     };
 
     let Some((match_byte_start, match_byte_len)) = exact_match.or_else(token_match) else {
-        return format!(
-            "{}...",
-            content
-                .chars()
-                .take(EVIDENCE_SNIPPET_CHARS)
-                .collect::<String>()
-        );
+        // 无匹配时从头部截取，预留 3 字符给后缀 "..."
+        let budget = EVIDENCE_SNIPPET_CHARS.saturating_sub(3).max(1);
+        let truncated: String = content.chars().take(budget).collect();
+        return FocusedExcerpt {
+            text: format!("{}...", truncated),
+            raw_text: truncated,
+            start: 0,
+            end: budget,
+            truncated: true,
+        };
     };
 
     // to_ascii_lowercase preserves byte offsets, so these byte boundaries are
     // also valid in the original UTF-8 content.
+    // 为前后省略号预留 6 字符（前后各 "..."），确保 text 不超过 EVIDENCE_SNIPPET_CHARS
+    let budget = EVIDENCE_SNIPPET_CHARS.saturating_sub(6).max(1);
     let match_char_start = content[..match_byte_start].chars().count();
     let match_char_len = content[match_byte_start..match_byte_start + match_byte_len]
         .chars()
         .count()
-        .min(EVIDENCE_SNIPPET_CHARS);
-    let before_match = (EVIDENCE_SNIPPET_CHARS - match_char_len) / 2;
+        .min(budget);
+    let before_match = (budget - match_char_len) / 2;
     let mut start = match_char_start.saturating_sub(before_match);
-    if start + EVIDENCE_SNIPPET_CHARS > content_len {
-        start = content_len.saturating_sub(EVIDENCE_SNIPPET_CHARS);
+    if start + budget > content_len {
+        start = content_len.saturating_sub(budget);
     }
-    let end = (start + EVIDENCE_SNIPPET_CHARS).min(content_len);
+    let end = (start + budget).min(content_len);
     let excerpt: String = content.chars().skip(start).take(end - start).collect();
 
-    format!(
-        "{}{}{}",
-        if start > 0 { "..." } else { "" },
-        excerpt,
-        if end < content_len { "..." } else { "" }
-    )
+    let has_prefix = start > 0;
+    let has_suffix = end < content_len;
+    FocusedExcerpt {
+        text: format!(
+            "{}{}{}",
+            if has_prefix { "..." } else { "" },
+            &excerpt,
+            if has_suffix { "..." } else { "" }
+        ),
+        raw_text: excerpt,
+        start,
+        end,
+        truncated: has_prefix || has_suffix,
+    }
 }
 
 /// 查询时间线事件（§11.1 TimelineFirst 策略）
@@ -1292,7 +1870,7 @@ fn query_timeline_events(
          LEFT JOIN kb_documents d ON d.id = pc.kb_document_id
          JOIN artifact_projections ap ON ap.artifact_id = pc.artifact_id
               AND ap.projection_type = 'brain_shadow_page'
-              AND ap.projection_ref = ?3
+              AND (ap.projection_ref = ?3 OR ap.projection_ref = ?4)
               AND ap.status = 'active'
          WHERE pc.candidate_type = 'timeline_event'
            AND pc.status IN ('accepted', 'applied')
@@ -1333,9 +1911,12 @@ fn query_timeline_events(
     };
 
     let rows = if let Some(slug) = filter_slug {
-        let slug_ref = format!("slug:{}", slug);
-        stmt.query_map(params![escaped_query, limit, slug_ref], map_row)
-            .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?
+        let (slug_ref, documents_slug_ref) = slug_ref_variants(slug);
+        stmt.query_map(
+            params![escaped_query, limit, slug_ref, documents_slug_ref],
+            map_row,
+        )
+        .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?
     } else {
         stmt.query_map(params![escaped_query, limit], map_row)
             .map_err(|e| GBrainError::Database(format!("时间线查询失败: {}", e)))?

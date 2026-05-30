@@ -688,6 +688,18 @@ pub struct EvidenceHit {
     pub snippet: String,
     /// 相关度
     pub relevance: f64,
+    /// 命中的核心词
+    pub matched_terms: Vec<String>,
+    /// KB passage ID
+    pub passage_id: Option<i64>,
+    /// 证据视图类型
+    pub view_type: Option<String>,
+    /// 片段在源文本中的字符起点
+    pub source_start: Option<i64>,
+    /// 片段在源文本中的字符终点
+    pub source_end: Option<i64>,
+    /// 是否建议 focused 读取更多上下文
+    pub needs_more_context: bool,
     /// 关联的原件信息
     pub artifact: Option<SourceArtifact>,
     /// 关联的影子页面 slug
@@ -1125,6 +1137,9 @@ pub struct ArtifactQueryOutput {
     pub timeline: Vec<TimelineEvent>,
     /// 图谱关系
     pub graph: Vec<GraphRelation>,
+    /// 内容未命中但标题/slug/original_name 明确相关的候选文档
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<DocumentCandidate>,
     /// 查询元信息
     pub meta: QueryMeta,
     /// 来源追溯（当 include_sources=true 时填充）
@@ -1157,9 +1172,45 @@ pub struct EvidenceResult {
     pub snippet: String,
     /// 相关度分数
     pub score: f64,
+    /// 命中的核心词
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_terms: Vec<String>,
+    /// 来源 artifact UID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_uid: Option<String>,
+    /// 关联的影子页面 slug
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_page_slug: Option<String>,
+    /// KB passage ID，可用于后续 focused 读取
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passage_id: Option<i64>,
+    /// 证据视图类型: atomic/window/node/raw
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_type: Option<String>,
+    /// 片段在源文本中的字符起点
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_start: Option<i64>,
+    /// 片段在源文本中的字符终点
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_end: Option<i64>,
+    /// 是否建议继续用 artifact_get focused 模式读取上下文
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_more_context: bool,
     /// 来源引用（当 include_sources=true 时填充）
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<SourceRef>,
+}
+
+/// 标题/slug/original_name 命中的候选文档
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentCandidate {
+    pub title: String,
+    pub original_name: Option<String>,
+    pub artifact_uid: Option<String>,
+    pub slug: Option<String>,
+    pub score: f64,
+    pub reason: String,
+    pub suggested_action: String,
 }
 
 /// 时间线事件
@@ -1195,6 +1246,34 @@ pub struct QueryMeta {
     pub used_vector: bool,
     /// 是否使用了关键词搜索
     pub used_keyword: bool,
+    /// 是否使用了 fallback
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fallback_used: bool,
+    /// 命中的 fallback 阶段
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_stage: Option<String>,
+    /// fallback 原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// fallback 尝试过的查询
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_queries: Vec<String>,
+    /// 从原 query 提取的核心词
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub core_terms: Vec<String>,
+    /// 置信度: high/medium/low/none
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+    /// 仅标题/slug 命中时提示调用方应 focused 读取
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needs_focused_context: bool,
+    /// 明确无可靠结果
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_results: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// 建议变更条目 — promotion 的用户友好包装（设计文档 §6）
@@ -1251,6 +1330,24 @@ pub struct ArtifactDetailOutput {
     pub occurrences: Option<Vec<ArtifactOccurrenceSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_matches: Vec<FocusedContentMatch>,
+}
+
+/// artifact_get focused content 命中片段
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FocusedContentMatch {
+    pub snippet: String,
+    pub score: f64,
+    pub kb_document_id: Option<i64>,
+    pub passage_id: Option<i64>,
+    pub view_type: Option<String>,
+    pub source_start: Option<i64>,
+    pub source_end: Option<i64>,
 }
 
 /// projection 摘要（用户友好字段，不暴露内部 projection_key/ref）

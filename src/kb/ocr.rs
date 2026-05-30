@@ -725,8 +725,6 @@ pub fn writeback_ocr_results(
             let mut overlapping_pages: Vec<i32> = Vec::new();
             let mut best_overlap = 0usize;
             let mut best_title = String::new();
-            let mut best_src_start: Option<i32> = None;
-            let mut best_src_end: Option<i32> = None;
             let mut best_page_num: Option<i32> = None;
 
             for meta in &block_meta_vec {
@@ -745,8 +743,6 @@ pub fn writeback_ocr_results(
                     if overlap > best_overlap {
                         best_overlap = overlap;
                         best_title = title_path.clone();
-                        best_src_start = *src_start;
-                        best_src_end = *src_end;
                         best_page_num = *page_num;
                     }
                 }
@@ -757,8 +753,14 @@ pub fn writeback_ocr_results(
             // 排序页号列表仅用于跨页来源信息的 metadata
             let page_num = best_page_num;
             let title_path = best_title;
-            let src_start = best_src_start;
-            let src_end = best_src_end;
+            // P2 修复：node 的 source_start/source_end 必须使用 chunk 在源文件中的
+            // 字符偏移（chunk_spans[i]），而不是重叠最佳 block 的 src_start/src_end。
+            // 原因：持久化阶段 pipeline.rs 将 node.source_start 当作 chunk 基址传给
+            // passage rebuild；若沿用 block 起始，会导致同一 OCR 页被切成多个 chunk 时，
+            // 后续 chunk 的 passage 绝对偏移从页首重复叠加，focused/evidence 命中位置错位。
+            // block 信息只继续用于 page_number / title_path 这种"块级关联"语义。
+            let src_start = Some(chunk_start as i32);
+            let src_end = Some(chunk_end as i32);
 
             // 跨页 chunk：在 metadata 中记录所有来源页
             let node_metadata = if overlapping_pages.len() > 1 {

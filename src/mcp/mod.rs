@@ -720,13 +720,23 @@ impl McpServer {
                     arguments["include_projections"].as_bool().unwrap_or(false);
                 let include_sources = arguments["include_sources"].as_bool().unwrap_or(false);
                 let include_content = arguments["include_content"].as_bool().unwrap_or(false);
+                let content_query = arguments["content_query"].as_str();
+                let content_mode = arguments["content_mode"].as_str();
+                let max_chars = arguments["max_chars"].as_u64().map(|n| n as usize);
+                let passage_id = arguments["passage_id"].as_i64();
 
                 let svc = ops.artifact_service();
-                let detail = svc.get_artifact_detail(
+                let detail = svc.get_artifact_detail_with_content_options(
                     &id_or_uid,
                     include_projections,
                     include_sources,
                     include_content,
+                    crate::artifact::service::ArtifactContentOptions {
+                        content_query,
+                        content_mode,
+                        max_chars,
+                        passage_id,
+                    },
                 )?;
 
                 match detail {

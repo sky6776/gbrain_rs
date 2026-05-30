@@ -60,7 +60,7 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
 
     OperationDef {
         name: "artifact_query",
-        description: "统一知识查询。自动混合 gbrain 长期记忆、KB 文档证据和时间线事件。默认隐藏内部 ID。",
+        description: "统一知识查询。自动混合 gbrain 长期记忆、KB 文档证据和时间线事件。返回聚焦证据、命中词和 fallback meta；优先用命中片段问答，不要仅为“更完整”而读取全文。默认隐藏内部 ID。",
         params: &[
             ParamDef { name: "query", description: "查询文本", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "mode", description: "查询模式: auto(自动), memory(优先记忆), evidence(优先证据), timeline(优先时间线)", required: false, param_type: ParamType::String, enum_values: Some(&["auto", "memory", "evidence", "timeline"]), items_type: None },
@@ -81,12 +81,16 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
 
     OperationDef {
         name: "artifact_get",
-        description: "获取知识源详情。支持 ID 或 UID 查询，可选展示投影和来源追溯。",
+        description: "获取知识源详情。支持 ID 或 UID 查询，可选展示投影、来源追溯，以及按 query 聚焦读取片段。",
         params: &[
             ParamDef { name: "id_or_uid", description: "Artifact ID 或 UID（如 '1' 或 'art_ab12cd34ef56'）", required: true, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "include_projections", description: "包含投影详情", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
             ParamDef { name: "include_sources", description: "包含来源追溯", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
-            ParamDef { name: "include_content", description: "包含正文内容（优先 KB chunks，未处理时尝试解析原始文件）", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "include_content", description: "Include full content. Prefer artifact_query excerpts for Q&A; use this only when focused search results are insufficient or the user explicitly needs the whole artifact.", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
+            ParamDef { name: "content_mode", description: "正文读取模式: focused(按 query/passage 取片段) 或 full(全文；需 include_content=true)", required: false, param_type: ParamType::String, enum_values: Some(&["focused", "full"]), items_type: None },
+            ParamDef { name: "content_query", description: "focused 模式的查询词；提供后只返回相关 KB passage，不读取整篇 artifact", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
+            ParamDef { name: "max_chars", description: "focused 内容最大字符数（默认 1600）", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
+            ParamDef { name: "passage_id", description: "直接读取 artifact_query 返回的 KB passage ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
         ],
     },
 
