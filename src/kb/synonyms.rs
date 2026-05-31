@@ -13,6 +13,27 @@ use crate::error::{GBrainError, Result};
 use crate::kb::pipeline::embedding_to_blob;
 use crate::search::vector::cosine_similarity;
 
+fn with_savepoint<T>(
+    conn: &Connection,
+    name: &str,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute(&format!("SAVEPOINT {}", name), [])
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+    match f(conn) {
+        Ok(value) => {
+            conn.execute(&format!("RELEASE {}", name), [])
+                .map_err(|e| GBrainError::Database(e.to_string()))?;
+            Ok(value)
+        }
+        Err(e) => {
+            let _ = conn.execute(&format!("ROLLBACK TO {}", name), []);
+            let _ = conn.execute(&format!("RELEASE {}", name), []);
+            Err(e)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime lookup (PR-2)
 // ---------------------------------------------------------------------------
@@ -236,7 +257,9 @@ fn extract_candidate_tokens(
 
     // 逐行 tokenize，content 用完即释放
     while let Ok(Some(row)) = rows.next() {
-        let content: String = row.get(0).map_err(|e| GBrainError::Database(e.to_string()))?;
+        let content: String = row
+            .get(0)
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
         let tokens_str = crate::nlp::chinese::tokenize_content(&content);
         let unique: std::collections::HashSet<String> = tokens_str
             .split_whitespace()
@@ -342,76 +365,64 @@ fn embed_and_store_tokens(
     // #12: 收集新嵌入结果，供调用方 merge
     let mut new_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
 
-    // #14: 用事务包裹批量写入，减少 WAL commit
-    // 已知限制：手动 BEGIN/COMMIT/ROLLBACK 管理，若循环内某次写入失败则手动 ROLLBACK
-    // 后通过 ? 提前返回。存在双重 ROLLBACK 风险（ROLLBACK 本身失败时事务可能已回滚，
-    // 后续操作不致命但不优雅）。未来可改用 rusqlite::Transaction 的 RAII 模式，
-    // 让 drop 时自动回滚未提交的事务，消除手动管理风险。
-    conn.execute("BEGIN", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
-
-    // 按 concurrency 分组处理
-    for group in chunks.chunks(concurrency.max(1)) {
-        // 并发 embed：每组内各 chunk 同时请求 embedding API
-        let group_results: Vec<Option<Vec<Vec<f32>>>> = if concurrency > 1 {
-            std::thread::scope(|s| {
+    with_savepoint(conn, "sp_embed_token_embeddings", |conn| {
+        // 按 concurrency 分组处理
+        for group in chunks.chunks(concurrency.max(1)) {
+            // 并发 embed：每组内各 chunk 同时请求 embedding API
+            let group_results: Vec<Option<Vec<Vec<f32>>>> = if concurrency > 1 {
+                std::thread::scope(|s| {
+                    group
+                        .iter()
+                        .map(|chunk| {
+                            let texts: Vec<String> = chunk.iter().map(|(t, _)| t.clone()).collect();
+                            s.spawn(move || {
+                                let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+                                embed_batch_with_retry(embedder, rt, &refs)
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or(None))
+                        .collect()
+                })
+            } else {
+                // concurrency=1：直接在当前线程执行，避免不必要的线程创建
                 group
                     .iter()
                     .map(|chunk| {
-                        let texts: Vec<String> = chunk.iter().map(|(t, _)| t.clone()).collect();
-                        s.spawn(move || {
-                            let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-                            embed_batch_with_retry(embedder, rt, &refs)
-                        })
+                        let texts: Vec<&str> = chunk.iter().map(|(t, _)| t.as_str()).collect();
+                        embed_batch_with_retry(embedder, rt, &texts)
                     })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|h| h.join().unwrap_or(None))
                     .collect()
-            })
-        } else {
-            // concurrency=1：直接在当前线程执行，避免不必要的线程创建
-            group
-                .iter()
-                .map(|chunk| {
-                    let texts: Vec<&str> = chunk.iter().map(|(t, _)| t.as_str()).collect();
-                    embed_batch_with_retry(embedder, rt, &texts)
-                })
-                .collect()
-        };
+            };
 
-        // 串行写入 DB（Connection 非线程安全）
-        for (chunk, result) in group.iter().zip(group_results.iter()) {
-            match result {
-                None => {
-                    warn!(count = chunk.len(), "Batch embedding 最终失败，跳过该批");
-                    continue;
-                }
-                Some(vectors) => {
-                    for ((token, doc_freq), vec) in chunk.iter().zip(vectors.iter()) {
-                        let blob = embedding_to_blob(vec);
-                        conn.execute(
-                            "INSERT OR REPLACE INTO kb_token_embeddings \
-                             (token, embedding_index_id, embedding, doc_freq) \
-                             VALUES (?1, ?2, ?3, ?4)",
-                            params![token, index_id, blob, *doc_freq as i64],
-                        )
-                        .map_err(|e| {
-                            // 写入失败时回滚事务
-                            let _ = conn.execute("ROLLBACK", []);
-                            GBrainError::Database(e.to_string())
-                        })?;
-                        embedded += 1;
-                        new_embeddings.insert(token.clone(), vec.clone());
+            // 串行写入 DB（Connection 非线程安全）
+            for (chunk, result) in group.iter().zip(group_results.iter()) {
+                match result {
+                    None => {
+                        warn!(count = chunk.len(), "Batch embedding 最终失败，跳过该批");
+                        continue;
                     }
-                    info!(batch = chunk.len(), embedded, "Embedded token batch");
+                    Some(vectors) => {
+                        for ((token, doc_freq), vec) in chunk.iter().zip(vectors.iter()) {
+                            let blob = embedding_to_blob(vec);
+                            conn.execute(
+                                "INSERT OR REPLACE INTO kb_token_embeddings \
+                                 (token, embedding_index_id, embedding, doc_freq) \
+                                 VALUES (?1, ?2, ?3, ?4)",
+                                params![token, index_id, blob, *doc_freq as i64],
+                            )
+                            .map_err(|e| GBrainError::Database(e.to_string()))?;
+                            embedded += 1;
+                            new_embeddings.insert(token.clone(), vec.clone());
+                        }
+                        info!(batch = chunk.len(), embedded, "Embedded token batch");
+                    }
                 }
             }
         }
-    }
-
-    conn.execute("COMMIT", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
+        Ok(())
+    })?;
 
     Ok((embedded, new_embeddings))
 }
@@ -500,17 +511,13 @@ fn knn_mine_via_vec(
     ))
     .map_err(|e| GBrainError::Database(e.to_string()))?;
 
-    // 2. 清空旧数据并用事务批量插入
-    conn.execute_batch(&format!("DELETE FROM {}", table))
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
-
     let tokens: Vec<String> = all.keys().cloned().collect();
 
-    // #14: 用事务包裹虚表批量写入
-    conn.execute("BEGIN", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
+    with_savepoint(conn, "sp_write_token_vec_table", |conn| {
+        // 清空旧数据并批量插入；失败时回滚到旧虚表内容。
+        conn.execute_batch(&format!("DELETE FROM {}", table))
+            .map_err(|e| GBrainError::Database(e.to_string()))?;
 
-    {
         let mut stmt = conn
             .prepare(&format!(
                 "INSERT INTO {} (rowid, embedding) VALUES (?1, ?2)",
@@ -523,10 +530,8 @@ fn knn_mine_via_vec(
             stmt.execute(params![(i + 1) as i64, blob])
                 .map_err(|e| GBrainError::Database(e.to_string()))?;
         }
-    }
-
-    conn.execute("COMMIT", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
+        Ok(())
+    })?;
 
     // 3. 对每个 token 执行 KNN 查询
     //    cosine 距离 = 1 - cosine_similarity
@@ -626,31 +631,24 @@ fn write_synonyms_bidirectional(
             .push((token.clone(), *score));
     }
 
-    // 事务包裹批量写入
-    conn.execute("BEGIN", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
-
     let mut written = 0usize;
-    for (token, mut synonyms) in by_token {
-        synonyms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        synonyms.truncate(max_per_token);
-        for (synonym, score) in synonyms {
-            conn.execute(
-                "INSERT OR REPLACE INTO kb_token_synonyms \
-                 (token, synonym, score, embedding_index_id) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![token, synonym, score, index_id],
-            )
-            .map_err(|e| {
-                let _ = conn.execute("ROLLBACK", []);
-                GBrainError::Database(e.to_string())
-            })?;
-            written += 1;
+    with_savepoint(conn, "sp_write_synonym_pairs", |conn| {
+        for (token, mut synonyms) in by_token {
+            synonyms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            synonyms.truncate(max_per_token);
+            for (synonym, score) in synonyms {
+                conn.execute(
+                    "INSERT OR REPLACE INTO kb_token_synonyms \
+                     (token, synonym, score, embedding_index_id) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![token, synonym, score, index_id],
+                )
+                .map_err(|e| GBrainError::Database(e.to_string()))?;
+                written += 1;
+            }
         }
-    }
-
-    conn.execute("COMMIT", [])
-        .map_err(|e| GBrainError::Database(e.to_string()))?;
+        Ok(())
+    })?;
 
     Ok(written)
 }
@@ -931,11 +929,8 @@ mod tests {
     fn library_scoped_index_lookup() {
         let conn = test_conn();
         // Library 1: active index (id=1, dims=1536)
-        conn.execute(
-            "INSERT INTO kb_libraries (id, name) VALUES (1, 'lib1')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO kb_libraries (id, name) VALUES (1, 'lib1')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO kb_embedding_indexes \
              (id, library_id, provider, model, dimensions, index_type, is_active) \
@@ -944,11 +939,8 @@ mod tests {
         )
         .unwrap();
         // Library 2: active index (id=2, dims=768) — 不同模型
-        conn.execute(
-            "INSERT INTO kb_libraries (id, name) VALUES (2, 'lib2')",
-            [],
-        )
-        .unwrap();
+        conn.execute("INSERT INTO kb_libraries (id, name) VALUES (2, 'lib2')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO kb_embedding_indexes \
              (id, library_id, provider, model, dimensions, index_type, is_active) \

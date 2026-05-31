@@ -15,6 +15,7 @@ use super::types::UnifiedQueryResult;
 struct CacheEntry {
     value: UnifiedQueryResult,
     created_at: Instant,
+    last_accessed: Instant,
     ttl: Duration,
 }
 
@@ -67,8 +68,9 @@ impl QueryCache {
     /// 获取缓存值
     pub fn get(&self, key: &str) -> Option<UnifiedQueryResult> {
         let mut entries = self.entries.lock().ok()?;
-        match entries.get(key) {
+        match entries.get_mut(key) {
             Some(entry) if !entry.is_expired() => {
+                entry.last_accessed = Instant::now();
                 debug!("query_cache hit: key={}", key);
                 Some(entry.value.clone())
             }
@@ -83,11 +85,19 @@ impl QueryCache {
     /// 写入缓存
     pub fn set(&self, key: String, value: UnifiedQueryResult) {
         if let Ok(mut entries) = self.entries.lock() {
+            if let Some(entry) = entries.get_mut(&key) {
+                entry.value = value;
+                entry.created_at = Instant::now();
+                entry.last_accessed = entry.created_at;
+                entry.ttl = self.default_ttl;
+                return;
+            }
+
             if entries.len() >= self.max_entries {
-                // 淘汰最旧条目
+                // 淘汰最近最少使用的条目
                 if let Some(oldest_key) = entries
                     .iter()
-                    .min_by_key(|(_, e)| e.created_at)
+                    .min_by_key(|(_, e)| e.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
                     trace!("query_cache eviction: key={}", oldest_key);
@@ -99,6 +109,7 @@ impl QueryCache {
                 CacheEntry {
                     value,
                     created_at: Instant::now(),
+                    last_accessed: Instant::now(),
                     ttl: self.default_ttl,
                 },
             );

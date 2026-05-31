@@ -12,6 +12,7 @@ use tracing::{debug, trace};
 struct CacheEntry<T> {
     value: T,
     created_at: Instant,
+    last_accessed: Instant,
     ttl: Duration,
 }
 
@@ -40,8 +41,9 @@ impl<T: Clone> SearchCache<T> {
     /// 获取缓存值（过期返回 None）
     pub fn get(&self, key: &str) -> Option<T> {
         let mut entries = self.entries.lock().ok()?;
-        match entries.get(key) {
+        match entries.get_mut(key) {
             Some(entry) if !entry.is_expired() => {
+                entry.last_accessed = Instant::now();
                 trace!("cache hit: key={}", key);
                 Some(entry.value.clone())
             }
@@ -53,14 +55,22 @@ impl<T: Clone> SearchCache<T> {
         }
     }
 
-    /// 写入缓存（超过容量时淘汰最旧的条目）
+    /// 写入缓存（超过容量时淘汰最近最少使用的条目）
     pub fn set(&self, key: String, value: T) {
         if let Ok(mut entries) = self.entries.lock() {
+            if let Some(entry) = entries.get_mut(&key) {
+                entry.value = value;
+                entry.created_at = Instant::now();
+                entry.last_accessed = entry.created_at;
+                entry.ttl = self.default_ttl;
+                return;
+            }
+
             if entries.len() >= self.max_entries {
-                // 淘汰最旧的条目（近似 LRU：基于 created_at 时间戳）
+                // 淘汰最近最少使用的条目，而不是最早创建的条目。
                 if let Some(oldest_key) = entries
                     .iter()
-                    .min_by_key(|(_, v)| v.created_at)
+                    .min_by_key(|(_, v)| v.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
                     debug!("cache eviction (LRU): key={}", oldest_key);
@@ -72,6 +82,7 @@ impl<T: Clone> SearchCache<T> {
                 CacheEntry {
                     value,
                     created_at: Instant::now(),
+                    last_accessed: Instant::now(),
                     ttl: self.default_ttl,
                 },
             );

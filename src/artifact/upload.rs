@@ -11,7 +11,7 @@
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -86,34 +86,58 @@ pub fn write_artifact_file(
     };
     let path = dir.join(&filename);
 
-    // write-if-absent：如果文件已存在且大小匹配，跳过写入
+    // write-if-absent：hash 命名文件已存在时必须校验内容，避免复用损坏文件。
     if path.exists() {
-        if let Ok(metadata) = fs::metadata(&path) {
-            if metadata.len() as usize == content.len() {
-                debug!("Artifact 文件已存在，跳过写入: {:?}", path);
-                return Ok(path);
-            }
+        if verify_artifact_integrity(&path, sha256)? {
+            debug!("Artifact 文件已存在，跳过写入: {:?}", path);
+            return Ok(path);
         }
+        return Err(GBrainError::FileError(format!(
+            "artifact 文件已存在但内容 hash 不匹配: {}",
+            path.display()
+        )));
     }
 
-    // 原子写入：先写临时文件，再重命名
-    let tmp_path = dir.join(format!("{}.tmp", sha256));
-    let mut file = fs::File::create(&tmp_path)
+    // 原子 no-clobber 写入：先写唯一临时文件，再用 hard_link 创建目标。
+    // hard_link 在目标已存在时失败，不会像 Unix rename 那样覆盖并发写入的目标。
+    let tmp_path = dir.join(format!(
+        "{}.{}.tmp",
+        sha256,
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
         .map_err(|e| GBrainError::FileError(format!("创建临时文件失败: {}", e)))?;
     file.write_all(content)
         .map_err(|e| GBrainError::FileError(format!("写入临时文件失败: {}", e)))?;
-    file.flush()
-        .map_err(|e| GBrainError::FileError(format!("刷新临时文件失败: {}", e)))?;
+    file.sync_all()
+        .map_err(|e| GBrainError::FileError(format!("同步临时文件失败: {}", e)))?;
     drop(file);
 
-    // 如果目标已存在（并发写入），直接删除临时文件
-    if path.exists() {
-        let _ = fs::remove_file(&tmp_path);
-        return Ok(path);
+    match fs::hard_link(&tmp_path, &path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp_path);
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(&tmp_path);
+            if verify_artifact_integrity(&path, sha256)? {
+                return Ok(path);
+            }
+            return Err(GBrainError::FileError(format!(
+                "并发写入后 artifact 内容 hash 不匹配: {}",
+                path.display()
+            )));
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(GBrainError::FileError(format!(
+                "安装 artifact 文件失败: {}",
+                e
+            )));
+        }
     }
-
-    fs::rename(&tmp_path, &path)
-        .map_err(|e| GBrainError::FileError(format!("重命名临时文件失败: {}", e)))?;
 
     Ok(path)
 }

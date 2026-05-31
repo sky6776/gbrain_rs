@@ -9,6 +9,7 @@ pub struct TokenBudget {
     daily_limit: u64,
     used_today: AtomicU64,
     last_reset_day: AtomicU64, // unix day (days since epoch)
+    reset_in_progress: AtomicBool,
 }
 
 impl TokenBudget {
@@ -17,6 +18,7 @@ impl TokenBudget {
             daily_limit,
             used_today: AtomicU64::new(0),
             last_reset_day: AtomicU64::new(current_day()),
+            reset_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -43,15 +45,24 @@ impl TokenBudget {
         }
     }
 
-    // 已知限制（TOCTOU 竞态）：check_reset 的 load+store 之间无原子保护，
-    // 多线程可能同时读到 last != today 并重复 store(0)，但结果是幂等的（写入相同值），
-    // 不会导致预算超支。若需严格保证仅一个线程执行重置，可用 compare_exchange 循环。
     fn check_reset(&self) {
         let today = current_day();
-        let last = self.last_reset_day.load(Ordering::Relaxed);
-        if today != last {
-            self.used_today.store(0, Ordering::Relaxed);
-            self.last_reset_day.store(today, Ordering::Relaxed);
+        if self.last_reset_day.load(Ordering::Acquire) == today {
+            return;
+        }
+
+        if self
+            .reset_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.used_today.store(0, Ordering::Release);
+            self.last_reset_day.store(today, Ordering::Release);
+            self.reset_in_progress.store(false, Ordering::Release);
+        } else {
+            while self.reset_in_progress.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
         }
     }
 

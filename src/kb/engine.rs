@@ -4,7 +4,49 @@
 
 use crate::error::{GBrainError, Result};
 use crate::kb::types::*;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, Row, ToSql, Transaction};
+
+struct SqlUpdateBuilder {
+    sets: Vec<String>,
+    values: Vec<Box<dyn ToSql>>,
+}
+
+impl SqlUpdateBuilder {
+    fn new() -> Self {
+        Self {
+            sets: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+
+    fn push_set<V>(&mut self, column: &str, value: V)
+    where
+        V: ToSql + 'static,
+    {
+        let placeholder = self.push_param(value);
+        self.sets.push(format!("{} = {}", column, placeholder));
+    }
+
+    fn push_param<V>(&mut self, value: V) -> String
+    where
+        V: ToSql + 'static,
+    {
+        self.values.push(Box::new(value));
+        format!("?{}", self.values.len())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.sets.is_empty()
+    }
+
+    fn set_clause(&self) -> String {
+        self.sets.join(", ")
+    }
+
+    fn param_refs(&self) -> Vec<&dyn ToSql> {
+        self.values.iter().map(|p| p.as_ref()).collect()
+    }
+}
 
 fn row_to_document(row: &Row) -> std::result::Result<Document, rusqlite::Error> {
     Ok(Document {
@@ -121,17 +163,12 @@ impl<'a> KbEngine<'a> {
     /// H6 fix: 移除手动 `tx.rollback()`，依赖 Drop guard 自动回滚，
     /// 避免手动回滚 + Drop 回滚的双重回滚问题。
     ///
-    /// H7 注意：使用 `unchecked_transaction()` 绕过了 rusqlite 的编译期借用检查，
-    /// 允许在事务内意外嵌套事务。调用方应避免在 `f` 闭包内再次调用
-    /// `self.transaction()` 或任何可能开启新事务的操作。
-    /// 未来重构方向：将 `f` 的签名改为接受 `&Transaction` 而非 `&Connection`，
-    /// 使嵌套事务在编译期被拒绝。
     pub fn transaction<T, F>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&Connection) -> Result<T>,
+        F: FnOnce(&Transaction<'_>) -> Result<T>,
     {
         let tx = self.conn.unchecked_transaction()?;
-        let result = f(self.conn);
+        let result = f(&tx);
         if result.is_ok() {
             tx.commit()?;
         }
@@ -355,109 +392,85 @@ impl<'a> KbEngine<'a> {
         })
     }
 
-    /// H17 注意：动态 SQL 构建 SET 子句时，参数位置通过 `param_values` 的 push 顺序管理。
-    /// id 参数始终在最后。添加新字段时需确保：
-    /// 1. SET 子句的 `?` 占位符与 `param_values` 的 push 顺序一一对应
-    /// 2. id 参数始终在 `param_values` 最后
-    /// 未来优化方向：使用 `rusqlite::named_params!` 宏（`:name` 语法）消除位置依赖，
-    /// 或构建参数追踪结构体自动管理位置偏移。
     pub fn update_library(&self, id: i64, input: &UpdateLibraryInput) -> Result<()> {
         self.transaction(|conn| {
-            let mut sets = Vec::new();
-            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut update = SqlUpdateBuilder::new();
 
             if let Some(ref name) = input.name {
-                sets.push("name = ?".to_string());
-                param_values.push(Box::new(name.clone()));
+                update.push_set("name", name.clone());
             }
             if let Some(semantic) = input.semantic_segmentation_enabled {
-                sets.push("semantic_segmentation_enabled = ?".to_string());
-                param_values.push(Box::new(semantic as i32));
+                update.push_set("semantic_segmentation_enabled", semantic as i32);
             }
             if let Some(raptor) = input.raptor_enabled {
-                sets.push("raptor_enabled = ?".to_string());
-                param_values.push(Box::new(raptor as i32));
+                update.push_set("raptor_enabled", raptor as i32);
             }
             if let Some(ref url) = input.raptor_llm_base_url {
-                sets.push("raptor_llm_base_url = ?".to_string());
-                param_values.push(Box::new(url.clone()));
+                update.push_set("raptor_llm_base_url", url.clone());
             }
             if let Some(ref secret) = input.raptor_llm_secret_ref {
-                sets.push("raptor_llm_secret_ref = ?".to_string());
-                param_values.push(Box::new(secret.clone()));
+                update.push_set("raptor_llm_secret_ref", secret.clone());
             }
             if let Some(ref model) = input.raptor_llm_model {
-                sets.push("raptor_llm_model = ?".to_string());
-                param_values.push(Box::new(model.clone()));
+                update.push_set("raptor_llm_model", model.clone());
             }
             if let Some(chunk_size) = input.chunk_size {
-                sets.push("chunk_size = ?".to_string());
-                param_values.push(Box::new(chunk_size.clamp(200, 5000) as i32));
+                update.push_set("chunk_size", chunk_size.clamp(200, 5000) as i32);
             }
             if let Some(chunk_overlap) = input.chunk_overlap {
-                sets.push("chunk_overlap = ?".to_string());
-                param_values.push(Box::new(chunk_overlap.clamp(0, 1000) as i32));
+                update.push_set("chunk_overlap", chunk_overlap.clamp(0, 1000) as i32);
             }
             // P0-016: 库级治理字段更新
             if let Some(ref v) = input.embedding_provider {
-                sets.push("embedding_provider = ?".to_string());
-                param_values.push(Box::new(v.clone()));
+                update.push_set("embedding_provider", v.clone());
             }
             if let Some(ref v) = input.embedding_model {
-                sets.push("embedding_model = ?".to_string());
-                param_values.push(Box::new(v.clone()));
+                update.push_set("embedding_model", v.clone());
             }
             if let Some(v) = input.embedding_dimensions {
-                sets.push("embedding_dimensions = ?".to_string());
-                param_values.push(Box::new(v));
+                update.push_set("embedding_dimensions", v);
             }
             if let Some(ref v) = input.search_profile {
-                sets.push("search_profile = ?".to_string());
-                param_values.push(Box::new(v.clone()));
+                update.push_set("search_profile", v.clone());
             }
             if let Some(v) = input.rerank_enabled {
-                sets.push("rerank_enabled = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("rerank_enabled", v as i32);
             }
             if let Some(ref v) = input.rerank_provider {
-                sets.push("rerank_provider = ?".to_string());
-                param_values.push(Box::new(v.clone()));
+                update.push_set("rerank_provider", v.clone());
             }
             if let Some(v) = input.summary_enabled {
-                sets.push("summary_enabled = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("summary_enabled", v as i32);
             }
             if let Some(v) = input.external_embedding_allowed {
-                sets.push("external_embedding_allowed = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("external_embedding_allowed", v as i32);
             }
             if let Some(v) = input.external_rerank_allowed {
-                sets.push("external_rerank_allowed = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("external_rerank_allowed", v as i32);
             }
             if let Some(v) = input.external_summary_allowed {
-                sets.push("external_summary_allowed = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("external_summary_allowed", v as i32);
             }
             if let Some(v) = input.external_ocr_allowed {
-                sets.push("external_ocr_allowed = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("external_ocr_allowed", v as i32);
             }
             if let Some(v) = input.redaction_enabled {
-                sets.push("redaction_enabled = ?".to_string());
-                param_values.push(Box::new(v as i32));
+                update.push_set("redaction_enabled", v as i32);
             }
 
-            if sets.is_empty() {
+            if update.is_empty() {
                 return Ok(());
             }
 
-            sets.push("updated_at = datetime('now')".to_string());
-            param_values.push(Box::new(id));
+            update.sets.push("updated_at = datetime('now')".to_string());
+            let id_placeholder = update.push_param(id);
 
-            let sql = format!("UPDATE kb_libraries SET {} WHERE id = ?", sets.join(", "));
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                param_values.iter().map(|p| p.as_ref()).collect();
+            let sql = format!(
+                "UPDATE kb_libraries SET {} WHERE id = {}",
+                update.set_clause(),
+                id_placeholder
+            );
+            let param_refs = update.param_refs();
 
             conn.execute(&sql, param_refs.as_slice())?;
             Ok(())
@@ -697,55 +710,52 @@ impl<'a> KbEngine<'a> {
         run_id: Option<&str>,
     ) -> Result<()> {
         self.transaction(|conn| {
-            let mut sets = Vec::new();
-            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut update = SqlUpdateBuilder::new();
 
             if let Some(s) = parsing_status {
-                sets.push("parsing_status = ?".to_string());
-                param_values.push(Box::new(s));
+                update.push_set("parsing_status", s);
             }
             if let Some(p) = parsing_progress {
-                sets.push("parsing_progress = ?".to_string());
-                param_values.push(Box::new(p));
+                update.push_set("parsing_progress", p);
             }
             if let Some(e) = parsing_error {
-                sets.push("parsing_error = ?".to_string());
-                param_values.push(Box::new(e.to_string()));
+                update.push_set("parsing_error", e.to_string());
             }
             if let Some(s) = embedding_status {
-                sets.push("embedding_status = ?".to_string());
-                param_values.push(Box::new(s));
+                update.push_set("embedding_status", s);
             }
             if let Some(p) = embedding_progress {
-                sets.push("embedding_progress = ?".to_string());
-                param_values.push(Box::new(p));
+                update.push_set("embedding_progress", p);
             }
             if let Some(e) = embedding_error {
-                sets.push("embedding_error = ?".to_string());
-                param_values.push(Box::new(e.to_string()));
+                update.push_set("embedding_error", e.to_string());
             }
 
-            if sets.is_empty() {
+            if update.is_empty() {
                 return Ok(());
             }
 
-            sets.push("updated_at = datetime('now')".to_string());
-            // id 参数
-            param_values.push(Box::new(id));
+            update.sets.push("updated_at = datetime('now')".to_string());
+            let id_placeholder = update.push_param(id);
 
             let sql = if let Some(rid) = run_id {
                 // 修复：增加 processing_run_id WHERE 条件，防止旧 run 污染中间状态
-                param_values.push(Box::new(rid.to_string()));
+                let run_id_placeholder = update.push_param(rid.to_string());
                 format!(
-                    "UPDATE kb_documents SET {} WHERE id = ? AND processing_run_id = ?",
-                    sets.join(", ")
+                    "UPDATE kb_documents SET {} WHERE id = {} AND processing_run_id = {}",
+                    update.set_clause(),
+                    id_placeholder,
+                    run_id_placeholder
                 )
             } else {
-                format!("UPDATE kb_documents SET {} WHERE id = ?", sets.join(", "))
+                format!(
+                    "UPDATE kb_documents SET {} WHERE id = {}",
+                    update.set_clause(),
+                    id_placeholder
+                )
             };
 
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                param_values.iter().map(|p| p.as_ref()).collect();
+            let param_refs = update.param_refs();
 
             let rows = conn.execute(&sql, param_refs.as_slice())?;
             if run_id.is_some() && rows == 0 {

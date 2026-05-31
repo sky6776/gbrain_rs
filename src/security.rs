@@ -239,15 +239,28 @@ fn reject_symlinks(path: &std::path::Path) -> Result<()> {
     for component in path.components() {
         current.push(component);
         if let Ok(meta) = std::fs::symlink_metadata(&current) {
-            if meta.is_symlink() {
+            if meta.is_symlink() || is_windows_reparse_point(&meta) {
                 return Err(GBrainError::Security(format!(
-                    "symlink detected in path component: {}",
+                    "symlink or reparse point detected in path component: {}",
                     current.display()
                 )));
             }
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn is_windows_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_windows_reparse_point(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 #[cfg(test)]

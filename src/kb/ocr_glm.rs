@@ -267,8 +267,9 @@ impl GlmOcrProvider {
         {
             Ok(r) => r,
             Err(e) => {
+                let retryable = is_reqwest_error_retryable(&e);
                 let msg = format!("请求失败: {}", e);
-                return if is_single_page_retryable(&msg) {
+                return if retryable {
                     Err(SinglePageError::Retryable(msg))
                 } else {
                     Err(SinglePageError::Fatal(msg))
@@ -280,7 +281,7 @@ impl GlmOcrProvider {
         if !status.is_success() {
             let error_text = resp.text().unwrap_or_default();
             let msg = format!("API 错误 (status={}): {}", status, error_text);
-            return if is_single_page_retryable(&msg) {
+            return if is_retryable_status(status) {
                 Err(SinglePageError::Retryable(msg))
             } else {
                 Err(SinglePageError::Fatal(msg))
@@ -561,22 +562,17 @@ pub fn build_ocr_options_from_config(config: &crate::config::Config) -> OcrOptio
     }
 }
 
-/// 判断单页请求错误是否可重试（429/503/timeout/网络错误）
-///
-/// 已知限制：通过错误消息子串匹配判断可重试类型，脆弱且依赖上游 API 的错误文本格式。
-/// 若后续可获取 HTTP 状态码（如从 reqwest::Error 扩展信息中提取），应改为按状态码分类：
-/// - 429 (Rate Limit) / 503 (Service Unavailable) / 超时 → 可重试
-/// - 4xx 其他 → 不可重试
-/// - 网络连接错误 → 可重试
-fn is_single_page_retryable(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    lower.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("503")
-        || lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("connection")
-        || lower.contains("hyper")
+/// 判断 reqwest 错误是否可重试。
+fn is_reqwest_error_retryable(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.status().is_some_and(is_retryable_status)
+}
+
+/// 判断 HTTP 状态码是否可重试。
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::BAD_GATEWAY
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        || status == reqwest::StatusCode::GATEWAY_TIMEOUT
 }
 
 #[cfg(test)]

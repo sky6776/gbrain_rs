@@ -307,7 +307,6 @@ fn blocks_to_markdown(blocks: &[crate::kb::ocr_provider::OcrLayoutBlock]) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kb::ocr_provider::OcrLayoutBlock;
 
     fn make_analysis(page: i32, text: &str) -> PdfPageAnalysis {
         PdfPageAnalysis {

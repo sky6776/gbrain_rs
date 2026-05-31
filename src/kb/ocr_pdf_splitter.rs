@@ -295,8 +295,6 @@ pub fn split_pdf_for_ocr(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // 注意：实际 PDF 拆分测试需要真实 PDF 文件，
     // 这里只测试辅助逻辑和错误路径。
 

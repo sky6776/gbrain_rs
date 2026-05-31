@@ -153,29 +153,26 @@ fn split_recursive(text: &str, target_words: usize) -> Vec<String> {
 /// Chinese punctuation delimiters split immediately without checking expected_next,
 /// since Chinese text does not use spaces after punctuation.
 fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Vec<String> {
-    // TODO(H24): 每次调用都分配 Vec<char>（O(n) 内存，每个字符 4 字节）。
-    // 在 split_recursive 的递归中，每个段落都会触发一次分配。
-    // 改进方向：使用 str 的 char_indices() 迭代器配合字符位置映射表，
-    // 避免整体收集为 Vec<char>；或缓存 char indices 避免重复分配。
-    let chars: Vec<char> = text.chars().collect();
     let mut result = Vec::new();
     let mut start = 0usize;
+    let mut iter = text.char_indices().peekable();
 
-    for (i, &c) in chars.iter().enumerate() {
+    while let Some((idx, c)) = iter.next() {
         if delimiters.contains(&c) {
             let is_chinese_delim = is_cjk_punctuation(c);
-            let next_i = i + 1;
+            let end = idx + c.len_utf8();
 
             if is_chinese_delim {
                 // Chinese punctuation: split immediately regardless of next char
-                let segment: String = chars[start..=i].iter().collect();
-                result.push(segment);
-                start = next_i;
-            } else if next_i < chars.len() && expected_next.contains(&chars[next_i]) {
+                result.push(text[start..end].to_string());
+                start = end;
+            } else if iter
+                .peek()
+                .is_some_and(|(_, next)| expected_next.contains(next))
+            {
                 // English punctuation: delimiter followed by space
-                let segment: String = chars[start..=i].iter().collect();
-                result.push(segment);
-                start = next_i; // include the space in the next segment (preserves it)
+                result.push(text[start..end].to_string());
+                start = end; // include the space in the next segment (preserves it)
             }
         }
     }
@@ -183,9 +180,8 @@ fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Ve
     // Last segment — I-12: trim leading whitespace from the trailing segment
     // after a delimiter, since the space character after punctuation is not
     // semantically meaningful at the start of a new segment.
-    if start < chars.len() {
-        let segment: String = chars[start..].iter().collect();
-        result.push(segment.trim_start().to_string());
+    if start < text.len() {
+        result.push(text[start..].trim_start().to_string());
     }
 
     result

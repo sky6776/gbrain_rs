@@ -353,19 +353,22 @@ impl<'a> ArtifactService<'a> {
 
                     let change_id = promotion::create_candidate(
                         conn,
-                        manual_output.artifact_id,
-                        Some(manual_output.occurrence_id),
-                        None,
-                        None,
-                        CandidateType::PageUpdate, // P1-8 修复：使用 PageUpdate 替代 FactClaim
-                        slug,
-                        "compiled_truth",
-                        &format!("人工修改冲突 — 建议更新 {}", slug),
-                        &proposed_payload,
-                        &evidence,
-                        0.7,
-                        RiskLevel::Medium,
-                    ).map_err(|e| GBrainError::Database(format!("创建冲突候选变更失败: {}", e)))?;
+                        promotion::CreateCandidateInput {
+                            artifact_id: manual_output.artifact_id,
+                            occurrence_id: Some(manual_output.occurrence_id),
+                            kb_document_id: None,
+                            kb_node_id: None,
+                            candidate_type: CandidateType::PageUpdate,
+                            target_slug: slug.to_string(),
+                            target_field: "compiled_truth".to_string(),
+                            title: format!("人工修改冲突 — 建议更新 {}", slug),
+                            proposed_payload,
+                            evidence_json: evidence,
+                            confidence: 0.7,
+                            risk_level: RiskLevel::Medium,
+                        },
+                    )
+                    .map_err(|e| GBrainError::Database(format!("创建冲突候选变更失败: {}", e)))?;
 
                     return Ok(serde_json::json!({
                         "resolution": "conflict",

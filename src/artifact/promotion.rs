@@ -49,18 +49,21 @@ pub fn extract_promotion_candidates(
         if !summary.is_empty() {
             let id = create_candidate(
                 conn,
-                artifact_id,
-                Some(occurrence_id),
-                Some(kb_document_id),
-                None,
-                CandidateType::DocumentSummary,
-                &target_slug,
-                "summary",
-                &format!("Summary of {}", kb_doc.original_name),
-                &serde_json::json!({ "summary": summary }).to_string(),
-                &serde_json::json!({ "kb_document_id": kb_document_id }).to_string(),
-                0.8,
-                RiskLevel::Low,
+                CreateCandidateInput {
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    kb_document_id: Some(kb_document_id),
+                    kb_node_id: None,
+                    candidate_type: CandidateType::DocumentSummary,
+                    target_slug: target_slug.clone(),
+                    target_field: "summary".to_string(),
+                    title: format!("Summary of {}", kb_doc.original_name),
+                    proposed_payload: serde_json::json!({ "summary": summary }).to_string(),
+                    evidence_json: serde_json::json!({ "kb_document_id": kb_document_id })
+                        .to_string(),
+                    confidence: 0.8,
+                    risk_level: RiskLevel::Low,
+                },
             )?;
             candidate_ids.push(id);
         }
@@ -73,23 +76,26 @@ pub fn extract_promotion_candidates(
         for keyword in keywords {
             let id = create_candidate(
                 conn,
-                artifact_id,
-                Some(occurrence_id),
-                Some(kb_document_id),
-                None,
-                CandidateType::FactClaim,
-                &target_slug,
-                "keywords",
-                &format!("Keyword: {} (from {})", keyword, kb_doc.original_name),
-                &serde_json::json!({
-                    "subject_slug": target_slug,
-                    "predicate": "keyword",
-                    "object_text": keyword,
-                })
-                .to_string(),
-                &serde_json::json!({ "kb_document_id": kb_document_id }).to_string(),
-                0.7,
-                RiskLevel::Low,
+                CreateCandidateInput {
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    kb_document_id: Some(kb_document_id),
+                    kb_node_id: None,
+                    candidate_type: CandidateType::FactClaim,
+                    target_slug: target_slug.clone(),
+                    target_field: "keywords".to_string(),
+                    title: format!("Keyword: {} (from {})", keyword, kb_doc.original_name),
+                    proposed_payload: serde_json::json!({
+                        "subject_slug": target_slug,
+                        "predicate": "keyword",
+                        "object_text": keyword,
+                    })
+                    .to_string(),
+                    evidence_json: serde_json::json!({ "kb_document_id": kb_document_id })
+                        .to_string(),
+                    confidence: 0.7,
+                    risk_level: RiskLevel::Low,
+                },
             )?;
             candidate_ids.push(id);
         }
@@ -113,22 +119,25 @@ pub fn extract_promotion_candidates(
                 .collect::<String>();
             let id = create_candidate(
                 conn,
-                artifact_id,
-                Some(occurrence_id),
-                Some(kb_document_id),
-                None,
-                CandidateType::EntityMention,
-                &target_slug,
-                "entities",
-                &format!("Entity: {} (from {})", entity_name, kb_doc.original_name),
-                &serde_json::json!({
-                    "entity_name": entity_name,
-                    "suggested_slug": suggested_slug,
-                })
-                .to_string(),
-                &serde_json::json!({ "kb_document_id": kb_document_id }).to_string(),
-                0.75,
-                RiskLevel::Medium,
+                CreateCandidateInput {
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    kb_document_id: Some(kb_document_id),
+                    kb_node_id: None,
+                    candidate_type: CandidateType::EntityMention,
+                    target_slug: target_slug.clone(),
+                    target_field: "entities".to_string(),
+                    title: format!("Entity: {} (from {})", entity_name, kb_doc.original_name),
+                    proposed_payload: serde_json::json!({
+                        "entity_name": entity_name,
+                        "suggested_slug": suggested_slug,
+                    })
+                    .to_string(),
+                    evidence_json: serde_json::json!({ "kb_document_id": kb_document_id })
+                        .to_string(),
+                    confidence: 0.75,
+                    risk_level: RiskLevel::Medium,
+                },
             )?;
             candidate_ids.push(id);
         }
@@ -140,27 +149,29 @@ pub fn extract_promotion_candidates(
             if node_type == "timeline_event" || node_type == "date" {
                 let id = create_candidate(
                     conn,
-                    artifact_id,
-                    Some(occurrence_id),
-                    Some(kb_document_id),
-                    Some(node.id),
-                    CandidateType::TimelineEvent,
-                    &target_slug,
-                    "timeline",
-                    &format!("Timeline event from {}", kb_doc.original_name),
-                    &serde_json::json!({
-                        "title": node.title,
-                        "content": node.content,
-                        "date": node.metadata.get("date"),
-                    })
-                    .to_string(),
-                    &serde_json::json!({
-                        "kb_document_id": kb_document_id,
-                        "kb_node_id": node.id,
-                    })
-                    .to_string(),
-                    0.6,
-                    RiskLevel::Medium,
+                    CreateCandidateInput {
+                        artifact_id,
+                        occurrence_id: Some(occurrence_id),
+                        kb_document_id: Some(kb_document_id),
+                        kb_node_id: Some(node.id),
+                        candidate_type: CandidateType::TimelineEvent,
+                        target_slug: target_slug.clone(),
+                        target_field: "timeline".to_string(),
+                        title: format!("Timeline event from {}", kb_doc.original_name),
+                        proposed_payload: serde_json::json!({
+                            "title": node.title,
+                            "content": node.content,
+                            "date": node.metadata.get("date"),
+                        })
+                        .to_string(),
+                        evidence_json: serde_json::json!({
+                            "kb_document_id": kb_document_id,
+                            "kb_node_id": node.id,
+                        })
+                        .to_string(),
+                        confidence: 0.6,
+                        risk_level: RiskLevel::Medium,
+                    },
                 )?;
                 candidate_ids.push(id);
             }
@@ -183,24 +194,27 @@ pub fn extract_promotion_candidates(
                 .collect::<String>();
             let id = create_candidate(
                 conn,
-                artifact_id,
-                Some(occurrence_id),
-                Some(kb_document_id),
-                None,
-                CandidateType::LinkSuggestion,
-                &target_slug,
-                "links",
-                &format!("Link suggestion: {} → {}", target_slug, suggested_slug),
-                &serde_json::json!({
-                    "from_slug": target_slug,
-                    "to_slug": suggested_slug,
-                    "link_type": "related",
-                    "entity_name": entity_name,
-                })
-                .to_string(),
-                &serde_json::json!({ "kb_document_id": kb_document_id }).to_string(),
-                0.5,
-                RiskLevel::Low,
+                CreateCandidateInput {
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    kb_document_id: Some(kb_document_id),
+                    kb_node_id: None,
+                    candidate_type: CandidateType::LinkSuggestion,
+                    target_slug: target_slug.clone(),
+                    target_field: "links".to_string(),
+                    title: format!("Link suggestion: {} → {}", target_slug, suggested_slug),
+                    proposed_payload: serde_json::json!({
+                        "from_slug": target_slug,
+                        "to_slug": suggested_slug,
+                        "link_type": "related",
+                        "entity_name": entity_name,
+                    })
+                    .to_string(),
+                    evidence_json: serde_json::json!({ "kb_document_id": kb_document_id })
+                        .to_string(),
+                    confidence: 0.5,
+                    risk_level: RiskLevel::Low,
+                },
             )?;
             candidate_ids.push(id);
         }
@@ -211,23 +225,26 @@ pub fn extract_promotion_candidates(
         if !summary.is_empty() {
             let id = create_candidate(
                 conn,
-                artifact_id,
-                Some(occurrence_id),
-                Some(kb_document_id),
-                None,
-                CandidateType::FactClaim,
-                &target_slug,
-                "compiled_truth",
-                &format!("Fact claim from {}", kb_doc.original_name),
-                &serde_json::json!({
-                    "subject_slug": target_slug,
-                    "predicate": "summary",
-                    "object_text": summary,
-                })
-                .to_string(),
-                &serde_json::json!({ "kb_document_id": kb_document_id }).to_string(),
-                0.6,
-                RiskLevel::Medium,
+                CreateCandidateInput {
+                    artifact_id,
+                    occurrence_id: Some(occurrence_id),
+                    kb_document_id: Some(kb_document_id),
+                    kb_node_id: None,
+                    candidate_type: CandidateType::FactClaim,
+                    target_slug: target_slug.clone(),
+                    target_field: "compiled_truth".to_string(),
+                    title: format!("Fact claim from {}", kb_doc.original_name),
+                    proposed_payload: serde_json::json!({
+                        "subject_slug": target_slug,
+                        "predicate": "summary",
+                        "object_text": summary,
+                    })
+                    .to_string(),
+                    evidence_json: serde_json::json!({ "kb_document_id": kb_document_id })
+                        .to_string(),
+                    confidence: 0.6,
+                    risk_level: RiskLevel::Medium,
+                },
             )?;
             candidate_ids.push(id);
         }
@@ -249,51 +266,32 @@ pub fn extract_promotion_candidates(
 /// 同一 artifact + 同一内容不应重复创建候选。重试时如果候选已存在（pending/accepted/applied），
 /// INSERT OR IGNORE 会跳过，返回已有候选的 id，保证幂等。
 ///
-/// H13 TODO: 此函数有 13 个位置参数，调用者必须记住精确顺序（6+ 个调用点）。
-/// 每个调用点都是潜在的参数顺序错误。建议引入结构体：
-/// ```ignore
-/// struct CreateCandidateInput<'a> {
-///     artifact_id: i64,
-///     occurrence_id: Option<i64>,
-///     kb_document_id: Option<i64>,
-///     kb_node_id: Option<i64>,
-///     candidate_type: CandidateType,
-///     target_slug: &'a str,
-///     target_field: &'a str,
-///     title: &'a str,
-///     proposed_payload: &'a str,
-///     evidence_json: &'a str,
-///     confidence: f64,
-///     risk_level: RiskLevel,
-/// }
-/// ```
-/// 重构应在有测试覆盖时进行，避免引入回归。
-#[allow(clippy::too_many_arguments)]
-pub fn create_candidate(
-    conn: &Connection,
-    artifact_id: i64,
-    occurrence_id: Option<i64>,
-    kb_document_id: Option<i64>,
-    kb_node_id: Option<i64>,
-    candidate_type: CandidateType,
-    target_slug: &str,
-    target_field: &str,
-    title: &str,
-    proposed_payload: &str,
-    evidence_json: &str,
-    confidence: f64,
-    risk_level: RiskLevel,
-) -> Result<i64> {
+pub struct CreateCandidateInput {
+    pub artifact_id: i64,
+    pub occurrence_id: Option<i64>,
+    pub kb_document_id: Option<i64>,
+    pub kb_node_id: Option<i64>,
+    pub candidate_type: CandidateType,
+    pub target_slug: String,
+    pub target_field: String,
+    pub title: String,
+    pub proposed_payload: String,
+    pub evidence_json: String,
+    pub confidence: f64,
+    pub risk_level: RiskLevel,
+}
+
+pub fn create_candidate(conn: &Connection, input: CreateCandidateInput) -> Result<i64> {
     // 修复：计算候选指纹用于去重，防止重试路径重复创建同一批候选。
     // fingerprint 由确定性字段组成：artifact_id + candidate_type + target_slug +
     // target_field + proposed_payload，不含 confidence/risk_level 等可能因
     // KB 重新解析而变化的字段。
     let fingerprint = compute_candidate_fingerprint(
-        artifact_id,
-        &candidate_type,
-        target_slug,
-        target_field,
-        proposed_payload,
+        input.artifact_id,
+        &input.candidate_type,
+        &input.target_slug,
+        &input.target_field,
+        &input.proposed_payload,
     );
 
     let now = now_str();
@@ -311,23 +309,23 @@ pub fn create_candidate(
              candidate_fingerprint, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
-            artifact_id,
-            occurrence_id,
-            kb_document_id,
-            kb_node_id,
-            candidate_type.to_string(),
-            target_slug,
-            target_field,
-            title,
-            proposed_payload,
-            evidence_json,
-            confidence,
-            risk_level.to_string(),
+            input.artifact_id,
+            input.occurrence_id,
+            input.kb_document_id,
+            input.kb_node_id,
+            input.candidate_type.to_string(),
+            input.target_slug,
+            input.target_field,
+            input.title,
+            input.proposed_payload,
+            input.evidence_json,
+            input.confidence,
+            input.risk_level.to_string(),
             "pending",
             "",
             "",
             Option::<String>::None,
-            fingerprint,
+            &fingerprint,
             now,
             now,
         ],
@@ -339,7 +337,7 @@ pub fn create_candidate(
         let existing_id: i64 = conn
             .query_row(
                 "SELECT id FROM promotion_candidates WHERE candidate_fingerprint = ?1 AND status IN ('pending', 'accepted', 'applied') LIMIT 1",
-                params![fingerprint],
+                params![&fingerprint],
                 |row| row.get(0),
             )
             .map_err(|e| GBrainError::Database(format!("查询已有候选失败: {}", e)))?;
@@ -598,13 +596,24 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
     // 修复：记录本次 apply 前创建的 page_versions.id 到 review_notes，
     // rollback 时按 version id 精确恢复，避免批量 apply 同秒多候选时
     // rollback 拿到同页其它候选的快照
+    let candidate_type = candidate
+        .candidate_type
+        .parse()
+        .unwrap_or(CandidateType::FactClaim);
     let snapshot_version_id: Option<i64> = conn
         .query_row(
             "SELECT MAX(id) FROM page_versions WHERE page_id = (SELECT id FROM pages WHERE slug = ?1)",
             params![&candidate.target_slug],
             |row| row.get(0),
         )
-        .ok();
+        .map_err(|e| GBrainError::Database(format!("查询页面快照失败: {}", e)))?;
+
+    if candidate_type != CandidateType::PageCreate && snapshot_version_id.is_none() {
+        return Err(GBrainError::Database(format!(
+            "候选 {} 应用后未记录 page_versions 快照，拒绝标记为 applied",
+            candidate.id
+        )));
+    }
 
     // 修复：applied_at 在所有修改完成后生成，确保晚于 page_versions 快照的 snapshot_at
     let applied_at = now_str();
@@ -922,58 +931,40 @@ fn rollback_page_create(conn: &Connection, candidate: &PromotionCandidate) -> Re
 fn rollback_shadow_page_update(conn: &Connection, candidate: &PromotionCandidate) -> Result<()> {
     let slug = &candidate.target_slug;
 
-    // 修复：优先按 snapshot_version_id 精确恢复，
+    // 按 snapshot_version_id 精确恢复，
     // 避免批量 apply 同秒多候选时 rollback 拿到同页其它候选的快照。
     // snapshot_version_id 存储在 review_notes 的最后一行，格式: snapshot_version_id:{id}
     // 按行解析取最后一行
-    let snapshot_version_id: Option<i64> = candidate
+    let snapshot_version_id: i64 = candidate
         .review_notes
         .lines()
         .last()
         .and_then(|line| line.strip_prefix("snapshot_version_id:"))
-        .and_then(|s| s.parse::<i64>().ok());
+        .and_then(|s| s.parse::<i64>().ok())
+        .ok_or_else(|| {
+            GBrainError::Database(format!(
+                "候选 {} 缺少 snapshot_version_id，无法安全回滚",
+                candidate.id
+            ))
+        })?;
 
-    let previous_content: Option<String> = if let Some(vid) = snapshot_version_id {
-        // 按 version id 精确查找
-        conn.query_row(
+    let prev_content: String = conn
+        .query_row(
             "SELECT compiled_truth FROM page_versions WHERE id = ?1",
-            rusqlite::params![vid],
+            rusqlite::params![snapshot_version_id],
             |row| row.get(0),
         )
-        .ok()
-    } else {
-        // 降级：无 version id 时按 snapshot_at 排序（兼容旧数据）
-        conn.query_row(
-            "SELECT pv.compiled_truth FROM page_versions pv
-             JOIN pages p ON p.id = pv.page_id
-             WHERE p.slug = ?1 AND pv.snapshot_at <= ?2
-             ORDER BY pv.snapshot_at DESC LIMIT 1",
-            rusqlite::params![slug, candidate.applied_at.as_deref().unwrap_or("")],
-            |row| row.get(0),
-        )
-        .ok()
-    };
+        .map_err(|e| GBrainError::Database(format!("查询页面快照失败: {}", e)))?;
 
-    if let Some(prev_content) = previous_content {
-        // 恢复页面内容
-        let now = now_str();
-        conn.execute(
-            "UPDATE pages SET compiled_truth = ?1, updated_at = ?2 WHERE slug = ?3",
-            rusqlite::params![prev_content, now, slug],
-        )
-        .map_err(|e| GBrainError::Database(format!("恢复影子页面失败: {}", e)))?;
-        // 修复：回滚后重建 chunk，确保搜索索引与页面内容一致
-        rebuild_chunks_for_page(conn, slug)?;
-        // 修复：同步更新 compiled_truth_tokens 和 content_hash，
-        // 避免 rollback 后 tokens/hash 仍为回滚前状态，导致 FTS 搜索或变更检测不一致
-        sync_page_tokens_and_hash(conn, slug)?;
-        info!("影子页面 {} 已恢复到应用前版本", slug);
-    } else {
-        // 没有版本历史，尝试移除候选添加的内容
-        // 对于简单追加式更新，可以移除候选添加的行
-        debug!("候选 {} 无版本历史可恢复，尝试移除追加内容", candidate.id);
-        remove_candidate_content_from_page(conn, candidate)?;
-    }
+    let now = now_str();
+    conn.execute(
+        "UPDATE pages SET compiled_truth = ?1, updated_at = ?2 WHERE slug = ?3",
+        rusqlite::params![prev_content, now, slug],
+    )
+    .map_err(|e| GBrainError::Database(format!("恢复影子页面失败: {}", e)))?;
+    rebuild_chunks_for_page(conn, slug)?;
+    sync_page_tokens_and_hash(conn, slug)?;
+    info!("影子页面 {} 已恢复到应用前版本", slug);
 
     Ok(())
 }
@@ -1090,7 +1081,7 @@ fn sync_page_tokens_and_hash(conn: &Connection, slug: &str) -> Result<()> {
             params![slug],
             |row| row.get(0),
         )
-        .unwrap_or_default();
+        .map_err(|e| GBrainError::Database(format!("读取页面内容失败: {}", e)))?;
     let truth_tokens = crate::nlp::chinese::tokenize_content(&new_truth);
     let content_hash = {
         use sha2::{Digest, Sha256};
@@ -1098,146 +1089,12 @@ fn sync_page_tokens_and_hash(conn: &Connection, slug: &str) -> Result<()> {
         hasher.update(new_truth.as_bytes());
         format!("{:x}", hasher.finalize())
     };
-    if let Err(e) = conn.execute(
+    conn.execute(
         "UPDATE pages SET compiled_truth_tokens = ?1, content_hash = ?2 WHERE slug = ?3",
         params![truth_tokens, content_hash, slug],
-    ) {
-        // 列可能不存在（旧 schema），记录 warn 但不阻断流程
-        warn!(
-            "更新页面 {} 的 compiled_truth_tokens/content_hash 失败: {}",
-            slug, e
-        );
-    }
+    )
+    .map_err(|e| GBrainError::Database(format!("更新页面 tokens/hash 失败: {}", e)))?;
     Ok(())
-}
-
-/// 从页面内容中移除候选添加的内容（无版本历史时的降级方案）
-fn remove_candidate_content_from_page(
-    conn: &Connection,
-    candidate: &PromotionCandidate,
-) -> Result<()> {
-    // 获取当前页面内容
-    let current_content: Option<String> = conn
-        .query_row(
-            "SELECT compiled_truth FROM pages WHERE slug = ?1",
-            rusqlite::params![candidate.target_slug],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(content) = current_content {
-        // 从 payload 中提取候选添加的文本
-        let payload: serde_json::Value =
-            serde_json::from_str(&candidate.proposed_payload).unwrap_or(serde_json::json!({}));
-
-        // 尝试从页面内容中移除候选添加的行
-        let candidate_type = candidate
-            .candidate_type
-            .parse()
-            .unwrap_or(CandidateType::FactClaim);
-
-        let text_to_remove = extract_candidate_text_for_removal(&candidate_type, &payload);
-        if !text_to_remove.is_empty() {
-            // 注意：仅移除第一次出现，避免误删相同文本的其他位置。
-            // TODO: 未来应在 apply 时存储字节范围，rollback 时精确移除。
-            let new_content = content.replacen(&text_to_remove, "", 1);
-            if new_content != content {
-                let now = now_str();
-                conn.execute(
-                    "UPDATE pages SET compiled_truth = ?1, updated_at = ?2 WHERE slug = ?3",
-                    rusqlite::params![new_content, now, &candidate.target_slug],
-                )
-                .map_err(|e| GBrainError::Database(format!("移除候选内容失败: {}", e)))?;
-                // 修复：移除内容后重建 chunk，确保搜索索引与页面内容一致
-                rebuild_chunks_for_page(conn, &candidate.target_slug)?;
-                // 修复：同步更新 compiled_truth_tokens 和 content_hash，
-                // 避免 rollback 后 tokens/hash 仍为回滚前状态
-                sync_page_tokens_and_hash(conn, &candidate.target_slug)?;
-                debug!(
-                    "从页面 {} 移除了候选 {} 的内容",
-                    candidate.target_slug, candidate.id
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// 从候选 payload 中提取需要移除的文本
-fn extract_candidate_text_for_removal(
-    candidate_type: &CandidateType,
-    payload: &serde_json::Value,
-) -> String {
-    match candidate_type {
-        CandidateType::DocumentSummary => payload
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        CandidateType::EntityMention => {
-            let name = payload
-                .get("entity_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let slug = payload
-                .get("suggested_slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if slug.is_empty() {
-                format!("- candidate://{}", name)
-            } else {
-                format!("- candidate://{} ({})", slug, name)
-            }
-        }
-        CandidateType::TimelineEvent => {
-            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let date = payload.get("date").and_then(|v| v.as_str()).unwrap_or("");
-            let content = payload
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if date.is_empty() {
-                format!("- **{}**: {}", title, content)
-            } else {
-                format!("- **{}** ({}): {}", title, date, content)
-            }
-        }
-        CandidateType::LinkSuggestion => {
-            let from = payload
-                .get("from_slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let to = payload
-                .get("to_slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let link_type = payload
-                .get("link_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("related");
-            format!(
-                "- candidate://{} → candidate://{} ({})",
-                from, to, link_type
-            )
-        }
-        CandidateType::FactClaim => {
-            let subject = payload
-                .get("subject_slug")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let predicate = payload
-                .get("predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let object = payload
-                .get("object_text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("- **{}**: {} = {}", subject, predicate, object)
-        }
-        _ => String::new(),
-    }
 }
 
 /// 自动应用低风险候选（promotion_policy = auto 时）
@@ -1281,61 +1138,26 @@ pub fn auto_apply_candidates(
         }
         // 仅自动应用低风险候选
         if candidate.risk_level == "low" && candidate.confidence >= 0.8 {
-            // 修复：用 savepoint 隔离整个 accept + apply 的所有写入。
-            // 直接调用 apply_candidate_inner（而非 apply_candidate）避免嵌套 savepoint。
-            // apply_candidate 内部有自己的 savepoint，嵌套时内层 savepoint 清理失败
-            // 可能污染连接状态。外层 savepoint 覆盖整个 accept+apply 流程，
-            // 失败时全部回滚，候选恢复为 pending 可重试。
             let sp_name = format!("sp_auto_apply_{}", candidate.id);
-            if let Err(e) = conn.execute(&format!("SAVEPOINT {}", sp_name), []) {
-                failures.push(format!("候选 {} 创建 savepoint 失败: {}", candidate.id, e));
-                continue;
-            }
-            // 先 accept
-            let review_input = ReviewCandidateInput {
-                candidate_id: candidate.id,
-                action: "accept".to_string(),
-                reviewer: "auto".to_string(),
-                notes: Some("自动审核: 低风险高置信度".to_string()),
-            };
-            match review_candidate(conn, &review_input) {
-                Ok(reviewed) => {
-                    // 再 apply（直接调用 inner 避免嵌套 savepoint）
-                    let mut candidate_for_apply = reviewed;
-                    match apply_candidate_inner(conn, &mut candidate_for_apply) {
-                        Ok(_) => {
-                            // 修复：RELEASE SAVEPOINT 失败时事务未提交，不能认为已应用；
-                            // applied.push() 必须在 RELEASE 成功后执行
-                            match conn.execute(&format!("RELEASE {}", sp_name), []) {
-                                Ok(_) => applied.push(candidate.id),
-                                Err(e) => {
-                                    // RELEASE 失败：回滚整个 accept+apply，候选恢复为 pending
-                                    warn!(
-                                        "自动应用候选 {} 释放 savepoint 失败: {}, 回滚",
-                                        candidate.id, e
-                                    );
-                                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                                    failures.push(format!(
-                                        "候选 {} 释放 savepoint 失败: {}",
-                                        candidate.id, e
-                                    ));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            // accept+apply 失败，savepoint 回滚所有写入（含 accept 状态变更）
-                            debug!("自动应用候选 {} 失败: {}, savepoint 回滚", candidate.id, e);
-                            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                            failures.push(format!("候选 {} apply 失败: {}", candidate.id, e));
-                        }
-                    }
-                }
+            let result = with_savepoint(conn, &sp_name, |conn| {
+                // 外层 savepoint 覆盖整个 accept+apply 流程，失败时候选恢复为 pending 可重试。
+                // 直接调用 apply_candidate_inner 避免嵌套 apply_candidate savepoint。
+                let review_input = ReviewCandidateInput {
+                    candidate_id: candidate.id,
+                    action: "accept".to_string(),
+                    reviewer: "auto".to_string(),
+                    notes: Some("自动审核: 低风险高置信度".to_string()),
+                };
+                let mut candidate_for_apply = review_candidate(conn, &review_input)?;
+                apply_candidate_inner(conn, &mut candidate_for_apply)?;
+                Ok(())
+            });
+
+            match result {
+                Ok(()) => applied.push(candidate.id),
                 Err(e) => {
-                    // review_candidate 失败：释放 savepoint，记录失败
-                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                    failures.push(format!("候选 {} accept 失败: {}", candidate.id, e));
+                    debug!("自动应用候选 {} 失败: {}, savepoint 回滚", candidate.id, e);
+                    failures.push(format!("候选 {} auto-apply 失败: {}", candidate.id, e));
                 }
             }
         }
@@ -1452,90 +1274,34 @@ pub fn batch_apply_candidates(
     let mut failures = Vec::new();
 
     for candidate in &candidates {
-        // 修复：用 savepoint 隔离整个 accept+apply 流程，与 auto_apply_candidates 一致。
-        // 之前先 accept 再 apply，apply 失败后靠 best-effort UPDATE ... pending 恢复，
-        // 但崩溃或恢复 UPDATE 失败时候选会卡在 accepted 状态。
-        // savepoint 确保失败时全部回滚（含 accept 状态变更），候选恢复为 pending 可重试。
-        // 直接调用 apply_candidate_inner（而非 apply_candidate）避免嵌套 savepoint。
         let sp_name = format!("sp_batch_apply_{}", candidate.id);
-        if conn.execute(&format!("SAVEPOINT {}", sp_name), []).is_err() {
-            failed += 1;
-            failures.push(format!("候选 id={} 创建 savepoint 失败", candidate.id));
-            continue;
-        }
+        let result = with_savepoint(conn, &sp_name, |conn| {
+            // savepoint 确保失败时全部回滚（含 accept 状态变更），候选恢复为 pending 可重试。
+            // 直接调用 apply_candidate_inner 避免嵌套 apply_candidate savepoint。
+            let review_input = ReviewCandidateInput {
+                candidate_id: candidate.id,
+                action: "accept".to_string(),
+                reviewer: "batch_apply".to_string(),
+                notes: Some("批量审核应用".to_string()),
+            };
+            let mut candidate_for_apply = review_candidate(conn, &review_input)?;
+            apply_candidate_inner(conn, &mut candidate_for_apply)?;
+            Ok(())
+        });
 
-        // 先 accept
-        let review_input = ReviewCandidateInput {
-            candidate_id: candidate.id,
-            action: "accept".to_string(),
-            reviewer: "batch_apply".to_string(),
-            notes: Some("批量审核应用".to_string()),
-        };
-        if let Err(e) = review_candidate(conn, &review_input) {
-            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-            failed += 1;
-            failures.push(format!("候选 id={} accept 失败: {}", candidate.id, e));
-            continue;
-        }
-        // 再 apply（直接调用 inner 避免嵌套 savepoint）
-        // review_candidate 返回 accepted 状态的候选，apply_candidate_inner 需要完整记录
-        let mut candidate_for_apply = match find_candidate_by_id(conn, candidate.id) {
-            Ok(Some(c)) => c,
-            Ok(None) => {
-                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                failed += 1;
-                failures.push(format!(
-                    "候选 id={} accept 后查询失败: 不存在",
-                    candidate.id
-                ));
-                continue;
-            }
-            Err(e) => {
-                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                failed += 1;
-                failures.push(format!("候选 id={} accept 后查询失败: {}", candidate.id, e));
-                continue;
-            }
-        };
-        match apply_candidate_inner(conn, &mut candidate_for_apply) {
-            Ok(_) => {
-                // 修复：RELEASE 失败时回滚整个 accept+apply，候选恢复为 pending
-                match conn.execute(&format!("RELEASE {}", sp_name), []) {
-                    Ok(_) => {
-                        applied += 1;
-                        info!(
-                            "批量应用候选成功: id={} type={}",
-                            candidate.id, candidate.candidate_type
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "批量应用候选 {} 释放 savepoint 失败: {}, 回滚",
-                            candidate.id, e
-                        );
-                        let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                        let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                        failed += 1;
-                        failures.push(format!(
-                            "候选 id={} ({}) RELEASE savepoint 失败: {}",
-                            candidate.id, candidate.candidate_type, e
-                        ));
-                    }
-                }
-            }
-            Err(e) => {
-                // accept+apply 失败，savepoint 回滚所有写入（含 accept 状态变更）
-                debug!(
-                    "批量应用候选 {} apply 失败: {}, savepoint 回滚",
-                    candidate.id, e
+        match result {
+            Ok(()) => {
+                applied += 1;
+                info!(
+                    "批量应用候选成功: id={} type={}",
+                    candidate.id, candidate.candidate_type
                 );
-                let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
+            }
+            Err(e) => {
+                debug!("批量应用候选 {} 失败: {}, savepoint 回滚", candidate.id, e);
                 failed += 1;
                 failures.push(format!(
-                    "候选 id={} ({}) apply 失败: {}",
+                    "候选 id={} ({}) batch apply 失败: {}",
                     candidate.id, candidate.candidate_type, e
                 ));
             }
@@ -1851,11 +1617,10 @@ fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate
         .and_then(|v| v.as_str())
         .unwrap_or(&candidate.target_field);
     let value = payload.get("value").and_then(|v| v.as_str()).unwrap_or("");
-    // P2-9 修复：读取 mode 字段，默认 append（向后兼容）
     let mode = payload
         .get("mode")
         .and_then(|v| v.as_str())
-        .unwrap_or("append");
+        .ok_or_else(|| GBrainError::InvalidInput("page_update payload 缺少 mode".to_string()))?;
 
     let slug = &candidate.target_slug;
 
@@ -1868,7 +1633,7 @@ fn apply_page_update_candidate(conn: &Connection, candidate: &PromotionCandidate
              SELECT id, compiled_truth, frontmatter, title, page_type FROM pages WHERE slug = ?1",
             rusqlite::params![slug],
         )
-        .ok(); // page_versions 表可能不存在（旧 schema），忽略错误
+        .map_err(|e| GBrainError::Database(format!("创建页面快照失败: {}", e)))?;
 
         conn.execute(
             "UPDATE pages SET compiled_truth = ?1, updated_at = datetime('now') WHERE slug = ?2",
@@ -1996,7 +1761,7 @@ fn update_shadow_page_section(
             params![slug],
             |row| row.get(0),
         )
-        .unwrap_or(false);
+        .map_err(|e| GBrainError::Database(format!("查询页面是否存在失败: {}", e)))?;
 
     if page_exists {
         // 修复：在修改前创建 page_versions 快照，使 rollback 能可靠恢复
@@ -2008,14 +1773,14 @@ fn update_shadow_page_section(
              SELECT id, compiled_truth, frontmatter, title, page_type FROM pages WHERE slug = ?1",
             params![slug],
         )
-        .ok(); // page_versions 表可能不存在（旧 schema），忽略错误
+        .map_err(|e| GBrainError::Database(format!("创建页面快照失败: {}", e)))?;
         let snapshot_version_id: Option<i64> = conn
             .query_row(
                 "SELECT MAX(id) FROM page_versions WHERE page_id = (SELECT id FROM pages WHERE slug = ?1)",
                 params![slug],
                 |row| row.get(0),
             )
-            .ok();
+            .map_err(|e| GBrainError::Database(format!("查询页面快照失败: {}", e)))?;
 
         // M28 修复：追加前检查是否已存在相同标题的节，避免重复追加
         let existing_content: String = conn
