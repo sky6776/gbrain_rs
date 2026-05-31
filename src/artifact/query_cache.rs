@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tracing::{debug, trace};
+use tracing::debug;
 
 use super::types::UnifiedQueryResult;
 
@@ -94,13 +94,14 @@ impl QueryCache {
             }
 
             if entries.len() >= self.max_entries {
+                // 当前 max_entries 规模下 O(n) 遍历可接受；若需更大容量应改用 OrderedDict 等结构
                 // 淘汰最近最少使用的条目
                 if let Some(oldest_key) = entries
                     .iter()
                     .min_by_key(|(_, e)| e.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
-                    trace!("query_cache eviction: key={}", oldest_key);
+                    tracing::debug!("QueryCache LRU 淘汰: key={}, 当前条目数={}", oldest_key, entries.len());
                     entries.remove(&oldest_key);
                 }
             }

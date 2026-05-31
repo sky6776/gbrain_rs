@@ -109,6 +109,9 @@ pub fn rebuild_passages_for_node(
                 if rows[i].2 != expected_start || rows[i].3 != expected_end {
                     return false;
                 }
+                // m-21 已知开销：对每个 passage 计算 SHA256 以判断内容是否变更。
+                // 大文档批量重建时此开销可感知。未来改进方向：使用增量 hash（只计算变更部分）
+                // 或先比较长度再按需计算 hash，以减少不必要的 SHA256 调用。
                 let old_hash = Sha256::digest(rows[i].1.as_bytes());
                 let new_hash = Sha256::digest(draft.content.as_bytes());
                 old_hash == new_hash
@@ -302,13 +305,15 @@ fn add_window_passages(content: &str, drafts: &mut Vec<PassageDraft>) {
     }
 
     let base_step = WINDOW_CHARS.saturating_sub(WINDOW_OVERLAP).max(1);
-    let window_chars = if chars.len() > MAX_WINDOW_PASSAGES_PER_NODE * base_step {
+    let mut window_chars = if chars.len() > MAX_WINDOW_PASSAGES_PER_NODE * base_step {
         let required_step =
             (chars.len() + MAX_WINDOW_PASSAGES_PER_NODE - 1) / MAX_WINDOW_PASSAGES_PER_NODE;
         required_step + WINDOW_OVERLAP
     } else {
         WINDOW_CHARS
     };
+    // 注意: 不对 window_chars 设硬上限。自适应逻辑已通过增大窗口确保大文档被完整覆盖。
+    // 对超大窗口的搜索质量由 FTS 索引和 rerank 层保证，而非限制窗口大小。
     let step = window_chars.saturating_sub(WINDOW_OVERLAP).max(1);
     let mut start = 0;
     let mut order = 0;

@@ -2026,14 +2026,18 @@ impl BrainEngine for SqliteEngine {
             for (id, chunk_index, chunk_source) in &existing {
                 if !retained_set.contains(&(*chunk_index, chunk_source.clone())) {
                     // 清理向量索引和 embedding 数据
-                    let _ = tx.execute(
+                    if let Err(e) = tx.execute(
                         "DELETE FROM vec_chunks WHERE chunk_id = ?1",
                         params![id],
-                    );
-                    let _ = tx.execute(
+                    ) {
+                        tracing::warn!("清理 vec_chunks 失败 (chunk_id={}): {}", id, e);
+                    }
+                    if let Err(e) = tx.execute(
                         "DELETE FROM chunk_embeddings WHERE chunk_id = ?1",
                         params![id],
-                    );
+                    ) {
+                        tracing::warn!("清理 chunk_embeddings 失败 (chunk_id={}): {}", id, e);
+                    }
                     tx.execute("DELETE FROM chunks WHERE id = ?1", params![id])?;
                     stale_count += 1;
                 }

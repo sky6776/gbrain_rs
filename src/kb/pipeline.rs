@@ -17,7 +17,8 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
 
-const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+// M-8 修复：MAX_OCR_IMAGE_BYTES 统一定义在 ocr.rs，此处引用
+use crate::kb::ocr::MAX_OCR_IMAGE_BYTES;
 const OCR_IMAGE_TOTAL_PAGES: i32 = 1;
 
 fn is_ocr_image_extension(ext: &str) -> bool {
@@ -425,6 +426,11 @@ pub async fn process_document_async(
     let lib_id = payload.library_id;
     let run_id = &payload.processing_run_id;
 
+    // M-7 修复：统一在此处加载一次 OCR 配置，避免图片/PDF 分支各自重复调用 Config::load()。
+    // TODO: 调用方已持有 config: &Config，理想做法是将 &Config 作为参数传入本函数，
+    // 但签名变更影响面较广（所有调用方需同步修改），当前先用单次加载缓解。
+    let ocr_config = crate::config::Config::load().unwrap_or_default();
+
     kb.ensure_document_run_current(doc_id, run_id)?;
     let library = kb.get_library(lib_id)?;
 
@@ -465,7 +471,6 @@ pub async fn process_document_async(
     })?;
 
     if is_ocr_image_extension(ext) {
-        let ocr_config = crate::config::Config::load().unwrap_or_default();
         enqueue_image_ocr(
             conn,
             doc_id,
@@ -504,8 +509,7 @@ pub async fn process_document_async(
     // Phase 1+2: PDF OCR 分支 — 解析后、分割前执行 OCR
     // 返回 None 表示异步 OCR 已入队，主 pipeline 应在此提前返回，不执行后续 split/embed/persist
     let parsed = if ext == "pdf" {
-        // 加载 OCR 配置（单次加载，避免 maybe_apply_pdf_ocr 内部重复 Config::load）
-        let ocr_config = crate::config::Config::load().unwrap_or_default();
+        // M-7 修复：复用函数顶部已加载的 ocr_config，不再重复 Config::load()
         match maybe_apply_pdf_ocr(
             conn,
             doc_id,
@@ -1506,7 +1510,8 @@ fn enqueue_image_ocr(
         Err(e) => {
             // MIME 校验失败时标记文档为 failed，防止伪装文件在目录导入时留下处理中状态
             let fallback_mime = crate::kb::types::mime_type_for_ext(&ext_lower);
-            let _ = mark_image_ocr_unavailable(
+            // M-9 修复：不再用 let _ = 吞掉错误，改为记录警告
+            if let Err(e2) = mark_image_ocr_unavailable(
                 conn,
                 doc_id,
                 run_id,
@@ -1516,7 +1521,9 @@ fn enqueue_image_ocr(
                 "failed",
                 crate::kb::ocr::OcrStatus::Failed,
                 &format!("图片 MIME 校验失败: {}", e),
-            );
+            ) {
+                tracing::warn!("标记图片 OCR 不可用失败: {}", e2);
+            }
             return Err(e);
         }
     };

@@ -778,7 +778,10 @@ fn git_run_with_timeout(
         .spawn()
         .map_err(|e| GBrainError::FileError(format!("git 启动失败: {}", e)))?;
 
-    // 在辅助线程中等待进程完成
+    // 在辅助线程启动前提取 PID 作为超时 kill handle
+    let pid = child.id();
+
+    // 辅助线程拥有 Child 的全部所有权，用于 wait_with_output
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
@@ -788,10 +791,44 @@ fn git_run_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(e)) => Err(GBrainError::FileError(format!("git 执行失败: {}", e))),
-        Err(_) => Err(GBrainError::FileError(format!(
-            "git 命令超时（{}秒）",
-            timeout_secs
-        ))),
+        Err(_) => {
+            // 超时：通过 PID kill 子进程，不依赖 Child 所有权
+            kill_process_by_pid(pid);
+            // 等待线程回收子进程（wait_with_output 在 kill 后会很快返回）
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            tracing::warn!("git 命令超时（{}秒），已 kill 子进程 PID={}", timeout_secs, pid);
+            Err(GBrainError::FileError(format!(
+                "git 命令超时（{}秒），子进程已终止",
+                timeout_secs
+            )))
+        }
+    }
+}
+
+/// 通过 PID 终止进程及其子进程树（跨平台）
+fn kill_process_by_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        // Windows: taskkill /F /T /PID — /T 同时终止进程树中的子进程（如 ssh、credential helper）
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix: 先 kill 子进程（如 ssh、credential helper），再 kill 主进程
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "-P", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }
 

@@ -29,6 +29,8 @@ impl DocumentParser for CsvParser {
 
         let mut rows = Vec::new();
         let mut headers: Vec<String> = Vec::new();
+        // CSV 行数上限，防止超大文件耗尽内存
+        const MAX_CSV_ROWS: usize = 100_000;
         // C4 fix: 存储 serde_json::Value 而非预序列化的 JSON 字符串，
         // 避免最终 serde_json::to_string(&row_records) 产生双重转义。
         let mut row_records: Vec<serde_json::Value> = Vec::new();
@@ -36,6 +38,12 @@ impl DocumentParser for CsvParser {
         for result in reader.records() {
             match result {
                 Ok(record) => {
+                    if rows.len() >= MAX_CSV_ROWS {
+                        return Err(GBrainError::InvalidInput(format!(
+                            "CSV 行数超过上限 {}，请拆分文件后重试",
+                            MAX_CSV_ROWS
+                        )));
+                    }
                     let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
                     if headers.is_empty() && !fields.is_empty() {
                         headers = fields.clone();
@@ -46,7 +54,7 @@ impl DocumentParser for CsvParser {
                         .map(|(i, h)| (h.clone(), fields.get(i).cloned().unwrap_or_default()))
                         .collect();
                     // 直接存为 Value，不再提前序列化
-                    row_records.push(serde_json::to_value(&row_map).unwrap_or(serde_json::Value::Null));
+                    row_records.push(serde_json::to_value(&row_map).expect("JSON 序列化不应失败: HashMap<String, String> 始终可序列化"));
                     rows.push(fields.join("\t"));
                 }
                 Err(e) => {

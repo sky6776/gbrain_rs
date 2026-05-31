@@ -78,6 +78,12 @@ pub fn plan_ocr_requests(
                 )));
             }
         }
+    } else if !ocr_pages.is_empty() {
+        // total_pages <= 0 但仍指定了页码，无法校验，应拒绝
+        return Err(crate::error::GBrainError::InvalidInput(format!(
+            "total_pages 无效 ({}) 但 ocr_pages 非空 ({} 页)，无法校验页码范围",
+            total_pages, ocr_pages.len()
+        )));
     }
 
     // H25 修复：根据 submit_mode 决定是否需要物理拆分

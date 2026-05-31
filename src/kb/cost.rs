@@ -61,7 +61,7 @@ impl TokenBudget {
             self.reset_in_progress.store(false, Ordering::Release);
         } else {
             while self.reset_in_progress.load(Ordering::Acquire) {
-                std::hint::spin_loop();
+                std::thread::yield_now();
             }
         }
     }

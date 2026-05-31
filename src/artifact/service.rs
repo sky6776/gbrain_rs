@@ -65,7 +65,6 @@ impl ArtifactContentOptions<'_> {
 }
 
 /// put_memory 冲突检测与解析的上下文数据
-#[allow(dead_code)]
 struct PutResolutionContext {
     existing_artifact: Option<SourceArtifact>,
     page_conflict_detected: bool,
@@ -1672,8 +1671,10 @@ fn find_title_slug_candidates(
         return Ok(Vec::new());
     }
 
-    // 当 filter_slug 存在时，构造 SQL IN 子句来约束 canonical_slug，
-    // 避免全库扫描后返回不属于目标 slug 范围的候选
+    // M-19 修复：当 filter_slug 为 None 时，无法将 core_terms 下推到 SQL 层做 FTS/LIKE 过滤，
+    // 因为 source_artifacts 表没有 FTS 索引，只能先 LIMIT 拉取再在 Rust 侧做字符串匹配。
+    // 这种情况下如果结果达到 LIMIT 上限（1000 条），说明可能有遗漏，需要 warn 提示。
+    // 未来优化方向：为 source_artifacts 添加 FTS5 虚拟表，或使用 LIKE 子句下推 core_terms。
     let slug_variants: Vec<String> = filter_slug
         .map(|s| query::slug_value_variants(s))
         .unwrap_or_default();
@@ -1733,7 +1734,9 @@ fn find_title_slug_candidates(
 
     let required = if core_terms.len() >= 3 { 2 } else { 1 };
     let mut candidates = Vec::new();
+    let mut raw_row_count = 0usize;
     for row in rows {
+        raw_row_count += 1;
         let (artifact_uid, slug, artifact_name, doc_title, doc_name) = row?;
         let combined =
             format!("{} {} {} {}", slug, artifact_name, doc_title, doc_name).to_lowercase();
@@ -1768,6 +1771,14 @@ fn find_title_slug_candidates(
                 core_terms.join(" ")
             ),
         });
+    }
+    // M-19: 当无 filter_slug 且 SQL 返回行数达到 LIMIT 上限时，
+    // 可能有匹配的候选被截断遗漏，打印 warn 便于排查
+    if filter_slug.is_none() && raw_row_count >= 1000 {
+        warn!(
+            "find_title_slug_candidates: 无 filter_slug 时 SQL 返回 {} 行达到 LIMIT 上限，可能有遗漏候选",
+            raw_row_count
+        );
     }
     candidates.sort_by(|a, b| {
         b.score

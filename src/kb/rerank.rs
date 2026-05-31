@@ -20,7 +20,10 @@ fn get_http_client() -> &'static reqwest::Client {
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .unwrap_or_else(|e| {
+                tracing::warn!("rerank HTTP client 构建失败，使用默认配置: {}", e);
+                reqwest::Client::new()
+            })
     })
 }
 

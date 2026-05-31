@@ -415,8 +415,32 @@ where
             break;
         }
 
-        let k = calculate_k(current_nodes.len(), config.cluster_size);
-        if k < 2 {
+        // 从当前层级节点中筛选出有向量的节点用于聚类，跳过无向量节点
+        // M-15: 先过滤再计算 k，确保 k 基于实际参与聚类的有向量节点数
+        let (vectors_with, node_ids_with): (Vec<Vec<f32>>, Vec<i64>) = current_node_ids
+            .iter()
+            .filter_map(|id| {
+                let node = nodes.iter().find(|n| n.id == *id)?;
+                node.vector.clone().map(|v| (v, *id))
+            })
+            .unzip();
+
+        // 收集无向量节点 ID，后续用于启发式归入聚类簇
+        let node_ids_without: Vec<i64> = current_node_ids
+            .iter()
+            .filter(|id| !node_ids_with.contains(id))
+            .copied()
+            .collect();
+
+        // 没有足够的有向量节点，无法聚类
+        if node_ids_with.len() < config.min_nodes {
+            tracing::warn!(
+                level = current_level,
+                total_nodes = current_nodes.len(),
+                nodes_with_vectors = node_ids_with.len(),
+                "RAPTOR 树构建停止：有向量的节点数不足 min_nodes"
+            );
+            // 为所有当前节点（含无向量）创建单一摘要节点作为兜底父节点
             let current_refs: Vec<&RaptorNode> = current_nodes.iter().collect();
             let summary_node = create_summary_node(
                 nodes,
@@ -427,27 +451,39 @@ where
                 &llm_summarize,
             )
             .await?;
+            let summary_id = summary_node.id;
             nodes.push(summary_node);
+            // 将所有当前节点（含无向量）设为摘要的子节点
+            for node in nodes.iter_mut() {
+                if current_node_ids.contains(&node.id) && node.parent_id.is_none() {
+                    node.parent_id = Some(summary_id);
+                }
+            }
             break;
         }
 
-        // 从当前层级节点中筛选出有向量的节点用于聚类，跳过无向量节点
-        let (vectors_with, node_ids_with): (Vec<Vec<f32>>, Vec<i64>) = current_node_ids
-            .iter()
-            .filter_map(|id| {
-                let node = nodes.iter().find(|n| n.id == *id)?;
-                node.vector.clone().map(|v| (v, *id))
-            })
-            .unzip();
-
-        // 没有足够的有向量节点，无法聚类
-        if node_ids_with.len() < config.min_nodes {
-            tracing::warn!(
-                level = current_level,
-                total_nodes = current_nodes.len(),
-                nodes_with_vectors = node_ids_with.len(),
-                "RAPTOR 树构建停止：有向量的节点数不足 min_nodes"
-            );
+        // M-15: 使用有向量节点数计算 k，而非总节点数
+        let k = calculate_k(node_ids_with.len(), config.cluster_size);
+        // C-4: calculate_k 返回值恒 >= 2，补充退化条件 — 当节点数太少不足以形成有效聚类时兜底
+        if k < 2 || node_ids_with.len() < k * config.cluster_size {
+            let current_refs: Vec<&RaptorNode> = current_nodes.iter().collect();
+            let summary_node = create_summary_node(
+                nodes,
+                &current_node_ids,
+                current_refs,
+                next_id,
+                current_level,
+                &llm_summarize,
+            )
+            .await?;
+            let summary_id = summary_node.id;
+            nodes.push(summary_node);
+            // 将所有当前节点（含无向量）设为摘要的子节点
+            for node in nodes.iter_mut() {
+                if current_node_ids.contains(&node.id) && node.parent_id.is_none() {
+                    node.parent_id = Some(summary_id);
+                }
+            }
             break;
         }
 
@@ -507,6 +543,52 @@ where
             new_node_ids.push(next_id);
             nodes.push(summary_node);
             next_id += 1;
+        }
+
+        // M-14: 无向量节点按启发式归入最近邻有向量节点所在的簇
+        // 遍历无向量节点，找到与其 chunk_order 最接近的有向量节点，将其 parent_id 设为该有向量节点所属簇的摘要节点 ID
+        if !node_ids_without.is_empty() {
+            // 先收集有向量节点的 (chunk_order, parent_id) 信息，避免后续可变借用冲突
+            let vec_node_info: Vec<(i32, Option<i64>)> = node_ids_with
+                .iter()
+                .map(|&id| {
+                    let node = nodes.iter().find(|n| n.id == id).unwrap();
+                    (node.chunk_order, node.parent_id)
+                })
+                .collect();
+
+            // 收集无向量节点的 (id, chunk_order) 信息
+            let no_vec_info: Vec<(i64, i32)> = node_ids_without
+                .iter()
+                .map(|&id| {
+                    let node = nodes.iter().find(|n| n.id == id).unwrap();
+                    (id, node.chunk_order)
+                })
+                .collect();
+
+            // 为每个无向量节点找 chunk_order 最近的有向量节点，取其 parent_id
+            let mut assignments: Vec<(i64, i64)> = Vec::new();
+            for (no_vec_id, no_vec_order) in &no_vec_info {
+                let best_parent = vec_node_info
+                    .iter()
+                    .filter_map(|&(vec_order, vec_parent)| {
+                        let parent = vec_parent?;
+                        let order_dist = (*no_vec_order as i64 - vec_order as i64).unsigned_abs();
+                        Some((order_dist, parent))
+                    })
+                    .min_by_key(|(dist, _)| *dist)
+                    .map(|(_, parent_id)| parent_id);
+                if let Some(parent_id) = best_parent {
+                    assignments.push((*no_vec_id, parent_id));
+                }
+            }
+
+            // 批量写入 parent_id（此时不再有不可变借用）
+            for (node_id, parent_id) in assignments {
+                if let Some(node) = nodes.iter_mut().find(|n| n.id == node_id) {
+                    node.parent_id = Some(parent_id);
+                }
+            }
         }
 
         current_level += 1;

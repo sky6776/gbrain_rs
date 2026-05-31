@@ -67,13 +67,14 @@ impl<T: Clone> SearchCache<T> {
             }
 
             if entries.len() >= self.max_entries {
+                // 当前 max_entries=100，O(n) 遍历可接受；若需更大容量应改用 OrderedDict 等结构
                 // 淘汰最近最少使用的条目，而不是最早创建的条目。
                 if let Some(oldest_key) = entries
                     .iter()
                     .min_by_key(|(_, v)| v.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
-                    debug!("cache eviction (LRU): key={}", oldest_key);
+                    debug!("SearchCache LRU 淘汰: key={}, 当前条目数={}", oldest_key, entries.len());
                     entries.remove(&oldest_key);
                 }
             }

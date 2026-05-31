@@ -366,7 +366,7 @@ fn query_kb_evidence(
     }
 
     candidates = rerank_evidence_candidates(conn, query, candidates, &plan, config)?;
-    candidates = dedup_evidence_by_document(candidates);
+    candidates = dedup_evidence_by_document(candidates, 3);
     candidates.truncate(limit_usize);
 
     debug!(
@@ -398,6 +398,15 @@ fn enrich_evidence_with_artifact_metadata(
     evidence_hits: &mut [EvidenceHit],
     filter_slug: Option<&str>,
 ) -> Result<()> {
+    // TODO(m-6): 当前对每个 evidence hit 逐个调用 find_projection_by_ref + find_artifact_by_id，
+    // 形成经典的 N+1 查询模式。当 evidence_hits 较多时（例如 20 条），可能产生 40+ 次 SQL 查询。
+    // 优化方向：
+    //   1. 先收集所有需要补全的 (kb_document_id, needs_artifact, needs_shadow) 三元组；
+    //   2. 批量查询：SELECT * FROM artifact_projections WHERE projection_type='kb_document'
+    //      AND projection_ref IN ('kb_document:1', 'kb_document:2', ...) AND status='active'；
+    //   3. 根据 projection 结果再批量查询 artifact：SELECT * FROM artifacts WHERE id IN (...)；
+    //   4. 最后遍历 evidence_hits 用 HashMap 填充，将 O(N) 次查询降为 O(1)（常量 2-3 次）。
+    // 注意：store 层目前缺少批量查询接口，需要先添加 batch_find_projections_by_refs 等方法。
     for hit in evidence_hits.iter_mut() {
         if hit.kb_document_id <= 0 {
             continue;
@@ -763,12 +772,19 @@ impl EvidenceCandidate {
     }
 }
 
-// 注意：query_node_candidates 和 query_passage_candidates 的整体结构高度相似：
+// TODO(m-4): query_node_candidates 和 query_passage_candidates 的整体结构高度相似：
 // 1. 空 query 检查 → 2. 根据 filter_slug 选择 SQL → 3. prepare + query_map → 4. 结果遍历。
-// 差异仅在：查询的 FTS 表不同（kb_doc_fts vs kb_passage_fts）、返回的 EvidenceCandidate
-// 字段填充略有不同（node 用 -node_id 作为 candidate_id，passage 直接用 passage_id）。
-// 重构方向：可提取泛型辅助函数，接受 SQL 模板和 row mapping 闭包。
-// 当前保持独立是因为 SQL 和 row mapping 的差异虽小但散布在多处，强行抽象可能降低可读性。
+// 差异点：
+//   - FTS 表不同：kb_doc_fts vs kb_passage_fts
+//   - SQL 列数不同：node 返回 10 列（不含 node_id），passage 返回 12 列
+//   - candidate_id 语义不同：node 用 -node_id，passage 直接用 passage_id
+//   - passage_id 字段不同：node 为 None，passage 为 Some(passage_id)
+//   - view_type 来源不同：node 固定 "node"，passage 来自 ps.view_type 列
+// 重构方向：提取辅助函数 `query_fts_candidates(conn, sql_with_slug, sql_without_slug,
+//   fts_query, fetch_k, filter_slug, route_weight, map_fn)`，
+//   将 SQL 选择、参数绑定、row 遍历逻辑集中，两个上层函数只负责构造 SQL 和 map_row 闭包。
+// 预计可减少约 40 行重复代码。当前保持独立是因为 SQL 和 row mapping 的差异散布多处，
+// 需要设计合适的闭包签名来避免引入新的泛型复杂度。
 fn query_node_candidates(
     conn: &Connection,
     fts_query: &str,
@@ -1211,15 +1227,23 @@ fn merge_evidence_routes(routes: Vec<Vec<EvidenceCandidate>>) -> Vec<EvidenceCan
     out
 }
 
-fn dedup_evidence_by_document(candidates: Vec<EvidenceCandidate>) -> Vec<EvidenceCandidate> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for candidate in candidates {
-        if seen.insert(candidate.kb_document_id) {
-            out.push(candidate);
-        }
-    }
-    out
+/// C-3 修复：按文档保留 top-N 个候选，而非只保留第一个。
+/// 同一文档可能有多个不同 passage 都命中查询关键词，全部丢弃会丢失有价值的证据。
+/// max_per_doc 控制每个文档最多保留的候选数量，推荐值 3。
+fn dedup_evidence_by_document(candidates: Vec<EvidenceCandidate>, max_per_doc: usize) -> Vec<EvidenceCandidate> {
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    candidates
+        .into_iter()
+        .filter(|c| {
+            let count = counts.entry(c.kb_document_id).or_insert(0usize);
+            if *count < max_per_doc {
+                *count += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 fn focus_evidence_candidate_content(candidate: &mut EvidenceCandidate, plan: &EvidenceQueryPlan) {
@@ -1410,48 +1434,65 @@ fn normalize_score(score: f64, min: f64, max: f64) -> f64 {
     ((score - min) / width).clamp(0.0, 1.0)
 }
 
+/// m-7 修复：使用 WHERE id IN (...) 一次性查询所有涉及的库策略，
+/// 替代之前的逐个 library_id 查询（N 个库 = N 次 SQL round-trip）。
+/// 通常候选只涉及 1-5 个库，但即使是 5 个也只需 1 次查询。
 fn resolve_evidence_rerank_policy(
     conn: &Connection,
     candidates: &[EvidenceCandidate],
 ) -> Result<(bool, bool, bool, String)> {
     // 返回: (external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider)
-    let mut library_ids = HashSet::new();
-    for candidate in candidates {
-        library_ids.insert(candidate.library_id);
+    let library_ids: HashSet<i64> = candidates.iter().map(|c| c.library_id).collect();
+    if library_ids.is_empty() {
+        return Ok((true, false, true, String::new()));
     }
+
+    // 构造 WHERE id IN (?, ?, ...) 子句
+    let placeholders: Vec<String> = library_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let sql = format!(
+        "SELECT external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider \
+         FROM kb_libraries WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let params: Vec<Box<dyn rusqlite::types::ToSql>> = library_ids
+        .iter()
+        .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| GBrainError::Database(format!("准备库策略批量查询失败: {}", e)))?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| GBrainError::Database(format!("库策略批量查询失败: {}", e)))?;
 
     let mut external_allowed = true;
     let mut redaction_enabled = false;
     let mut rerank_enabled = true;
     let mut rerank_provider = String::new();
-    for library_id in library_ids {
-        let policy = conn.query_row(
-            "SELECT external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider \
-             FROM kb_libraries WHERE id = ?1",
-            params![library_id],
-            |row| {
-                Ok((
-                    row.get::<_, i32>(0)?,
-                    row.get::<_, i32>(1)?,
-                    row.get::<_, i32>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        );
-        if let Ok((allowed, redact, re_enabled, re_provider)) = policy {
-            if allowed == 0 {
-                external_allowed = false;
-            }
-            if redact != 0 {
-                redaction_enabled = true;
-            }
-            // 任一库禁用 rerank 则全局禁用，取最保守策略
-            if re_enabled == 0 {
-                rerank_enabled = false;
-            }
-            if rerank_provider.is_empty() && !re_provider.is_empty() {
-                rerank_provider = re_provider;
-            }
+    for row in rows {
+        let (allowed, redact, re_enabled, re_provider) = row
+            .map_err(|e| GBrainError::Database(format!("读取库策略行失败: {}", e)))?;
+        if allowed == 0 {
+            external_allowed = false;
+        }
+        if redact != 0 {
+            redaction_enabled = true;
+        }
+        // 任一库禁用 rerank 则全局禁用，取最保守策略
+        if re_enabled == 0 {
+            rerank_enabled = false;
+        }
+        if rerank_provider.is_empty() && !re_provider.is_empty() {
+            rerank_provider = re_provider;
         }
     }
     Ok((
@@ -1491,6 +1532,12 @@ fn query_focused_excerpt_details(
         return None;
     }
 
+    // m-2 注释：folded 使用 to_ascii_lowercase()，该方法只修改 ASCII 字母（a-z → A-Z），
+    // 不会改变非 ASCII 字节（包括 UTF-8 多字节字符），因此 UTF-8 字节布局保持不变。
+    // 这意味着 folded 上的 str::find() 返回的是字节偏移（byte offset），
+    // 后续通过 content[..byte_pos].chars().count() 转换为字符偏移（char offset）。
+    // 所有基于 folded.find() 的计算（byte_pos、search_from）都是字节级别的，
+    // 而最终 start/end 输出和 chars[] 下标是字符级别的。
     let folded = content.to_ascii_lowercase();
     let chars: Vec<char> = content.chars().collect();
     let content_len = chars.len();

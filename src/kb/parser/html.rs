@@ -7,6 +7,23 @@ use super::{DocumentParser, ParsedDocument};
 use crate::error::GBrainError;
 use std::collections::HashMap;
 
+// M-11: 预编译高频正则，避免在循环/每次调用中重复编译
+
+/// 匹配 HTML 开标签（捕获组1=标签名，组2=属性）
+static TAG_OPEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?is)<(\w+)([^>]*)>").unwrap()
+});
+
+/// 匹配 HTML 闭标签
+static TAG_CLOSE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"<[^>]*>").unwrap()
+});
+
+/// 匹配 class 属性值（用于隐藏 class 检测）
+static CLASS_ATTR_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#).unwrap()
+});
+
 pub struct HtmlParser;
 
 impl Default for HtmlParser {
@@ -155,13 +172,16 @@ fn remove_tags(html: &str, tag: &str) -> String {
 /// 从 `start` 位置开始，查找与开标签匹配的闭标签位置。
 /// 使用深度计数追踪嵌套同名标签，返回匹配闭标签之后的全局偏移量。
 /// 未找到匹配时返回 None。
+/// m-15: 添加最大嵌套深度限制，防止超深层嵌套 HTML 导致 O(n²)
+const MAX_TAG_NESTING_DEPTH: usize = 256;
+
 fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize> {
     let open_pat = format!(r"(?i)<{}[\s>/]", regex::escape(tag_name));
     let close_pat = format!(r"(?i)</{}\s*>", regex::escape(tag_name));
     let Ok(open_re) = regex::Regex::new(&open_pat) else { return None };
     let Ok(close_re) = regex::Regex::new(&close_pat) else { return None };
 
-    let mut depth = 1;
+    let mut depth: usize = 1;
     let mut pos = start;
 
     while depth > 0 && pos < html.len() {
@@ -178,6 +198,10 @@ fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize
 
         if closest.2 {
             depth += 1;
+            // m-15: 超过最大嵌套深度时停止追踪，防止恶意/畸形 HTML 导致 O(n²)
+            if depth > MAX_TAG_NESTING_DEPTH {
+                return None;
+            }
         } else {
             depth -= 1;
         }
@@ -191,15 +215,11 @@ fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize
 /// `detect(open_tag)` 接收开标签文本，返回 true 则删除该元素及所有子内容。
 /// 正确处理嵌套同名标签：`<div class="hidden"><div>inner</div></div>` 会被完整删除。
 fn remove_elements_matching(html: &str, detect: impl Fn(&str) -> bool) -> String {
-    let Ok(tag_re) = regex::Regex::new(r"(?is)<(\w+)([^>]*)>") else {
-        return html.to_string();
-    };
-
     let mut result = String::with_capacity(html.len());
     let mut pos = 0;
 
     while pos < html.len() {
-        let Some(cap) = tag_re.captures(&html[pos..]) else {
+        let Some(cap) = TAG_OPEN_RE.captures(&html[pos..]) else {
             result.push_str(&html[pos..]);
             break;
         };
@@ -211,13 +231,11 @@ fn remove_elements_matching(html: &str, detect: impl Fn(&str) -> bool) -> String
         result.push_str(&html[pos..open_start]);
 
         if full.as_str().ends_with("/>") {
-            // 自闭合标签：检测后直接跳过或保留
-            if detect(full.as_str()) {
-                pos = open_end;
-            } else {
+            // s-9: 自闭合标签 — 仅在未命中时保留
+            if !detect(full.as_str()) {
                 result.push_str(full.as_str());
-                pos = open_end;
             }
+            pos = open_end;
         } else if detect(full.as_str()) {
             // 非自闭合标签 + 需要删除：找匹配闭标签，跳过整棵子树
             if let Some(subtree_end) = find_matching_close(html, open_end, &tag_name) {
@@ -240,11 +258,8 @@ fn remove_elements_matching(html: &str, detect: impl Fn(&str) -> bool) -> String
 /// 正确处理嵌套同名标签，确保子树内容不会泄漏到 KB 索引。
 fn remove_hidden_class_elements(html: &str) -> String {
     static HIDDEN_TOKENS: &[&str] = &["hidden", "invisible", "d-none", "visually-hidden", "sr-only"];
-    let Ok(class_re) = regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#) else {
-        return html.to_string();
-    };
     remove_elements_matching(html, |open_tag| {
-        if let Some(cap) = class_re.captures(open_tag) {
+        if let Some(cap) = CLASS_ATTR_RE.captures(open_tag) {
             if let Some(classes) = cap.get(1) {
                 return classes.as_str().split_whitespace().any(|token| {
                     HIDDEN_TOKENS.iter().any(|h| token.eq_ignore_ascii_case(h))
@@ -328,11 +343,7 @@ fn extract_metadata(raw: &str, meta: &mut HashMap<String, String>) {
 }
 
 fn strip_tags(html: &str) -> String {
-    if let Ok(re) = regex::Regex::new(r"<[^>]*>") {
-        re.replace_all(html, "").to_string()
-    } else {
-        html.to_string()
-    }
+    TAG_CLOSE_RE.replace_all(html, "").to_string()
 }
 
 fn clean_html_text(text: &str) -> String {

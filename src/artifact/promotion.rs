@@ -561,11 +561,11 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
     // 修改时的 datetime('now')，比 applied_at 更晚，rollback 查不到。
     // 现在先执行修改，再生成 applied_at，确保 snapshot_at < applied_at 成立。
 
-    // 根据候选类型应用变更
-    let candidate_type = candidate
+    // 解析 candidate_type，只解析一次，后续 match 和 snapshot 共用
+    let candidate_type: CandidateType = candidate
         .candidate_type
         .parse()
-        .unwrap_or(CandidateType::FactClaim);
+        .map_err(|e| GBrainError::Database(format!("无效的 candidate_type '{}': {}", candidate.candidate_type, e)))?;
     match candidate_type {
         CandidateType::DocumentSummary => {
             apply_summary_candidate(conn, candidate)?;
@@ -596,10 +596,7 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
     // 修复：记录本次 apply 前创建的 page_versions.id 到 review_notes，
     // rollback 时按 version id 精确恢复，避免批量 apply 同秒多候选时
     // rollback 拿到同页其它候选的快照
-    let candidate_type = candidate
-        .candidate_type
-        .parse()
-        .unwrap_or(CandidateType::FactClaim);
+    // 注意: candidate_type 已在函数顶部解析并校验，此处直接复用
     let snapshot_version_id: Option<i64> = conn
         .query_row(
             "SELECT MAX(id) FROM page_versions WHERE page_id = (SELECT id FROM pages WHERE slug = ?1)",

@@ -1452,7 +1452,8 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
 const MAX_OCR_RETRIES: u32 = 3;
 /// OCR 请求初始退避时间（秒），每次重试翻倍
 const INITIAL_RETRY_BACKOFF_SECS: u64 = 2;
-const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+// M-8 修复：MAX_OCR_IMAGE_BYTES 统一定义在 ocr.rs，此处引用
+use crate::kb::ocr::MAX_OCR_IMAGE_BYTES;
 
 fn ocr_payload_extension(payload: &crate::kb::jobs::KbOcrPayload) -> String {
     std::path::Path::new(&payload.storage_path)
@@ -1973,6 +1974,16 @@ fn execute_image_ocr_job(
             &payload.model,
             &payload.processing_run_id,
         )?;
+        // M-10 修复：大小超限时同步更新文档状态为 failed，与 MIME 校验失败路径保持一致，
+        // 防止文档停留在 PROCESSING 状态
+        if let Err(e2) = conn.execute(
+            "UPDATE kb_documents SET document_status = 'failed', parsing_error = ?1, \
+             parsing_status = 3, parsing_progress = 100, updated_at = datetime('now') \
+             WHERE id = ?2 AND processing_run_id = ?3",
+            rusqlite::params![reason, payload.document_id, payload.processing_run_id],
+        ) {
+            tracing::warn!(doc_id = payload.document_id, error = %e2, "标记文档为 failed 失败");
+        }
         return Err(GBrainError::InvalidInput(reason));
     }
 
@@ -3051,7 +3062,15 @@ fn run_priority_workers(engine: &SqliteEngine, config: &Config) -> bool {
             Ok(true) => return true, // 有作业被处理，立即返回重新轮询
             Ok(false) => continue,   // 无作业，尝试下一个
             Err(e) => {
-                // #2 修复：出错后继续尝试下一个 worker，不跳过后续 worker
+                // m-23 修复：区分致命错误与可恢复错误。
+                // 数据库连接断开等致命错误应提前退出，避免后续 worker 在无效连接上反复失败。
+                if matches!(e, crate::error::GBrainError::Database(_))
+                    || matches!(e, crate::error::GBrainError::NotConnected)
+                {
+                    warn!(worker = *name, error = %e, "致命错误，提前退出 worker 调度");
+                    return false;
+                }
+                // 可恢复错误：记录警告后继续尝试下一个 worker
                 warn!(worker = *name, error = %e, "worker 处理循环出错");
             }
         }

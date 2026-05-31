@@ -698,22 +698,32 @@ fn get_node_context(
 /// 避免对整个 content 调用 `to_lowercase()`（某些 Unicode 字符如 ß→ss 会改变长度，
 /// 导致偏移量与原始内容坐标系错位）。regex::find_iter 返回的字节偏移量
 /// 天然适用于原始字符串。
+///
+/// M-16: 合并为一个交替正则 `(term1|term2|...)` 一次性匹配，
+/// 避免对每个 term 各编译一次正则并遍历内容。对 term 做 regex::escape() 防止正则注入。
 fn compute_highlights(content: &str, query: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    let query_terms: Vec<&str> = query.split_whitespace().collect();
-    for term in query_terms {
-        if term.len() < 2 {
-            continue;
-        }
-        let Ok(re) = regex::RegexBuilder::new(&regex::escape(term))
-            .case_insensitive(true)
-            .build()
-        else {
-            continue;
-        };
-        for m in re.find_iter(content) {
-            ranges.push((m.start(), m.end()));
-        }
+    let query_terms: Vec<&str> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 2)
+        .collect();
+    if query_terms.is_empty() {
+        return ranges;
+    }
+    // 构建交替正则 (term1|term2|...)，每个 term 做 escape 防止正则注入
+    let pattern = query_terms
+        .iter()
+        .map(|t| regex::escape(t))
+        .collect::<Vec<_>>()
+        .join("|");
+    let Ok(re) = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+    else {
+        return ranges;
+    };
+    for m in re.find_iter(content) {
+        ranges.push((m.start(), m.end()));
     }
     ranges
 }

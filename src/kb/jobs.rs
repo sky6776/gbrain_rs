@@ -193,15 +193,37 @@ pub fn enqueue_mine_synonyms_job(
     library_id: Option<i64>,
     full: bool,
 ) -> Result<i64> {
-    let queue = JobQueue::new(conn);
-    // Avoid duplicate pending jobs
-    let existing = conn
+    // 使用 IMMEDIATE 事务：立即获取写锁，防止并发调用者同时读到 COUNT=0 后重复入队
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| GBrainError::Database(format!("开启 IMMEDIATE 事务失败: {}", e)))?;
+    let result = enqueue_mine_synonyms_job_inner(conn, library_id, full);
+    // 统一在外层管理事务关闭：Ok → COMMIT, Err → ROLLBACK
+    match &result {
+        Ok(_) => {
+            if let Err(e) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(GBrainError::Database(format!("提交事务失败: {}", e)));
+            }
+        }
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+    result
+}
+
+fn enqueue_mine_synonyms_job_inner(
+    conn: &Connection,
+    library_id: Option<i64>,
+    full: bool,
+) -> Result<i64> {
+    let existing: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM jobs WHERE job_type = 'kb_mine_synonyms' AND status = 'pending'",
             [],
-            |row| row.get::<_, i64>(0),
+            |row| row.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|e| GBrainError::Database(format!("查询待处理同义词任务失败: {}", e)))?;
     if existing > 0 {
         return Ok(0);
     }
@@ -210,13 +232,16 @@ pub fn enqueue_mine_synonyms_job(
         library_id,
         full,
     };
-    queue.enqueue(JobInput {
+    let queue = JobQueue::new(conn);
+    let job_id = queue.enqueue(JobInput {
         job_type: "kb_mine_synonyms".to_string(),
         payload: serde_json::to_value(&payload)
             .map_err(|e| GBrainError::Serialization(e.to_string()))?,
         priority: Some(PRIORITY_KB_SYNONYMS),
         max_attempts: Some(2),
-    })
+    })?;
+    // 注意: COMMIT 由外层 enqueue_mine_synonyms_job 统一管理
+    Ok(job_id)
 }
 
 /// Claim the next pending synonym mining job.

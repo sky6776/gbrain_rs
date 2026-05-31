@@ -3,6 +3,9 @@
 //! Phase 1~4: 支持 GLM-OCR 版面识别、页级状态、块级融合、异步 job。
 
 use crate::error::{GBrainError, Result};
+
+/// M-8 修复：OCR 图片大小上限（10 MB），pipeline.rs 和 worker.rs 共用此常量。
+pub const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 use crate::kb::context;
 use crate::kb::engine::KbEngine;
 use crate::kb::types::*;
@@ -119,10 +122,16 @@ pub fn persist_ocr_page_results(
     conn.execute("SAVEPOINT sp_persist_ocr_pages", [])?;
     let result = persist_ocr_page_results_inner(conn, document_id, run_id, page_results, sensitive_value);
     if result.is_ok() {
-        let _ = conn.execute("RELEASE sp_persist_ocr_pages", []);
+        // 成功路径：RELEASE 失败意味着数据可能未真正提交，必须传播错误
+        conn.execute("RELEASE sp_persist_ocr_pages", [])
+            .map_err(|e| GBrainError::Database(format!("SAVEPOINT sp_persist_ocr_pages RELEASE 失败: {}", e)))?;
     } else {
-        let _ = conn.execute("ROLLBACK TO sp_persist_ocr_pages", []);
-        let _ = conn.execute("RELEASE sp_persist_ocr_pages", []);
+        if let Err(e) = conn.execute("ROLLBACK TO sp_persist_ocr_pages", []) {
+            tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_pages ROLLBACK 失败");
+        }
+        if let Err(e) = conn.execute("RELEASE sp_persist_ocr_pages", []) {
+            tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_pages RELEASE (回滚后) 失败");
+        }
     }
     result
 }
@@ -206,10 +215,16 @@ pub fn persist_ocr_blocks(
     conn.execute("SAVEPOINT sp_persist_ocr_blocks", [])?;
     let result = persist_ocr_blocks_inner(conn, document_id, run_id, page_results, sensitive_value);
     if result.is_ok() {
-        let _ = conn.execute("RELEASE sp_persist_ocr_blocks", []);
+        // 成功路径：RELEASE 失败意味着数据可能未真正提交，必须传播错误
+        conn.execute("RELEASE sp_persist_ocr_blocks", [])
+            .map_err(|e| GBrainError::Database(format!("SAVEPOINT sp_persist_ocr_blocks RELEASE 失败: {}", e)))?;
     } else {
-        let _ = conn.execute("ROLLBACK TO sp_persist_ocr_blocks", []);
-        let _ = conn.execute("RELEASE sp_persist_ocr_blocks", []);
+        if let Err(e) = conn.execute("ROLLBACK TO sp_persist_ocr_blocks", []) {
+            tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_blocks ROLLBACK 失败");
+        }
+        if let Err(e) = conn.execute("RELEASE sp_persist_ocr_blocks", []) {
+            tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_blocks RELEASE (回滚后) 失败");
+        }
     }
     result
 }
@@ -353,32 +368,35 @@ pub fn compute_ocr_status(
     total_pages: i32,
     run_id: Option<&str>,
 ) -> Result<(OcrStatus, f64)> {
-    // 合并为单条 GROUP BY 查询，避免多次 COUNT(*) 逐一执行
-    let sql = if run_id.is_some() {
-        "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
-         WHERE document_id = ?1 AND processing_run_id = ?2 GROUP BY status"
-    } else {
-        "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
-         WHERE document_id = ?1 GROUP BY status"
-    };
-
+    // m-16 修复：用两个分支直接查询，避免 Vec<Box<dyn ToSql>> + rid.to_string() 的堆分配
     let mut status_counts: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
     let mut total_ocr_pages: i32 = 0;
 
-    let params: Vec<Box<dyn rusqlite::types::ToSql>> = if let Some(rid) = run_id {
-        vec![Box::new(document_id), Box::new(rid.to_string())]
-    } else {
-        vec![Box::new(document_id)]
-    };
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    {
+        let mut stmt = if run_id.is_some() {
+            conn.prepare(
+                "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
+                 WHERE document_id = ?1 AND processing_run_id = ?2 GROUP BY status",
+            )?
+        } else {
+            conn.prepare(
+                "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
+                 WHERE document_id = ?1 GROUP BY status",
+            )?
+        };
 
-    let mut stmt = conn.prepare(sql)?;
-    let mut rows = stmt.query(param_refs.as_slice())?;
-    while let Some(row) = rows.next()? {
-        let status: String = row.get(0)?;
-        let cnt: i32 = row.get(1)?;
-        total_ocr_pages += cnt;
-        status_counts.insert(status, cnt);
+        let mut rows = if let Some(rid) = run_id {
+            stmt.query(rusqlite::params![document_id, rid])?
+        } else {
+            stmt.query(rusqlite::params![document_id])?
+        };
+
+        while let Some(row) = rows.next()? {
+            let status: String = row.get(0)?;
+            let cnt: i32 = row.get(1)?;
+            total_ocr_pages += cnt;
+            status_counts.insert(status, cnt);
+        }
     }
 
     let done_count = status_counts.get("done").copied().unwrap_or(0);

@@ -13,11 +13,24 @@ use crate::error::{GBrainError, Result};
 use crate::kb::pipeline::embedding_to_blob;
 use crate::search::vector::cosine_similarity;
 
+/// 校验 SQL 标识符只包含字母、数字和下划线，防止注入。
+fn validate_sql_identifier(name: &str) {
+    assert!(
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "SQL 标识符必须非空且只包含字母数字和下划线，got: {:?}",
+        name
+    );
+}
+
 fn with_savepoint<T>(
     conn: &Connection,
     name: &str,
     f: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
+    validate_sql_identifier(name);
     conn.execute(&format!("SAVEPOINT {}", name), [])
         .map_err(|e| GBrainError::Database(e.to_string()))?;
     match f(conn) {
@@ -115,8 +128,18 @@ pub fn batch_lookup_token_synonyms(
         return HashMap::new();
     }
 
+    // 去重（保留首次出现顺序），避免重复参数传入 SQL IN
+    let mut seen = std::collections::HashSet::new();
+    let unique_tokens: Vec<&String> = tokens
+        .iter()
+        .filter(|t| seen.insert(*t))
+        .collect();
+    if unique_tokens.is_empty() {
+        return HashMap::new();
+    }
+
     // 构建 IN 子句
-    let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+    let placeholders: Vec<&str> = unique_tokens.iter().map(|_| "?").collect();
     let sql = format!(
         "SELECT token, synonym FROM kb_token_synonyms \
          WHERE embedding_index_id = ? AND token IN ({}) \
@@ -128,9 +151,9 @@ pub fn batch_lookup_token_synonyms(
         return HashMap::new();
     };
 
-    // 参数：active_idx_id + 各 token
+    // 参数：active_idx_id + 各去重 token
     let params: Vec<&dyn rusqlite::ToSql> = std::iter::once(&active_idx_id as &dyn rusqlite::ToSql)
-        .chain(tokens.iter().map(|t| t as &dyn rusqlite::ToSql))
+        .chain(unique_tokens.iter().map(|t| *t as &dyn rusqlite::ToSql))
         .collect();
 
     let rows = stmt.query_map(params.as_slice(), |row| {
@@ -214,12 +237,19 @@ pub struct MineSynonymsStats {
 // -- helpers ----------------------------------------------------------------
 
 fn is_substring_or_superstring(a: &str, b: &str) -> bool {
+    // 短 token（长度 <= 2）太容易误命中，跳过子串/超串检查
+    if a.chars().count() <= 2 || b.chars().count() <= 2 {
+        return false;
+    }
     a.contains(b) || b.contains(a)
 }
 
 /// 将 BLOB 反序列化为 f32 向量。
 /// 编码使用共享的 `pipeline::embedding_to_blob`。
 fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
+    if blob.len() % 4 != 0 {
+        tracing::warn!("blob 长度 {} 不是 4 的倍数，尾部字节将被丢弃", blob.len());
+    }
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
@@ -454,24 +484,26 @@ fn knn_mine_brute_force(
         return Vec::new();
     }
 
-    let tokens: Vec<String> = all.keys().cloned().collect();
+    let tokens: Vec<&String> = all.keys().collect();
     let mut pairs = Vec::new();
 
-    for (i, token_a) in tokens.iter().enumerate() {
+    for i in 0..tokens.len() {
+        let token_a = tokens[i];
         let emb_a = &all[token_a];
-        let mut neighbors: Vec<(f32, String)> = Vec::new();
+        let mut neighbors: Vec<(f32, usize)> = Vec::new();
 
-        for (j, token_b) in tokens.iter().enumerate() {
+        for j in 0..tokens.len() {
             if i == j {
                 continue;
             }
+            let token_b = tokens[j];
             // #5 修复：substring 过滤前置，避免浪费邻居槽位
             if is_substring_or_superstring(token_a, token_b) {
                 continue;
             }
             let sim = cosine_similarity(emb_a, &all[token_b]);
             if sim >= opts.similarity_threshold as f32 {
-                neighbors.push((sim, token_b.clone()));
+                neighbors.push((sim, j));
             }
         }
 
@@ -479,8 +511,8 @@ fn knn_mine_brute_force(
         // #4 修复：修正 off-by-one — self 已在循环中排除，直接用 knn_k
         neighbors.truncate(opts.knn_k);
 
-        for (score, token_b) in neighbors {
-            pairs.push((token_a.clone(), token_b, score));
+        for (score, j) in neighbors {
+            pairs.push((token_a.clone(), tokens[j].clone(), score));
         }
     }
     pairs
@@ -502,6 +534,7 @@ fn knn_mine_via_vec(
     opts: &MineSynonymsOpts,
 ) -> Result<Vec<(String, String, f32)>> {
     let table = token_vec_table_name(index_id);
+    validate_sql_identifier(&table);
 
     // 1. 创建 cosine 距离度量的 sqlite-vec 虚表
     conn.execute_batch(&format!(
@@ -510,6 +543,25 @@ fn knn_mine_via_vec(
         table, dimensions,
     ))
     .map_err(|e| GBrainError::Database(e.to_string()))?;
+
+    // guard：无论如何都清理虚表，防止 KNN 查询阶段出错导致虚表残留
+    struct DropGuard<'a> {
+        conn: &'a Connection,
+        table: String,
+        armed: bool,
+    }
+    impl Drop for DropGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                let _ = self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", self.table));
+            }
+        }
+    }
+    let mut guard = DropGuard {
+        conn,
+        table: table.clone(),
+        armed: true,
+    };
 
     let tokens: Vec<String> = all.keys().cloned().collect();
 
@@ -584,8 +636,11 @@ fn knn_mine_via_vec(
         }
     }
 
-    // 4. 清理临时虚表
-    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", table));
+    // 4. 显式清理虚表；DROP 成功后再 disarm guard，避免失败时 guard 不重试
+    drop(knn_stmt); // 先释放 KNN 语句句柄，避免 DROP TABLE 时表仍被引用
+    conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", table))
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+    guard.armed = false; // DROP 成功后才 disarm
 
     Ok(pairs)
 }
@@ -604,7 +659,14 @@ fn knn_mine(
         Ok(pairs) => pairs,
         Err(e) => {
             warn!(error = %e, "sqlite-vec KNN 失败，回退到内存暴力搜索");
-            knn_mine_brute_force(all, opts)
+            let pairs = knn_mine_brute_force(all, opts);
+            if pairs.is_empty() && all.len() > BRUTE_FORCE_MAX_TOKENS {
+                warn!(
+                    tokens = all.len(),
+                    "brute-force 回退也因 token 超限返回空结果，同义词挖掘被跳过"
+                );
+            }
+            pairs
         }
     }
 }
@@ -709,8 +771,8 @@ pub fn mine_synonyms(
             dimensions, dims
         )));
     }
-    let dims = if dimensions > 0 { dimensions } else { dims };
-    info!(index_id, dims, "Starting synonym mining");
+    let effective_dims = if dimensions > 0 { dimensions } else { dims };
+    info!(index_id, dims = effective_dims, "Starting synonym mining");
 
     // 2. Extract candidate tokens with DF
     let candidates = extract_candidate_tokens(conn, opts)?;
@@ -759,7 +821,7 @@ pub fn mine_synonyms(
     stats.total_embeddings = all_embeddings.len();
 
     // 6. KNN mine（优先 sqlite-vec，回退到内存暴力搜索）
-    let pairs = knn_mine(conn, index_id, dims, &all_embeddings, opts);
+    let pairs = knn_mine(conn, index_id, effective_dims, &all_embeddings, opts);
     info!(candidate_pairs = pairs.len(), "KNN mining complete");
 
     // #3 修复：full=true 时先清除该 index 的旧 synonym，避免低分旧 pair 残留
@@ -971,7 +1033,8 @@ mod tests {
 
     #[test]
     fn substring_filter() {
-        assert!(is_substring_or_superstring("积分", "分"));
+        // 短 token（长度 <= 2）跳过子串检查，避免误过滤
+        assert!(!is_substring_or_superstring("积分", "分")); // "分" 长度=1，跳过
         assert!(is_substring_or_superstring("transaction", "trans"));
         assert!(!is_substring_or_superstring("积分", "points"));
     }
