@@ -124,7 +124,7 @@ pub struct PageFilters {
 }
 
 /// Chunk source type
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkSource {
     CompiledTruth,

@@ -64,6 +64,9 @@ pub fn classify_granularity(
         return DocumentGranularity::Table;
     }
 
+    // char_count==0 通常意味着内容提取失败（空文件/解析异常），归为 Micro 作为兜底。
+    // 调用方应在上游检查空内容并跳过，而非依赖此处；若未来需要区分"空"与"极短"，
+    // 可返回 Option<DocumentGranularity> 并在 None 时由调用方决定处理策略。
     if char_count == 0 {
         return DocumentGranularity::Micro;
     }

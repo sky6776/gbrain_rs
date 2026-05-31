@@ -607,11 +607,11 @@ fn normalize_scores(results: &mut [SearchResult]) {
             r.score /= max_score;
         }
     } else if max_score == 0.0 {
-        // All scores are zero — assign uniform small positive values
-        // so downstream boost calculations don't produce all-zero results
-        let uniform = 1.0 / results.len() as f64;
+        // M42 修复：所有 RRF 分数为零时，说明候选完全无意义，
+        // 均匀分布会产生极小正值（如 1/N），干扰下游排序。
+        // 直接将所有分数置零，让调用方按零分处理（通常被过滤掉）。
         for r in results.iter_mut() {
-            r.score = uniform;
+            r.score = 0.0;
         }
     } else {
         // All scores are negative — shift to [0, 1] preserving order

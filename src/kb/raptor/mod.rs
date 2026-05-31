@@ -330,15 +330,59 @@ pub fn average_embeddings(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
 
 /// Build RAPTOR tree in memory.
 /// `llm_summarize` is an async closure that receives a cluster of nodes and returns summary text.
+/// 原地修改 `nodes`：添加摘要父节点并设置叶节点的 `parent_id`。
 pub async fn build_raptor_tree<F, Fut>(
     config: &RaptorConfig,
     nodes: &mut Vec<RaptorNode>,
     llm_summarize: F,
-) -> Result<Vec<RaptorNode>, GBrainError>
+) -> Result<(), GBrainError>
 where
     F: Fn(Vec<&RaptorNode>) -> Fut,
     Fut: std::future::Future<Output = Result<String, GBrainError>>,
 {
+    /// 为当前层所有节点创建单集群摘要节点，设置 parent_id 并推入 nodes。
+    /// 用于节点数不足 min_nodes 或聚类 k<2 的退化场景。
+    async fn create_summary_node<F, Fut>(
+        nodes: &mut Vec<RaptorNode>,
+        current_node_ids: &[i64],
+        current_nodes: Vec<&RaptorNode>,
+        next_id: i64,
+        current_level: i32,
+        llm_summarize: &F,
+    ) -> Result<RaptorNode, GBrainError>
+    where
+        F: Fn(Vec<&RaptorNode>) -> Fut,
+        Fut: std::future::Future<Output = Result<String, GBrainError>>,
+    {
+        let meta_library_id = current_nodes[0].library_id;
+        let meta_document_id = current_nodes[0].document_id;
+        let summary = llm_summarize(current_nodes).await?;
+        let summary_node = RaptorNode {
+            id: next_id,
+            library_id: meta_library_id,
+            document_id: meta_document_id,
+            content: summary,
+            level: current_level + 1,
+            parent_id: None,
+            chunk_order: 0,
+            vector: None,
+            title_path: String::new(),
+            page_number: None,
+            source_start: None,
+            source_end: None,
+            node_metadata: String::new(),
+            embedding_text: String::new(),
+        };
+
+        for node in nodes.iter_mut() {
+            if current_node_ids.contains(&node.id) && node.parent_id.is_none() {
+                node.parent_id = Some(next_id);
+            }
+        }
+
+        Ok(summary_node)
+    }
+
     let mut next_id = nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
     let mut current_level: i32 = 0;
     let mut current_node_ids: Vec<i64> = nodes
@@ -348,39 +392,24 @@ where
         .collect();
 
     while current_level < config.max_level as i32 {
-        let current_nodes: Vec<&RaptorNode> = current_node_ids
+        // 克隆当前层级节点，避免不可变引用与后续可变借用冲突
+        let current_nodes: Vec<RaptorNode> = current_node_ids
             .iter()
-            .filter_map(|id| nodes.iter().find(|n| n.id == *id))
+            .filter_map(|id| nodes.iter().find(|n| n.id == *id).cloned())
             .collect();
 
         if current_nodes.len() < config.min_nodes {
             if current_nodes.len() > 1 {
-                let meta_library_id = current_nodes[0].library_id;
-                let meta_document_id = current_nodes[0].document_id;
-                let summary = llm_summarize(current_nodes.clone()).await?;
-                let summary_node = RaptorNode {
-                    id: next_id,
-                    library_id: meta_library_id,
-                    document_id: meta_document_id,
-                    content: summary,
-                    level: current_level + 1,
-                    parent_id: None,
-                    chunk_order: 0,
-                    vector: None,
-                    title_path: String::new(),
-                    page_number: None,
-                    source_start: None,
-                    source_end: None,
-                    node_metadata: String::new(),
-                    embedding_text: String::new(),
-                };
-
-                for node in nodes.iter_mut() {
-                    if current_node_ids.contains(&node.id) && node.parent_id.is_none() {
-                        node.parent_id = Some(next_id);
-                    }
-                }
-
+                let current_refs: Vec<&RaptorNode> = current_nodes.iter().collect();
+                let summary_node = create_summary_node(
+                    nodes,
+                    &current_node_ids,
+                    current_refs,
+                    next_id,
+                    current_level,
+                    &llm_summarize,
+                )
+                .await?;
                 nodes.push(summary_node);
             }
             break;
@@ -388,48 +417,45 @@ where
 
         let k = calculate_k(current_nodes.len(), config.cluster_size);
         if k < 2 {
-            let meta_library_id = current_nodes[0].library_id;
-            let meta_document_id = current_nodes[0].document_id;
-            let summary = llm_summarize(current_nodes.clone()).await?;
-            let summary_node = RaptorNode {
-                id: next_id,
-                library_id: meta_library_id,
-                document_id: meta_document_id,
-                content: summary,
-                level: current_level + 1,
-                parent_id: None,
-                chunk_order: 0,
-                vector: None,
-                title_path: String::new(),
-                page_number: None,
-                source_start: None,
-                source_end: None,
-                node_metadata: String::new(),
-                embedding_text: String::new(),
-            };
-
-            for node in nodes.iter_mut() {
-                if current_node_ids.contains(&node.id) && node.parent_id.is_none() {
-                    node.parent_id = Some(next_id);
-                }
-            }
-
+            let current_refs: Vec<&RaptorNode> = current_nodes.iter().collect();
+            let summary_node = create_summary_node(
+                nodes,
+                &current_node_ids,
+                current_refs,
+                next_id,
+                current_level,
+                &llm_summarize,
+            )
+            .await?;
             nodes.push(summary_node);
             break;
         }
 
-        let vectors: Vec<Vec<f32>> = current_nodes
+        // 从当前层级节点中筛选出有向量的节点用于聚类，跳过无向量节点
+        let (vectors_with, node_ids_with): (Vec<Vec<f32>>, Vec<i64>) = current_node_ids
             .iter()
-            .filter_map(|n| n.vector.clone())
-            .collect();
+            .filter_map(|id| {
+                let node = nodes.iter().find(|n| n.id == *id)?;
+                node.vector.clone().map(|v| (v, *id))
+            })
+            .unzip();
 
-        if vectors.len() != current_nodes.len() {
+        // 没有足够的有向量节点，无法聚类
+        if node_ids_with.len() < config.min_nodes {
+            tracing::warn!(
+                level = current_level,
+                total_nodes = current_nodes.len(),
+                nodes_with_vectors = node_ids_with.len(),
+                "RAPTOR 树构建停止：有向量的节点数不足 min_nodes"
+            );
             break;
         }
 
+        let vectors = vectors_with;
+
         let kmeans = KMeans::new(k, 100, 1e-4);
         let assignments = kmeans.cluster(&vectors);
-        let clusters = kmeans::get_clusters(&current_node_ids, &assignments, k);
+        let clusters = kmeans::get_clusters(&node_ids_with, &assignments, k);
 
         let mut new_node_ids = Vec::new();
         for (cluster_idx, cluster_node_ids) in clusters.iter().enumerate() {
@@ -487,7 +513,7 @@ where
         current_node_ids = new_node_ids;
     }
 
-    Ok(nodes.to_vec())
+    Ok(())
 }
 
 /// Calculate optimal number of clusters.

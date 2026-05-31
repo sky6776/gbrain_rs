@@ -562,6 +562,12 @@ pub fn build_ocr_options_from_config(config: &crate::config::Config) -> OcrOptio
 }
 
 /// 判断单页请求错误是否可重试（429/503/timeout/网络错误）
+///
+/// 已知限制：通过错误消息子串匹配判断可重试类型，脆弱且依赖上游 API 的错误文本格式。
+/// 若后续可获取 HTTP 状态码（如从 reqwest::Error 扩展信息中提取），应改为按状态码分类：
+/// - 429 (Rate Limit) / 503 (Service Unavailable) / 超时 → 可重试
+/// - 4xx 其他 → 不可重试
+/// - 网络连接错误 → 可重试
 fn is_single_page_retryable(error: &str) -> bool {
     let lower = error.to_lowercase();
     lower.contains("429")

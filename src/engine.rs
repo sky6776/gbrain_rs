@@ -60,6 +60,9 @@ pub trait BrainEngine {
     fn count_stale_chunks(&self) -> Result<usize>;
     fn list_stale_chunks(&self, limit: Option<usize>) -> Result<Vec<StaleChunk>>;
     fn delete_chunks(&self, slug: &str) -> Result<()>;
+    /// H19: 增量删除过时 chunks，仅移除不在 retained 集合中的条目。
+    /// 保留未变化 chunks 的 embeddings，避免全删重建导致 embedding 缓存丢失。
+    fn delete_stale_chunks(&self, slug: &str, retained: &[(i32, ChunkSource)]) -> Result<()>;
 
     // Code graph
     fn add_code_edges(&self, edges: &[CodeEdgeInput]) -> Result<usize>;

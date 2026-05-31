@@ -13,7 +13,7 @@
 //! Boundaries are detected where smoothed similarity drops below a threshold.
 
 use crate::types::{ChunkInput, ChunkSource};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Default window size for Savitzky-Golay filter (must be odd)
 const DEFAULT_SG_WINDOW: usize = 5;
@@ -102,7 +102,8 @@ pub fn chunk_semantic(
         config.max_chunk_size,
     );
 
-    info!(
+    // L24: 语义切分完成日志降级为 debug，避免高频文档处理时刷屏
+    debug!(
         slug = %slug,
         paragraph_count = paragraphs.len(),
         boundary_count = boundaries.len(),
@@ -511,40 +512,44 @@ pub fn chunk_semantic_with_embeddings(
         .collect()
 }
 
-/// Split text into sentences
+/// Split text into sentences.
+/// H24 修复: 使用 Peekable<Chars> 惰性迭代替代 Vec<char> 收集，
+/// 避免大文本场景下的内存分配（原始实现对每段文本分配完整 char 数组）。
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
+    let mut iter = text.chars().peekable();
 
-    while i < chars.len() {
-        current.push(chars[i]);
+    while let Some(ch) = iter.next() {
+        current.push(ch);
 
-        // Sentence boundary: punctuation followed by space/newline
-        if (chars[i] == '.' || chars[i] == '!' || chars[i] == '?')
-            && i + 1 < chars.len()
-            && (chars[i + 1] == ' ' || chars[i + 1] == '\n')
-        {
-            if !current.trim().is_empty() {
-                sentences.push(current.trim().to_string());
+        // 句子边界: 标点符号（. ! ?）后跟空格或换行
+        if ch == '.' || ch == '!' || ch == '?' {
+            if let Some(&next) = iter.peek() {
+                if next == ' ' || next == '\n' {
+                    if !current.trim().is_empty() {
+                        sentences.push(current.trim().to_string());
+                    }
+                    current = String::new();
+                    iter.next(); // 消费空格/换行
+                    continue;
+                }
             }
-            current = String::new();
-            i += 2; // skip the punctuation and the space/newline
-            continue;
         }
 
-        // Newline boundary
-        if chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-            if !current.trim().is_empty() {
-                sentences.push(current.trim().to_string());
+        // 双换行边界
+        if ch == '\n' {
+            if let Some(&next) = iter.peek() {
+                if next == '\n' {
+                    if !current.trim().is_empty() {
+                        sentences.push(current.trim().to_string());
+                    }
+                    current = String::new();
+                    iter.next(); // 消费第二个换行
+                    continue;
+                }
             }
-            current = String::new();
-            i += 2; // skip both newlines
-            continue;
         }
-
-        i += 1;
     }
 
     if !current.trim().is_empty() {

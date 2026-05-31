@@ -115,6 +115,18 @@ impl<'a> JobQueue<'a> {
         self.dequeue_inner(Some(job_type))
     }
 
+    /// M31: 任务状态机说明
+    ///
+    /// 状态转换图:
+    ///   pending ──(dequeue 原子抢占)──→ running ──(complete)──→ completed
+    ///                                      │
+    ///                                      └──(fail, attempts < max_attempts)──→ pending (重试)
+    ///                                      └──(fail, attempts >= max_attempts)──→ failed (终态)
+    ///
+    /// 关键不变量:
+    /// - dequeue 使用 `WHERE status = 'pending'` 做乐观锁抢占，防止并发 worker 竞争同一任务
+    /// - complete/fail 使用 `WHERE status = 'running'` 确保只有持有任务的 worker 才能转换状态
+    /// - 超过 max_attempts 的任务进入 failed 终态，不再被 dequeue 捞取
     fn dequeue_inner(&self, job_type_filter: Option<&str>) -> Result<Option<Job>> {
         let max_retries = 10;
         for _ in 0..max_retries {
@@ -156,7 +168,8 @@ impl<'a> JobQueue<'a> {
                 running_job.attempts += 1;
                 return Ok(Some(running_job));
             }
-            // Another worker claimed this job — retry in loop
+            // 另一个 worker 已抢占此 job — 短暂休眠后重试，避免忙等待浪费 CPU
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         // Exceeded retry limit — no job could be claimed
         Ok(None)

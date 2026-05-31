@@ -17,13 +17,17 @@ pub fn check_ocr_run_guard(
     document_id: i64,
     expected_run_id: &str,
 ) -> Result<()> {
+    // 使用 ? 传播 SQL 错误，而非 unwrap_or_default() 掩盖数据库异常。
+    // 若文档不存在（QueryReturnedNoRows）或 SQL 执行失败，直接返回错误。
     let current_run: String = conn
         .query_row(
             "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
             rusqlite::params![document_id],
             |row| row.get(0),
         )
-        .unwrap_or_default();
+        .map_err(|e| GBrainError::Database(format!(
+            "查询文档 {} processing_run_id 失败: {}", document_id, e
+        )))?;
     if current_run != expected_run_id {
         return Err(GBrainError::InvalidInput(format!(
             "OCR run guard 失败: 文档 {} 当前 run={}, 期望 run={}",
@@ -76,7 +80,11 @@ impl OcrStatus {
             "done" => Self::Done,
             "partial" => Self::Partial,
             "failed" => Self::Failed,
-            _ => Self::NotNeeded,
+            _ => {
+                // M49: 未知 OCR 状态字符串回退到 NotNeeded，记录警告便于排查
+                tracing::warn!(input = %s, "未知 OcrStatus 值，回退为 NotNeeded");
+                Self::NotNeeded
+            }
         }
     }
 }
@@ -99,6 +107,27 @@ pub fn needs_ocr(text_density: f64, threshold: f64) -> bool {
 /// `run_id` 用于 run 隔离：UNIQUE 约束包含 (document_id, page_number, processing_run_id)，
 /// 不同 run 的页级结果互不干扰。
 pub fn persist_ocr_page_results(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+    page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
+) -> Result<()> {
+    // C5 fix: 用 SAVEPOINT 包裹所有页面的写入，确保原子性。
+    // SAVEPOINT 兼容外层已有事务的场景（不会产生 "cannot start a transaction within a transaction" 错误）。
+    // 若中途失败（如第 5/10 页），所有页面回滚，避免部分状态不一致。
+    conn.execute("SAVEPOINT sp_persist_ocr_pages", [])?;
+    let result = persist_ocr_page_results_inner(conn, document_id, run_id, page_results, sensitive_value);
+    if result.is_ok() {
+        let _ = conn.execute("RELEASE sp_persist_ocr_pages", []);
+    } else {
+        let _ = conn.execute("ROLLBACK TO sp_persist_ocr_pages", []);
+        let _ = conn.execute("RELEASE sp_persist_ocr_pages", []);
+    }
+    result
+}
+
+fn persist_ocr_page_results_inner(
     conn: &Connection,
     document_id: i64,
     run_id: &str,
@@ -166,6 +195,26 @@ pub fn persist_ocr_page_results(
 /// 将 OCR 版面块写入 kb_document_ocr_blocks 表
 /// `run_id` 用于 run 隔离：仅删除和插入同一 run 的 blocks，不影响其他 run 的数据。
 pub fn persist_ocr_blocks(
+    conn: &Connection,
+    document_id: i64,
+    run_id: &str,
+    page_results: &[crate::kb::ocr_provider::OcrPageResult],
+    sensitive_value: Option<&str>,
+) -> Result<()> {
+    // C5 fix: 用 SAVEPOINT 包裹删除+插入，确保原子性。
+    // SAVEPOINT 兼容外层已有事务的场景。
+    conn.execute("SAVEPOINT sp_persist_ocr_blocks", [])?;
+    let result = persist_ocr_blocks_inner(conn, document_id, run_id, page_results, sensitive_value);
+    if result.is_ok() {
+        let _ = conn.execute("RELEASE sp_persist_ocr_blocks", []);
+    } else {
+        let _ = conn.execute("ROLLBACK TO sp_persist_ocr_blocks", []);
+        let _ = conn.execute("RELEASE sp_persist_ocr_blocks", []);
+    }
+    result
+}
+
+fn persist_ocr_blocks_inner(
     conn: &Connection,
     document_id: i64,
     run_id: &str,
@@ -304,47 +353,39 @@ pub fn compute_ocr_status(
     total_pages: i32,
     run_id: Option<&str>,
 ) -> Result<(OcrStatus, f64)> {
-    let count_by_status = |status: &str| -> i32 {
-        if let Some(rid) = run_id {
-            conn.query_row(
-                "SELECT COUNT(*) FROM kb_document_ocr_pages \
-                 WHERE document_id = ?1 AND status = ?2 AND processing_run_id = ?3",
-                rusqlite::params![document_id, status, rid],
-                |row| row.get(0),
-            )
-            .unwrap_or(0)
-        } else {
-            conn.query_row(
-                "SELECT COUNT(*) FROM kb_document_ocr_pages \
-                 WHERE document_id = ?1 AND status = ?2",
-                rusqlite::params![document_id, status],
-                |row| row.get(0),
-            )
-            .unwrap_or(0)
-        }
-    };
-
-    let done_count = count_by_status("done");
-    let failed_count = count_by_status("failed");
-    let empty_ocr_count = count_by_status("empty_ocr");
-    let skipped_count = count_by_status("skipped");
-    let needed_count = count_by_status("needed");
-
-    let total_ocr_pages: i32 = if let Some(rid) = run_id {
-        conn.query_row(
-            "SELECT COUNT(*) FROM kb_document_ocr_pages WHERE document_id = ?1 AND processing_run_id = ?2",
-            rusqlite::params![document_id, rid],
-            |row| row.get(0),
-        )
-        .unwrap_or(0)
+    // 合并为单条 GROUP BY 查询，避免多次 COUNT(*) 逐一执行
+    let sql = if run_id.is_some() {
+        "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
+         WHERE document_id = ?1 AND processing_run_id = ?2 GROUP BY status"
     } else {
-        conn.query_row(
-            "SELECT COUNT(*) FROM kb_document_ocr_pages WHERE document_id = ?1",
-            rusqlite::params![document_id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0)
+        "SELECT status, COUNT(*) as cnt FROM kb_document_ocr_pages \
+         WHERE document_id = ?1 GROUP BY status"
     };
+
+    let mut status_counts: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut total_ocr_pages: i32 = 0;
+
+    let params: Vec<Box<dyn rusqlite::types::ToSql>> = if let Some(rid) = run_id {
+        vec![Box::new(document_id), Box::new(rid.to_string())]
+    } else {
+        vec![Box::new(document_id)]
+    };
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    while let Some(row) = rows.next()? {
+        let status: String = row.get(0)?;
+        let cnt: i32 = row.get(1)?;
+        total_ocr_pages += cnt;
+        status_counts.insert(status, cnt);
+    }
+
+    let done_count = status_counts.get("done").copied().unwrap_or(0);
+    let failed_count = status_counts.get("failed").copied().unwrap_or(0);
+    let empty_ocr_count = status_counts.get("empty_ocr").copied().unwrap_or(0);
+    let skipped_count = status_counts.get("skipped").copied().unwrap_or(0);
+    let needed_count = status_counts.get("needed").copied().unwrap_or(0);
 
     let success_count = done_count;
     let terminal_count = done_count + failed_count + empty_ocr_count + skipped_count + needed_count;

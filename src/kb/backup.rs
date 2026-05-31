@@ -111,10 +111,23 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
         let path = entry.path();
         let dest_path = dst.join(entry.file_name());
         if path.is_dir() {
-            std::fs::create_dir_all(&dest_path).ok();
+            std::fs::create_dir_all(&dest_path).map_err(|e| {
+                GBrainError::FileError(format!(
+                    "无法创建备份目录 {}: {}",
+                    dest_path.display(),
+                    e
+                ))
+            })?;
             count += copy_dir_recursive(&path, &dest_path)?;
         } else {
-            std::fs::copy(&path, &dest_path).ok();
+            std::fs::copy(&path, &dest_path).map_err(|e| {
+                GBrainError::FileError(format!(
+                    "无法复制文件 {} 到 {}: {}",
+                    path.display(),
+                    dest_path.display(),
+                    e
+                ))
+            })?;
             count += 1;
         }
     }

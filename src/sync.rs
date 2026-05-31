@@ -488,7 +488,12 @@ pub fn build_sync_manifest(repo_path: &Path) -> Result<(Vec<PathBuf>, Vec<String
         .map_err(|e| GBrainError::FileError(format!("git diff failed: {}", e)))?;
 
     if !output.status.success() {
-        // If git diff fails (e.g., no commits yet), fall back to full scan
+        // M34 修复：git diff 失败时记录警告，说明回退到全扫描的原因
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            stderr = %stderr,
+            "git diff HEAD 失败（可能是首次提交无 HEAD），回退到全文件扫描"
+        );
         let all_files = collect_import_files(repo_path);
         return Ok((all_files, Vec::new()));
     }
@@ -713,13 +718,17 @@ fn validate_git_url(url: &str) -> Result<()> {
 }
 
 /// git clone a repository
+/// H15 fix: 使用 --depth=1 浅克隆，减少大型仓库的克隆时间和带宽消耗。
+/// KB 同步场景只需要最新文件内容，不需要完整 git 历史。
+/// H15 补充: 添加 120 秒超时，防止挂起的 git 进程无限期阻塞应用。
 fn git_clone(url: &str, path: &Path) -> Result<()> {
     validate_git_url(url)?;
-    info!(url = %url, path = %path.display(), "Cloning repository");
-    let output = std::process::Command::new("git")
-        .args(["clone", url, &path.to_string_lossy()])
-        .output()
-        .map_err(|e| GBrainError::FileError(format!("git clone failed: {}", e)))?;
+    info!(url = %url, path = %path.display(), "Cloning repository (shallow)");
+    let output = git_run_with_timeout(
+        &["clone", "--depth=1", url, &path.to_string_lossy()],
+        None,
+        120,
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -732,13 +741,10 @@ fn git_clone(url: &str, path: &Path) -> Result<()> {
 }
 
 /// git pull in an existing repository
+/// H15 fix: 浅克隆仓库的 pull 使用 --depth=1 避免拉取完整历史
 fn git_pull(path: &Path) -> Result<()> {
     info!(path = %path.display(), "Pulling repository");
-    let output = std::process::Command::new("git")
-        .args(["pull"])
-        .current_dir(path)
-        .output()
-        .map_err(|e| GBrainError::FileError(format!("git pull failed: {}", e)))?;
+    let output = git_run_with_timeout(&["pull", "--depth=1"], Some(path), 120)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -748,6 +754,45 @@ fn git_pull(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// 带超时的 git 命令执行辅助函数
+/// 在辅助线程中等待 git 进程完成，主线程设置超时。
+/// 防止挂起的 git 进程（如等待凭据输入）无限期阻塞应用。
+fn git_run_with_timeout(
+    args: &[&str],
+    current_dir: Option<&Path>,
+    timeout_secs: u64,
+) -> Result<std::process::Output> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // 禁用交互式凭据提示，避免 git 阻塞等待用户输入
+        .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(dir) = current_dir {
+        cmd.current_dir(dir);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| GBrainError::FileError(format!("git 启动失败: {}", e)))?;
+
+    // 在辅助线程中等待进程完成
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(GBrainError::FileError(format!("git 执行失败: {}", e))),
+        Err(_) => Err(GBrainError::FileError(format!(
+            "git 命令超时（{}秒）",
+            timeout_secs
+        ))),
+    }
 }
 
 /// Collect markdown and supported code files from a directory, skipping hidden files.
@@ -777,6 +822,10 @@ fn walk_import_dir(dir: &Path, files: &mut Vec<PathBuf>) {
             continue;
         };
         if meta.file_type().is_symlink() || meta.len() > 5 * 1024 * 1024 {
+            // M46: 大文件（>5MB）静默跳过时记录 debug 日志，方便排查文件未同步的原因
+            if meta.len() > 5 * 1024 * 1024 {
+                debug!(path = %path.display(), size = meta.len(), "跳过超大文件（>5MB）");
+            }
             continue;
         }
         if path.is_dir() {

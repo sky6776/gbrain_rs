@@ -258,6 +258,11 @@ fn slug_ref_variants(slug: &str) -> (String, String) {
 }
 
 fn slug_matches_filter(candidate: &str, filter: &str) -> bool {
+    // 快速路径：如果原始值完全相等，直接通过，避免 O(n*m) 的变体比较
+    if candidate == filter {
+        return true;
+    }
+
     // 同时规范化 candidate 和 filter，确保 slug: 前缀、documents/ 前缀
     // 等各种形式都能正确匹配
     let filter_variants = slug_value_variants(filter);
@@ -764,6 +769,12 @@ impl EvidenceCandidate {
     }
 }
 
+// 注意：query_node_candidates 和 query_passage_candidates 的整体结构高度相似：
+// 1. 空 query 检查 → 2. 根据 filter_slug 选择 SQL → 3. prepare + query_map → 4. 结果遍历。
+// 差异仅在：查询的 FTS 表不同（kb_doc_fts vs kb_passage_fts）、返回的 EvidenceCandidate
+// 字段填充略有不同（node 用 -node_id 作为 candidate_id，passage 直接用 passage_id）。
+// 重构方向：可提取泛型辅助函数，接受 SQL 模板和 row mapping 闭包。
+// 当前保持独立是因为 SQL 和 row mapping 的差异虽小但散布在多处，强行抽象可能降低可读性。
 fn query_node_candidates(
     conn: &Connection,
     fts_query: &str,
@@ -1301,32 +1312,18 @@ fn rerank_evidence_candidates(
         .filter(|s| !s.is_empty())
         .unwrap_or("https://api.openai.com/v1");
     let weights = vec![0.25, 0.0, 0.0, 0.65, 0.0, 0.0];
-    let (scored, rerank_info) = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt.block_on(crate::kb::rerank::try_model_rerank_simple(
-            &rerank_cfg,
-            query,
-            &local_candidates,
-            &candidate_texts,
-            &weights,
-            None,
-            base_url,
-            api_key,
-        )),
-        Err(_) => (
-            crate::kb::rerank::local_rerank(&local_candidates, &weights),
-            crate::kb::rerank::RerankResult {
-                model_rerank_attempted: false,
-                model_rerank_succeeded: false,
-                fallback_used: true,
-                fallback_reason: Some(crate::kb::rerank::FallbackReason::ApiError),
-                provider: "local".to_string(),
-                candidates_reranked: candidates.len(),
-            },
-        ),
-    };
+    // H3 fix: 使用全局共享运行时，避免每次证据重排创建新运行时
+    let rt = crate::runtime::shared_runtime();
+    let (scored, rerank_info) = rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+        &rerank_cfg,
+        query,
+        &local_candidates,
+        &candidate_texts,
+        &weights,
+        None,
+        base_url,
+        api_key,
+    ));
 
     // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
     let should_audit = external_allowed && rerank_cfg.model_rerank_enabled && !api_key.is_empty();

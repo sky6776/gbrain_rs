@@ -21,8 +21,9 @@ pub fn upload_file<E: BrainEngine>(
     validate_page_slug(slug)?;
     validate_upload_path(source_path, remote, working_dir)?;
 
-    // For remote callers, also use validate_contained for robust path traversal protection
-    // (canonicalizes both paths and verifies containment)
+    // L23: 纵深防御 — 远程调用方额外使用 validate_contained 做路径遍历防护。
+    // validate_upload_path 已做基本校验，validate_contained 通过 canonicalize 两条路径
+    // 并验证包含关系，防止符号链接或路径编码绕过。多层校验确保即使单层被绕过也不会泄露文件。
     if remote {
         validate_contained(source_path, working_dir, remote)?;
     }

@@ -12,6 +12,10 @@ pub const STATUS_SKIPPED: i32 = 4;
 
 /// 扩展名对应的 MIME 类型映射（格式映射，非安全校验）
 /// 安全校验的允许扩展名列表由 Config.kb_allowed_extensions 控制。
+///
+/// L6: ext.to_lowercase() 每次调用分配新 String。
+/// 返回值为 &'static str 无法避免输入分配（除非改为接受 &str 要求调用方预转小写），
+/// 调用频率低，暂不优化。
 pub fn mime_type_for_ext(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
         "pdf" => "application/pdf",
@@ -41,7 +45,9 @@ pub struct Library {
     #[serde(skip_serializing)]
     pub raptor_llm_secret_ref: String,
     pub raptor_llm_model: String,
+    /// 切片最大长度（单位：字符数）。默认 512，范围 [200, 5000]。
     pub chunk_size: usize,
+    /// 切片重叠长度（单位：字符数）。默认 50，范围 [0, 1000]。
     pub chunk_overlap: usize,
     pub batch_max_documents: usize,
     pub batch_max_chunks: usize,
@@ -573,6 +579,9 @@ impl std::fmt::Display for PhaseError {
 
 impl std::error::Error for PhaseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // L7: 返回内部错误作为 source，使 error chain 可通过 .source() 遍历。
+        // Some(self.source.as_ref()) 是包装器模式的标准实现：
+        // 调用方可通过 iter::successors(err.source(), |e| e.source()) 遍历完整错误链。
         Some(self.source.as_ref())
     }
 }

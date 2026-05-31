@@ -76,6 +76,10 @@ fn clean_html(raw: &str) -> String {
     result = remove_tags(&result, "noscript");
 
     // 移除 hidden/display:none 元素
+    // 注意：当前 regex 仅匹配内联 style 属性中的 display:none / visibility:hidden，
+    // 以及 aria-hidden="true"。无法处理外部 CSS class 隐藏（如 .hidden { display:none }）、
+    // <script> 标签内的动态样式修改、或 HTML 注释包裹的隐藏元素。
+    // 对于大多数 KB 解析场景已足够，若需完整覆盖应改用 DOM 解析器。
     if let Ok(re) = regex::Regex::new(
         r#"(?i)<[^>]*\b(?:display\s*:\s*none|visibility\s*:\s*hidden|aria-hidden\s*=\s*['"]true['"])[^>]*>.*?</[^>]+>"#,
     ) {
@@ -131,15 +135,24 @@ fn extract_metadata(raw: &str, meta: &mut HashMap<String, String>) {
         }
     }
     // <meta name="description" content="...">
+    // H18 fix: 使用两个独立的 regex 分别匹配 name 和 content 属性，
+    // 不再假设 name 在 content 之前。HTML 允许属性以任意顺序出现。
     for name in &["description", "keywords", "author"] {
+        // 方案：先匹配包含正确 name 的 <meta> 标签整体，再从中提取 content
         let pattern = format!(
-            r#"<meta\s+name=["']{}["']\s+content=["']([^"']+)["']"#,
+            r#"<meta\s+[^>]*?name=["']{}["'][^>]*?content=["']([^"']+)["'][^>]*?/?>|^<meta\s+[^>]*?content=["']([^"']+)["'][^>]*?name=["']{}["'][^>]*?/?>"#,
+            regex::escape(name),
             regex::escape(name)
         );
-        if let Ok(re) = regex::Regex::new(&pattern) {
+        if let Ok(re) = regex::RegexBuilder::new(&pattern).case_insensitive(true).build() {
             if let Some(cap) = re.captures(raw) {
-                if let Some(m) = cap.get(1) {
-                    meta.insert(name.to_string(), m.as_str().to_string());
+                // content 在 group 1 (name在前) 或 group 2 (content在前)
+                let content = cap.get(1).or_else(|| cap.get(2));
+                if let Some(m) = content {
+                    let val = m.as_str().trim().to_string();
+                    if !val.is_empty() {
+                        meta.insert(name.to_string(), val);
+                    }
                 }
             }
         }

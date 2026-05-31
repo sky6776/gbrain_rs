@@ -32,6 +32,8 @@ pub struct Config {
     pub embedding_dimensions: usize,
 
     // --- Chunking ---
+    // M45 说明：chunk_size 和 chunk_overlap 的单位均为字符数（chars），而非字节数。
+    // 即 chunk_size=500 表示每块最多 500 个 Unicode 字符。这与 TextSplitter 的行为一致。
     pub chunk_size: usize,
     pub chunk_overlap: usize,
 
@@ -106,8 +108,9 @@ pub struct Config {
     /// 新建 library 默认是否允许外部 OCR（默认 true）
     pub ocr_external_allowed_default: bool,
     /// OCR API key（仅从环境变量读取: GBRAIN_OCR_API_KEY > ZHIPU_API_KEY）
-    /// 设计上不从 config.json 反序列化，防止配置文件中的旧 key 压过环境变量。
-    #[serde(skip)]
+    /// L13: 使用 skip_serializing 允许从配置文件读取（向后兼容），但写入时不持久化密钥。
+    /// 环境变量优先级高于配置文件值（见 apply_env_overrides）。
+    #[serde(skip_serializing)]
     pub ocr_api_key: Option<String>,
     /// OCR base URL（默认智谱 GLM-OCR endpoint）
     pub ocr_base_url: String,
@@ -126,6 +129,9 @@ pub struct Config {
     /// OCR 文本密度阈值（字符数低于此值视为低密度页）
     pub ocr_text_density_threshold: usize,
     /// OCR 最低低密度页比例（触发 OCR 的阈值）
+    /// L29: 此字段已废弃 — detect_ocr_pages 不再使用 ratio 参数，
+    /// 保留字段以兼容现有配置文件反序列化。
+    #[deprecated(note = "不再使用，低密度页比例不作为 OCR 触发条件")]
     pub ocr_min_low_density_ratio: f64,
     /// OCR 图片面积覆盖率阈值
     pub ocr_image_area_threshold: f64,
@@ -259,6 +265,7 @@ impl Default for Config {
             ocr_mode: "auto".to_string(),
             ocr_submit_mode: "pdf_first".to_string(),
             ocr_text_density_threshold: 50,
+            #[allow(deprecated)]
             ocr_min_low_density_ratio: 0.5,
             ocr_image_area_threshold: 0.08,
             ocr_image_count_threshold: 1,
@@ -512,7 +519,8 @@ impl Config {
             config.ocr_text_density_threshold = v as usize;
         }
         if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_MIN_LOW_DENSITY_RATIO"]) {
-            config.ocr_min_low_density_ratio = v;
+            #[allow(deprecated)]
+            { config.ocr_min_low_density_ratio = v; }
         }
         if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_IMAGE_AREA_THRESHOLD"]) {
             config.ocr_image_area_threshold = v;
@@ -1091,7 +1099,8 @@ impl Config {
             self.ocr_submit_mode = other.ocr_submit_mode;
         }
         self.ocr_text_density_threshold = other.ocr_text_density_threshold;
-        self.ocr_min_low_density_ratio = other.ocr_min_low_density_ratio;
+        #[allow(deprecated)]
+        { self.ocr_min_low_density_ratio = other.ocr_min_low_density_ratio; }
         self.ocr_image_area_threshold = other.ocr_image_area_threshold;
         self.ocr_image_count_threshold = other.ocr_image_count_threshold;
         self.ocr_timeout_seconds_per_page = other.ocr_timeout_seconds_per_page;

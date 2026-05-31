@@ -183,78 +183,69 @@ const FRONTMATTER_LINK_MAP: &[FrontmatterLinkRule] = &[
 ];
 
 /// Strip code blocks from content to avoid false link matches
-/// Handles both fenced blocks (```) and inline code (`) using a character-level
-/// parser. Replaces code regions with spaces (preserving character positions) so that link
-/// positions in the cleaned text still correspond to the original content.
+/// Handles both fenced blocks (```) and inline code (`) using a byte-level
+/// scan on String. Replaces code regions with spaces (preserving byte positions)
+/// so that link positions in the cleaned text still correspond to the original content.
+///
+/// 相比旧版 Vec<char> 实现，此版本直接在 String/bytes 上操作，
+/// 避免了 O(n) 额外内存分配（Vec<char> 每个字符占 4 字节），
+/// 在大文档上可节省约 75% 的内存。
 fn strip_code_blocks(content: &str) -> String {
-    let chars: Vec<char> = content.chars().collect();
-    let len = chars.len();
-    let mut result: Vec<char> = vec![' '; len]; // Start with all spaces (preserves positions)
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    // 用 content 的字节初始化 result，避免逐字节拷贝
+    let mut result = content.as_bytes().to_vec();
     let mut i = 0;
-
     let mut in_code = false;
 
     while i < len {
-        // Check for fenced code block: ```
-        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            if !in_code {
-                // Start of fenced block — blank out the opening ```
-                result[i] = ' ';
-                result[i + 1] = ' ';
-                result[i + 2] = ' ';
-                in_code = true;
-                i += 3;
-                continue;
-            } else {
-                // End of fenced block — blank out the closing ```
-                result[i] = ' ';
-                result[i + 1] = ' ';
-                result[i + 2] = ' ';
-                in_code = false;
-                i += 3;
-                continue;
-            }
+        // 检测围栏代码块: ```
+        if i + 2 < len && bytes[i] == b'`' && bytes[i + 1] == b'`' && bytes[i + 2] == b'`' {
+            result[i] = b' ';
+            result[i + 1] = b' ';
+            result[i + 2] = b' ';
+            in_code = !in_code;
+            i += 3;
+            continue;
         }
 
         if in_code {
-            // Inside fenced block — leave as space
+            // 围栏代码块内部 — 替换为空格
+            result[i] = b' ';
             i += 1;
             continue;
         }
 
-        // Check for inline code: single `
-        if chars[i] == '`' {
-            // Find the closing backtick at character level
+        // 检测行内代码: 单个 `
+        if bytes[i] == b'`' {
             let mut j = i + 1;
-            while j < len && chars[j] != '`' {
+            while j < len && bytes[j] != b'`' {
                 j += 1;
             }
             if j < len {
-                // P2-6: Reject inline code spans that cross newline boundaries
-                let span: String = chars[i + 1..j].iter().collect();
-                if span.contains('\n') {
-                    // Newline before closing backtick — not an inline code span
-                    result[i] = chars[i];
+                // P2-6: 拒绝跨越换行符的行内代码 span
+                let has_newline = (i + 1..j).any(|k| bytes[k] == b'\n');
+                if has_newline {
+                    // 换行符之前未找到闭合反引号 — 非行内代码
                     i += 1;
                     continue;
                 }
-                // Found closing backtick — blank out the whole inline code span
-                // (leave as spaces, preserving positions)
-                for slot in &mut result[i..=j] {
-                    *slot = ' ';
+                // 找到闭合反引号 — 将整个行内代码 span 替换为空格
+                for k in i..=j {
+                    result[k] = b' ';
                 }
                 i = j + 1;
                 continue;
             }
-            // No closing backtick found — treat as regular char
+            // 未找到闭合反引号 — 当作普通字符
         }
 
-        // Regular character — copy to result
-        result[i] = chars[i];
         i += 1;
     }
 
-    result.into_iter().collect()
+    // SAFETY: 原始内容是有效 UTF-8，我们只将 ASCII 反引号/代码内容替换为
+    // ASCII 空格，不破坏多字节 UTF-8 序列（多字节字符的首字节 >= 0x80）
+    unsafe { String::from_utf8_unchecked(result) }
 }
 
 /// Extract entity references from markdown content

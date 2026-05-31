@@ -135,10 +135,9 @@ pub fn detect_ocr_pages(
     text_density_threshold: usize,
     image_area_threshold: f64,
     image_count_threshold: usize,
-    _min_low_density_ratio: f64,
     mode: &crate::kb::ocr_provider::OcrMode,
 ) -> OcrDetection {
-    let total_pages = pages.len().max(1);
+    let total_pages = pages.len();
     let mut reasons_by_page: BTreeMap<i32, Vec<OcrReason>> = BTreeMap::new();
     let mut low_density_pages = Vec::new();
     let mut image_rich_pages = Vec::new();
@@ -297,7 +296,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         assert!(!result.needs_ocr);
@@ -316,7 +314,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         assert!(result.needs_ocr);
@@ -338,7 +335,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         assert!(result.needs_ocr);
@@ -355,7 +351,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         assert!(result.needs_ocr);
@@ -381,7 +376,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::AllPages,
         );
         assert!(result.needs_ocr);
@@ -398,7 +392,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         assert!(result.needs_ocr);
@@ -422,7 +415,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.4, // 阈值高于 1/3
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         // 页 3 应该仍在 OCR 列表中（因为有 ImageArea 原因）
@@ -453,7 +445,6 @@ mod tests {
             50,
             0.08,
             1,
-            0.3,
             &crate::kb::ocr_provider::OcrMode::Auto,
         );
         // P1 修复：ratio 不再否决单页判定，低密度页仍需 OCR

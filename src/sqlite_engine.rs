@@ -1977,13 +1977,74 @@ impl BrainEngine for SqliteEngine {
             rows
         };
         for id in ids {
-            let _ = conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id]);
+            // L1: 清理向量索引失败时记录警告
+            if let Err(e) = conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id]) {
+                tracing::warn!(chunk_id = id, error = %e, "清理 vec_chunks 失败");
+            }
         }
         conn.execute(
             "DELETE FROM chunks WHERE page_id = (SELECT id FROM pages WHERE slug = ?1)",
             params![slug],
         )?;
         Ok(())
+    }
+
+    /// H19 修复: 增量删除过时 chunks，仅移除不在 retained 集合中的条目。
+    /// 与 delete_chunks 不同，此方法保留未变化 chunks 及其 embeddings。
+    fn delete_stale_chunks(&self, slug: &str, retained: &[(i32, ChunkSource)]) -> Result<()> {
+        self.transaction(|tx| {
+            let page_id: i64 = tx.query_row(
+                "SELECT id FROM pages WHERE slug = ?1",
+                params![slug],
+                |row| row.get(0),
+            )?;
+
+            // 收集现存 chunks 的 (id, chunk_index, chunk_source)
+            let existing: Vec<(i64, i32, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, chunk_index, chunk_source FROM chunks WHERE page_id = ?1",
+                )?;
+                let rows = stmt
+                    .query_map(params![page_id], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i32>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect::<Vec<_>>();
+                rows
+            };
+
+            // 构建 retained 集合 (chunk_index, chunk_source 字符串)
+            let retained_set: std::collections::HashSet<(i32, String)> =
+                retained.iter().map(|(idx, src)| (*idx, src.to_string())).collect();
+
+            // 找出并删除过时 chunks（不在 retained 集合中的条目）
+            let mut stale_count = 0u64;
+            for (id, chunk_index, chunk_source) in &existing {
+                if !retained_set.contains(&(*chunk_index, chunk_source.clone())) {
+                    // 清理向量索引和 embedding 数据
+                    let _ = tx.execute(
+                        "DELETE FROM vec_chunks WHERE chunk_id = ?1",
+                        params![id],
+                    );
+                    let _ = tx.execute(
+                        "DELETE FROM chunk_embeddings WHERE chunk_id = ?1",
+                        params![id],
+                    );
+                    tx.execute("DELETE FROM chunks WHERE id = ?1", params![id])?;
+                    stale_count += 1;
+                }
+            }
+
+            if stale_count > 0 {
+                debug!(slug = %slug, stale_count, "已清理过时 chunks");
+            }
+
+            Ok(())
+        })
     }
 
     // ── Links ──────────────────────────────────────────────────
@@ -2076,7 +2137,10 @@ impl BrainEngine for SqliteEngine {
         for id in chunk_ids {
             sym_values.push(id);
         }
-        let _ = conn.execute(&sym_sql, sym_values.as_slice());
+        // L1: 符号索引清理失败时记录警告
+        if let Err(e) = conn.execute(&sym_sql, sym_values.as_slice()) {
+            tracing::warn!(error = %e, "清理符号索引失败");
+        }
 
         Ok(count)
     }
@@ -3504,10 +3568,13 @@ impl BrainEngine for SqliteEngine {
         }
         if let Err(e) = std::fs::write(&file_dir, &data) {
             // Disk write failed — clean up DB record to avoid inconsistency
-            let _ = conn.execute(
+            // L1: DB 回滚清理失败时记录警告
+            if let Err(e) = conn.execute(
                 "DELETE FROM files WHERE page_slug = ?1 AND filename = ?2",
                 params![slug, filename],
-            );
+            ) {
+                tracing::warn!(slug = %slug, filename = %filename, error = %e, "清理文件 DB 记录失败");
+            }
             return Err(GBrainError::FileError(format!(
                 "Failed to write file: {}",
                 e

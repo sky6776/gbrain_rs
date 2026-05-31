@@ -439,11 +439,14 @@ pub fn upload_source(
             } else {
                 // 页面已存在，只更新 frontmatter 和 content_hash（不覆盖 compiled content）
                 debug!("shadow page 已存在，补充 frontmatter: {}", slug);
-                let _ = conn.execute(
+                // L1: 补充 frontmatter 是最佳努力操作，但失败时仍需记录
+                if let Err(e) = conn.execute(
                     "UPDATE pages SET frontmatter = ?1, content_hash = ?2, updated_at = datetime('now')
                      WHERE slug = ?3 AND (frontmatter IS NULL OR frontmatter = '' OR content_hash IS NULL OR content_hash = '')",
                     rusqlite::params![frontmatter, content_hash, slug],
-                );
+                ) {
+                    tracing::warn!(slug = %slug, error = %e, "补充影子页面 frontmatter 失败");
+                }
             }
 
             _shadow_page_slug = Some(slug);
@@ -1059,14 +1062,19 @@ pub fn put_manual_memory(
                 .map_err(|e| GBrainError::Database(format!("查询 shadow page id 失败: {}", e)))?;
 
             // 清理向量索引（vec_chunks 和 chunk_embeddings）
-            let _ = conn.execute(
+            // L1: 向量索引清理失败时记录警告，避免数据残留无声漏过
+            if let Err(e) = conn.execute(
                 "DELETE FROM vec_chunks WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
                 rusqlite::params![page_id_for_chunk],
-            );
-            let _ = conn.execute(
+            ) {
+                tracing::warn!(page_id = page_id_for_chunk, error = %e, "清理 vec_chunks 失败");
+            }
+            if let Err(e) = conn.execute(
                 "DELETE FROM chunk_embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
                 rusqlite::params![page_id_for_chunk],
-            );
+            ) {
+                tracing::warn!(page_id = page_id_for_chunk, error = %e, "清理 chunk_embeddings 失败");
+            }
             // 删除旧 chunks
             conn.execute(
                 "DELETE FROM chunks WHERE page_id = ?1",

@@ -209,19 +209,24 @@ pub fn upsert_node_embedding_for_index(
     let _ = create_vec_table_for_index(conn, embedding_index_id, dimensions);
 
     // 3. 写入 per-index vec 虚表：先 DELETE 旧行再 INSERT
-    //    vec0 表无主键/唯一约束，INSERT OR REPLACE 不会替换重复行，必须先删后插
+    //    vec0 虚表无主键/唯一约束，INSERT OR REPLACE 不会替换重复行，必须先删后插
     let vec_table = vec_table_name_for_index(embedding_index_id);
-    let _ = conn.execute(
+    // L1: 清理 vec 虚表旧行，失败时 warn 而非静默吞错
+    if let Err(e) = conn.execute(
         &format!("DELETE FROM {} WHERE node_id = ?1", vec_table),
         rusqlite::params![node_id],
-    );
-    let _ = conn.execute(
+    ) {
+        tracing::warn!(node_id, error = %e, "清理 vec 虚表旧行失败");
+    }
+    if let Err(e) = conn.execute(
         &format!(
             "INSERT INTO {} (node_id, embedding) VALUES (?1, ?2)",
             vec_table
         ),
         rusqlite::params![node_id, blob],
-    );
+    ) {
+        tracing::warn!(node_id, error = %e, "写入 vec 虚表失败");
+    }
 
     Ok(())
 }

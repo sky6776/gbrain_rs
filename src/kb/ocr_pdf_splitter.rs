@@ -192,6 +192,7 @@ pub fn split_pdf_for_ocr(
     max_bytes: usize,
     temp_budget_max_bytes: u64,
     temp_guard: &mut TempOcrDir,
+    // TODO: 未来用于支持可插拔的 PDF 拆分策略（如 MuPDF 等），当前直接使用 lopdf
     _splitter: &dyn PdfSplitter,
 ) -> Result<Vec<SplitPdf>> {
     let page_count = source_end_page - source_start_page + 1;

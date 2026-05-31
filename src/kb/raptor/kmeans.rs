@@ -89,7 +89,7 @@ impl KMeans {
                 .collect();
 
             let total: f64 = distances.iter().sum();
-            if total == 0.0 {
+            if total.abs() < 1e-10 {
                 let idx = rng.gen_range(0..n);
                 centroids.push(vectors[idx].clone());
                 continue;

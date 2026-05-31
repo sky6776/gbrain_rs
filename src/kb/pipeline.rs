@@ -398,6 +398,17 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
 /// 3. **嵌入** — 为每个节点生成嵌入向量
 /// 4. **RAPTOR** — 构建层次化摘要树 (可选)
 /// 5. **持久化** — 将所有节点写入数据库
+///
+/// # 安全性说明：`&Connection` 跨越 `.await` 边界
+///
+/// 本函数接收 `&Connection`（rusqlite 同步连接）并在多个 `.await` 点之间使用。
+/// 这是安全的，因为：
+/// - 所有数据库操作（`conn.execute`、`conn.unchecked_transaction` 等）是同步调用，
+///   不会与 `.await` 交叉执行；
+/// - `.await` 点（`split_async`、`embed_batch`、`summarize_cluster`）仅涉及纯 CPU/IO，
+///   不访问数据库连接；
+/// - 此函数在单线程 tokio 任务中运行，不存在并发访问同一连接的风险。
+/// 若未来需要并发数据库访问，应改用 `deadpool` 等连接池。
 #[allow(clippy::too_many_arguments)]
 pub async fn process_document_async(
     conn: &Connection,
@@ -960,8 +971,7 @@ pub async fn process_document_async(
                     .await;
 
                     match result {
-                        Ok(tree_nodes) => {
-                            nodes = tree_nodes;
+                        Ok(()) => {
                             report_progress(
                                 on_progress,
                                 "raptor",
@@ -1408,14 +1418,19 @@ pub(crate) fn persist_nodes_and_vectors_inner(
 
             // 向后兼容：同步写入 legacy vec_kb_nodes
             let blob = embedding_to_blob(vector);
-            let _ = conn.execute(
+            // L1: legacy 向量索引清理失败时记录警告
+            if let Err(e) = conn.execute(
                 "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
                 rusqlite::params![db_id],
-            );
-            let _ = conn.execute(
+            ) {
+                tracing::warn!(node_id = db_id, error = %e, "清理 legacy vec_kb_nodes 失败");
+            }
+            if let Err(e) = conn.execute(
                 "INSERT INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
                 rusqlite::params![db_id, &blob],
-            );
+            ) {
+                tracing::warn!(node_id = db_id, error = %e, "写入 legacy vec_kb_nodes 失败");
+            }
         }
     }
 
@@ -1820,7 +1835,6 @@ fn maybe_apply_pdf_ocr(
         config.ocr_text_density_threshold,
         config.ocr_image_area_threshold,
         config.ocr_image_count_threshold,
-        config.ocr_min_low_density_ratio,
         &ocr_mode,
     );
 

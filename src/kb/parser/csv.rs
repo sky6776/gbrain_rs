@@ -29,7 +29,9 @@ impl DocumentParser for CsvParser {
 
         let mut rows = Vec::new();
         let mut headers: Vec<String> = Vec::new();
-        let mut row_records: Vec<String> = Vec::new();
+        // C4 fix: 存储 serde_json::Value 而非预序列化的 JSON 字符串，
+        // 避免最终 serde_json::to_string(&row_records) 产生双重转义。
+        let mut row_records: Vec<serde_json::Value> = Vec::new();
 
         for result in reader.records() {
             match result {
@@ -38,18 +40,20 @@ impl DocumentParser for CsvParser {
                     if headers.is_empty() && !fields.is_empty() {
                         headers = fields.clone();
                     }
-                    let row_json = serde_json::to_string(
-                        &headers
-                            .iter()
-                            .enumerate()
-                            .map(|(i, h)| (h.clone(), fields.get(i).cloned().unwrap_or_default()))
-                            .collect::<HashMap<_, _>>(),
-                    )
-                    .unwrap_or_default();
+                    let row_map: HashMap<String, String> = headers
+                        .iter()
+                        .enumerate()
+                        .map(|(i, h)| (h.clone(), fields.get(i).cloned().unwrap_or_default()))
+                        .collect();
+                    // 直接存为 Value，不再提前序列化
+                    row_records.push(serde_json::to_value(&row_map).unwrap_or(serde_json::Value::Null));
                     rows.push(fields.join("\t"));
-                    row_records.push(row_json);
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    // M50: 畸形 CSV 行跳过时记录 debug 日志，便于排查数据质量问题
+                    tracing::debug!(error = %e, "CSV 行解析错误，跳过");
+                    continue;
+                }
             }
         }
 

@@ -14,6 +14,10 @@
 /// ```
 ///
 /// 空字段会自动省略对应行。
+///
+/// L5: 每次调用都会分配新 String（format! + Vec::join）。
+/// 由于返回值本身就是新构建的文本，此分配不可避免。
+/// 高频调用场景可考虑预分配 String::with_capacity 优化。
 pub fn build_embedding_text(
     document_title: &str,
     title_path: &str,

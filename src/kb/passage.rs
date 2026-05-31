@@ -65,6 +65,9 @@ pub fn clean_text_for_search(text: &str) -> String {
 /// 但 query/focused 输出把这些值当作源文件绝对偏移再加 snippet 偏移，
 /// 导致多 chunk 文档里第二个及后续 node 的 passage 定位到错误位置。
 /// 此处统一在写入前叠加 base offset，让 passage 的偏移与源文件对齐。
+///
+/// L4: 当前实现总是 DELETE + 重建全部 passage，无法增量更新。
+/// 未来改进方向：比较新旧 passage draft 的 content hash，仅更新变化的行。
 pub fn rebuild_passages_for_node(
     conn: &Connection,
     node_id: i64,

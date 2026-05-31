@@ -43,6 +43,9 @@ impl TokenBudget {
         }
     }
 
+    // 已知限制（TOCTOU 竞态）：check_reset 的 load+store 之间无原子保护，
+    // 多线程可能同时读到 last != today 并重复 store(0)，但结果是幂等的（写入相同值），
+    // 不会导致预算超支。若需严格保证仅一个线程执行重置，可用 compare_exchange 循环。
     fn check_reset(&self) {
         let today = current_day();
         let last = self.last_reset_day.load(Ordering::Relaxed);

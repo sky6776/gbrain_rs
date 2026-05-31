@@ -408,36 +408,18 @@ pub fn kb_search(
                 true,
                 "",
             );
-            match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt.block_on(crate::kb::rerank::try_model_rerank_simple(
-                    &rerank_cfg,
-                    &query_normalized,
-                    &candidates,
-                    &candidate_texts,
-                    &weights,
-                    None,
-                    base_url,
-                    api_key,
-                )),
-                Err(_) => {
-                    // 无法创建 runtime，直接使用本地 rerank
-                    let local = crate::kb::rerank::local_rerank(&candidates, &weights);
-                    (
-                        local,
-                        crate::kb::rerank::RerankResult {
-                            model_rerank_attempted: false,
-                            model_rerank_succeeded: false,
-                            fallback_used: true,
-                            fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
-                            provider: "local".into(),
-                            candidates_reranked: merged.len(),
-                        },
-                    )
-                }
-            }
+            // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
+            let rt = crate::runtime::shared_runtime();
+            rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+                &rerank_cfg,
+                &query_normalized,
+                &candidates,
+                &candidate_texts,
+                &weights,
+                None,
+                base_url,
+                api_key,
+            ))
         } else {
             // 跳过模型 rerank，直接本地 rerank
             let local = crate::kb::rerank::local_rerank(&candidates, &weights);
@@ -711,18 +693,26 @@ fn get_node_context(
 }
 
 /// P3-026: compute highlight character ranges
+///
+/// C1 fix: 使用 case-insensitive regex 在原始内容上直接搜索，
+/// 避免对整个 content 调用 `to_lowercase()`（某些 Unicode 字符如 ß→ss 会改变长度，
+/// 导致偏移量与原始内容坐标系错位）。regex::find_iter 返回的字节偏移量
+/// 天然适用于原始字符串。
 fn compute_highlights(content: &str, query: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    let content_lower = content.to_lowercase();
     let query_terms: Vec<&str> = query.split_whitespace().collect();
     for term in query_terms {
         if term.len() < 2 {
             continue;
         }
-        let mut start = 0;
-        while let Some(pos) = content_lower[start..].find(&term.to_lowercase()) {
-            ranges.push((start + pos, start + pos + term.len()));
-            start += pos + term.len();
+        let Ok(re) = regex::RegexBuilder::new(&regex::escape(term))
+            .case_insensitive(true)
+            .build()
+        else {
+            continue;
+        };
+        for m in re.find_iter(content) {
+            ranges.push((m.start(), m.end()));
         }
     }
     ranges
@@ -1179,7 +1169,11 @@ fn compute_rrf_merge(all_candidates: Vec<Vec<RankedResult>>) -> Vec<RankedResult
     if all_candidates.is_empty() {
         return Vec::new();
     }
-    // 即使只有一个候选列表，也按 RRF 公式计算分数
+    // 快速路径：单检索器时跳过 RRF 公式，直接保留原始分数，
+    // 避免 RRF 变换破坏单一检索器返回的相关性分数排序。
+    if all_candidates.len() == 1 {
+        return all_candidates.into_iter().next().unwrap_or_default();
+    }
     let mut scores: HashMap<i64, f64> = HashMap::new();
     for candidates in &all_candidates {
         for r in candidates {

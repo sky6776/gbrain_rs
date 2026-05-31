@@ -8,6 +8,31 @@
 use crate::types::*;
 use std::collections::HashMap;
 
+/// 从文本构建词集，用于 Jaccard 相似度计算。
+/// H11 fix: 对 CJK 文本使用 jieba 分词，而非简单的 split_whitespace()。
+/// 中文/日文/韩文文本词间无空格，split_whitespace() 会将整句当作一个"词"，
+/// 导致 Jaccard 系数无意义，CJK 内容无法正确去重。
+fn tokenize_to_word_set(text: &str) -> std::collections::HashSet<String> {
+    let lower = text.to_lowercase();
+    // 检测是否包含 CJK 字符（Unicode CJK Unified Ideographs 范围）
+    let has_cjk = lower.chars().any(|c| {
+        ('\u{4E00}'..='\u{9FFF}').contains(&c)    // CJK Unified Ideographs
+            || ('\u{3400}'..='\u{4DBF}').contains(&c) // CJK Unified Ideographs Extension A
+            || ('\u{3040}'..='\u{309F}').contains(&c) // Hiragana
+            || ('\u{30A0}'..='\u{30FF}').contains(&c) // Katakana
+            || ('\u{AC00}'..='\u{D7AF}').contains(&c) // Hangul Syllables
+    });
+    if has_cjk {
+        // 使用 jieba 分词处理 CJK 文本
+        crate::nlp::chinese::tokenize_content(&lower)
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        lower.split_whitespace().map(|s| s.to_string()).collect()
+    }
+}
+
 /// P2-9: Cross-source dedup within the same page.
 /// When two chunks from the same slug have Jaccard similarity > threshold
 /// but different chunk_source values, keep the CompiledTruth version
@@ -24,13 +49,7 @@ fn dedup_by_cross_source(results: &mut Vec<SearchResult>, threshold: f64) {
     // Pre-compute word sets for all results to avoid O(n^2) set construction
     let word_sets: Vec<std::collections::HashSet<String>> = results
         .iter()
-        .map(|r| {
-            r.chunk_text
-                .to_lowercase()
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
-        })
+        .map(|r| tokenize_to_word_set(&r.chunk_text))
         .collect();
 
     let mut to_remove: Vec<usize> = Vec::new();
@@ -99,13 +118,7 @@ fn dedup_by_text_similarity(results: &mut Vec<SearchResult>, threshold: f64) {
     // Pre-compute word sets for all results to avoid O(n^2) set construction
     let word_sets: Vec<std::collections::HashSet<String>> = results
         .iter()
-        .map(|r| {
-            r.chunk_text
-                .to_lowercase()
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
-        })
+        .map(|r| tokenize_to_word_set(&r.chunk_text))
         .collect();
 
     let mut kept: Vec<usize> = Vec::with_capacity(results.len());

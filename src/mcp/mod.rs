@@ -1065,7 +1065,6 @@ impl McpServer {
                         config.ocr_text_density_threshold,
                         config.ocr_image_area_threshold,
                         config.ocr_image_count_threshold,
-                        config.ocr_min_low_density_ratio,
                         &ocr_mode,
                     );
                     let reasons: std::collections::BTreeMap<String, Vec<String>> = detection

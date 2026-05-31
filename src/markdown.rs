@@ -77,7 +77,11 @@ fn parse_yaml_frontmatter(yaml_str: &str) -> serde_json::Value {
     // Use serde_yaml for proper YAML parsing
     match serde_yaml::from_str::<serde_yaml::Value>(yaml_str) {
         Ok(yaml_value) => yaml_to_json(yaml_value),
-        Err(_) => serde_json::Value::Object(Default::default()),
+        Err(e) => {
+            // M39: YAML 解析失败时记录警告，帮助排查格式错误的 frontmatter
+            tracing::warn!(error = %e, "YAML frontmatter 解析失败，返回空对象");
+            serde_json::Value::Object(Default::default())
+        }
     }
 }
 

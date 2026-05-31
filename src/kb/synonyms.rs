@@ -343,6 +343,10 @@ fn embed_and_store_tokens(
     let mut new_embeddings: HashMap<String, Vec<f32>> = HashMap::new();
 
     // #14: 用事务包裹批量写入，减少 WAL commit
+    // 已知限制：手动 BEGIN/COMMIT/ROLLBACK 管理，若循环内某次写入失败则手动 ROLLBACK
+    // 后通过 ? 提前返回。存在双重 ROLLBACK 风险（ROLLBACK 本身失败时事务可能已回滚，
+    // 后续操作不致命但不优雅）。未来可改用 rusqlite::Transaction 的 RAII 模式，
+    // 让 drop 时自动回滚未提交的事务，消除手动管理风险。
     conn.execute("BEGIN", [])
         .map_err(|e| GBrainError::Database(e.to_string()))?;
 

@@ -371,8 +371,8 @@ fn get_inherited_media_box(
                     let x1 = object_to_f64(&arr[0]);
                     let y1 = object_to_f64(&arr[1]);
                     let x2 = object_to_f64(&arr[2]);
-                    let y3 = object_to_f64(&arr[3]);
-                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1, y1, x2, y3) {
+                    let y2 = object_to_f64(&arr[3]);
+                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1, y1, x2, y2) {
                         if x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() {
                             return Some([x1, y1, x2, y2]);
                         }
@@ -390,8 +390,8 @@ fn get_inherited_media_box(
                     let x1 = object_to_f64(&arr[0]);
                     let y1 = object_to_f64(&arr[1]);
                     let x2 = object_to_f64(&arr[2]);
-                    let y3 = object_to_f64(&arr[3]);
-                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1, y1, x2, y3) {
+                    let y2 = object_to_f64(&arr[3]);
+                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (x1, y1, x2, y2) {
                         if x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() {
                             return Some([x1, y1, x2, y2]);
                         }

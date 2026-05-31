@@ -51,11 +51,8 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
     // 构建 RaptorConfig（使用默认值）
     let raptor_config = RaptorConfig::default();
 
-    // 创建 tokio 运行时执行异步管道
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
+    // 获取全局共享 tokio 运行时执行异步管道
+    let rt = crate::runtime::shared_runtime();
 
     // 执行文档处理管道
     let result = rt.block_on(process_document_async(
@@ -446,16 +443,21 @@ fn set_shadow_summary(body: &str, summary: &str) -> String {
 }
 
 fn rebuild_shadow_page_chunks(conn: &Connection, page_id: i64, body: &str) -> Result<()> {
-    let _ = conn.execute(
+    // L1: 清理旧的 vec/embedding 数据，失败时 warn 而非静默吞错
+    if let Err(e) = conn.execute(
         "DELETE FROM vec_chunks
          WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
         rusqlite::params![page_id],
-    );
-    let _ = conn.execute(
+    ) {
+        tracing::warn!(page_id, error = %e, "清理 vec_chunks 失败");
+    }
+    if let Err(e) = conn.execute(
         "DELETE FROM chunk_embeddings
          WHERE chunk_id IN (SELECT id FROM chunks WHERE page_id = ?1)",
         rusqlite::params![page_id],
-    );
+    ) {
+        tracing::warn!(page_id, error = %e, "清理 chunk_embeddings 失败");
+    }
     conn.execute(
         "DELETE FROM chunks WHERE page_id = ?1",
         rusqlite::params![page_id],
@@ -518,10 +520,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
         ))
     });
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
+    let rt = crate::runtime::shared_runtime();
 
     let result = match job_type.as_str() {
         "kb_reembed_node" => {
@@ -965,10 +964,7 @@ pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> 
         Some(config.embedding_dimensions),
     );
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| GBrainError::InvalidInput(format!("创建异步运行时失败: {}", e)))?;
+    let rt = crate::runtime::shared_runtime();
 
     let opts = crate::kb::synonyms::MineSynonymsOpts {
         library_id: payload.library_id,
@@ -1950,12 +1946,15 @@ fn execute_image_ocr_job(
                 &payload.model,
                 &payload.processing_run_id,
             );
-            let _ = conn.execute(
+            // L1: 文档状态标记为失败是关键清理操作，失败时记录警告
+            if let Err(e2) = conn.execute(
                 "UPDATE kb_documents SET document_status = 'failed', parsing_error = ?1, \
                  parsing_status = 3, parsing_progress = 100, updated_at = datetime('now') \
                  WHERE id = ?2 AND processing_run_id = ?3",
                 rusqlite::params![reason, payload.document_id, payload.processing_run_id],
-            );
+            ) {
+                tracing::warn!(doc_id = payload.document_id, error = %e2, "标记文档为 failed 失败");
+            }
             return Err(e);
         }
     };
@@ -2866,8 +2865,8 @@ fn rebuild_raptor_after_reembed(
     let max_tokens = raptor_config.max_tokens_per_summary;
     let llm_cfg = llm_config.clone();
 
-    // 构建 RAPTOR 树
-    let raptor_nodes = rt.block_on(crate::kb::raptor::build_raptor_tree(
+    // 构建 RAPTOR 树（原地修改 nodes）
+    rt.block_on(crate::kb::raptor::build_raptor_tree(
         &raptor_config,
         &mut nodes,
         |cluster| {
@@ -2953,13 +2952,13 @@ fn rebuild_raptor_after_reembed(
 
         // 3. 插入新 RAPTOR 父节点
         let mut id_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-        for node in &raptor_nodes {
+        for node in &nodes {
             if node.level == 0 {
                 id_map.insert(node.id, node.id);
             }
         }
 
-        for node in &raptor_nodes {
+        for node in &nodes {
             if node.level == 0 {
                 continue;
             }
@@ -3002,7 +3001,7 @@ fn rebuild_raptor_after_reembed(
         }
 
         // 4. 更新叶节点的 parent_id
-        for node in &raptor_nodes {
+        for node in &nodes {
             if node.level == 0 {
                 if let Some(parent_temp_id) = node.parent_id {
                     if let Some(&parent_db_id) = id_map.get(&parent_temp_id) {
@@ -3018,7 +3017,7 @@ fn rebuild_raptor_after_reembed(
         tx.commit()?;
     }
 
-    let parent_count = raptor_nodes.iter().filter(|n| n.level > 0).count();
+    let parent_count = nodes.iter().filter(|n| n.level > 0).count();
     tracing::info!(
         document_id = doc_id,
         parent_count,
@@ -3033,6 +3032,11 @@ fn rebuild_raptor_after_reembed(
 /// 每个 worker 同级调度，任意 worker 出错不影响后续 worker 执行。
 /// 旧版将 synonym mining 嵌套在 artifact 的 Ok(false) 分支内，
 /// artifact 出错时 synonym mining 永远不会被调度（饥饿问题）。
+///
+/// L2: 优先级策略说明 —— kb(文档解析/切分) > ocr(异步OCR) > reembed(重嵌入修复) > artifact(投影) > synonyms(同义词挖掘)。
+/// kb 排最前因为后续所有 worker 都依赖解析完成的文档数据；
+/// ocr 紧随其后因为 OCR 结果需写回文档再触发重新解析；
+/// synonyms 排最后因为它是最耗时的后台任务，优先级最低。
 fn run_priority_workers(engine: &SqliteEngine, config: &Config) -> bool {
     let workers: &[(&str, fn(&SqliteEngine, &Config) -> Result<bool>)] = &[
         ("kb", run_kb_worker_once),

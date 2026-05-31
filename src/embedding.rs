@@ -78,7 +78,8 @@ impl Embedder {
         }
     }
 
-    /// Set a callback that fires after each successful batch
+    /// M36: 设置每个 batch 完成后的回调（当前未被外部调用，保留供未来监控/指标采集使用）
+    #[allow(dead_code)]
     pub fn set_batch_callback(&mut self, cb: impl Fn(usize, i64) + Send + Sync + 'static) {
         self.on_batch_complete = Some(Box::new(cb));
     }

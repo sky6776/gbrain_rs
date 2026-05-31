@@ -153,6 +153,10 @@ fn split_recursive(text: &str, target_words: usize) -> Vec<String> {
 /// Chinese punctuation delimiters split immediately without checking expected_next,
 /// since Chinese text does not use spaces after punctuation.
 fn split_by_regex(text: &str, delimiters: &[char], expected_next: &[char]) -> Vec<String> {
+    // TODO(H24): 每次调用都分配 Vec<char>（O(n) 内存，每个字符 4 字节）。
+    // 在 split_recursive 的递归中，每个段落都会触发一次分配。
+    // 改进方向：使用 str 的 char_indices() 迭代器配合字符位置映射表，
+    // 避免整体收集为 Vec<char>；或缓存 char indices 避免重复分配。
     let chars: Vec<char> = text.chars().collect();
     let mut result = Vec::new();
     let mut start = 0usize;

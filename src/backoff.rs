@@ -73,6 +73,10 @@ where
 }
 
 /// Blocking version for sync contexts
+///
+/// M35 注意：此函数使用 `std::thread::sleep` 阻塞当前 OS 线程。
+/// 仅允许从专用阻塞线程（如 `std::thread::spawn`）或非异步上下文调用。
+/// 在 tokio 异步运行时内应使用 `with_backoff` 异步版本，避免阻塞 tokio worker 线程。
 pub fn with_backoff_sync<F, T, E>(mut f: F, opts: BackoffOpts) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
@@ -111,6 +115,8 @@ where
                     error = %e,
                     "Operation failed (sync), retrying with backoff"
                 );
+                // M35: 此处使用阻塞 sleep 会占用 OS 线程。
+                // 在 sync 场景下可接受（单线程批处理），但 tokio 异步上下文中应改用 tokio::time::sleep。
                 std::thread::sleep(Duration::from_millis(delay_ms));
             }
         }

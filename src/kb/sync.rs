@@ -58,6 +58,8 @@ pub fn scan_directory(dir: &Path, allowed_extensions: &[&str]) -> Result<Vec<std
 }
 
 fn should_skip_dir(path: &Path) -> bool {
+    // L11: 跳过隐藏目录（.开头）、node_modules、__pycache__，
+    // 与常见 .gitignore 规则一致，避免扫描依赖和缓存目录。
     path.file_name()
         .and_then(|n| n.to_str())
         .map(|n| n.starts_with('.') || n == "node_modules" || n == "__pycache__")

@@ -72,11 +72,9 @@ impl DocumentSplitter for MarkdownHeaderSplitter {
 }
 
 fn normalize_note_boundaries(text: &str) -> String {
+    // 零宽字符直接过滤移除，避免引入人工断行干扰分块边界
     text.chars()
-        .map(|ch| match ch {
-            '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => '\n',
-            _ => ch,
-        })
+        .filter(|ch| !matches!(ch, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}'))
         .collect()
 }
 

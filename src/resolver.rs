@@ -158,6 +158,12 @@ impl Default for ResolverRegistry {
 /// 2. Slugify + dir hint: normalize then exact match with dir prefix
 /// 3. Fuzzy match: find_by_title_fuzzy (threshold 0.55)
 /// 4. (Live only) Keyword search fallback (score >= 0.8)
+/// M33: SlugResolver 拥有 SqliteEngine 的所有权而非借用引用。
+///
+/// 设计决策：当前选择拥有所有权是因为：
+/// - Batch 模式需要长期持有 engine 以支持缓存查询，生命周期管理更简单
+/// - Resolver 通常独占使用一个 engine 实例，共享收益不大
+/// - 未来如果需要多 resolver 共享 engine，可改为 `Arc<SqliteEngine>` 引用计数
 pub struct SlugResolver {
     engine: SqliteEngine,
     mode: ResolverMode,

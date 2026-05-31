@@ -77,8 +77,12 @@ pub fn fuzzy_search(
     info!(query = %query, min_similarity, limit, "Starting fuzzy search");
 
     let min_sim = min_similarity.clamp(0.0, 1.0);
+    // H10 fix: 添加上限避免全表扫描。对于大数据库（>10000 页），
+    // fuzzy search 按标题排序取最新页面作为候选集，而非全部加载。
+    // 未来优化：通过 FTS5 预过滤或 SQLite 自定义 trigram 函数推入数据库层。
+    let scan_limit = 5000;
     let pages = engine.list_pages(PageFilters {
-        limit: None,
+        limit: Some(scan_limit),
         ..Default::default()
     })?;
 

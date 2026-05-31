@@ -9,6 +9,10 @@ use crate::error::Result;
 use rusqlite::{params, Connection};
 
 /// 写入表格元信息到 kb_tables
+///
+/// L9: 表格标题（sheet_name）和列名（headers）仅存入 kb_tables 元数据，
+/// 未参与 FTS 全文索引。若需按标题搜索表格，需额外建立 FTS 索引或在写入时
+/// 将标题拼入 row_text 一并索引。
 pub fn insert_table(
     conn: &Connection,
     document_id: i64,

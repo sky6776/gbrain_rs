@@ -57,18 +57,21 @@ impl std::fmt::Display for Reservation {
 /// R3-02: RAII guard that ensures ROLLBACK is issued if a transaction is
 /// dropped without being explicitly committed. Prevents orphaned transactions
 /// that would lock the database if a panic occurs between BEGIN and COMMIT.
-struct TxGuard<'a> {
+///
+/// M32: 此类型已公开，供其他模块复用 RAII 事务管理模式，
+/// 避免各处重复实现相同的 BEGIN/COMMIT/ROLLBACK 逻辑。
+pub struct TxGuard<'a> {
     conn: &'a rusqlite::Connection,
     active: bool,
 }
 
 impl<'a> TxGuard<'a> {
-    fn begin(conn: &'a rusqlite::Connection) -> Result<Self> {
+    pub fn begin(conn: &'a rusqlite::Connection) -> Result<Self> {
         conn.execute("BEGIN IMMEDIATE", [])?;
         Ok(Self { conn, active: true })
     }
 
-    fn commit(mut self) -> Result<()> {
+    pub fn commit(mut self) -> Result<()> {
         self.conn.execute("COMMIT", [])?;
         self.active = false; // Only mark inactive AFTER successful COMMIT
         Ok(())

@@ -57,9 +57,13 @@ impl<T: Clone> SearchCache<T> {
     pub fn set(&self, key: String, value: T) {
         if let Ok(mut entries) = self.entries.lock() {
             if entries.len() >= self.max_entries {
-                // 简单淘汰：移除最旧的一个
-                if let Some(oldest_key) = entries.keys().next().cloned() {
-                    debug!("cache eviction: key={}", oldest_key);
+                // 淘汰最旧的条目（近似 LRU：基于 created_at 时间戳）
+                if let Some(oldest_key) = entries
+                    .iter()
+                    .min_by_key(|(_, v)| v.created_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    debug!("cache eviction (LRU): key={}", oldest_key);
                     entries.remove(&oldest_key);
                 }
             }

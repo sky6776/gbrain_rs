@@ -64,6 +64,9 @@ fn row_to_document(row: &Row) -> std::result::Result<Document, rusqlite::Error> 
 /// FIX11-02: 清理节点的向量数据（包括 per-index vec 表）
 /// delete_library/delete_document/delete_document_nodes/purge_document 均需调用此函数，
 /// 否则 vec_kb_nodes 和 vec_kb_{index_id} 虚表中的向量数据会残留，随时间累积影响搜索结果和磁盘空间。
+///
+/// L8: 当前逐节点单条 DELETE，批量删除场景（如 delete_library）会产生大量单条 SQL。
+/// 未来可优化为批量 DELETE ... WHERE node_id IN (...) 或一次性清理整个 index 的 vec 表。
 pub(crate) fn cleanup_node_vectors(conn: &Connection, node_id: i64) {
     // 清理 per-index vec 表（通过 kb_node_embeddings 反查 index_id）
     if let Ok(mut stmt) = conn
@@ -113,19 +116,26 @@ impl<'a> KbEngine<'a> {
         Self { conn }
     }
 
-    /// Execute in a transaction (RAII: auto-rollback on Drop if commit not called)
+    /// Execute in a transaction (RAII: auto-rollback on Drop if not committed)
+    ///
+    /// H6 fix: 移除手动 `tx.rollback()`，依赖 Drop guard 自动回滚，
+    /// 避免手动回滚 + Drop 回滚的双重回滚问题。
+    ///
+    /// H7 注意：使用 `unchecked_transaction()` 绕过了 rusqlite 的编译期借用检查，
+    /// 允许在事务内意外嵌套事务。调用方应避免在 `f` 闭包内再次调用
+    /// `self.transaction()` 或任何可能开启新事务的操作。
+    /// 未来重构方向：将 `f` 的签名改为接受 `&Transaction` 而非 `&Connection`，
+    /// 使嵌套事务在编译期被拒绝。
     pub fn transaction<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
         let tx = self.conn.unchecked_transaction()?;
         let result = f(self.conn);
-        match &result {
-            Ok(_) => tx.commit()?,
-            Err(_) => {
-                let _ = tx.rollback();
-            }
+        if result.is_ok() {
+            tx.commit()?;
         }
+        // tx Drop: if not committed, auto-rollback via Drop guard
         result
     }
 
@@ -345,6 +355,12 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// H17 注意：动态 SQL 构建 SET 子句时，参数位置通过 `param_values` 的 push 顺序管理。
+    /// id 参数始终在最后。添加新字段时需确保：
+    /// 1. SET 子句的 `?` 占位符与 `param_values` 的 push 顺序一一对应
+    /// 2. id 参数始终在 `param_values` 最后
+    /// 未来优化方向：使用 `rusqlite::named_params!` 宏（`:name` 语法）消除位置依赖，
+    /// 或构建参数追踪结构体自动管理位置偏移。
     pub fn update_library(&self, id: i64, input: &UpdateLibraryInput) -> Result<()> {
         self.transaction(|conn| {
             let mut sets = Vec::new();

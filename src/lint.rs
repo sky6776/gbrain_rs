@@ -148,6 +148,11 @@ pub fn lint_pages(engine: &SqliteEngine, slug: Option<&str>, opts: LintOpts) -> 
                         page_type: page.page_type.clone(),
                         title: page.title.clone(),
                         compiled_truth: fixed.clone(),
+                        // M37: Page.timeline 是 Option<String>（JSON 序列化后的字符串），
+                        // PageInput.timeline 需要 Option<serde_json::Value>，必须反序列化。
+                        // 如果反序列化失败（格式损坏），传入 None 会导致 timeline 被清空。
+                        // TODO: 考虑为 put_page 增加 timeline_raw: Option<String> 字段，
+                        //       直接透传原始字符串，避免反序列化再序列化的精度损失。
                         timeline: page
                             .timeline
                             .as_ref()

@@ -91,11 +91,12 @@ pub fn transition_document_status(
     }
 
     let error = error_message.unwrap_or("");
+    // 仅更新 document_status，不修改 index_status（索引状态由索引流程独立管理）
     conn.execute(
-        "UPDATE kb_documents SET document_status = ?1, index_status = ?2, \
-         parsing_error = CASE WHEN ?3 != '' THEN ?3 ELSE parsing_error END, \
-         updated_at = datetime('now') WHERE id = ?4",
-        params![new_status.as_str(), new_status.as_str(), error, document_id],
+        "UPDATE kb_documents SET document_status = ?1, \
+         parsing_error = CASE WHEN ?2 != '' THEN ?2 ELSE parsing_error END, \
+         updated_at = datetime('now') WHERE id = ?3",
+        params![new_status.as_str(), error, document_id],
     )?;
 
     Ok(())

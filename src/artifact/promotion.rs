@@ -248,6 +248,26 @@ pub fn extract_promotion_candidates(
 /// fingerprint = SHA256(artifact_id|candidate_type|target_slug|target_field|proposed_payload)
 /// 同一 artifact + 同一内容不应重复创建候选。重试时如果候选已存在（pending/accepted/applied），
 /// INSERT OR IGNORE 会跳过，返回已有候选的 id，保证幂等。
+///
+/// H13 TODO: 此函数有 13 个位置参数，调用者必须记住精确顺序（6+ 个调用点）。
+/// 每个调用点都是潜在的参数顺序错误。建议引入结构体：
+/// ```ignore
+/// struct CreateCandidateInput<'a> {
+///     artifact_id: i64,
+///     occurrence_id: Option<i64>,
+///     kb_document_id: Option<i64>,
+///     kb_node_id: Option<i64>,
+///     candidate_type: CandidateType,
+///     target_slug: &'a str,
+///     target_field: &'a str,
+///     title: &'a str,
+///     proposed_payload: &'a str,
+///     evidence_json: &'a str,
+///     confidence: f64,
+///     risk_level: RiskLevel,
+/// }
+/// ```
+/// 重构应在有测试覆盖时进行，避免引入回归。
 #[allow(clippy::too_many_arguments)]
 pub fn create_candidate(
     conn: &Connection,
@@ -491,6 +511,28 @@ pub fn review_candidate(
     Ok(candidate)
 }
 
+/// 在命名 savepoint 内执行操作，失败时自动回滚到 savepoint。
+/// 用于隔离单个 candidate 的所有写入操作，避免部分写入导致数据不一致。
+fn with_savepoint<T>(
+    conn: &Connection,
+    name: &str,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute(&format!("SAVEPOINT {}", name), [])?;
+    match f(conn) {
+        Ok(result) => {
+            conn.execute(&format!("RELEASE {}", name), [])?;
+            Ok(result)
+        }
+        Err(e) => {
+            // 回滚到 savepoint 并释放，记录错误但不掩盖原始错误
+            let _ = conn.execute(&format!("ROLLBACK TO {}", name), []);
+            let _ = conn.execute(&format!("RELEASE {}", name), []);
+            Err(e)
+        }
+    }
+}
+
 /// 应用已审核的候选变更
 ///
 /// 将候选写入 gbrain page，并记录 provenance。
@@ -505,47 +547,12 @@ pub fn apply_candidate(conn: &Connection, candidate_id: i64) -> Result<Promotion
         )));
     }
 
-    // 修复：用 SQLite savepoint 隔离每个 candidate 的所有写入。
-    // apply_candidate 内部会修改 pages.compiled_truth、重建 chunks、写入 provenance、
-    // 更新 candidate 状态。如果中间任何步骤失败，上层只把 candidate 重置回 pending
-    // 并返回 Ok，但 pages/provenance 的半写入不会被回滚，外层事务仍提交。
-    // 下次重试可能重复追加内容。savepoint 确保失败时回滚该 candidate 的所有写入。
+    // 用 SQLite savepoint 隔离每个 candidate 的所有写入，失败时自动回滚
     let sp_name = format!("sp_apply_{}", candidate_id);
-    conn.execute(&format!("SAVEPOINT {}", sp_name), [])
-        .map_err(|e| GBrainError::Database(format!("创建 savepoint 失败: {}", e)))?;
-
-    let apply_result = apply_candidate_inner(conn, &mut candidate);
-
-    match apply_result {
-        Ok(_) => {
-            // 修复：RELEASE SAVEPOINT 等价于提交事务，失败时不能返回 Ok，
-            // 否则调用方认为已应用但事务未提交/连接仍在事务中。
-            // 同时必须先清理 savepoint（ROLLBACK TO + RELEASE），否则 SQLite 连接
-            // 仍停在未释放的 savepoint 里，后续操作会污染连接状态。
-            match conn.execute(&format!("RELEASE {}", sp_name), []) {
-                Ok(_) => Ok(candidate),
-                Err(e) => {
-                    // RELEASE 失败：先回滚到 savepoint 撤销所有写入，再释放 savepoint 清理连接状态
-                    warn!(
-                        "释放 savepoint {} 失败: {}, 回滚并清理 savepoint",
-                        sp_name, e
-                    );
-                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                    Err(GBrainError::Database(format!(
-                        "释放 savepoint {} 失败（事务已回滚）: {}",
-                        sp_name, e
-                    )))
-                }
-            }
-        }
-        Err(e) => {
-            // 失败：回滚到 savepoint，所有写入撤销（pages、chunks、provenance、状态）
-            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-            Err(e)
-        }
-    }
+    with_savepoint(conn, &sp_name, |conn| {
+        apply_candidate_inner(conn, &mut candidate)?;
+        Ok(candidate)
+    })
 }
 
 /// apply_candidate 的内部实现，在 savepoint 保护下执行
@@ -683,41 +690,12 @@ pub fn rollback_candidate(conn: &Connection, candidate_id: i64) -> Result<Promot
         }
     }
 
-    // 修复：用 savepoint 保护整个回滚流程的三步操作：
-    // (1) 标记 provenance 为 stale，(2) 恢复影子页面，(3) 更新候选状态。
-    // 任何一步失败时回滚所有写入，避免 provenance 已 stale 但候选仍 applied 的不一致状态。
+    // 用 savepoint 保护整个回滚流程，失败时自动回滚
     let sp_name = format!("sp_rollback_{}", candidate_id);
-    conn.execute(&format!("SAVEPOINT {}", sp_name), [])
-        .map_err(|e| GBrainError::Database(format!("创建 savepoint 失败: {}", e)))?;
-
-    let rollback_result = rollback_candidate_inner(conn, &mut candidate);
-
-    match rollback_result {
-        Ok(_) => {
-            match conn.execute(&format!("RELEASE {}", sp_name), []) {
-                Ok(_) => Ok(candidate),
-                Err(e) => {
-                    // RELEASE 失败：回滚并清理 savepoint
-                    warn!(
-                        "释放 savepoint {} 失败: {}, 回滚并清理 savepoint",
-                        sp_name, e
-                    );
-                    let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-                    let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-                    Err(GBrainError::Database(format!(
-                        "释放 savepoint {} 失败（事务已回滚）: {}",
-                        sp_name, e
-                    )))
-                }
-            }
-        }
-        Err(e) => {
-            // 失败：回滚到 savepoint，所有写入撤销
-            let _ = conn.execute(&format!("ROLLBACK TO {}", sp_name), []);
-            let _ = conn.execute(&format!("RELEASE {}", sp_name), []);
-            Err(e)
-        }
-    }
+    with_savepoint(conn, &sp_name, |conn| {
+        rollback_candidate_inner(conn, &mut candidate)?;
+        Ok(candidate)
+    })
 }
 
 /// rollback_candidate 的内部实现，在 savepoint 保护下执行
@@ -1160,7 +1138,9 @@ fn remove_candidate_content_from_page(
 
         let text_to_remove = extract_candidate_text_for_removal(&candidate_type, &payload);
         if !text_to_remove.is_empty() {
-            let new_content = content.replace(&text_to_remove, "");
+            // 注意：仅移除第一次出现，避免误删相同文本的其他位置。
+            // TODO: 未来应在 apply 时存储字节范围，rollback 时精确移除。
+            let new_content = content.replacen(&text_to_remove, "", 1);
             if new_content != content {
                 let now = now_str();
                 conn.execute(
@@ -2037,6 +2017,20 @@ fn update_shadow_page_section(
             )
             .ok();
 
+        // M28 修复：追加前检查是否已存在相同标题的节，避免重复追加
+        let existing_content: String = conn
+            .query_row(
+                "SELECT compiled_truth FROM pages WHERE slug = ?1",
+                params![slug],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if existing_content.contains(&format!("## {}", section)) {
+            // 已存在相同标题的节，跳过追加
+            tracing::debug!(slug = %slug, section = %section, "影子页面已包含同名 section，跳过追加");
+            return Ok(snapshot_version_id);
+        }
+
         // 追加内容到 page 的 compiled_truth 列
         let append_text = format!("\n\n## {}\n\n{}", section, content);
         conn.execute(
@@ -2328,6 +2322,10 @@ fn rebuild_chunks_for_page(conn: &Connection, slug: &str) -> Result<()> {
 /// 将 serde_json::Value 转换为 canonical JSON 字符串（sorted keys），
 /// 与 src/operations.rs canonical_json 逻辑一致，确保 page_create 的
 /// content_hash 和 put_page 的 content_hash 对相同 frontmatter 产生相同结果。
+///
+/// C3 fix: 使用 `serde_json::to_string()` 对 key/value 进行正确的 JSON 转义，
+/// 而非简单 `format!("{}:{}", k, v)` 拼接（当 key/value 含 `:`, `{`, `"` 等字符时
+/// 会产生歧义输出，导致 hash 碰撞或假阴性）。
 fn serialize_canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -2335,7 +2333,11 @@ fn serialize_canonical_json(value: &serde_json::Value) -> String {
             sorted.sort_by(|a, b| a.0.cmp(b.0));
             let pairs: Vec<String> = sorted
                 .iter()
-                .map(|(k, v)| format!("{}:{}", k, serialize_canonical_json(v)))
+                .map(|(k, v)| {
+                    let key = serde_json::to_string(k).unwrap_or_else(|_| k.to_string());
+                    let val = serialize_canonical_json(v);
+                    format!("{}:{}", key, val)
+                })
                 .collect();
             format!("{{{}}}", pairs.join(","))
         }
@@ -2343,6 +2345,8 @@ fn serialize_canonical_json(value: &serde_json::Value) -> String {
             let items: Vec<String> = arr.iter().map(serialize_canonical_json).collect();
             format!("[{}]", items.join(","))
         }
-        other => other.to_string(),
+        // 对于 String/Number/Bool/Null，使用 serde_json::to_string 确保
+        // 字符串带引号且转义，数字/布尔值原样输出
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
     }
 }

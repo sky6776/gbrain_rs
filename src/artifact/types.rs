@@ -205,11 +205,11 @@ impl std::str::FromStr for CandidateType {
             "fact_claim" => Ok(CandidateType::FactClaim),
             "page_create" => Ok(CandidateType::PageCreate),
             "page_update" => Ok(CandidateType::PageUpdate),
-            // 兼容旧值
+            // 兼容旧版序列化值（已废弃，仅用于反序列化兼容）
             "entity" => Ok(CandidateType::EntityMention),
             "keyword" => Ok(CandidateType::FactClaim),
             "timeline" => Ok(CandidateType::TimelineEvent),
-            _ => Err(format!("unknown candidate type: {}", s)),
+            _ => Err(format!("未知的候选类型: {}（合法值: document_summary, entity_mention, link_suggestion, timeline_event, fact_claim, page_create, page_update）", s)),
         }
     }
 }
@@ -249,22 +249,25 @@ impl fmt::Display for CandidateStatus {
 }
 
 impl std::str::FromStr for CandidateStatus {
-    type Err = std::convert::Infallible;
+    type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        Ok(match s {
-            "pending" => CandidateStatus::Pending,
-            "accepted" => CandidateStatus::Accepted,
-            "rejected" => CandidateStatus::Rejected,
-            "applied" => CandidateStatus::Applied,
-            "rolled_back" => CandidateStatus::RolledBack,
-            "stale" => CandidateStatus::Stale,
-            "superseded" => CandidateStatus::Superseded,
-            // 兼容旧值
-            "approved" => CandidateStatus::Accepted,
-            "expired" => CandidateStatus::Stale,
-            _ => CandidateStatus::Stale,
-        })
+        match s {
+            "pending" => Ok(CandidateStatus::Pending),
+            "accepted" => Ok(CandidateStatus::Accepted),
+            "rejected" => Ok(CandidateStatus::Rejected),
+            "applied" => Ok(CandidateStatus::Applied),
+            "rolled_back" => Ok(CandidateStatus::RolledBack),
+            "stale" => Ok(CandidateStatus::Stale),
+            "superseded" => Ok(CandidateStatus::Superseded),
+            // 兼容旧版序列化值（已废弃，仅用于反序列化兼容）
+            "approved" => Ok(CandidateStatus::Accepted),
+            "expired" => Ok(CandidateStatus::Stale),
+            _ => Err(format!(
+                "未知的候选状态: {}（合法值: pending, accepted, rejected, applied, rolled_back, stale, superseded）",
+                s
+            )),
+        }
     }
 }
 
@@ -1060,6 +1063,9 @@ pub fn infer_mime_type(extension: &str) -> String {
         "csv" => "text/csv".to_string(),
         "tsv" => "text/tab-separated-values".to_string(),
         "rst" => "text/x-rst".to_string(),
+        // M44 说明：yaml/toml 返回的是非标准 MIME 类型（application/x-yaml、application/toml），
+        // IANA 未正式注册这些类型。生产环境中若需严格标准 MIME，应使用 text/plain 或
+        // 配合 Content-Disposition 头返回。此处保留是因为前端/客户端依赖这些类型做格式判断。
         "yaml" | "yml" => "application/x-yaml".to_string(),
         "toml" => "application/toml".to_string(),
         _ => "application/octet-stream".to_string(),

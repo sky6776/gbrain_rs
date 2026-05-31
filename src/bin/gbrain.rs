@@ -475,7 +475,6 @@ fn detect_ocr_pages_for_pdf(
         config.ocr_text_density_threshold,
         config.ocr_image_area_threshold,
         config.ocr_image_count_threshold,
-        config.ocr_min_low_density_ratio,
         &ocr_mode,
     );
     Ok(detection)
@@ -816,14 +815,20 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 info!("KB worker: 后台线程已随 MCP 服务启动");
             }
             // 后台启动 autopilot 维护线程（嵌入过期内容 + 完整性检查 + 健康报告）
-            if config.autopilot_enabled {
-                gbrain_core::autopilot::spawn_autopilot_thread(
+            // C7 fix: 保存 shutdown 句柄，MCP 服务器退出后可通知 autopilot 线程优雅停止
+            let _autopilot_shutdown = if config.autopilot_enabled {
+                let handle = gbrain_core::autopilot::spawn_autopilot_thread(
                     PathBuf::from(db_path.clone()),
                     config.clone(),
                     config.autopilot_interval_secs,
                 );
-                info!("Autopilot: 后台线程已随 MCP 服务启动");
-            }
+                if handle.is_some() {
+                    info!("Autopilot: 后台线程已随 MCP 服务启动");
+                }
+                handle
+            } else {
+                None
+            };
             let mut server = McpServer::with_config(engine, config.clone());
             server.run()?;
             return Ok(());

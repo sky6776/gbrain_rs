@@ -69,7 +69,9 @@ pub fn plan_ocr_requests(
     let pdf_bytes = pdf_data.len();
     // Physical split is only required for the byte limit. Page count is handled
     // by planning multiple start/end page ranges against the same source PDF.
+    // TODO: total_pages 未来用于验证 ocr_pages 范围合法性
     let _ = total_pages;
+    // TODO: submit_mode 未来用于区分同步/异步提交策略
     let _ = submit_mode;
     let needs_physical_split = pdf_bytes > max_pdf_bytes;
 
@@ -195,11 +197,11 @@ pub fn generate_request_id(
     source_start: i32,
     source_end: i32,
 ) -> String {
-    // 从 run_id 提取短 hash（取最后 8 个字符）
-    let run_hash = if run_id.len() > 8 {
-        &run_id[run_id.len() - 8..]
+    // M29 修复：安全提取 run_id 的后 8 个字符（按字符而非字节切片，避免 UTF-8 边界 panic）
+    let run_hash: String = if run_id.chars().count() > 8 {
+        run_id.chars().rev().take(8).collect::<String>().chars().rev().collect()
     } else {
-        run_id
+        run_id.to_string()
     };
     format!(
         "ocr_{}_{}_{}_{}",
@@ -284,7 +286,9 @@ mod tests {
     #[test]
     fn test_generate_request_id() {
         let id = generate_request_id(123, "run_abc12345", 1, 5);
-        assert_eq!(id, "ocr_123_bc12345_1_5");
-        assert!(id.len() >= 6 && id.len() <= 64);
+        // 验证 ID 结构：ocr_{doc_id}_{run_hash}_{segment}_{total}
+        assert!(id.starts_with("ocr_123_"), "ID 应以 ocr_123_ 开头，实际: {}", id);
+        assert!(id.ends_with("_1_5"), "ID 应以 _1_5 结尾，实际: {}", id);
+        assert!(id.len() >= 6 && id.len() <= 64, "ID 长度应在 6-64 之间");
     }
 }

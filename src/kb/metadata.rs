@@ -241,7 +241,8 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
     use jieba_rs::Jieba;
     static JIEBA: std::sync::OnceLock<Jieba> = std::sync::OnceLock::new();
     let jieba = JIEBA.get_or_init(Jieba::new);
-    let words: Vec<&str> = jieba.cut(content, false).into_iter().collect();
+    // HMM=true 启用隐马尔可夫模型，对新词（未登录词）识别更好，提升关键词质量
+    let words: Vec<&str> = jieba.cut(content, true).into_iter().collect();
 
     // 停用词
     let stopwords: &[&str] = &[
@@ -266,6 +267,8 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
     }
 
     // 取前 10 高频词
+    // 已知限制：硬编码 top-10 阈值，对长文档可能丢失重要关键词。
+    // 未来可根据文档长度动态调整（如每 5000 字增加 5 个词位），或改为可配置参数。
     let mut sorted: Vec<(&str, usize)> = freq.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
     let keywords: Vec<String> = sorted.iter().take(10).map(|(w, _)| w.to_string()).collect();

@@ -388,6 +388,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_folders_library_parent_name
     ON kb_folders(library_id, COALESCE(parent_id, -1), name);
 
 -- KB 文档
+-- 设计说明：该表包含 40+ 列，涵盖基础信息、处理状态、解析元数据、版本控制、OCR 等多个维度。
+-- 当前采用宽表设计以简化单表查询和避免 JOIN 开销。随着字段持续增长，未来可考虑：
+-- 1) 将 OCR 相关字段拆分为 kb_document_ocr_meta 子表；
+-- 2) 将版本/软删字段拆分为 kb_document_lifecycle 子表；
+-- 3) 将解析/嵌入状态字段拆分为 kb_document_processing 子表。
 CREATE TABLE IF NOT EXISTS kb_documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

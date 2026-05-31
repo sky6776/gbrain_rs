@@ -86,6 +86,13 @@ impl<'a> ArtifactService<'a> {
     /// 步骤：
     /// 1. 创建 artifact store 记录和 projection（在事务内）
     /// 2. 调用原 gbrain put_page 写入页面内容（设计文档 §8.6 步骤 6）
+    ///
+    /// TODO: 此函数超过 400 行，职责过多（参数校验、冲突检测、内容生成、投影管理、
+    /// 日志记录等），应拆分为多个小函数。例如：
+    /// - resolve_existing_artifact(): 查找并处理已有 artifact 的冲突逻辑
+    /// - build_page_content(): 根据类型构建页面内容
+    /// - manage_projections(): 投影创建/更新/废弃逻辑
+    /// 当前保持完整函数体以避免大规模重构引入回归风险。
     pub fn put_memory(
         &self,
         slug: &str,
@@ -1770,6 +1777,15 @@ fn load_artifact_content_from_kb(conn: &Connection, artifact_id: i64) -> Result<
     let projections = store::find_projections_by_artifact(conn, artifact_id)
         .map_err(|e| GBrainError::Database(e.to_string()))?;
 
+    // M30 修复：将 prepare 移到循环外，避免每次迭代重复编译 SQL 语句
+    let mut stmt = conn
+        .prepare(
+            "SELECT content FROM kb_document_nodes
+             WHERE document_id = ?1 AND level = 0
+             ORDER BY chunk_order, id",
+        )
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
+
     for projection in projections {
         if projection.status != "active" || projection.projection_type != "kb_document" {
             continue;
@@ -1783,13 +1799,6 @@ fn load_artifact_content_from_kb(conn: &Connection, artifact_id: i64) -> Result<
             continue;
         };
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT content FROM kb_document_nodes
-                 WHERE document_id = ?1 AND level = 0
-                 ORDER BY chunk_order, id",
-            )
-            .map_err(|e| GBrainError::Database(e.to_string()))?;
         let rows = stmt
             .query_map(rusqlite::params![document_id], |row| {
                 row.get::<_, String>(0)

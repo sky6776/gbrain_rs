@@ -706,7 +706,11 @@ pub fn find_projection_history(
     projection_type: Option<&str>,
     limit: i64,
 ) -> Result<Vec<ArtifactProjection>, rusqlite::Error> {
-    // 根据可选参数组合构建查询，避免动态 SQL 绑定的复杂性
+    // 注意：4 个 match 分支的 SQL 结构几乎完全相同，仅在 WHERE 子句的过滤条件上
+    // 有细微差异（artifact_id 和 projection_type 的有无）。当前保持独立分支是为了
+    // 避免 rusqlite 的动态参数绑定复杂性（不同参数数量需要不同的 params! 宏展开）。
+    // 重构方向：可提取公共 SELECT 列和 FROM/WHERE 骨架为宏或辅助函数，
+    // 按参数组合动态拼接 WHERE 子句和参数列表。但需权衡代码量减少 vs 可读性。
     match (artifact_id, projection_type) {
         (Some(aid), Some(pt)) => {
             let mut stmt = conn.prepare(

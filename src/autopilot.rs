@@ -85,15 +85,26 @@ impl<'a> Autopilot<'a> {
         Ok(())
     }
 
-    /// Run maintenance in a loop with a given interval
-    pub fn run_loop(&self, interval_secs: u64) -> ! {
+    /// Run maintenance in a loop with a given interval.
+    ///
+    /// C7 fix: 接受 `shutdown` 信号，每次循环迭代顶部检查标志。
+    /// 当外部设置 `shutdown` 为 true 时，循环优雅退出，允许线程被 join。
+    /// MCP 服务器关闭时调用方应设置此标志，避免分离线程在已关闭的数据库上继续运行。
+    pub fn run_loop(&self, interval_secs: u64, shutdown: &std::sync::atomic::AtomicBool) {
         info!(interval_secs, "Autopilot: starting daemon mode");
-        loop {
+        while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             if let Err(e) = self.run_once() {
                 warn!(error = %e, "Autopilot: cycle failed, will retry");
             }
-            std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+            // 分段 sleep 以便更快响应 shutdown 信号
+            let sleep_step = std::cmp::min(interval_secs, 5);
+            let mut remaining = interval_secs;
+            while remaining > 0 && !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(std::cmp::min(sleep_step, remaining)));
+                remaining = remaining.saturating_sub(sleep_step);
+            }
         }
+        info!("Autopilot: daemon mode stopped (shutdown signal received)");
     }
 
     /// Embed chunks that don't yet have embeddings
@@ -106,15 +117,7 @@ impl<'a> Autopilot<'a> {
             debug!("Autopilot: no stale chunks found, nothing to embed");
             return Ok(0);
         }
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                crate::error::GBrainError::InvalidInput(format!(
-                    "failed to start async runtime: {}",
-                    e
-                ))
-            })?;
+        let rt = crate::runtime::shared_runtime();
         let mut embedded = 0;
         for batch in stale.chunks(50) {
             let texts: Vec<&str> = batch.iter().map(|c| c.chunk_text.as_str()).collect();
@@ -172,10 +175,15 @@ impl<'a> Autopilot<'a> {
 /// 在闭包内创建 engine，避免跨线程借用问题。
 const MIN_INTERVAL_SECS: u64 = 60;
 
-pub fn spawn_autopilot_thread(db_path: std::path::PathBuf, config: Config, interval_secs: u64) {
+/// 返回 shutdown 信号句柄，调用方设置 `store(true)` 即可通知线程优雅退出。
+pub fn spawn_autopilot_thread(
+    db_path: std::path::PathBuf,
+    config: Config,
+    interval_secs: u64,
+) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     if !config.autopilot_enabled {
         tracing::info!("Autopilot is disabled, not spawning background thread");
-        return;
+        return None;
     }
     let interval = if interval_secs < MIN_INTERVAL_SECS {
         tracing::warn!(
@@ -188,6 +196,8 @@ pub fn spawn_autopilot_thread(db_path: std::path::PathBuf, config: Config, inter
     } else {
         interval_secs
     };
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
     std::thread::Builder::new()
         .name("autopilot".to_string())
         .spawn(move || {
@@ -203,7 +213,8 @@ pub fn spawn_autopilot_thread(db_path: std::path::PathBuf, config: Config, inter
             }
             tracing::info!(interval, "Autopilot: 后台线程已启动");
             let autopilot = Autopilot::new(&engine, config);
-            autopilot.run_loop(interval);
+            autopilot.run_loop(interval, &shutdown_clone);
         })
         .expect("spawn autopilot thread");
+    Some(shutdown)
 }

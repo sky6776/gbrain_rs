@@ -315,6 +315,12 @@ fn format_block_text(block: &OcrLayoutBlock, profile: &str) -> Option<String> {
 }
 
 /// 从版面块生成纯文本，按 profile 增强目标 block 格式
+// 注意：blocks_to_plain_text 和 blocks_to_markdown 存在结构重复。
+// 两者共享相同的 block 遍历逻辑和分支匹配，仅输出格式不同：
+// - plain_text 路径通过 format_block_text 统一格式化
+// - markdown 路径内联格式化，表格始终用 markdown 表格
+// 重构方向：可提取公共遍历+匹配逻辑为闭包/迭代器适配器，仅注入格式化策略。
+// 当前保持独立以便于各路径独立演进（如 markdown 可能增加代码块、链接等格式）。
 fn blocks_to_plain_text(blocks: &[OcrLayoutBlock], profile: &str) -> String {
     let mut parts = Vec::new();
     for block in blocks {
@@ -329,6 +335,7 @@ fn blocks_to_plain_text(blocks: &[OcrLayoutBlock], profile: &str) -> String {
 ///
 /// 与 blocks_to_plain_text 类似但保留更多格式：表格用 markdown 表格，
 /// 公式用 LaTeX 标记。图片 block 跳过（仅保留在 metadata/UI）。
+// 注意：此函数与 blocks_to_plain_text 存在结构重复，详见上方注释。
 fn blocks_to_markdown(blocks: &[OcrLayoutBlock], profile: &str) -> String {
     let mut parts = Vec::new();
     for block in blocks {
@@ -465,6 +472,11 @@ fn split_md_by_pages(md: Option<&str>, page_count: usize) -> Vec<String> {
     }
 
     // 尝试按 --- 分隔符拆分
+    // 已知限制：Markdown 文档中的水平分割线（如 "---"）会被误认为分页符。
+    // 当前仅在 parts.len() == page_count 时采纳拆分结果，若不匹配则跳过，
+    // 因此误拆分风险仅在分割后数量恰好等于页数时才触发。未来改进方向：
+    // 1) 要求 OCR API 返回明确分页标记（如 <!-- page-break -->）而非依赖 "---"；
+    // 2) 增加 "---" 前后上下文校验（如上方必须是标题或特定模式）以排除普通水平线。
     let parts: Vec<&str> = md.split("\n---\n").collect();
     if parts.len() == page_count {
         return parts.iter().map(|s| s.to_string()).collect();

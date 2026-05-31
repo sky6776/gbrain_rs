@@ -441,13 +441,12 @@ impl<'a> Operations<'a> {
             texts.extend(expanded_queries.iter().cloned());
         }
         let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .and_then(|rt| {
-                rt.block_on(embedder.embed_batch(&text_refs))
-                    .map_err(|e| std::io::Error::other(e.to_string()))
-            }) {
+        // H4 fix: 使用全局共享运行时，避免每次嵌入查询创建新运行时
+        let rt = crate::runtime::shared_runtime();
+        match rt
+            .block_on(embedder.embed_batch(&text_refs))
+            .map_err(|e| std::io::Error::other(e.to_string()))
+        {
             Ok(mut embeddings) => {
                 if embeddings.is_empty() {
                     return (None, None);
@@ -482,23 +481,15 @@ impl<'a> Operations<'a> {
             .as_deref()
             .or(self.config.openai_base_url.as_deref())
             .unwrap_or("https://api.openai.com/v1");
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|rt| {
-                rt.block_on(expand_query(
-                    query,
-                    api_key,
-                    base_url,
-                    &self.config.expansion_model,
-                ))
-            }) {
-            Ok(expanded) => Some(expanded),
-            Err(e) => {
-                warn!(error = %e, "Query expansion failed; using original query only");
-                None
-            }
-        }
+        // H4 fix: 使用全局共享运行时
+        let rt = crate::runtime::shared_runtime();
+        let expanded = rt.block_on(expand_query(
+            query,
+            api_key,
+            base_url,
+            &self.config.expansion_model,
+        ));
+        Some(expanded)
     }
 
     /// Search with vector embedding
@@ -837,11 +828,18 @@ impl<'a> Operations<'a> {
         }
         if !chunks.is_empty() {
             debug!(slug = %slug, chunk_count = chunks.len(), "Chunking page content");
-            if let Err(e) = self.engine.delete_chunks(slug) {
-                warn!(slug = %slug, error = %e, "Failed to clear stale chunks before reindex (non-critical)");
+            // H19 修复: 增量更新 chunks，保留未变化 chunks 的 embeddings
+            let retained_keys: Vec<(i32, ChunkSource)> = chunks
+                .iter()
+                .map(|c| (c.chunk_index, c.source.clone()))
+                .collect();
+            // 仅删除不在新集合中的过时 chunks
+            if let Err(e) = self.engine.delete_stale_chunks(slug, &retained_keys) {
+                warn!(slug = %slug, error = %e, "清理过时 chunks 失败（非致命）");
             }
+            // 增量 upsert：内容不变则保留已有 embedding
             if let Err(e) = self.engine.upsert_chunks(slug, &chunks) {
-                warn!(slug = %slug, error = %e, "Failed to upsert chunks (non-critical)");
+                warn!(slug = %slug, error = %e, "Upsert chunks 失败（非致命）");
             }
             if let Some(index) = &code_index {
                 if !index.edges.is_empty() {
@@ -1332,17 +1330,11 @@ impl<'a> Operations<'a> {
                     Some(&self.config.embedding_model),
                     Some(self.config.embedding_dimensions),
                 );
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .ok();
-                match rt {
-                    Some(rt) => rt
-                        .block_on(embedder.embed_batch(&[&input.query]))
-                        .ok()
-                        .and_then(|v| v.into_iter().next()),
-                    None => None,
-                }
+                // H4 fix: 使用全局共享运行时
+                let rt = crate::runtime::shared_runtime();
+                rt.block_on(embedder.embed_batch(&[&input.query]))
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
             } else {
                 None
             };
@@ -1765,6 +1757,10 @@ fn walk_dir(_base: &std::path::Path, dir: &std::path::Path, files: &mut Vec<std:
 
 /// Serialize a serde_json::Value to a canonical JSON string with sorted keys.
 /// Ensures the same logical frontmatter produces the same hash regardless of key order.
+///
+/// C3 fix: 使用 `serde_json::to_string()` 对 key/value 进行正确的 JSON 转义，
+/// 避免含 `:`, `{`, `"` 等字符时产生歧义输出。
+/// 与 src/artifact/promotion.rs `serialize_canonical_json` 保持一致。
 fn canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -1772,7 +1768,11 @@ fn canonical_json(value: &serde_json::Value) -> String {
             sorted.sort_by(|a, b| a.0.cmp(b.0));
             let pairs: Vec<String> = sorted
                 .iter()
-                .map(|(k, v)| format!("{}:{}", k, canonical_json(v)))
+                .map(|(k, v)| {
+                    let key = serde_json::to_string(k).unwrap_or_else(|_| k.to_string());
+                    let val = canonical_json(v);
+                    format!("{}:{}", key, val)
+                })
                 .collect();
             format!("{{{}}}", pairs.join(","))
         }
@@ -1780,7 +1780,7 @@ fn canonical_json(value: &serde_json::Value) -> String {
             let items: Vec<String> = arr.iter().map(canonical_json).collect();
             format!("[{}]", items.join(","))
         }
-        other => other.to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
     }
 }
 
