@@ -181,10 +181,15 @@ fn rollback_split_file(path: &Path, bytes: usize, temp_guard: &mut TempOcrDir) {
 /// `max_bytes` 为单个子文件 GLM-OCR 大小上限，
 /// `temp_budget_max_bytes` 为临时目录总字节预算上限。
 ///
-/// 在内存中生成输出字节，申请预算成功后才写入磁盘；
+/// P1 修复：先在内存中生成子 PDF 字节，申请预算成功后才写入磁盘；
 /// 预算不足时不会留下任何临时文件。
-/// `temp_guard` 拥有拆分文件目录及其预算，申请成功后立即登记，因此包括
-/// 写入失败在内的异常路径也会由目录守卫负责最终清理和释放。
+/// 写盘失败时立即释放已占用预算，避免后续拆分被误判预算不足。
+/// `temp_guard` 拥有拆分文件目录及其预算，Drop 时负责最终清理。
+///
+/// 注意：PdfSplitter trait 保留供外部独立调用（如 split_range），
+/// 但此函数因需要"先生成字节 → 检查预算 → 再写盘"的两阶段流程，
+/// 无法直接委托给 trait 的单步 split_range 方法，故内部直接调用
+/// generate_split_bytes / write_split_bytes。
 pub fn split_pdf_for_ocr(
     source_pdf: &[u8],
     source_start_page: i32,
@@ -192,20 +197,17 @@ pub fn split_pdf_for_ocr(
     max_bytes: usize,
     temp_budget_max_bytes: u64,
     temp_guard: &mut TempOcrDir,
-    // TODO: 未来用于支持可插拔的 PDF 拆分策略（如 MuPDF 等），当前直接使用 lopdf
-    _splitter: &dyn PdfSplitter,
 ) -> Result<Vec<SplitPdf>> {
     let page_count = source_end_page - source_start_page + 1;
 
-    // 在内存中生成拆分字节，不写入磁盘
+    // P1 修复：先在内存中生成子 PDF 字节（不写盘），预算检查通过后再落盘
     let (out_buf, child_page_count) =
         generate_split_bytes(source_pdf, source_start_page, source_end_page)?;
     let bytes = out_buf.len();
 
     if bytes <= max_bytes {
-        // 先申请预算，成功后才写盘，避免超限文件先落盘后删除
+        // 先申请预算，成功后才写盘
         if !temp_guard.try_reserve(bytes as u64, temp_budget_max_bytes) {
-            // 预算不足，文件未写盘，无需删除
             return Err(GBrainError::InvalidInput(format!(
                 "临时目录预算不足: 需要 {} bytes，当前已用 {} / 上限 {}",
                 bytes,
@@ -213,17 +215,20 @@ pub fn split_pdf_for_ocr(
                 temp_budget_max_bytes
             )));
         }
-        // 预算申请后立即移交目录守卫，确保写盘失败路径同样能够释放计数。
+        // 预算申请成功，写入磁盘；写盘失败时立即释放预算，避免后续拆分被误判预算不足
         let path = match write_split_bytes(
             &out_buf,
             source_start_page,
             source_end_page,
             temp_guard.path(),
         ) {
-            Ok(path) => path,
+            Ok(p) => p,
             Err(e) => {
-                let path = split_output_path(temp_guard.path(), source_start_page, source_end_page);
-                rollback_split_file(&path, bytes, temp_guard);
+                // 写盘失败：先尝试删除可能残留的部分文件，成功后再释放预算；
+                // rollback_split_file 内部已处理文件不存在时的 release 语义。
+                let partial_path =
+                    split_output_path(temp_guard.path(), source_start_page, source_end_page);
+                rollback_split_file(&partial_path, bytes, temp_guard);
                 return Err(e);
             }
         };
@@ -236,7 +241,7 @@ pub fn split_pdf_for_ocr(
         }]);
     }
 
-    // 超过大小限制：文件未写盘，无需删除
+    // 超过大小限制：此时尚未写盘，无需清理文件
 
     if page_count == 1 {
         return Err(GBrainError::InvalidInput(format!(
@@ -257,7 +262,6 @@ pub fn split_pdf_for_ocr(
         max_bytes,
         temp_budget_max_bytes,
         temp_guard,
-        _splitter,
     ) {
         Ok(left_results) => {
             results.extend(left_results);
@@ -276,7 +280,6 @@ pub fn split_pdf_for_ocr(
         max_bytes,
         temp_budget_max_bytes,
         temp_guard,
-        _splitter,
     ) {
         Ok(right_results) => {
             results.extend(right_results);

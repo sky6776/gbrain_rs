@@ -7,7 +7,7 @@
 //! 4. 单页子文件仍超限时标记 failed
 
 use crate::error::Result;
-use crate::kb::ocr_pdf_splitter::{split_pdf_for_ocr, LopdfSplitter};
+use crate::kb::ocr_pdf_splitter::split_pdf_for_ocr;
 use crate::kb::temp_guard::TempOcrDir;
 
 /// OCR 请求计划
@@ -67,13 +67,26 @@ pub fn plan_ocr_requests(
     }
 
     let pdf_bytes = pdf_data.len();
-    // Physical split is only required for the byte limit. Page count is handled
-    // by planning multiple start/end page ranges against the same source PDF.
-    // TODO: total_pages 未来用于验证 ocr_pages 范围合法性
-    let _ = total_pages;
-    // TODO: submit_mode 未来用于区分同步/异步提交策略
-    let _ = submit_mode;
-    let needs_physical_split = pdf_bytes > max_pdf_bytes;
+
+    // H25 修复：校验 ocr_pages 中的页码是否在合法范围 [1, total_pages] 内
+    if total_pages > 0 {
+        for &page in ocr_pages {
+            if page < 1 || page > total_pages {
+                return Err(crate::error::GBrainError::InvalidInput(format!(
+                    "OCR 页码 {} 超出合法范围 [1, {}]，总页数: {}",
+                    page, total_pages, total_pages
+                )));
+            }
+        }
+    }
+
+    // H25 修复：根据 submit_mode 决定是否需要物理拆分
+    // - PdfFirst: 仅在超过字节限制时拆分（原逻辑）
+    // - PdfRange: 强制按页段拆分为子文件，即使未超字节限制
+    let needs_physical_split = match submit_mode {
+        crate::kb::ocr_provider::OcrSubmitMode::PdfRange => true,
+        crate::kb::ocr_provider::OcrSubmitMode::PdfFirst => pdf_bytes > max_pdf_bytes,
+    };
 
     // 将目标页合并为连续页段
     let segments = merge_pages_to_segments(ocr_pages, max_pages_per_request);
@@ -83,8 +96,6 @@ pub fn plan_ocr_requests(
     for (seg_start, seg_end) in &segments {
         if needs_physical_split {
             // 需要物理拆分 PDF
-            let splitter = LopdfSplitter;
-
             // 先尝试直接拆出这个页段
             match split_pdf_for_ocr(
                 pdf_data,
@@ -93,7 +104,6 @@ pub fn plan_ocr_requests(
                 max_pdf_bytes,
                 temp_budget_max_bytes,
                 temp_guard,
-                &splitter,
             ) {
                 Ok(split_results) => {
                     for split in split_results {

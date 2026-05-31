@@ -573,6 +573,64 @@ pub fn find_projection_by_key(
     }
 }
 
+/// M24 修复：按投影键查询版本链（§31）
+///
+/// 返回按 created_at DESC 排列的投影历史，最新在前。
+/// 动态拼接 WHERE 条件，消除原有的 4 个重复 SQL 分支。
+pub fn find_projection_history(
+    conn: &Connection,
+    projection_key: &str,
+    artifact_id: Option<i64>,
+    projection_type: Option<&str>,
+    limit: i64,
+) -> Result<Vec<ArtifactProjection>, rusqlite::Error> {
+    const PROJECTION_HISTORY_SELECT: &str = "\
+        SELECT p.id, p.created_at, p.updated_at, \
+               p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref, \
+               p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by \
+        FROM artifact_projections p";
+
+    let mut where_clauses = vec!["p.projection_key = ?1".to_string()];
+    let mut param_idx = 1u32;
+
+    if artifact_id.is_some() {
+        param_idx += 1;
+        where_clauses.push(format!("p.artifact_id = ?{}", param_idx));
+    }
+    if projection_type.is_some() {
+        param_idx += 1;
+        where_clauses.push(format!("p.projection_type = ?{}", param_idx));
+    }
+    param_idx += 1;
+    let limit_param = param_idx;
+
+    let sql = format!(
+        "{} WHERE {} ORDER BY p.created_at DESC LIMIT ?{}",
+        PROJECTION_HISTORY_SELECT,
+        where_clauses.join(" AND "),
+        limit_param,
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+
+    // 构建动态参数列表
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    params.push(Box::new(projection_key.to_string()));
+    if let Some(aid) = artifact_id {
+        params.push(Box::new(aid));
+    }
+    if let Some(pt) = projection_type {
+        params.push(Box::new(pt.to_string()));
+    }
+    params.push(Box::new(limit));
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        row_to_artifact_projection(row)
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+}
+
 /// 按 artifact_id + projection_type + projection_key 查找投影（不限状态）
 ///
 /// 修复：reprocess 先标 stale 后调 create_kb_projection，
@@ -690,89 +748,6 @@ pub fn supersede_projection(
         params![new_proj_id, old_proj_id],
     )?;
     Ok(())
-}
-
-/// 按投影键查询版本链（§31）
-///
-/// 返回按 created_at DESC 排列的投影历史，最新在前。
-/// 修复：增加 artifact_id 和 projection_type 可选过滤，避免同一 library 下
-/// 多个 artifact 的投影混合（KB projection key 格式为 library:{id}，
-/// 同一 library 多个 artifact 共享此 key，但唯一约束是
-/// (artifact_id, projection_type, projection_key)）
-pub fn find_projection_history(
-    conn: &Connection,
-    projection_key: &str,
-    artifact_id: Option<i64>,
-    projection_type: Option<&str>,
-    limit: i64,
-) -> Result<Vec<ArtifactProjection>, rusqlite::Error> {
-    // 注意：4 个 match 分支的 SQL 结构几乎完全相同，仅在 WHERE 子句的过滤条件上
-    // 有细微差异（artifact_id 和 projection_type 的有无）。当前保持独立分支是为了
-    // 避免 rusqlite 的动态参数绑定复杂性（不同参数数量需要不同的 params! 宏展开）。
-    // 重构方向：可提取公共 SELECT 列和 FROM/WHERE 骨架为宏或辅助函数，
-    // 按参数组合动态拼接 WHERE 子句和参数列表。但需权衡代码量减少 vs 可读性。
-    match (artifact_id, projection_type) {
-        (Some(aid), Some(pt)) => {
-            let mut stmt = conn.prepare(
-                "SELECT p.id, p.created_at, p.updated_at,
-                        p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref,
-                        p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
-                 FROM artifact_projections p
-                 WHERE p.projection_key = ?1 AND p.artifact_id = ?2 AND p.projection_type = ?3
-                 ORDER BY p.created_at DESC
-                 LIMIT ?4",
-            )?;
-            let rows = stmt.query_map(params![projection_key, aid, pt, limit], |row| {
-                row_to_artifact_projection(row)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }
-        (Some(aid), None) => {
-            let mut stmt = conn.prepare(
-                "SELECT p.id, p.created_at, p.updated_at,
-                        p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref,
-                        p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
-                 FROM artifact_projections p
-                 WHERE p.projection_key = ?1 AND p.artifact_id = ?2
-                 ORDER BY p.created_at DESC
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![projection_key, aid, limit], |row| {
-                row_to_artifact_projection(row)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }
-        (None, Some(pt)) => {
-            let mut stmt = conn.prepare(
-                "SELECT p.id, p.created_at, p.updated_at,
-                        p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref,
-                        p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
-                 FROM artifact_projections p
-                 WHERE p.projection_key = ?1 AND p.projection_type = ?2
-                 ORDER BY p.created_at DESC
-                 LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![projection_key, pt, limit], |row| {
-                row_to_artifact_projection(row)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }
-        (None, None) => {
-            let mut stmt = conn.prepare(
-                "SELECT p.id, p.created_at, p.updated_at,
-                        p.artifact_id, p.occurrence_id, p.projection_type, p.projection_key, p.projection_ref,
-                        p.status, p.version_hash, p.stale_reason, p.metadata_json, p.superseded_by
-                 FROM artifact_projections p
-                 WHERE p.projection_key = ?1
-                 ORDER BY p.created_at DESC
-                 LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![projection_key, limit], |row| {
-                row_to_artifact_projection(row)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }
-    }
 }
 
 /// 按 ID 查找投影

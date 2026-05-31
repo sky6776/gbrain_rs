@@ -543,7 +543,12 @@ pub async fn process_document_async(
         "md" => crate::kb::metadata::extract_markdown_metadata(&parsed.content, &file_data),
         "pdf" => crate::kb::metadata::extract_pdf_metadata(&parsed.content, &file_data),
         "docx" => crate::kb::metadata::extract_docx_metadata(&parsed.content, &file_data),
-        "html" | "htm" => crate::kb::metadata::extract_html_metadata(&parsed.content, &file_data),
+        "html" | "htm" => {
+            // HTML parser 已在 parse() 阶段从原始 HTML 正确提取了 title/meta 标签，
+            // 此处直接从 parsed.metadata 转换为 DocumentMetadata，
+            // 避免对已抽取的纯文本做无效的 HTML 标签匹配。
+            crate::kb::metadata::DocumentMetadata::from_parser_metadata(&parsed.metadata)
+        }
         _ => crate::kb::metadata::DocumentMetadata::default(),
     };
     doc_meta.merge_with(&format_meta);
@@ -552,6 +557,15 @@ pub async fn process_document_async(
         &parsed.content,
         doc_meta.language.as_deref().unwrap_or("zh"),
     );
+    // 合并 meta keywords（如 HTML <meta name="keywords">）与正文提取的关键词。
+    // meta keywords 是作者指定的权威标签，优先保留；正文提取的关键词补充追加。
+    let final_keywords = match doc_meta.keywords.as_deref() {
+        Some(meta_kw) if !meta_kw.is_empty() && !keywords.is_empty() => {
+            format!("{}, {}", meta_kw, keywords)
+        }
+        Some(meta_kw) if !meta_kw.is_empty() => meta_kw.to_string(),
+        _ => keywords,
+    };
     // 落库元数据
     // FIX11-04: 元数据更新失败不应静默吞下，至少记录警告
     // 修复：传入 run_id，防止旧 job 污染新 run 的文档元数据
@@ -559,7 +573,7 @@ pub async fn process_document_async(
         doc_id,
         doc_meta.title.as_deref().unwrap_or(""),
         doc_meta.author.as_deref().unwrap_or(""),
-        &keywords,
+        &final_keywords,
         &entities,
         doc_meta.source_uri.as_deref().unwrap_or(""),
         doc_meta.document_date.as_deref(),

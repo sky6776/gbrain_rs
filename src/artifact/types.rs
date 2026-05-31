@@ -1044,32 +1044,10 @@ pub fn infer_extension(filename: &str) -> String {
 }
 
 /// 从扩展名推断 MIME 类型
+///
+/// M44 修复：委托给统一的 mime_type_for_ext，保持 API 兼容（返回 String）。
 pub fn infer_mime_type(extension: &str) -> String {
-    match extension {
-        "txt" => "text/plain".to_string(),
-        "md" | "markdown" => "text/markdown".to_string(),
-        "html" | "htm" => "text/html".to_string(),
-        "json" => "application/json".to_string(),
-        "xml" => "application/xml".to_string(),
-        "pdf" => "application/pdf".to_string(),
-        "doc" => "application/msword".to_string(),
-        "docx" => {
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
-        }
-        "png" => "image/png".to_string(),
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "gif" => "image/gif".to_string(),
-        "svg" => "image/svg+xml".to_string(),
-        "csv" => "text/csv".to_string(),
-        "tsv" => "text/tab-separated-values".to_string(),
-        "rst" => "text/x-rst".to_string(),
-        // M44 说明：yaml/toml 返回的是非标准 MIME 类型（application/x-yaml、application/toml），
-        // IANA 未正式注册这些类型。生产环境中若需严格标准 MIME，应使用 text/plain 或
-        // 配合 Content-Disposition 头返回。此处保留是因为前端/客户端依赖这些类型做格式判断。
-        "yaml" | "yml" => "application/x-yaml".to_string(),
-        "toml" => "application/toml".to_string(),
-        _ => "application/octet-stream".to_string(),
-    }
+    crate::kb::types::mime_type_for_ext(extension).to_string()
 }
 
 // ============================================================================

@@ -17,16 +17,31 @@ pub const STATUS_SKIPPED: i32 = 4;
 /// 返回值为 &'static str 无法避免输入分配（除非改为接受 &str 要求调用方预转小写），
 /// 调用频率低，暂不优化。
 pub fn mime_type_for_ext(ext: &str) -> &'static str {
+    // M44 修复：统一 MIME 映射，覆盖所有 KB 和 artifact 支持的格式
     match ext.to_lowercase().as_str() {
+        // 文档
         "pdf" => "application/pdf",
+        "doc" => "application/msword",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "csv" => "text/csv",
-        "html" | "htm" => "text/html",
+        // 文本
         "txt" => "text/plain",
-        "md" => "text/markdown",
+        "md" | "markdown" => "text/markdown",
+        "rst" => "text/x-rst",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "html" | "htm" => "text/html",
+        // 数据/配置
+        "json" => "application/json",
+        "xml" => "application/xml",
+        // 非 IANA 标准类型，前端/客户端依赖此类型做格式判断
+        "yaml" | "yml" => "application/x-yaml",
+        "toml" => "application/toml",
+        // 图片
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     }
 }

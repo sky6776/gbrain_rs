@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use rusqlite::{params, Connection};
+use sha2::{Digest, Sha256};
 
 const WINDOW_CHARS: usize = 720;
 const WINDOW_OVERLAP: usize = 120;
@@ -76,12 +77,53 @@ pub fn rebuild_passages_for_node(
     content: &str,
     node_source_start: i32,
 ) -> Result<usize> {
+    let drafts = build_passage_drafts(content);
+
+    // L4 修复：查询现有 passage 数量和签名，若完全匹配则跳过重建
+    let existing_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM kb_passage_spans WHERE node_id = ?1",
+        params![node_id],
+        |row| row.get(0),
+    )?;
+
+    if existing_count == drafts.len() as i64 && !drafts.is_empty() {
+        // 比较 view_type、source 偏移、content 的 SHA256 hash 作为签名，
+        // 避免仅靠长度判断导致长度相同但内容不同的 passage 被错误跳过，
+        // 同时防止 node_source_start 变化后旧的绝对偏移继续残留。
+        let mut stmt = conn.prepare(
+            "SELECT view_type, content, source_start, source_end FROM kb_passage_spans WHERE node_id = ?1 ORDER BY CASE view_type WHEN 'atomic' THEN 0 WHEN 'window' THEN 1 WHEN 'raw' THEN 2 END, passage_order",
+        )?;
+        let rows: Vec<(String, String, i64, i64)> = stmt
+            .query_map(params![node_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let unchanged = rows.len() == drafts.len()
+            && drafts.iter().enumerate().all(|(i, draft)| {
+                if rows[i].0 != draft.view_type {
+                    return false;
+                }
+                // 比较绝对偏移：node_source_start + draft 相对偏移应等于 DB 中的绝对偏移
+                let expected_start = node_source_start as i64 + draft.source_start as i64;
+                let expected_end = node_source_start as i64 + draft.source_end as i64;
+                if rows[i].2 != expected_start || rows[i].3 != expected_end {
+                    return false;
+                }
+                let old_hash = Sha256::digest(rows[i].1.as_bytes());
+                let new_hash = Sha256::digest(draft.content.as_bytes());
+                old_hash == new_hash
+            });
+
+        if unchanged {
+            return Ok(0);
+        }
+    }
+
     conn.execute(
         "DELETE FROM kb_passage_spans WHERE node_id = ?1",
         params![node_id],
     )?;
 
-    let drafts = build_passage_drafts(content);
     for draft in &drafts {
         // P3 修复：passage 内容存"原文"（保留所有空白与零宽字符），
         // FTS 分词使用清洗后版本。这样 passage.source_start + excerpt.start 才能

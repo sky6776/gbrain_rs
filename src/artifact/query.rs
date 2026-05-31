@@ -203,24 +203,25 @@ pub fn unified_query(
         }
     }
 
-    // 修复：filter_slug 已下推到各查询函数，不再需要后置 retain。
-    // 保留此块作为防御性兜底，确保即使下推逻辑有遗漏也不会泄漏非目标 slug 的结果
+    // M26+M52 修复：预计算 filter_slug 的所有变体，避免在每次 retain 调用中重复计算
+    // filter_slug 已下推到各查询函数，此处作为防御性兜底
     if let Some(slug) = &input.filter_slug {
-        brain_hits.retain(|hit| slug_matches_filter(&hit.slug, slug));
+        let filter_variants: HashSet<String> = slug_value_variants(slug).into_iter().collect();
+        brain_hits.retain(|hit| slug_matches_filter_cached(&hit.slug, &filter_variants));
         evidence_hits.retain(|hit| {
             hit.shadow_page_slug
                 .as_deref()
-                .map(|s| slug_matches_filter(s, slug))
+                .map(|s| slug_matches_filter_cached(s, &filter_variants))
                 .unwrap_or(false)
         });
         timeline_hits.retain(|hit| {
             hit.shadow_page_slug
                 .as_deref()
-                .map(|s| slug_matches_filter(s, slug))
+                .map(|s| slug_matches_filter_cached(s, &filter_variants))
                 .unwrap_or(false)
         });
-        // 修复：同步过滤 provenance_records，只保留目标 slug 的来源记录
-        provenance_records.retain(|rec| slug_matches_filter(&rec.brain_slug, slug));
+        // 同步过滤 provenance_records，只保留目标 slug 的来源记录
+        provenance_records.retain(|rec| slug_matches_filter_cached(&rec.brain_slug, &filter_variants));
     }
 
     let total_hits =
@@ -257,19 +258,12 @@ fn slug_ref_variants(slug: &str) -> (String, String) {
     (format!("slug:{}", first), format!("slug:{}", second))
 }
 
-fn slug_matches_filter(candidate: &str, filter: &str) -> bool {
-    // 快速路径：如果原始值完全相等，直接通过，避免 O(n*m) 的变体比较
-    if candidate == filter {
-        return true;
-    }
-
-    // 同时规范化 candidate 和 filter，确保 slug: 前缀、documents/ 前缀
-    // 等各种形式都能正确匹配
-    let filter_variants = slug_value_variants(filter);
+/// M26+M52 修复：使用预计算的 filter 变体集合进行匹配，避免重复计算
+fn slug_matches_filter_cached(candidate: &str, filter_variants: &HashSet<String>) -> bool {
     let candidate_variants = slug_value_variants(candidate);
     candidate_variants
         .iter()
-        .any(|cv| filter_variants.iter().any(|fv| cv == fv))
+        .any(|cv| filter_variants.contains(cv))
 }
 
 /// 查询 gbrain
@@ -1704,8 +1698,11 @@ fn build_and_match_query(terms: &[String]) -> String {
         .join(" AND ")
 }
 
+/// M53 修复：领域缩写列表 — 集中管理，可在此处扩展或改为从配置加载
+const DOMAIN_ABBREVIATIONS: &[&str] = &["lp", "gp", "vi", "api", "sdk"];
+
 fn is_domain_abbreviation(token: &str) -> bool {
-    matches!(token, "lp" | "gp" | "vi" | "api" | "sdk")
+    DOMAIN_ABBREVIATIONS.contains(&token)
 }
 
 fn matched_terms(content: &str, title: &str, plan: &EvidenceQueryPlan) -> Vec<String> {

@@ -278,12 +278,21 @@ pub fn normalize_glm_ocr_response(
     Ok(results)
 }
 
+/// M21 修复：块格式化策略 — 控制表格和公式的输出格式
+///
+/// - `Plain`: 表格用纯文本（| 分隔），公式用 [FORMULA] 标记
+/// - `Markdown`: 表格用 markdown 表格，公式用 $$...$$ LaTeX 标记
+enum BlockFormatMode {
+    Plain,
+    Markdown,
+}
+
 /// OCR profile 格式化策略：所有 block 均保留，但按 profile 对目标类型增强输出。
 /// - general: 无增强，按默认格式输出
 /// - table: 表格 block 使用完整 markdown 表格格式
 /// - formula: 公式 block 保留 LaTeX 原始内容，加独立标记
 /// - handwriting: 文本 block 不做特殊处理（手写识别质量由 OCR 引擎决定）
-fn format_block_text(block: &OcrLayoutBlock, profile: &str) -> Option<String> {
+fn format_block(block: &OcrLayoutBlock, profile: &str, mode: BlockFormatMode) -> Option<String> {
     if block.content.is_empty() {
         return None;
     }
@@ -298,16 +307,17 @@ fn format_block_text(block: &OcrLayoutBlock, profile: &str) -> Option<String> {
             }
         }
         OcrBlockLabel::Table => {
-            if profile == "table" {
-                // 表格 profile：转换为完整 markdown 表格
-                Some(format!(
-                    "[TABLE]\n{}",
-                    html_table_to_markdown(&block.content)
-                ))
+            // table profile 始终输出完整 markdown 表格以保真；
+            // 其他 profile 按 mode 控制格式。
+            let table_text = if profile == "table" {
+                html_table_to_markdown(&block.content)
             } else {
-                let plain = html_table_to_plain(&block.content);
-                Some(format!("[TABLE]\n{}", plain))
-            }
+                match mode {
+                    BlockFormatMode::Markdown => html_table_to_markdown(&block.content),
+                    BlockFormatMode::Plain => html_table_to_plain(&block.content),
+                }
+            };
+            Some(format!("[TABLE]\n{}", table_text))
         }
         OcrBlockLabel::Image => None,
         OcrBlockLabel::Unknown(_) => Some(block.content.clone()),
@@ -315,16 +325,10 @@ fn format_block_text(block: &OcrLayoutBlock, profile: &str) -> Option<String> {
 }
 
 /// 从版面块生成纯文本，按 profile 增强目标 block 格式
-// 注意：blocks_to_plain_text 和 blocks_to_markdown 存在结构重复。
-// 两者共享相同的 block 遍历逻辑和分支匹配，仅输出格式不同：
-// - plain_text 路径通过 format_block_text 统一格式化
-// - markdown 路径内联格式化，表格始终用 markdown 表格
-// 重构方向：可提取公共遍历+匹配逻辑为闭包/迭代器适配器，仅注入格式化策略。
-// 当前保持独立以便于各路径独立演进（如 markdown 可能增加代码块、链接等格式）。
 fn blocks_to_plain_text(blocks: &[OcrLayoutBlock], profile: &str) -> String {
     let mut parts = Vec::new();
     for block in blocks {
-        if let Some(text) = format_block_text(block, profile) {
+        if let Some(text) = format_block(block, profile, BlockFormatMode::Plain) {
             parts.push(text);
         }
     }
@@ -335,35 +339,11 @@ fn blocks_to_plain_text(blocks: &[OcrLayoutBlock], profile: &str) -> String {
 ///
 /// 与 blocks_to_plain_text 类似但保留更多格式：表格用 markdown 表格，
 /// 公式用 LaTeX 标记。图片 block 跳过（仅保留在 metadata/UI）。
-// 注意：此函数与 blocks_to_plain_text 存在结构重复，详见上方注释。
 fn blocks_to_markdown(blocks: &[OcrLayoutBlock], profile: &str) -> String {
     let mut parts = Vec::new();
     for block in blocks {
-        if block.content.is_empty() {
-            continue;
-        }
-        match &block.label {
-            OcrBlockLabel::Text => {
-                parts.push(block.content.clone());
-            }
-            OcrBlockLabel::Table => {
-                // markdown 路径始终用完整表格格式
-                parts.push(format!(
-                    "[TABLE]\n{}",
-                    html_table_to_markdown(&block.content)
-                ));
-            }
-            OcrBlockLabel::Formula => {
-                if profile == "formula" {
-                    parts.push(format!("$${}$$", block.content.trim()));
-                } else {
-                    parts.push(format!("[FORMULA]\n{}", block.content));
-                }
-            }
-            OcrBlockLabel::Image => {}
-            OcrBlockLabel::Unknown(_) => {
-                parts.push(block.content.clone());
-            }
+        if let Some(text) = format_block(block, profile, BlockFormatMode::Markdown) {
+            parts.push(text);
         }
     }
     parts.join("\n\n")
@@ -456,10 +436,17 @@ fn strip_markdown(md: &str) -> String {
     lines.join("\n")
 }
 
+/// M14 修复：OCR provider 返回的显式分页标记
+const PAGE_BREAK_MARKER: &str = "<!-- page-break -->";
+
 /// 尝试按页拆分 markdown 结果
 ///
-/// GLM-OCR 的 md_results 可能包含分页标记（如 `---` 或 `\\\newpage`）。
+/// GLM-OCR 的 md_results 可能包含分页标记。拆分优先级：
+/// 1. 显式页标记 `<!-- page-break -->`（最可靠，由 provider 明确标记）
+/// 2. `\newpage` 分隔符
 /// 如果无法拆分，返回每页空字符串，让调用方从各页 blocks 生成 markdown。
+///
+/// P2 修复：已移除 `\n---\n` fallback，避免正文水平线误触发分页。
 fn split_md_by_pages(md: Option<&str>, page_count: usize) -> Vec<String> {
     let md = match md {
         Some(m) if !m.is_empty() => m,
@@ -471,13 +458,8 @@ fn split_md_by_pages(md: Option<&str>, page_count: usize) -> Vec<String> {
         return vec![md.to_string()];
     }
 
-    // 尝试按 --- 分隔符拆分
-    // 已知限制：Markdown 文档中的水平分割线（如 "---"）会被误认为分页符。
-    // 当前仅在 parts.len() == page_count 时采纳拆分结果，若不匹配则跳过，
-    // 因此误拆分风险仅在分割后数量恰好等于页数时才触发。未来改进方向：
-    // 1) 要求 OCR API 返回明确分页标记（如 <!-- page-break -->）而非依赖 "---"；
-    // 2) 增加 "---" 前后上下文校验（如上方必须是标题或特定模式）以排除普通水平线。
-    let parts: Vec<&str> = md.split("\n---\n").collect();
+    // 优先按显式页标记拆分（最可靠，不会与正文内容冲突）
+    let parts: Vec<&str> = md.split(PAGE_BREAK_MARKER).collect();
     if parts.len() == page_count {
         return parts.iter().map(|s| s.to_string()).collect();
     }
@@ -572,6 +554,25 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].page_number, 5);
         assert!(results[0].text.contains("Title"));
+    }
+
+    #[test]
+    fn test_split_md_by_pages_explicit_marker() {
+        let md = "第一页内容<!-- page-break -->第二页内容<!-- page-break -->第三页内容";
+        let parts = split_md_by_pages(Some(md), 3);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "第一页内容");
+        assert_eq!(parts[1], "第二页内容");
+        assert_eq!(parts[2], "第三页内容");
+    }
+
+    #[test]
+    fn test_split_md_by_pages_marker_priority_over_dash() {
+        // 显式标记优先于 --- 分隔符
+        let md = "第一页\n---\n第二页";
+        let parts = split_md_by_pages(Some(md), 2);
+        // --- 拆分后恰好 2 段，应能正确拆分
+        assert_eq!(parts.len(), 2);
     }
 
     #[test]

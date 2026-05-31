@@ -76,30 +76,183 @@ fn clean_html(raw: &str) -> String {
     result = remove_tags(&result, "noscript");
 
     // 移除 hidden/display:none 元素
-    // 注意：当前 regex 仅匹配内联 style 属性中的 display:none / visibility:hidden，
-    // 以及 aria-hidden="true"。无法处理外部 CSS class 隐藏（如 .hidden { display:none }）、
-    // <script> 标签内的动态样式修改、或 HTML 注释包裹的隐藏元素。
-    // 对于大多数 KB 解析场景已足够，若需完整覆盖应改用 DOM 解析器。
-    if let Ok(re) = regex::Regex::new(
-        r#"(?i)<[^>]*\b(?:display\s*:\s*none|visibility\s*:\s*hidden|aria-hidden\s*=\s*['"]true['"])[^>]*>.*?</[^>]+>"#,
-    ) {
-        result = re.replace_all(&result, "").to_string();
+    // 覆盖范围：内联 style 中的 display:none / visibility:hidden、
+    // aria-hidden="true"，以及常见 CSS 隐藏 class（hidden, invisible, d-none,
+    // visually-hidden, sr-only）。
+    // 不支持：外部 CSS 文件中的 .hidden { display:none }、<style> 块中的样式规则、
+    // JavaScript 动态修改 class/style、HTML 注释包裹的隐藏元素。
+
+    // 第一步：匹配 inline style / aria-hidden（子树匹配，正确处理嵌套内容）
+    let Ok(style_re) = regex::Regex::new(
+        r#"(?i)(?:display\s*:\s*none|visibility\s*:\s*hidden|aria-hidden\s*=\s*["']true["'])"#,
+    ) else {
+        return result;
+    };
+    result = remove_elements_matching(&result, |tag| style_re.is_match(tag));
+
+    // 第二步：匹配隐藏 CSS class（按空格精确匹配 class token，子树匹配）
+    result = remove_hidden_class_elements(&result);
+
+    result
+}
+
+/// 删除指定标签的完整子树。
+/// 对普通标签（nav, footer 等）使用嵌套深度追踪，正确处理同名嵌套。
+/// 对 raw-text 元素（script, style 等）直接匹配第一个闭标签，
+/// 因为这些元素的内容中出现的 `<tag>` 是文本而非真实标签，不应增加嵌套深度。
+fn remove_tags(html: &str, tag: &str) -> String {
+    let open_pattern = format!(r"(?is)<{}\b[^>]*>", regex::escape(tag));
+    let Ok(open_re) = regex::Regex::new(&open_pattern) else {
+        return html.to_string();
+    };
+    let tag_lower = tag.to_lowercase();
+
+    // raw-text 元素：内容中出现的 `<tag>` 是文本而非真实标签，不追踪嵌套深度
+    let is_raw_text = matches!(tag_lower.as_str(), "script" | "style" | "textarea" | "title");
+    let close_re = if is_raw_text {
+        let close_pattern = format!(r"(?i)</{}\s*>", regex::escape(&tag_lower));
+        regex::Regex::new(&close_pattern).ok()
+    } else {
+        None
+    };
+
+    let mut result = String::with_capacity(html.len());
+    let mut pos = 0;
+
+    while pos < html.len() {
+        if let Some(m) = open_re.find(&html[pos..]) {
+            let open_start = pos + m.start();
+            let open_end = pos + m.end();
+            result.push_str(&html[pos..open_start]);
+
+            if m.as_str().ends_with("/>") {
+                // 自闭合标签：直接跳过
+                pos = open_end;
+            } else if let Some(ref cre) = close_re {
+                // raw-text 元素：找第一个闭标签，不追踪嵌套
+                if let Some(close_m) = cre.find(&html[open_end..]) {
+                    pos = open_end + close_m.end();
+                } else {
+                    result.push_str(m.as_str());
+                    pos = open_end;
+                }
+            } else if let Some(subtree_end) = find_matching_close(html, open_end, &tag_lower) {
+                // 普通标签：嵌套深度追踪
+                pos = subtree_end;
+            } else {
+                result.push_str(m.as_str());
+                pos = open_end;
+            }
+        } else {
+            result.push_str(&html[pos..]);
+            break;
+        }
     }
 
     result
 }
 
-fn remove_tags(html: &str, tag: &str) -> String {
-    let pattern = format!(
-        r"(?is)<{}[\s>].*?</{}>",
-        regex::escape(tag),
-        regex::escape(tag)
-    );
-    if let Ok(re) = regex::Regex::new(&pattern) {
-        re.replace_all(html, "").to_string()
-    } else {
-        html.to_string()
+/// 从 `start` 位置开始，查找与开标签匹配的闭标签位置。
+/// 使用深度计数追踪嵌套同名标签，返回匹配闭标签之后的全局偏移量。
+/// 未找到匹配时返回 None。
+fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize> {
+    let open_pat = format!(r"(?i)<{}[\s>/]", regex::escape(tag_name));
+    let close_pat = format!(r"(?i)</{}\s*>", regex::escape(tag_name));
+    let Ok(open_re) = regex::Regex::new(&open_pat) else { return None };
+    let Ok(close_re) = regex::Regex::new(&close_pat) else { return None };
+
+    let mut depth = 1;
+    let mut pos = start;
+
+    while depth > 0 && pos < html.len() {
+        let next_open = open_re.find(&html[pos..]).map(|m| (pos + m.start(), pos + m.end()));
+        let next_close = close_re.find(&html[pos..]).map(|m| (pos + m.start(), pos + m.end()));
+
+        let closest = match (next_open, next_close) {
+            (Some(o), Some(c)) if o.0 < c.0 => (o.0, o.1, true),
+            (Some(_), Some(c)) => (c.0, c.1, false),
+            (Some(o), None) => (o.0, o.1, true),
+            (None, Some(c)) => (c.0, c.1, false),
+            (None, None) => return None,
+        };
+
+        if closest.2 {
+            depth += 1;
+        } else {
+            depth -= 1;
+        }
+        pos = closest.1;
     }
+
+    if depth == 0 { Some(pos) } else { None }
+}
+
+/// 删除匹配谓词的 HTML 元素及其完整子树。
+/// `detect(open_tag)` 接收开标签文本，返回 true 则删除该元素及所有子内容。
+/// 正确处理嵌套同名标签：`<div class="hidden"><div>inner</div></div>` 会被完整删除。
+fn remove_elements_matching(html: &str, detect: impl Fn(&str) -> bool) -> String {
+    let Ok(tag_re) = regex::Regex::new(r"(?is)<(\w+)([^>]*)>") else {
+        return html.to_string();
+    };
+
+    let mut result = String::with_capacity(html.len());
+    let mut pos = 0;
+
+    while pos < html.len() {
+        let Some(cap) = tag_re.captures(&html[pos..]) else {
+            result.push_str(&html[pos..]);
+            break;
+        };
+        let full = cap.get(0).unwrap();
+        let open_start = pos + full.start();
+        let open_end = pos + full.end();
+        let tag_name = cap.get(1).unwrap().as_str().to_lowercase();
+
+        result.push_str(&html[pos..open_start]);
+
+        if full.as_str().ends_with("/>") {
+            // 自闭合标签：检测后直接跳过或保留
+            if detect(full.as_str()) {
+                pos = open_end;
+            } else {
+                result.push_str(full.as_str());
+                pos = open_end;
+            }
+        } else if detect(full.as_str()) {
+            // 非自闭合标签 + 需要删除：找匹配闭标签，跳过整棵子树
+            if let Some(subtree_end) = find_matching_close(html, open_end, &tag_name) {
+                pos = subtree_end;
+            } else {
+                result.push_str(full.as_str());
+                pos = open_end;
+            }
+        } else {
+            result.push_str(full.as_str());
+            pos = open_end;
+        }
+    }
+
+    result
+}
+
+/// 移除含有隐藏 CSS class 的 HTML 元素及其完整子树。
+/// 按空格拆分 class 属性值后精确匹配 token，避免误匹配连字符类名（如 `not-hidden`）。
+/// 正确处理嵌套同名标签，确保子树内容不会泄漏到 KB 索引。
+fn remove_hidden_class_elements(html: &str) -> String {
+    static HIDDEN_TOKENS: &[&str] = &["hidden", "invisible", "d-none", "visually-hidden", "sr-only"];
+    let Ok(class_re) = regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#) else {
+        return html.to_string();
+    };
+    remove_elements_matching(html, |open_tag| {
+        if let Some(cap) = class_re.captures(open_tag) {
+            if let Some(classes) = cap.get(1) {
+                return classes.as_str().split_whitespace().any(|token| {
+                    HIDDEN_TOKENS.iter().any(|h| token.eq_ignore_ascii_case(h))
+                });
+            }
+        }
+        false
+    })
 }
 
 /// P2-010: 提取 h1-h6 标题层级
@@ -123,8 +276,12 @@ fn extract_headings(raw: &str) -> Vec<String> {
 
 /// 提取 <title> 和 <meta> 标签内容到 metadata
 fn extract_metadata(raw: &str, meta: &mut HashMap<String, String>) {
-    // <title>
-    if let Ok(re) = regex::Regex::new(r"<title[^>]*>(.*?)</title>") {
+    // <title>（大小写不敏感，支持多行内容）
+    if let Ok(re) = regex::RegexBuilder::new(r"<title[^>]*>(.*?)</title>")
+        .case_insensitive(true)
+        .dot_matches_new_line(true)
+        .build()
+    {
         if let Some(cap) = re.captures(raw) {
             if let Some(m) = cap.get(1) {
                 let title = strip_tags(m.as_str()).trim().to_string();
@@ -135,23 +292,34 @@ fn extract_metadata(raw: &str, meta: &mut HashMap<String, String>) {
         }
     }
     // <meta name="description" content="...">
-    // H18 fix: 使用两个独立的 regex 分别匹配 name 和 content 属性，
-    // 不再假设 name 在 content 之前。HTML 允许属性以任意顺序出现。
+    // H18 fix: 使用两步法 — 先匹配含有正确 name 属性的 <meta> 标签整体，
+    // 再从该标签中提取 content 属性值，天然支持属性以任意顺序出现。
     for name in &["description", "keywords", "author"] {
-        // 方案：先匹配包含正确 name 的 <meta> 标签整体，再从中提取 content
-        let pattern = format!(
-            r#"<meta\s+[^>]*?name=["']{}["'][^>]*?content=["']([^"']+)["'][^>]*?/?>|^<meta\s+[^>]*?content=["']([^"']+)["'][^>]*?name=["']{}["'][^>]*?/?>"#,
-            regex::escape(name),
+        // 第一步：匹配含有正确 name 的所有 <meta> 标签
+        let tag_pattern = format!(
+            r#"(?i)<meta\s+[^>]*?name\s*=\s*["']{}["'][^>]*?/?>"#,
             regex::escape(name)
         );
-        if let Ok(re) = regex::RegexBuilder::new(&pattern).case_insensitive(true).build() {
-            if let Some(cap) = re.captures(raw) {
-                // content 在 group 1 (name在前) 或 group 2 (content在前)
-                let content = cap.get(1).or_else(|| cap.get(2));
-                if let Some(m) = content {
-                    let val = m.as_str().trim().to_string();
-                    if !val.is_empty() {
-                        meta.insert(name.to_string(), val);
+        if let Ok(tag_re) = regex::Regex::new(&tag_pattern) {
+            // 遍历所有匹配的 meta 标签，取第一个含有有效 content 的
+            for tag_cap in tag_re.captures_iter(raw) {
+                if let Some(full_tag) = tag_cap.get(0) {
+                    // 第二步：从标签中提取 content（大小写不敏感）
+                    if let Ok(content_re) = regex::RegexBuilder::new(
+                        r#"content\s*=\s*["']([^"']+)["']"#,
+                    )
+                    .case_insensitive(true)
+                    .build()
+                    {
+                        if let Some(content_cap) = content_re.captures(full_tag.as_str()) {
+                            if let Some(m) = content_cap.get(1) {
+                                let val = m.as_str().trim().to_string();
+                                if !val.is_empty() {
+                                    meta.insert(name.to_string(), val);
+                                    break; // 找到有效 content 后停止
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -244,6 +412,69 @@ mod tests {
         extract_metadata(html, &mut meta);
         assert_eq!(meta.get("title").unwrap(), "My Page");
         assert_eq!(meta.get("description").unwrap(), "A test page");
+    }
+
+    #[test]
+    fn test_extract_meta_content_before_name() {
+        // H18: content 在 name 之前的属性顺序
+        let html = r#"<html><head><meta content="A test page" name="description"></head></html>"#;
+        let mut meta = HashMap::new();
+        extract_metadata(html, &mut meta);
+        assert_eq!(meta.get("description").unwrap(), "A test page");
+    }
+
+    #[test]
+    fn test_extract_meta_uppercase_attrs() {
+        // CONTENT 大写属性应正确提取
+        let html = r#"<html><head><meta NAME="description" CONTENT="Upper case test"></head></html>"#;
+        let mut meta = HashMap::new();
+        extract_metadata(html, &mut meta);
+        assert_eq!(meta.get("description").unwrap(), "Upper case test");
+    }
+
+    #[test]
+    fn test_extract_meta_fallback_to_second() {
+        // 第一个匹配 name 但无 content，应取第二个有效 meta
+        let html = r#"<html><head><meta name="description"><meta name="description" content="fallback"></head></html>"#;
+        let mut meta = HashMap::new();
+        extract_metadata(html, &mut meta);
+        assert_eq!(meta.get("description").unwrap(), "fallback");
+    }
+
+    #[test]
+    fn test_remove_hidden_class() {
+        // M16 测试：常见 CSS 隐藏 class 应被移除
+        let html = r#"<html><body><div class="hidden">隐藏内容</div><p>可见内容</p><span class="d-none">隐藏2</span></body></html>"#;
+        let cleaned = clean_html(html);
+        assert!(!cleaned.contains("隐藏内容"));
+        assert!(!cleaned.contains("隐藏2"));
+        assert!(cleaned.contains("可见内容"));
+    }
+
+    #[test]
+    fn test_remove_sr_only_class() {
+        let html = r#"<html><body><span class="sr-only">屏幕阅读器文本</span><p>正常文本</p></body></html>"#;
+        let cleaned = clean_html(html);
+        assert!(!cleaned.contains("屏幕阅读器文本"));
+        assert!(cleaned.contains("正常文本"));
+    }
+
+    #[test]
+    fn test_not_hidden_class_preserved() {
+        // 连字符类名 not-hidden 不应被误删
+        let html = r#"<html><body><div class="not-hidden">保留内容</div></body></html>"#;
+        let cleaned = clean_html(html);
+        assert!(cleaned.contains("保留内容"));
+    }
+
+    #[test]
+    fn test_remove_hidden_nested_subtree() {
+        // 嵌套子树应被完整删除，不应残留内部可见内容
+        let html = r#"<html><body><div class="hidden"><p>A</p><p>B</p></div><p>可见</p></body></html>"#;
+        let cleaned = clean_html(html);
+        assert!(!cleaned.contains("A"), "嵌套的 A 应被删除");
+        assert!(!cleaned.contains("B"), "嵌套的 B 应被删除");
+        assert!(cleaned.contains("可见"));
     }
 
     #[test]

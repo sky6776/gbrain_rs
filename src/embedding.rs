@@ -51,7 +51,6 @@ pub struct Embedder {
     base_url: String,
     model: String,
     dimensions: usize,
-    on_batch_complete: Option<Box<dyn Fn(usize, i64) + Send + Sync>>,
 }
 
 impl Embedder {
@@ -74,14 +73,7 @@ impl Embedder {
             base_url: base_url.unwrap_or("https://api.openai.com/v1").to_string(),
             model: model.unwrap_or(DEFAULT_MODEL).to_string(),
             dimensions: dimensions.unwrap_or(DEFAULT_DIMENSIONS),
-            on_batch_complete: None,
         }
-    }
-
-    /// M36: 设置每个 batch 完成后的回调（当前未被外部调用，保留供未来监控/指标采集使用）
-    #[allow(dead_code)]
-    pub fn set_batch_callback(&mut self, cb: impl Fn(usize, i64) + Send + Sync + 'static) {
-        self.on_batch_complete = Some(Box::new(cb));
     }
 
     /// Check if the client is configured (has API key)
@@ -235,11 +227,6 @@ impl Embedder {
                         data.sort_by_key(|d| d.index);
 
                         info!(token_count, result_count, "Embedding batch complete");
-
-                        // Fire batch callback
-                        if let Some(ref cb) = self.on_batch_complete {
-                            cb(result_count, token_count);
-                        }
 
                         return Ok(data.into_iter().map(|d| d.embedding).collect());
                     }

@@ -8,6 +8,20 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// L2 修复：作业优先级集中配置，便于调整调度策略
+// 数值越高越优先处理，默认 0 为标准优先级
+
+/// KB 文档处理作业优先级
+const PRIORITY_KB_PROCESS: i32 = 0;
+/// OCR 作业优先级（供 pipeline/mcp 等外部入队点引用）
+#[allow(dead_code)]
+const PRIORITY_KB_OCR: i32 = 0;
+/// 重嵌入作业优先级（低于标准，避免占用前台资源）
+#[allow(dead_code)]
+const PRIORITY_KB_REEMBED: i32 = -1;
+/// 同义词挖掘作业优先级（最低，后台静默执行）
+const PRIORITY_KB_SYNONYMS: i32 = -2;
+
 /// KB document processing job payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbProcessPayload {
@@ -89,10 +103,9 @@ pub fn enqueue_kb_process_job(conn: &Connection, payload: &KbProcessPayload) -> 
         job_type: "kb_process_document".to_string(),
         payload: serde_json::to_value(payload)
             .map_err(|e| GBrainError::Serialization(e.to_string()))?,
-        priority: Some(0),
+        priority: Some(PRIORITY_KB_PROCESS),
         max_attempts: Some(3),
     };
-
     queue.enqueue(input)
 }
 
@@ -201,7 +214,7 @@ pub fn enqueue_mine_synonyms_job(
         job_type: "kb_mine_synonyms".to_string(),
         payload: serde_json::to_value(&payload)
             .map_err(|e| GBrainError::Serialization(e.to_string()))?,
-        priority: Some(-1), // low priority — runs after other jobs
+        priority: Some(PRIORITY_KB_SYNONYMS),
         max_attempts: Some(2),
     })
 }
@@ -305,7 +318,7 @@ pub fn enqueue_kb_ocr_job(conn: &Connection, payload: &KbOcrPayload) -> Result<i
         job_type: "kb_ocr_document".to_string(),
         payload: serde_json::to_value(payload)
             .map_err(|e| GBrainError::Serialization(e.to_string()))?,
-        priority: Some(0),
+        priority: Some(PRIORITY_KB_OCR),
         max_attempts: Some(3),
     };
     queue.enqueue(input)

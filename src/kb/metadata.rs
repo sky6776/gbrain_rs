@@ -49,6 +49,28 @@ impl DocumentMetadata {
         }
     }
 
+    /// 从 parser 在 parse() 阶段提取的 metadata HashMap 构造 DocumentMetadata。
+    /// HTML parser 已正确解析原始 HTML 的 title/meta 标签（大小写不敏感、
+    /// 属性顺序无关、fallback 到第二个 meta），此处直接映射到入库字段，
+    /// 避免对已抽取的纯文本做无效的 HTML 标签匹配。
+    pub fn from_parser_metadata(meta: &std::collections::HashMap<String, String>) -> Self {
+        let mut doc = DocumentMetadata::default();
+        if let Some(title) = meta.get("title") {
+            doc.title = Some(title.clone());
+        }
+        // description 作为 keywords 的 fallback（与原 extract_html_metadata 行为一致）
+        if let Some(desc) = meta.get("description") {
+            doc.keywords = Some(desc.clone());
+        }
+        if let Some(kw) = meta.get("keywords") {
+            doc.keywords = Some(kw.clone());
+        }
+        if let Some(author) = meta.get("author") {
+            doc.author = Some(author.clone());
+        }
+        doc
+    }
+
     /// 以高优先级字段覆盖低优先级字段
     pub fn merge_with(&mut self, other: &DocumentMetadata) {
         if other.title.is_some() {
@@ -266,12 +288,13 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
         *freq.entry(w_trimmed).or_insert(0) += 1;
     }
 
-    // 取前 10 高频词
-    // 已知限制：硬编码 top-10 阈值，对长文档可能丢失重要关键词。
-    // 未来可根据文档长度动态调整（如每 5000 字增加 5 个词位），或改为可配置参数。
+    // M9 修复：关键词数量按文档长度动态调整
+    // 基础 5 个，每 5000 字增加 1 个，上限 15 个
+    let content_char_count = content.chars().count();
+    let keyword_count = (5 + (content_char_count / 5000).min(10)).min(15);
     let mut sorted: Vec<(&str, usize)> = freq.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-    let keywords: Vec<String> = sorted.iter().take(10).map(|(w, _)| w.to_string()).collect();
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
+    let keywords: Vec<String> = sorted.iter().take(keyword_count).map(|(w, _)| w.to_string()).collect();
 
     // 实体初版：规则匹配（邮箱、日期、金额等模式）
     let mut entities: Vec<String> = Vec::new();
