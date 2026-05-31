@@ -221,7 +221,8 @@ pub fn unified_query(
                 .unwrap_or(false)
         });
         // 同步过滤 provenance_records，只保留目标 slug 的来源记录
-        provenance_records.retain(|rec| slug_matches_filter_cached(&rec.brain_slug, &filter_variants));
+        provenance_records
+            .retain(|rec| slug_matches_filter_cached(&rec.brain_slug, &filter_variants));
     }
 
     let total_hits =
@@ -326,7 +327,7 @@ fn query_kb_evidence(
     }
 
     let limit_usize = limit.clamp(1, 100) as usize;
-    let fetch_k = (limit_usize * 8).max(50).min(500);
+    let fetch_k = (limit_usize * 8).clamp(50, 500);
 
     let mut routes: Vec<Vec<EvidenceCandidate>> = Vec::new();
 
@@ -681,7 +682,11 @@ pub(crate) struct QueryFallbackPlan {
 
 /// # 问题 #1 修复：新增 `library_id` 参数
 /// 用于按库查找 active embedding index，避免跨库索引不一致。
-pub(crate) fn build_query_fallback_plan(query: &str, conn: &Connection, library_id: Option<i64>) -> QueryFallbackPlan {
+pub(crate) fn build_query_fallback_plan(
+    query: &str,
+    conn: &Connection,
+    library_id: Option<i64>,
+) -> QueryFallbackPlan {
     let plan = EvidenceQueryPlan::from_query(query);
     let expanded_terms = plan.expanded_core_terms(conn, library_id);
     QueryFallbackPlan {
@@ -1230,7 +1235,10 @@ fn merge_evidence_routes(routes: Vec<Vec<EvidenceCandidate>>) -> Vec<EvidenceCan
 /// C-3 修复：按文档保留 top-N 个候选，而非只保留第一个。
 /// 同一文档可能有多个不同 passage 都命中查询关键词，全部丢弃会丢失有价值的证据。
 /// max_per_doc 控制每个文档最多保留的候选数量，推荐值 3。
-fn dedup_evidence_by_document(candidates: Vec<EvidenceCandidate>, max_per_doc: usize) -> Vec<EvidenceCandidate> {
+fn dedup_evidence_by_document(
+    candidates: Vec<EvidenceCandidate>,
+    max_per_doc: usize,
+) -> Vec<EvidenceCandidate> {
     let mut counts: HashMap<i64, usize> = HashMap::new();
     candidates
         .into_iter()
@@ -1448,7 +1456,11 @@ fn resolve_evidence_rerank_policy(
     }
 
     // 构造 WHERE id IN (?, ?, ...) 子句
-    let placeholders: Vec<String> = library_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = library_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider \
          FROM kb_libraries WHERE id IN ({})",
@@ -1479,8 +1491,8 @@ fn resolve_evidence_rerank_policy(
     let mut rerank_enabled = true;
     let mut rerank_provider = String::new();
     for row in rows {
-        let (allowed, redact, re_enabled, re_provider) = row
-            .map_err(|e| GBrainError::Database(format!("读取库策略行失败: {}", e)))?;
+        let (allowed, redact, re_enabled, re_provider) =
+            row.map_err(|e| GBrainError::Database(format!("读取库策略行失败: {}", e)))?;
         if allowed == 0 {
             external_allowed = false;
         }

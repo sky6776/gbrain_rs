@@ -291,13 +291,7 @@ mod tests {
             make_page(1, &long_text, 0.0, 0, false),
             make_page(2, &long_text, 0.0, 0, false),
         ];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         assert!(!result.needs_ocr);
         assert_eq!(result.scope(), OcrScope::None);
         assert!(result.ocr_pages.is_empty());
@@ -309,13 +303,7 @@ mod tests {
             make_page(1, "", 0.92, 1, false),
             make_page(2, "", 0.85, 1, false),
         ];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         assert!(result.needs_ocr);
         assert_eq!(result.ocr_pages, vec![1, 2]);
         assert_eq!(result.scope(), OcrScope::Full);
@@ -330,13 +318,7 @@ mod tests {
             make_page(2, "", 0.9, 1, false),
             make_page(3, "短", 0.0, 0, false),
         ];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         assert!(result.needs_ocr);
         assert_eq!(result.ocr_pages, vec![2, 3]);
         assert_eq!(result.scope(), OcrScope::Partial);
@@ -346,13 +328,7 @@ mod tests {
     fn test_detect_image_rich_page_with_text() {
         // 文本充足但图片占比高
         let pages = vec![make_page(1, &"文本内容".repeat(20), 0.5, 2, false)];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         assert!(result.needs_ocr);
         assert!(result.reasons_by_page[&1]
             .iter()
@@ -387,13 +363,7 @@ mod tests {
     #[test]
     fn test_detect_vector_objects() {
         let pages = vec![make_page(1, "有文字但有矢量对象", 0.0, 0, true)];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         assert!(result.needs_ocr);
         assert!(result.uncertain_pages.contains(&1));
     }
@@ -410,13 +380,7 @@ mod tests {
             make_page(2, &long_text, 0.0, 0, false),
             make_page(3, "短", 0.5, 1, false), // 低密度 + 图片丰富
         ];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         // 页 3 应该仍在 OCR 列表中（因为有 ImageArea 原因）
         assert!(result.needs_ocr);
         assert!(
@@ -440,13 +404,7 @@ mod tests {
             make_page(4, &long_text, 0.0, 0, false),
             make_page(5, "短", 0.0, 0, false), // 仅低密度，无其他原因
         ];
-        let result = detect_ocr_pages(
-            &pages,
-            50,
-            0.08,
-            1,
-            &crate::kb::ocr_provider::OcrMode::Auto,
-        );
+        let result = detect_ocr_pages(&pages, 50, 0.08, 1, &crate::kb::ocr_provider::OcrMode::Auto);
         // P1 修复：ratio 不再否决单页判定，低密度页仍需 OCR
         assert!(
             result.needs_ocr,

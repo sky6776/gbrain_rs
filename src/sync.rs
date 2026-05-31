@@ -796,7 +796,11 @@ fn git_run_with_timeout(
             kill_process_by_pid(pid);
             // 等待线程回收子进程（wait_with_output 在 kill 后会很快返回）
             let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
-            tracing::warn!("git 命令超时（{}秒），已 kill 子进程 PID={}", timeout_secs, pid);
+            tracing::warn!(
+                "git 命令超时（{}秒），已 kill 子进程 PID={}",
+                timeout_secs,
+                pid
+            );
             Err(GBrainError::FileError(format!(
                 "git 命令超时（{}秒），子进程已终止",
                 timeout_secs

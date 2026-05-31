@@ -103,7 +103,7 @@ fn source_boost_factor(slug: &str) -> f64 {
             }
         }
     }
-    boosts.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    boosts.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     boosts
         .into_iter()
         .find(|(prefix, _)| slug.starts_with(prefix))
@@ -1978,7 +1978,8 @@ impl BrainEngine for SqliteEngine {
         };
         for id in ids {
             // L1: 清理向量索引失败时记录警告
-            if let Err(e) = conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id]) {
+            if let Err(e) = conn.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id])
+            {
                 tracing::warn!(chunk_id = id, error = %e, "清理 vec_chunks 失败");
             }
         }
@@ -2018,18 +2019,19 @@ impl BrainEngine for SqliteEngine {
             };
 
             // 构建 retained 集合 (chunk_index, chunk_source 字符串)
-            let retained_set: std::collections::HashSet<(i32, String)> =
-                retained.iter().map(|(idx, src)| (*idx, src.to_string())).collect();
+            let retained_set: std::collections::HashSet<(i32, String)> = retained
+                .iter()
+                .map(|(idx, src)| (*idx, src.to_string()))
+                .collect();
 
             // 找出并删除过时 chunks（不在 retained 集合中的条目）
             let mut stale_count = 0u64;
             for (id, chunk_index, chunk_source) in &existing {
                 if !retained_set.contains(&(*chunk_index, chunk_source.clone())) {
                     // 清理向量索引和 embedding 数据
-                    if let Err(e) = tx.execute(
-                        "DELETE FROM vec_chunks WHERE chunk_id = ?1",
-                        params![id],
-                    ) {
+                    if let Err(e) =
+                        tx.execute("DELETE FROM vec_chunks WHERE chunk_id = ?1", params![id])
+                    {
                         tracing::warn!("清理 vec_chunks 失败 (chunk_id={}): {}", id, e);
                     }
                     if let Err(e) = tx.execute(

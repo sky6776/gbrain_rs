@@ -534,7 +534,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 )?;
                 return Ok(true);
             }
-            reembed_single_node(conn, &embedder, &rt, node_id, None, &config.embedding_model)
+            reembed_single_node(conn, &embedder, rt, node_id, None, &config.embedding_model)
         }
         "kb_reembed" => {
             // 文档级重嵌入：读取所有无 embedding 的节点，逐个嵌入
@@ -681,7 +681,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
             reembed_document_nodes(
                 conn,
                 &embedder,
-                &rt,
+                rt,
                 doc_id,
                 target_index_id,
                 &config.embedding_model,
@@ -747,7 +747,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                         let kb2 = KbEngine::new(conn);
                         if let Ok(library) = kb2.get_library(library_id) {
                             if let Err(e) = rebuild_raptor_after_reembed(
-                                conn, &rt, doc_id, &library, config, run_id,
+                                conn, rt, doc_id, &library, config, run_id,
                             ) {
                                 tracing::warn!(
                                     document_id = doc_id,
@@ -946,14 +946,14 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
 /// Returns `true` if a job was processed, `false` if no job was available.
 pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
     let conn = engine.connection()?;
-    let Some((job_db_id, payload)) = crate::kb::jobs::claim_next_mine_synonyms_job(&conn)? else {
+    let Some((job_db_id, payload)) = crate::kb::jobs::claim_next_mine_synonyms_job(conn)? else {
         return Ok(false);
     };
 
     info!(job_db_id, "Synonym mining worker: 认领作业");
 
     let Some(api_key) = config.openai_api_key.as_deref() else {
-        crate::kb::jobs::fail_kb_job(&conn, job_db_id, "No embedding API key configured")?;
+        crate::kb::jobs::fail_kb_job(conn, job_db_id, "No embedding API key configured")?;
         return Ok(true);
     };
 
@@ -973,10 +973,10 @@ pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> 
     };
 
     match crate::kb::synonyms::mine_synonyms(
-        &conn,
+        conn,
         &embedder,
         config.embedding_dimensions as i32,
-        &rt,
+        rt,
         &opts,
     ) {
         Ok(stats) => {
@@ -988,12 +988,12 @@ pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> 
                 synonyms_written = stats.synonyms_written,
                 "Synonym mining worker: 挖掘完成"
             );
-            crate::kb::jobs::complete_kb_job(&conn, job_db_id)?;
+            crate::kb::jobs::complete_kb_job(conn, job_db_id)?;
             Ok(true)
         }
         Err(e) => {
             warn!(job_db_id, error = %e, "Synonym mining worker: 挖掘失败");
-            crate::kb::jobs::fail_kb_job(&conn, job_db_id, &e.to_string())?;
+            crate::kb::jobs::fail_kb_job(conn, job_db_id, &e.to_string())?;
             Ok(true)
         }
     }
@@ -3048,6 +3048,7 @@ fn rebuild_raptor_after_reembed(
 /// kb 排最前因为后续所有 worker 都依赖解析完成的文档数据；
 /// ocr 紧随其后因为 OCR 结果需写回文档再触发重新解析；
 /// synonyms 排最后因为它是最耗时的后台任务，优先级最低。
+#[allow(clippy::type_complexity)]
 fn run_priority_workers(engine: &SqliteEngine, config: &Config) -> bool {
     let workers: &[(&str, fn(&SqliteEngine, &Config) -> Result<bool>)] = &[
         ("kb", run_kb_worker_once),

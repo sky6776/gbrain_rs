@@ -383,63 +383,61 @@ pub fn kb_search(
             .rerank_api_key
             .as_deref()
             .is_some_and(|k| !k.is_empty());
-        let (scored, rerank_result) = if external_rerank_allowed
-            && rerank_cfg.model_rerank_enabled
-            && has_api_key
-        {
-            let api_key = input.rerank_api_key.as_deref().unwrap_or("");
-            let base_url = input
-                .rerank_base_url
-                .as_deref()
-                .filter(|u| !u.is_empty())
-                .unwrap_or("https://api.openai.com/v1");
-            // P4-004: 审计外部模型调用
-            let _ = crate::kb::privacy::log_external_model_call(
-                conn,
-                input.library_ids.first().copied(),
-                None,
-                "rerank",
-                &rerank_provider,
-                &rerank_cfg.rerank_model,
-                query_normalized.len() as i32,
-                merged.len() as i32,
-                0,
-                0.0,
-                true,
-                "",
-            );
-            // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
-            let rt = crate::runtime::shared_runtime();
-            rt.block_on(crate::kb::rerank::try_model_rerank_simple(
-                &rerank_cfg,
-                &query_normalized,
-                &candidates,
-                &candidate_texts,
-                &weights,
-                None,
-                base_url,
-                api_key,
-            ))
-        } else {
-            // 跳过模型 rerank，直接本地 rerank
-            let local = crate::kb::rerank::local_rerank(&candidates, &weights);
-            let reason = if !external_rerank_allowed {
-                crate::kb::rerank::FallbackReason::PrivacyBlocked
+        let (scored, rerank_result) =
+            if external_rerank_allowed && rerank_cfg.model_rerank_enabled && has_api_key {
+                let api_key = input.rerank_api_key.as_deref().unwrap_or("");
+                let base_url = input
+                    .rerank_base_url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or("https://api.openai.com/v1");
+                // P4-004: 审计外部模型调用
+                let _ = crate::kb::privacy::log_external_model_call(
+                    conn,
+                    input.library_ids.first().copied(),
+                    None,
+                    "rerank",
+                    &rerank_provider,
+                    &rerank_cfg.rerank_model,
+                    query_normalized.len() as i32,
+                    merged.len() as i32,
+                    0,
+                    0.0,
+                    true,
+                    "",
+                );
+                // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
+                let rt = crate::runtime::shared_runtime();
+                rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+                    &rerank_cfg,
+                    &query_normalized,
+                    &candidates,
+                    &candidate_texts,
+                    &weights,
+                    None,
+                    base_url,
+                    api_key,
+                ))
             } else {
-                crate::kb::rerank::FallbackReason::NotConfigured
+                // 跳过模型 rerank，直接本地 rerank
+                let local = crate::kb::rerank::local_rerank(&candidates, &weights);
+                let reason = if !external_rerank_allowed {
+                    crate::kb::rerank::FallbackReason::PrivacyBlocked
+                } else {
+                    crate::kb::rerank::FallbackReason::NotConfigured
+                };
+                (
+                    local,
+                    crate::kb::rerank::RerankResult {
+                        model_rerank_attempted: false,
+                        model_rerank_succeeded: false,
+                        fallback_used: true,
+                        fallback_reason: Some(reason),
+                        provider: "local".into(),
+                        candidates_reranked: merged.len(),
+                    },
+                )
             };
-            (
-                local,
-                crate::kb::rerank::RerankResult {
-                    model_rerank_attempted: false,
-                    model_rerank_succeeded: false,
-                    fallback_used: true,
-                    fallback_reason: Some(reason),
-                    provider: "local".into(),
-                    candidates_reranked: merged.len(),
-                },
-            )
-        };
 
         // 按 rerank 分数重排 merged
         let score_map: HashMap<i64, f64> = scored.iter().map(|(id, s)| (*id, *s)).collect();
@@ -703,10 +701,7 @@ fn get_node_context(
 /// 避免对每个 term 各编译一次正则并遍历内容。对 term 做 regex::escape() 防止正则注入。
 fn compute_highlights(content: &str, query: &str) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
-    let query_terms: Vec<&str> = query
-        .split_whitespace()
-        .filter(|t| t.len() >= 2)
-        .collect();
+    let query_terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() >= 2).collect();
     if query_terms.is_empty() {
         return ranges;
     }

@@ -94,7 +94,9 @@ pub fn rebuild_passages_for_node(
             "SELECT view_type, content, source_start, source_end FROM kb_passage_spans WHERE node_id = ?1 ORDER BY CASE view_type WHEN 'atomic' THEN 0 WHEN 'window' THEN 1 WHEN 'raw' THEN 2 END, passage_order",
         )?;
         let rows: Vec<(String, String, i64, i64)> = stmt
-            .query_map(params![node_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .query_map(params![node_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -305,9 +307,8 @@ fn add_window_passages(content: &str, drafts: &mut Vec<PassageDraft>) {
     }
 
     let base_step = WINDOW_CHARS.saturating_sub(WINDOW_OVERLAP).max(1);
-    let mut window_chars = if chars.len() > MAX_WINDOW_PASSAGES_PER_NODE * base_step {
-        let required_step =
-            (chars.len() + MAX_WINDOW_PASSAGES_PER_NODE - 1) / MAX_WINDOW_PASSAGES_PER_NODE;
+    let window_chars = if chars.len() > MAX_WINDOW_PASSAGES_PER_NODE * base_step {
+        let required_step = chars.len().div_ceil(MAX_WINDOW_PASSAGES_PER_NODE);
         required_step + WINDOW_OVERLAP
     } else {
         WINDOW_CHARS

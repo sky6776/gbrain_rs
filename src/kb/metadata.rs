@@ -294,7 +294,11 @@ pub fn extract_keywords_and_entities(content: &str, _language: &str) -> (String,
     let keyword_count = (5 + (content_char_count / 5000).min(10)).min(15);
     let mut sorted: Vec<(&str, usize)> = freq.into_iter().collect();
     sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
-    let keywords: Vec<String> = sorted.iter().take(keyword_count).map(|(w, _)| w.to_string()).collect();
+    let keywords: Vec<String> = sorted
+        .iter()
+        .take(keyword_count)
+        .map(|(w, _)| w.to_string())
+        .collect();
 
     // 实体初版：规则匹配（邮箱、日期、金额等模式）
     let mut entities: Vec<String> = Vec::new();

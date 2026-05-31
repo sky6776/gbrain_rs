@@ -93,7 +93,9 @@ fn recursive_split(
                 result.push(current_chunk.clone());
             }
             current_chunk = if chunk_overlap > 0 && !result.is_empty() {
-                let prev = result.last().expect("分块结果不应为空：chunk_overlap > 0 且 result 不为空时至少应有一个 chunk");
+                let prev = result.last().expect(
+                    "分块结果不应为空：chunk_overlap > 0 且 result 不为空时至少应有一个 chunk",
+                );
                 take_tail(prev, chunk_overlap)
             } else {
                 String::new()

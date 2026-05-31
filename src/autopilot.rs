@@ -100,7 +100,9 @@ impl<'a> Autopilot<'a> {
             let sleep_step = std::cmp::min(interval_secs, 5);
             let mut remaining = interval_secs;
             while remaining > 0 && !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(std::cmp::min(sleep_step, remaining)));
+                std::thread::sleep(std::time::Duration::from_secs(std::cmp::min(
+                    sleep_step, remaining,
+                )));
                 remaining = remaining.saturating_sub(sleep_step);
             }
         }
@@ -124,7 +126,7 @@ impl<'a> Autopilot<'a> {
             let embeddings = rt.block_on(embedder.embed_batch(&texts))?;
             let mut by_slug: std::collections::HashMap<String, Vec<crate::types::ChunkInput>> =
                 std::collections::HashMap::new();
-            for (row, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            for (row, embedding) in batch.iter().zip(embeddings) {
                 let existing = self.engine.get_chunk_by_id(row.chunk_id)?;
                 by_slug
                     .entry(row.slug.clone())

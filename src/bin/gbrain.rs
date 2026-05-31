@@ -1768,7 +1768,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     ..Default::default()
                 };
                 let stats = gbrain_core::kb::synonyms::mine_synonyms(
-                    &conn,
+                    conn,
                     &embedder,
                     config.embedding_dimensions as i32,
                     &rt,

@@ -74,7 +74,11 @@ impl<T: Clone> SearchCache<T> {
                     .min_by_key(|(_, v)| v.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
-                    debug!("SearchCache LRU 淘汰: key={}, 当前条目数={}", oldest_key, entries.len());
+                    debug!(
+                        "SearchCache LRU 淘汰: key={}, 当前条目数={}",
+                        oldest_key,
+                        entries.len()
+                    );
                     entries.remove(&oldest_key);
                 }
             }

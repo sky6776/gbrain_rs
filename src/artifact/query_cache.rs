@@ -101,7 +101,11 @@ impl QueryCache {
                     .min_by_key(|(_, e)| e.last_accessed)
                     .map(|(k, _)| k.clone())
                 {
-                    tracing::debug!("QueryCache LRU 淘汰: key={}, 当前条目数={}", oldest_key, entries.len());
+                    tracing::debug!(
+                        "QueryCache LRU 淘汰: key={}, 当前条目数={}",
+                        oldest_key,
+                        entries.len()
+                    );
                     entries.remove(&oldest_key);
                 }
             }

@@ -520,7 +520,9 @@ impl Config {
         }
         if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_MIN_LOW_DENSITY_RATIO"]) {
             #[allow(deprecated)]
-            { config.ocr_min_low_density_ratio = v; }
+            {
+                config.ocr_min_low_density_ratio = v;
+            }
         }
         if let Some(v) = first_valid_env_f64(&["GBRAIN_OCR_IMAGE_AREA_THRESHOLD"]) {
             config.ocr_image_area_threshold = v;
@@ -1100,7 +1102,9 @@ impl Config {
         }
         self.ocr_text_density_threshold = other.ocr_text_density_threshold;
         #[allow(deprecated)]
-        { self.ocr_min_low_density_ratio = other.ocr_min_low_density_ratio; }
+        {
+            self.ocr_min_low_density_ratio = other.ocr_min_low_density_ratio;
+        }
         self.ocr_image_area_threshold = other.ocr_image_area_threshold;
         self.ocr_image_count_threshold = other.ocr_image_count_threshold;
         self.ocr_timeout_seconds_per_page = other.ocr_timeout_seconds_per_page;

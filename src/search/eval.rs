@@ -139,7 +139,11 @@ pub fn ndcg_at_k(relevant: &HashSet<String>, retrieved: &[String], k: usize) -> 
     } else {
         let score = dcg / ideal_dcg;
         // M54: 防御性检查 NaN/Inf（理论上不应出现，但浮点运算可能产生异常值）
-        if score.is_finite() { score } else { 0.0 }
+        if score.is_finite() {
+            score
+        } else {
+            0.0
+        }
     }
 }
 

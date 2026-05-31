@@ -10,19 +10,16 @@ use std::collections::HashMap;
 // M-11: 预编译高频正则，避免在循环/每次调用中重复编译
 
 /// 匹配 HTML 开标签（捕获组1=标签名，组2=属性）
-static TAG_OPEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?is)<(\w+)([^>]*)>").unwrap()
-});
+static TAG_OPEN_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<(\w+)([^>]*)>").unwrap());
 
 /// 匹配 HTML 闭标签
-static TAG_CLOSE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"<[^>]*>").unwrap()
-});
+static TAG_CLOSE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"<[^>]*>").unwrap());
 
 /// 匹配 class 属性值（用于隐藏 class 检测）
-static CLASS_ATTR_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#).unwrap()
-});
+static CLASS_ATTR_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#).unwrap());
 
 pub struct HtmlParser;
 
@@ -125,7 +122,10 @@ fn remove_tags(html: &str, tag: &str) -> String {
     let tag_lower = tag.to_lowercase();
 
     // raw-text 元素：内容中出现的 `<tag>` 是文本而非真实标签，不追踪嵌套深度
-    let is_raw_text = matches!(tag_lower.as_str(), "script" | "style" | "textarea" | "title");
+    let is_raw_text = matches!(
+        tag_lower.as_str(),
+        "script" | "style" | "textarea" | "title"
+    );
     let close_re = if is_raw_text {
         let close_pattern = format!(r"(?i)</{}\s*>", regex::escape(&tag_lower));
         regex::Regex::new(&close_pattern).ok()
@@ -178,15 +178,23 @@ const MAX_TAG_NESTING_DEPTH: usize = 256;
 fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize> {
     let open_pat = format!(r"(?i)<{}[\s>/]", regex::escape(tag_name));
     let close_pat = format!(r"(?i)</{}\s*>", regex::escape(tag_name));
-    let Ok(open_re) = regex::Regex::new(&open_pat) else { return None };
-    let Ok(close_re) = regex::Regex::new(&close_pat) else { return None };
+    let Ok(open_re) = regex::Regex::new(&open_pat) else {
+        return None;
+    };
+    let Ok(close_re) = regex::Regex::new(&close_pat) else {
+        return None;
+    };
 
     let mut depth: usize = 1;
     let mut pos = start;
 
     while depth > 0 && pos < html.len() {
-        let next_open = open_re.find(&html[pos..]).map(|m| (pos + m.start(), pos + m.end()));
-        let next_close = close_re.find(&html[pos..]).map(|m| (pos + m.start(), pos + m.end()));
+        let next_open = open_re
+            .find(&html[pos..])
+            .map(|m| (pos + m.start(), pos + m.end()));
+        let next_close = close_re
+            .find(&html[pos..])
+            .map(|m| (pos + m.start(), pos + m.end()));
 
         let closest = match (next_open, next_close) {
             (Some(o), Some(c)) if o.0 < c.0 => (o.0, o.1, true),
@@ -208,7 +216,11 @@ fn find_matching_close(html: &str, start: usize, tag_name: &str) -> Option<usize
         pos = closest.1;
     }
 
-    if depth == 0 { Some(pos) } else { None }
+    if depth == 0 {
+        Some(pos)
+    } else {
+        None
+    }
 }
 
 /// 删除匹配谓词的 HTML 元素及其完整子树。
@@ -257,13 +269,20 @@ fn remove_elements_matching(html: &str, detect: impl Fn(&str) -> bool) -> String
 /// 按空格拆分 class 属性值后精确匹配 token，避免误匹配连字符类名（如 `not-hidden`）。
 /// 正确处理嵌套同名标签，确保子树内容不会泄漏到 KB 索引。
 fn remove_hidden_class_elements(html: &str) -> String {
-    static HIDDEN_TOKENS: &[&str] = &["hidden", "invisible", "d-none", "visually-hidden", "sr-only"];
+    static HIDDEN_TOKENS: &[&str] = &[
+        "hidden",
+        "invisible",
+        "d-none",
+        "visually-hidden",
+        "sr-only",
+    ];
     remove_elements_matching(html, |open_tag| {
         if let Some(cap) = CLASS_ATTR_RE.captures(open_tag) {
             if let Some(classes) = cap.get(1) {
-                return classes.as_str().split_whitespace().any(|token| {
-                    HIDDEN_TOKENS.iter().any(|h| token.eq_ignore_ascii_case(h))
-                });
+                return classes
+                    .as_str()
+                    .split_whitespace()
+                    .any(|token| HIDDEN_TOKENS.iter().any(|h| token.eq_ignore_ascii_case(h)));
             }
         }
         false
@@ -309,23 +328,23 @@ fn extract_metadata(raw: &str, meta: &mut HashMap<String, String>) {
     // <meta name="description" content="...">
     // H18 fix: 使用两步法 — 先匹配含有正确 name 属性的 <meta> 标签整体，
     // 再从该标签中提取 content 属性值，天然支持属性以任意顺序出现。
+    let content_re = regex::RegexBuilder::new(r#"content\s*=\s*["']([^"']+)["']"#)
+        .case_insensitive(true)
+        .build();
+
     for name in &["description", "keywords", "author"] {
         // 第一步：匹配含有正确 name 的所有 <meta> 标签
         let tag_pattern = format!(
             r#"(?i)<meta\s+[^>]*?name\s*=\s*["']{}["'][^>]*?/?>"#,
             regex::escape(name)
         );
+
         if let Ok(tag_re) = regex::Regex::new(&tag_pattern) {
-            // 遍历所有匹配的 meta 标签，取第一个含有有效 content 的
-            for tag_cap in tag_re.captures_iter(raw) {
-                if let Some(full_tag) = tag_cap.get(0) {
-                    // 第二步：从标签中提取 content（大小写不敏感）
-                    if let Ok(content_re) = regex::RegexBuilder::new(
-                        r#"content\s*=\s*["']([^"']+)["']"#,
-                    )
-                    .case_insensitive(true)
-                    .build()
-                    {
+            if let Ok(ref content_re) = content_re {
+                // 遍历所有匹配的 meta 标签，取第一个含有有效 content 的
+                for tag_cap in tag_re.captures_iter(raw) {
+                    if let Some(full_tag) = tag_cap.get(0) {
+                        // 第二步：从标签中提取 content（大小写不敏感）
                         if let Some(content_cap) = content_re.captures(full_tag.as_str()) {
                             if let Some(m) = content_cap.get(1) {
                                 let val = m.as_str().trim().to_string();
@@ -437,7 +456,8 @@ mod tests {
     #[test]
     fn test_extract_meta_uppercase_attrs() {
         // CONTENT 大写属性应正确提取
-        let html = r#"<html><head><meta NAME="description" CONTENT="Upper case test"></head></html>"#;
+        let html =
+            r#"<html><head><meta NAME="description" CONTENT="Upper case test"></head></html>"#;
         let mut meta = HashMap::new();
         extract_metadata(html, &mut meta);
         assert_eq!(meta.get("description").unwrap(), "Upper case test");
@@ -481,7 +501,8 @@ mod tests {
     #[test]
     fn test_remove_hidden_nested_subtree() {
         // 嵌套子树应被完整删除，不应残留内部可见内容
-        let html = r#"<html><body><div class="hidden"><p>A</p><p>B</p></div><p>可见</p></body></html>"#;
+        let html =
+            r#"<html><body><div class="hidden"><p>A</p><p>B</p></div><p>可见</p></body></html>"#;
         let cleaned = clean_html(html);
         assert!(!cleaned.contains("A"), "嵌套的 A 应被删除");
         assert!(!cleaned.contains("B"), "嵌套的 B 应被删除");

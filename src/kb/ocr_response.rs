@@ -444,7 +444,7 @@ const PAGE_BREAK_MARKER: &str = "<!-- page-break -->";
 /// GLM-OCR 的 md_results 可能包含分页标记。拆分优先级：
 /// 1. 显式页标记 `<!-- page-break -->`（最可靠，由 provider 明确标记）
 /// 2. `\newpage` 分隔符
-/// 如果无法拆分，返回每页空字符串，让调用方从各页 blocks 生成 markdown。
+///    如果无法拆分，返回每页空字符串，让调用方从各页 blocks 生成 markdown。
 ///
 /// P2 修复：已移除 `\n---\n` fallback，避免正文水平线误触发分页。
 fn split_md_by_pages(md: Option<&str>, page_count: usize) -> Vec<String> {

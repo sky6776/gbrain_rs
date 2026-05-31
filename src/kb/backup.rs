@@ -112,11 +112,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<usize> {
         let dest_path = dst.join(entry.file_name());
         if path.is_dir() {
             std::fs::create_dir_all(&dest_path).map_err(|e| {
-                GBrainError::FileError(format!(
-                    "无法创建备份目录 {}: {}",
-                    dest_path.display(),
-                    e
-                ))
+                GBrainError::FileError(format!("无法创建备份目录 {}: {}", dest_path.display(), e))
             })?;
             count += copy_dir_recursive(&path, &dest_path)?;
         } else {

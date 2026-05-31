@@ -343,7 +343,7 @@ where
     /// 为当前层所有节点创建单集群摘要节点，设置 parent_id 并推入 nodes。
     /// 用于节点数不足 min_nodes 或聚类 k<2 的退化场景。
     async fn create_summary_node<F, Fut>(
-        nodes: &mut Vec<RaptorNode>,
+        nodes: &mut [RaptorNode],
         current_node_ids: &[i64],
         current_nodes: Vec<&RaptorNode>,
         next_id: i64,

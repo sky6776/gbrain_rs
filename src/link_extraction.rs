@@ -231,8 +231,8 @@ fn strip_code_blocks(content: &str) -> String {
                     continue;
                 }
                 // 找到闭合反引号 — 将整个行内代码 span 替换为空格
-                for k in i..=j {
-                    result[k] = b' ';
+                for slot in &mut result[i..=j] {
+                    *slot = b' ';
                 }
                 i = j + 1;
                 continue;
@@ -694,24 +694,20 @@ pub fn infer_link_type(
     // 2. Source-page-type-based inference (enhanced with PARTNER_ROLE_RE/ADVISOR_ROLE_RE)
     if let Some(ref spt) = source_page_type {
         match spt {
-            PageType::Person => {
-                if target_lower.starts_with("companies/") {
-                    if partner_role_re.is_match(&regex_input) {
-                        return "invested_in".to_string();
-                    }
-                    if advisor_role_re.is_match(&regex_input) {
-                        return "advises".to_string();
-                    }
-                    return "works_at".to_string();
+            PageType::Person if target_lower.starts_with("companies/") => {
+                if partner_role_re.is_match(&regex_input) {
+                    return "invested_in".to_string();
                 }
+                if advisor_role_re.is_match(&regex_input) {
+                    return "advises".to_string();
+                }
+                return "works_at".to_string();
             }
-            PageType::Company => {
-                if target_lower.starts_with("people/") {
-                    if partner_role_re.is_match(&regex_input) {
-                        return "invested_in".to_string();
-                    }
-                    return "key_person".to_string();
+            PageType::Company if target_lower.starts_with("people/") => {
+                if partner_role_re.is_match(&regex_input) {
+                    return "invested_in".to_string();
                 }
+                return "key_person".to_string();
             }
             _ => {}
         }

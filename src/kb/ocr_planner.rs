@@ -82,7 +82,8 @@ pub fn plan_ocr_requests(
         // total_pages <= 0 但仍指定了页码，无法校验，应拒绝
         return Err(crate::error::GBrainError::InvalidInput(format!(
             "total_pages 无效 ({}) 但 ocr_pages 非空 ({} 页)，无法校验页码范围",
-            total_pages, ocr_pages.len()
+            total_pages,
+            ocr_pages.len()
         )));
     }
 
@@ -215,7 +216,14 @@ pub fn generate_request_id(
 ) -> String {
     // M29 修复：安全提取 run_id 的后 8 个字符（按字符而非字节切片，避免 UTF-8 边界 panic）
     let run_hash: String = if run_id.chars().count() > 8 {
-        run_id.chars().rev().take(8).collect::<String>().chars().rev().collect()
+        run_id
+            .chars()
+            .rev()
+            .take(8)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect()
     } else {
         run_id.to_string()
     };
@@ -303,7 +311,11 @@ mod tests {
     fn test_generate_request_id() {
         let id = generate_request_id(123, "run_abc12345", 1, 5);
         // 验证 ID 结构：ocr_{doc_id}_{run_hash}_{segment}_{total}
-        assert!(id.starts_with("ocr_123_"), "ID 应以 ocr_123_ 开头，实际: {}", id);
+        assert!(
+            id.starts_with("ocr_123_"),
+            "ID 应以 ocr_123_ 开头，实际: {}",
+            id
+        );
         assert!(id.ends_with("_1_5"), "ID 应以 _1_5 结尾，实际: {}", id);
         assert!(id.len() >= 6 && id.len() <= 64, "ID 长度应在 6-64 之间");
     }

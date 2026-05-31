@@ -409,7 +409,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
 /// - `.await` 点（`split_async`、`embed_batch`、`summarize_cluster`）仅涉及纯 CPU/IO，
 ///   不访问数据库连接；
 /// - 此函数在单线程 tokio 任务中运行，不存在并发访问同一连接的风险。
-/// 若未来需要并发数据库访问，应改用 `deadpool` 等连接池。
+///   若未来需要并发数据库访问，应改用 `deadpool` 等连接池。
 #[allow(clippy::too_many_arguments)]
 pub async fn process_document_async(
     conn: &Connection,

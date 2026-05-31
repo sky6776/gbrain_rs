@@ -65,6 +65,7 @@ impl ArtifactContentOptions<'_> {
 }
 
 /// put_memory 冲突检测与解析的上下文数据
+#[allow(dead_code)]
 struct PutResolutionContext {
     existing_artifact: Option<SourceArtifact>,
     page_conflict_detected: bool,
@@ -194,6 +195,7 @@ impl<'a> ArtifactService<'a> {
     ///
     /// 在事务内根据 resolution 执行 conflict/no_op/update/create 分支。
     /// 所有写入操作在同一事务内完成，保证原子性。
+    #[allow(clippy::too_many_arguments)]
     fn execute_put_transaction(
         engine: &SqliteEngine,
         ctx: &OpContext,
@@ -491,10 +493,7 @@ impl<'a> ArtifactService<'a> {
         );
 
         if resolution == "conflict" {
-            warn!(
-                "put_memory conflict: slug={}, page modified by human",
-                slug
-            );
+            warn!("put_memory conflict: slug={}, page modified by human", slug);
         }
 
         // P1-1 修复：dry_run 在任何写入之前返回，零副作用
@@ -638,7 +637,7 @@ impl<'a> ArtifactService<'a> {
         let requested_mode = input.mode.as_deref().unwrap_or("auto");
         let strategy = facade_query_strategy(requested_mode)?;
         let conn = self.engine.connection()?;
-        let fallback_plan = query::build_query_fallback_plan(&input.query, &conn, None);
+        let fallback_plan = query::build_query_fallback_plan(&input.query, conn, None);
         let mut fallback_state = QueryFallbackState {
             core_terms: fallback_plan.core_terms.clone(),
             ..Default::default()
@@ -1102,11 +1101,10 @@ impl<'a> ArtifactService<'a> {
                         })
                         .collect();
                     content_mode = Some("focused".to_string());
-                    if content_query.is_none() && content_options.passage_id.is_some() {
-                        content_query = Some(format!(
-                            "passage_id:{}",
-                            content_options.passage_id.unwrap()
-                        ));
+                    if content_query.is_none() {
+                        if let Some(pid) = content_options.passage_id {
+                            content_query = Some(format!("passage_id:{pid}"));
+                        }
                     }
                     (!focused.is_empty()).then(|| {
                         let joined = focused
@@ -1676,7 +1674,7 @@ fn find_title_slug_candidates(
     // 这种情况下如果结果达到 LIMIT 上限（1000 条），说明可能有遗漏，需要 warn 提示。
     // 未来优化方向：为 source_artifacts 添加 FTS5 虚拟表，或使用 LIKE 子句下推 core_terms。
     let slug_variants: Vec<String> = filter_slug
-        .map(|s| query::slug_value_variants(s))
+        .map(query::slug_value_variants)
         .unwrap_or_default();
 
     let (where_extra, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =

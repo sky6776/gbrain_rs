@@ -67,7 +67,7 @@ impl DocumentSplitter for MarkdownHeaderSplitter {
             chunks.push(text.trim().to_string());
         }
 
-        Ok(split_large_markdown_chunks(chunks)?)
+        split_large_markdown_chunks(chunks)
     }
 }
 

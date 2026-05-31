@@ -225,17 +225,24 @@ impl GlmOcrProvider {
         }
 
         // 先读取原始文本，反序列化失败时可包含原始响应便于排查
-        let response_text = response.text()
+        let response_text = response
+            .text()
             .map_err(|e| GBrainError::Serialization(format!("GLM-OCR 响应体读取失败: {}", e)))?;
-        let response_json: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| {
+        let response_json: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
                 let preview: String = response_text.chars().take(200).collect();
-                GBrainError::Serialization(format!("GLM-OCR 响应解析失败: {}，原始响应前200字符: {}", e, preview))
+                GBrainError::Serialization(format!(
+                    "GLM-OCR 响应解析失败: {}，原始响应前200字符: {}",
+                    e, preview
+                ))
             })?;
         let mut glm_response: GlmOcrResponse = serde_json::from_value(response_json.clone())
             .map_err(|e| {
                 let preview: String = response_text.chars().take(200).collect();
-                GBrainError::Serialization(format!("GLM-OCR 响应结构解析失败: {}，原始响应前200字符: {}", e, preview))
+                GBrainError::Serialization(format!(
+                    "GLM-OCR 响应结构解析失败: {}，原始响应前200字符: {}",
+                    e, preview
+                ))
             })?;
         glm_response.raw_json = response_json;
 

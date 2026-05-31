@@ -3105,7 +3105,8 @@ fn rollback_page_create_soft_deletes_page() {
             target_slug: new_page_slug.to_string(),
             target_field: "compiled_truth".to_string(),
             title: "新建页面标题".to_string(),
-            proposed_payload: r#"{"title":"新建页面标题","content":"这是新建页面的内容"}"#.to_string(),
+            proposed_payload: r#"{"title":"新建页面标题","content":"这是新建页面的内容"}"#
+                .to_string(),
             evidence_json: "{}".to_string(),
             confidence: 0.8,
             risk_level: RiskLevel::Low,

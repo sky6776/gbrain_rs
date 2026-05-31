@@ -562,10 +562,12 @@ fn apply_candidate_inner(conn: &Connection, candidate: &mut PromotionCandidate) 
     // 现在先执行修改，再生成 applied_at，确保 snapshot_at < applied_at 成立。
 
     // 解析 candidate_type，只解析一次，后续 match 和 snapshot 共用
-    let candidate_type: CandidateType = candidate
-        .candidate_type
-        .parse()
-        .map_err(|e| GBrainError::Database(format!("无效的 candidate_type '{}': {}", candidate.candidate_type, e)))?;
+    let candidate_type: CandidateType = candidate.candidate_type.parse().map_err(|e| {
+        GBrainError::Database(format!(
+            "无效的 candidate_type '{}': {}",
+            candidate.candidate_type, e
+        ))
+    })?;
     match candidate_type {
         CandidateType::DocumentSummary => {
             apply_summary_candidate(conn, candidate)?;

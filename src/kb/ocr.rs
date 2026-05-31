@@ -28,9 +28,12 @@ pub fn check_ocr_run_guard(
             rusqlite::params![document_id],
             |row| row.get(0),
         )
-        .map_err(|e| GBrainError::Database(format!(
-            "查询文档 {} processing_run_id 失败: {}", document_id, e
-        )))?;
+        .map_err(|e| {
+            GBrainError::Database(format!(
+                "查询文档 {} processing_run_id 失败: {}",
+                document_id, e
+            ))
+        })?;
     if current_run != expected_run_id {
         return Err(GBrainError::InvalidInput(format!(
             "OCR run guard 失败: 文档 {} 当前 run={}, 期望 run={}",
@@ -120,11 +123,17 @@ pub fn persist_ocr_page_results(
     // SAVEPOINT 兼容外层已有事务的场景（不会产生 "cannot start a transaction within a transaction" 错误）。
     // 若中途失败（如第 5/10 页），所有页面回滚，避免部分状态不一致。
     conn.execute("SAVEPOINT sp_persist_ocr_pages", [])?;
-    let result = persist_ocr_page_results_inner(conn, document_id, run_id, page_results, sensitive_value);
+    let result =
+        persist_ocr_page_results_inner(conn, document_id, run_id, page_results, sensitive_value);
     if result.is_ok() {
         // 成功路径：RELEASE 失败意味着数据可能未真正提交，必须传播错误
         conn.execute("RELEASE sp_persist_ocr_pages", [])
-            .map_err(|e| GBrainError::Database(format!("SAVEPOINT sp_persist_ocr_pages RELEASE 失败: {}", e)))?;
+            .map_err(|e| {
+                GBrainError::Database(format!(
+                    "SAVEPOINT sp_persist_ocr_pages RELEASE 失败: {}",
+                    e
+                ))
+            })?;
     } else {
         if let Err(e) = conn.execute("ROLLBACK TO sp_persist_ocr_pages", []) {
             tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_pages ROLLBACK 失败");
@@ -217,7 +226,12 @@ pub fn persist_ocr_blocks(
     if result.is_ok() {
         // 成功路径：RELEASE 失败意味着数据可能未真正提交，必须传播错误
         conn.execute("RELEASE sp_persist_ocr_blocks", [])
-            .map_err(|e| GBrainError::Database(format!("SAVEPOINT sp_persist_ocr_blocks RELEASE 失败: {}", e)))?;
+            .map_err(|e| {
+                GBrainError::Database(format!(
+                    "SAVEPOINT sp_persist_ocr_blocks RELEASE 失败: {}",
+                    e
+                ))
+            })?;
     } else {
         if let Err(e) = conn.execute("ROLLBACK TO sp_persist_ocr_blocks", []) {
             tracing::warn!(error = %e, "SAVEPOINT sp_persist_ocr_blocks ROLLBACK 失败");
@@ -369,7 +383,8 @@ pub fn compute_ocr_status(
     run_id: Option<&str>,
 ) -> Result<(OcrStatus, f64)> {
     // m-16 修复：用两个分支直接查询，避免 Vec<Box<dyn ToSql>> + rid.to_string() 的堆分配
-    let mut status_counts: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+    let mut status_counts: std::collections::HashMap<String, i32> =
+        std::collections::HashMap::new();
     let mut total_ocr_pages: i32 = 0;
 
     {

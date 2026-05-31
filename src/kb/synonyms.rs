@@ -16,10 +16,7 @@ use crate::search::vector::cosine_similarity;
 /// 校验 SQL 标识符只包含字母、数字和下划线，防止注入。
 fn validate_sql_identifier(name: &str) {
     assert!(
-        !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
         "SQL 标识符必须非空且只包含字母数字和下划线，got: {:?}",
         name
     );
@@ -130,10 +127,7 @@ pub fn batch_lookup_token_synonyms(
 
     // 去重（保留首次出现顺序），避免重复参数传入 SQL IN
     let mut seen = std::collections::HashSet::new();
-    let unique_tokens: Vec<&String> = tokens
-        .iter()
-        .filter(|t| seen.insert(*t))
-        .collect();
+    let unique_tokens: Vec<&String> = tokens.iter().filter(|t| seen.insert(*t)).collect();
     if unique_tokens.is_empty() {
         return HashMap::new();
     }
@@ -164,7 +158,7 @@ pub fn batch_lookup_token_synonyms(
     if let Ok(iter) = rows {
         for row in iter.flatten() {
             let (token, synonym) = row;
-            let entry = result.entry(token).or_insert_with(Vec::new);
+            let entry = result.entry(token).or_default();
             if entry.len() < limit_per_token {
                 entry.push(synonym);
             }
@@ -247,7 +241,7 @@ fn is_substring_or_superstring(a: &str, b: &str) -> bool {
 /// 将 BLOB 反序列化为 f32 向量。
 /// 编码使用共享的 `pipeline::embedding_to_blob`。
 fn blob_to_f32(blob: &[u8]) -> Vec<f32> {
-    if blob.len() % 4 != 0 {
+    if !blob.len().is_multiple_of(4) {
         tracing::warn!("blob 长度 {} 不是 4 的倍数，尾部字节将被丢弃", blob.len());
     }
     blob.chunks_exact(4)
@@ -318,7 +312,7 @@ fn extract_candidate_tokens(
         .collect();
 
     // 重要词排前面
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
     Ok(candidates)
 }
 
@@ -492,11 +486,10 @@ fn knn_mine_brute_force(
         let emb_a = &all[token_a];
         let mut neighbors: Vec<(f32, usize)> = Vec::new();
 
-        for j in 0..tokens.len() {
+        for (j, &token_b) in tokens.iter().enumerate() {
             if i == j {
                 continue;
             }
-            let token_b = tokens[j];
             // #5 修复：substring 过滤前置，避免浪费邻居槽位
             if is_substring_or_superstring(token_a, token_b) {
                 continue;
@@ -553,7 +546,9 @@ fn knn_mine_via_vec(
     impl Drop for DropGuard<'_> {
         fn drop(&mut self) {
             if self.armed {
-                let _ = self.conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", self.table));
+                let _ = self
+                    .conn
+                    .execute_batch(&format!("DROP TABLE IF EXISTS {}", self.table));
             }
         }
     }

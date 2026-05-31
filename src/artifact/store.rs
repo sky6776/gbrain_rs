@@ -625,9 +625,7 @@ pub fn find_projection_history(
     params.push(Box::new(limit));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        row_to_artifact_projection(row)
-    })?;
+    let rows = stmt.query_map(param_refs.as_slice(), row_to_artifact_projection)?;
     rows.collect::<Result<Vec<_>, _>>()
 }
 

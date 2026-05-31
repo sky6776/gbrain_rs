@@ -102,14 +102,12 @@ fn extract_docx_text_structured(data: &[u8]) -> Result<(String, Vec<String>), GB
                     }
                 }
             }
-            Ok(quick_xml::events::Event::Text(ref e)) => {
-                if in_t_tag || in_pstyle {
-                    if let Ok(text) = e.unescape() {
-                        if in_pstyle {
-                            pstyle_text.push_str(&text);
-                        } else {
-                            current_text.push_str(&text);
-                        }
+            Ok(quick_xml::events::Event::Text(ref e)) if in_t_tag || in_pstyle => {
+                if let Ok(text) = e.unescape() {
+                    if in_pstyle {
+                        pstyle_text.push_str(&text);
+                    } else {
+                        current_text.push_str(&text);
                     }
                 }
             }

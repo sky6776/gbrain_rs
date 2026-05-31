@@ -54,7 +54,10 @@ impl DocumentParser for CsvParser {
                         .map(|(i, h)| (h.clone(), fields.get(i).cloned().unwrap_or_default()))
                         .collect();
                     // 直接存为 Value，不再提前序列化
-                    row_records.push(serde_json::to_value(&row_map).expect("JSON 序列化不应失败: HashMap<String, String> 始终可序列化"));
+                    row_records.push(
+                        serde_json::to_value(&row_map)
+                            .expect("JSON 序列化不应失败: HashMap<String, String> 始终可序列化"),
+                    );
                     rows.push(fields.join("\t"));
                 }
                 Err(e) => {
