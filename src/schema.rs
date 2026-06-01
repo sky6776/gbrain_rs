@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 31;
+pub const SCHEMA_VERSION: i32 = 32;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -366,6 +366,8 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     external_summary_allowed INTEGER NOT NULL DEFAULT 1,
     external_ocr_allowed INTEGER NOT NULL DEFAULT 1,
     redaction_enabled INTEGER NOT NULL DEFAULT 0,
+    title_weight REAL NOT NULL DEFAULT 0.2,
+    augmentation_enabled INTEGER NOT NULL DEFAULT 1,
     deleted_at TEXT -- 软删除时间戳，NULL 表示未删除
 );
 

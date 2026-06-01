@@ -685,6 +685,7 @@ pub fn writeback_ocr_results(
     run_id: Option<&str>,
     semantic_enabled: bool,
     embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
+    title_weight: f32,
 ) -> Result<WritebackResult> {
     if ocr_pages.is_empty() {
         return Ok(WritebackResult {
@@ -843,8 +844,13 @@ pub fn writeback_ocr_results(
                 String::new()
             };
 
-            let embedding_text =
-                context::build_embedding_text(doc_title, &title_path, page_num, chunk);
+            let embedding_text = context::build_embedding_text(
+                doc_title,
+                &title_path,
+                page_num,
+                chunk,
+                title_weight,
+            );
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,

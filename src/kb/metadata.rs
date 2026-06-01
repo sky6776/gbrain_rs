@@ -34,14 +34,13 @@ impl DocumentMetadata {
         let source_path = Some(path.to_string_lossy().to_string());
         let source_uri = Some(format!("file://{}", path.to_string_lossy()));
 
-        // 从文件名推断 title（去扩展名）
-        let title = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
+        // 注意：不从文件名推断 title。KB 存储路径是 hash 文件名（如 a1b2c3...），
+        // file_stem 会得到无意义的 hash 值。title 应来自：
+        // 1. 格式特定提取（markdown frontmatter、PDF Info、HTML <title>、DOCX core.xml）
+        // 2. 回退到 kb_documents.original_name（由 resolve_doc_title 处理）
 
         DocumentMetadata {
-            title,
+            title: None,
             modified_at,
             source_path,
             source_uri,
@@ -416,9 +415,12 @@ mod tests {
     }
 
     #[test]
-    fn test_filename_title_fallback() {
-        let meta = DocumentMetadata::from_file_path(Path::new("/docs/report-2024.md"));
-        assert_eq!(meta.title.as_deref(), Some("report-2024"));
+    fn test_filename_title_not_set_from_storage_path() {
+        // 存储路径是 hash 文件名，不应从中推断 title
+        let meta = DocumentMetadata::from_file_path(Path::new("/data/a1b2c3d4.txt"));
+        assert_eq!(meta.title, None);
+        // source_path 仍然正确设置
+        assert!(meta.source_path.is_some());
     }
 
     #[test]

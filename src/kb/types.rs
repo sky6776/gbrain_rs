@@ -80,6 +80,11 @@ pub struct Library {
     pub external_summary_allowed: bool,
     pub external_ocr_allowed: bool,
     pub redaction_enabled: bool,
+    /// 标题/文件名在 embedding 文本中的权重 (0.0-1.0)。默认 0.2。
+    /// 权重越高，标题重复次数越多，文档级检索越准确。
+    pub title_weight: f32,
+    /// 是否启用自动关键词和问题生成（分块后 LLM 增强）。
+    pub augmentation_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +133,10 @@ pub struct CreateLibraryInput {
     pub external_ocr_allowed: Option<bool>,
     #[serde(default)]
     pub redaction_enabled: Option<bool>,
+    #[serde(default)]
+    pub title_weight: Option<f32>,
+    #[serde(default)]
+    pub augmentation_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +162,8 @@ pub struct UpdateLibraryInput {
     pub external_summary_allowed: Option<bool>,
     pub external_ocr_allowed: Option<bool>,
     pub redaction_enabled: Option<bool>,
+    pub title_weight: Option<f32>,
+    pub augmentation_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,6 +412,13 @@ pub struct RaptorNode {
 
 // --- Search model ---
 
+/// 对话消息，用于查询改写时传递多轮对话历史
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String, // "user" 或 "assistant"
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct KbSearchInput {
     pub library_ids: Vec<i64>,
@@ -420,6 +438,18 @@ pub struct KbSearchInput {
     // P5-011: filter by specific embedding index
     pub embedding_index_id: Option<i64>,
     pub rerank_model: Option<String>,
+    /// 限制每个文档在检索结果中的最大 chunk 数，避免大文档垄断结果。
+    /// None 表示不限制（由 top_k 自然截断）。推荐值 3。
+    pub max_chunks_per_doc: Option<usize>,
+    /// 多轮对话历史，用于查询改写。为空时跳过改写。
+    pub chat_history: Vec<ChatMessage>,
+    /// 查询改写使用的 LLM API key（空则跳过改写）
+    #[serde(skip_serializing)]
+    pub rewrite_api_key: Option<String>,
+    /// 查询改写使用的 LLM base URL
+    pub rewrite_base_url: Option<String>,
+    /// 查询改写使用的 LLM 模型名
+    pub rewrite_model: Option<String>,
     // FIX11-07: API key 不应序列化到 JSON 日志/响应中，防止泄露
     #[serde(skip_serializing)]
     pub rerank_api_key: Option<String>,
@@ -446,6 +476,11 @@ impl Default for KbSearchInput {
             rerank_model: None,
             rerank_api_key: None,
             rerank_base_url: None,
+            max_chunks_per_doc: None,
+            chat_history: Vec::new(),
+            rewrite_api_key: None,
+            rewrite_base_url: None,
+            rewrite_model: None,
         }
     }
 }

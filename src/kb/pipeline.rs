@@ -25,6 +25,24 @@ fn is_ocr_image_extension(ext: &str) -> bool {
     crate::artifact::types::is_ocr_image_file(&ext.to_lowercase())
 }
 
+/// 稳定标题源解析：优先使用格式解析提取的 title，其次使用 original_name（去掉扩展名）。
+/// 同步和异步管道共享此逻辑，避免重复代码。
+fn resolve_doc_title<'a>(format_title: &'a str, original_name: &str) -> std::borrow::Cow<'a, str> {
+    if !format_title.is_empty() {
+        std::borrow::Cow::Borrowed(format_title)
+    } else if !original_name.is_empty() {
+        // 去掉扩展名作为标题
+        std::borrow::Cow::Owned(
+            original_name
+                .rsplit_once('.')
+                .map(|(name, _)| name.to_string())
+                .unwrap_or_else(|| original_name.to_string()),
+        )
+    } else {
+        std::borrow::Cow::Borrowed("")
+    }
+}
+
 /// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
 ///
 /// 严格区分 byte offset 和 char offset：
@@ -317,24 +335,45 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     )?;
 
     // --- 阶段 3: 构建 Level-0 节点 ---
+    // 稳定标题源：优先使用 metadata 中的 title，其次使用数据库中的 original_name
+    let format_title = parsed.metadata.get("title").map(|s| s.as_str()).unwrap_or("");
+    let original_name: String = conn
+        .query_row(
+            "SELECT original_name FROM kb_documents WHERE id = ?1",
+            [doc_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    let doc_title = resolve_doc_title(format_title, &original_name);
+    let title_weight = library.title_weight;
+
     let raptor_nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
-        .map(|(i, chunk)| RaptorNode {
-            id: -((i as i64) + 1), // 临时负 ID
-            library_id: lib_id,
-            document_id: doc_id,
-            content: chunk.clone(),
-            level: 0,
-            parent_id: None,
-            chunk_order: i as i32,
-            vector: None,
-            title_path: String::new(),
-            page_number: None,
-            source_start: None,
-            source_end: None,
-            node_metadata: String::new(),
-            embedding_text: String::new(),
+        .map(|(i, chunk)| {
+            let embedding_text = crate::kb::context::build_embedding_text(
+                &doc_title,
+                "",    // 同步管道无章节路径
+                None,  // 同步管道无页码
+                chunk,
+                title_weight,
+            );
+            RaptorNode {
+                id: -((i as i64) + 1), // 临时负 ID
+                library_id: lib_id,
+                document_id: doc_id,
+                content: chunk.clone(),
+                level: 0,
+                parent_id: None,
+                chunk_order: i as i32,
+                vector: None,
+                title_path: String::new(),
+                page_number: None,
+                source_start: None,
+                source_end: None,
+                node_metadata: String::new(),
+                embedding_text,
+            }
         })
         .collect();
 
@@ -709,7 +748,17 @@ pub async fn process_document_async(
     }
 
     // P1-006/P1-007: 根据粒度应用节点策略 + P1-011: 生成 contextual embedding 文本
-    let doc_title = doc_meta.title.as_deref().unwrap_or("");
+    // 稳定标题源：优先使用格式解析提取的 title，其次使用数据库中的 original_name
+    let format_title = doc_meta.title.as_deref().unwrap_or("");
+    let original_name: String = conn
+        .query_row(
+            "SELECT original_name FROM kb_documents WHERE id = ?1",
+            [doc_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    let doc_title = resolve_doc_title(format_title, &original_name);
+    let title_weight = library.title_weight;
     let mut nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
@@ -733,8 +782,13 @@ pub async fn process_document_async(
             };
             let src_start = Some(c_start as i32);
             let src_end = Some(c_end as i32);
-            let embedding_text =
-                crate::kb::context::build_embedding_text(doc_title, &title_path, page_num, chunk);
+            let embedding_text = crate::kb::context::build_embedding_text(
+                &doc_title,
+                &title_path,
+                page_num,
+                chunk,
+                title_weight,
+            );
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -828,7 +882,8 @@ pub async fn process_document_async(
     // P1-006: micro 文档策略 — 仅保留一个 whole-document node
     if granularity == crate::kb::granularity::DocumentGranularity::Micro && !chunks.is_empty() {
         let full_text = parsed.content.clone();
-        let embedding_text = crate::kb::context::build_micro_embedding_text(doc_title, &full_text);
+        let embedding_text =
+            crate::kb::context::build_micro_embedding_text(&doc_title, &full_text, title_weight);
         nodes = vec![RaptorNode {
             id: -1,
             library_id: lib_id,
@@ -845,6 +900,93 @@ pub async fn process_document_async(
             node_metadata: "{\"node_type\":\"whole_document\"}".to_string(),
             embedding_text,
         }];
+    }
+
+    // --- 阶段 2.5: 自动关键词与问题生成（可选） ---
+    // 需要库级 augmentation_enabled 开关 + 外部摘要允许（增强是外部 LLM 调用）
+    if library.augmentation_enabled && library.external_summary_allowed && !nodes.is_empty() {
+        // 解析 LLM 配置（复用 RAPTOR 的配置解析逻辑）
+        let llm_cfg = raptor::resolve_raptor_llm_config(
+            Some(&library),
+            kb_raptor_secret_ref,
+            kb_raptor_base_url,
+            kb_raptor_model,
+        );
+
+        if let Ok(cfg) = llm_cfg {
+            report_progress(
+                on_progress,
+                "augment",
+                &format!("增强 {} 个节点（关键词+问题生成）", nodes.len()),
+            );
+
+            let mut aug_count = 0usize;
+            for node in &mut nodes {
+                // 跳过过短的 chunk（不值得增强）
+                if node.content.chars().count() < 100 {
+                    continue;
+                }
+
+                // 隐私红线：如果启用脱敏，对外发内容做脱敏处理
+                let content_for_augment = if library.redaction_enabled {
+                    crate::kb::privacy::redact_content(&node.content)
+                } else {
+                    node.content.clone()
+                };
+
+                // 审计外部模型调用
+                let aug_start = std::time::Instant::now();
+                let aug_result = crate::kb::augment::augment_chunk(
+                    &content_for_augment,
+                    &cfg.api_key,
+                    &cfg.base_url,
+                    &cfg.model,
+                )
+                .await;
+                let aug_elapsed = aug_start.elapsed().as_millis() as i32;
+
+                // 记录外部调用审计日志
+                let _ = crate::kb::privacy::log_external_model_call(
+                    conn,
+                    Some(lib_id),
+                    Some(doc_id),
+                    "augment",
+                    "custom",
+                    &cfg.model,
+                    content_for_augment.len() as i32,
+                    0,
+                    aug_elapsed,
+                    0.0,
+                    aug_result.is_ok(),
+                    "",
+                );
+
+                match aug_result {
+                    Ok(Some(aug)) => {
+                        // 合并到 node_metadata
+                        node.node_metadata = crate::kb::augment::merge_augmentation_into_metadata(
+                            &node.node_metadata,
+                            &aug,
+                        );
+                        aug_count += 1;
+                    }
+                    Ok(None) => {} // 静默跳过
+                    Err(e) => {
+                        tracing::debug!("节点增强失败: {}", e);
+                    }
+                }
+            }
+
+            if aug_count > 0 {
+                report_progress(
+                    on_progress,
+                    "augment",
+                    &format!("成功增强 {} 个节点", aug_count),
+                );
+            }
+        } else {
+            report_progress(on_progress, "augment", "无可用 LLM 配置，跳过增强");
+        }
     }
 
     // --- 阶段 3: 嵌入 ---
@@ -1339,7 +1481,26 @@ pub(crate) fn persist_nodes_and_vectors_inner(
     let mut id_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
 
     for node in &sorted_nodes {
-        let content_tokens = chinese::tokenize_content(&node.content);
+        let mut content_tokens = chinese::tokenize_content(&node.content);
+
+        // 如果 node_metadata 中包含增强的关键词/问题，追加到 content_tokens 以参与 FTS5 索引
+        // 关键词和问题也需要经过中文分词，确保 FTS5 匹配一致性
+        if !node.node_metadata.is_empty() && node.node_metadata != "{}" {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&node.node_metadata) {
+                let extra_tokens: Vec<String> = ["keywords", "questions"]
+                    .iter()
+                    .filter_map(|&key| meta.get(key).and_then(|v| v.as_array()))
+                    .flat_map(|arr| {
+                        arr.iter().filter_map(|v| {
+                            v.as_str().map(crate::nlp::chinese::tokenize_content)
+                        })
+                    })
+                    .collect();
+                if !extra_tokens.is_empty() {
+                    content_tokens = format!("{} {}", content_tokens, extra_tokens.join(" "));
+                }
+            }
+        }
 
         conn.execute(
             "INSERT INTO kb_document_nodes \

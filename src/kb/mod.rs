@@ -3,6 +3,7 @@
 //! Handles document upload, parsing, chunking, embedding, RAPTOR summarization,
 //! and hybrid search (vector + FTS5 + RRF).
 
+pub mod augment;
 pub mod backup;
 pub mod cache;
 pub mod chinese;

@@ -197,7 +197,8 @@ impl<'a> KbEngine<'a> {
                         embedding_provider, embedding_model, embedding_dimensions, \
                         search_profile, rerank_enabled, rerank_provider, summary_enabled, \
                         external_embedding_allowed, external_rerank_allowed, \
-                        external_summary_allowed, external_ocr_allowed, redaction_enabled \
+                        external_summary_allowed, external_ocr_allowed, redaction_enabled, \
+                        title_weight, augmentation_enabled \
                  FROM kb_libraries ORDER BY sort_order DESC, id DESC",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -229,6 +230,8 @@ impl<'a> KbEngine<'a> {
                     external_summary_allowed: row.get::<_, i32>(23)? != 0,
                     external_ocr_allowed: row.get::<_, i32>(24)? != 0,
                     redaction_enabled: row.get::<_, i32>(25)? != 0,
+                    title_weight: row.get::<_, f32>(26)?,
+                    augmentation_enabled: row.get::<_, i32>(27)? != 0,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -293,8 +296,9 @@ impl<'a> KbEngine<'a> {
                   embedding_provider, embedding_model, embedding_dimensions, \
                   search_profile, rerank_enabled, rerank_provider, summary_enabled, \
                   external_embedding_allowed, external_rerank_allowed, \
-                  external_summary_allowed, external_ocr_allowed, redaction_enabled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                  external_summary_allowed, external_ocr_allowed, redaction_enabled, \
+                  title_weight, augmentation_enabled) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     input.name,
                     semantic,
@@ -322,6 +326,8 @@ impl<'a> KbEngine<'a> {
                             .unwrap_or(true)
                     }) as i32,
                     input.redaction_enabled.unwrap_or(false) as i32,
+                    input.title_weight.unwrap_or(0.2).clamp(0.0, 1.0),
+                    input.augmentation_enabled.unwrap_or(true) as i32,
                 ],
             )?;
             let lib_id = conn.last_insert_rowid();
@@ -353,7 +359,8 @@ impl<'a> KbEngine<'a> {
                         embedding_provider, embedding_model, embedding_dimensions, \
                         search_profile, rerank_enabled, rerank_provider, summary_enabled, \
                         external_embedding_allowed, external_rerank_allowed, \
-                        external_summary_allowed, external_ocr_allowed, redaction_enabled \
+                        external_summary_allowed, external_ocr_allowed, redaction_enabled, \
+                        title_weight, augmentation_enabled \
                  FROM kb_libraries WHERE id = ?1",
                 [id],
                 |row| {
@@ -385,6 +392,8 @@ impl<'a> KbEngine<'a> {
                         external_summary_allowed: row.get::<_, i32>(23)? != 0,
                         external_ocr_allowed: row.get::<_, i32>(24)? != 0,
                         redaction_enabled: row.get::<_, i32>(25)? != 0,
+                        title_weight: row.get::<_, f32>(26)?,
+                        augmentation_enabled: row.get::<_, i32>(27)? != 0,
                     })
                 },
             )
@@ -456,6 +465,12 @@ impl<'a> KbEngine<'a> {
             }
             if let Some(v) = input.redaction_enabled {
                 update.push_set("redaction_enabled", v as i32);
+            }
+            if let Some(v) = input.title_weight {
+                update.push_set("title_weight", v.clamp(0.0, 1.0));
+            }
+            if let Some(v) = input.augmentation_enabled {
+                update.push_set("augmentation_enabled", v as i32);
             }
 
             if update.is_empty() {

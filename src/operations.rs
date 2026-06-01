@@ -1321,7 +1321,46 @@ impl<'a> Operations<'a> {
     ) -> crate::error::Result<Vec<crate::kb::KbSearchResult>> {
         let conn = self.engine.connection()?;
 
-        // 尝试计算查询向量以启用混合搜索
+        // 查询改写：在向量计算前完成，确保 FTS 和向量检索对齐到同一查询
+        // 如果有 chat_history 且有 rewrite 配置，先改写查询
+        let rewritten_query = if !input.chat_history.is_empty() {
+            let rewrite_api_key = input.rewrite_api_key.as_deref()
+                .or_else(|| self.config.expansion_api_key_resolved())
+                .unwrap_or("");
+            let rewrite_base_url = input.rewrite_base_url.as_deref()
+                .or_else(|| self.config.expansion_base_url_resolved())
+                .unwrap_or("https://api.openai.com/v1");
+            let rewrite_model = input.rewrite_model.as_deref()
+                .or(Some(self.config.expansion_model.as_str()))
+                .unwrap_or("gpt-4o-mini");
+
+            if !rewrite_api_key.is_empty() {
+                let rt = crate::runtime::shared_runtime();
+                // rewrite_query_with_context 内部会做标准化，直接传入原始查询
+                let rewritten = rt.block_on(
+                    crate::kb::search::rewrite_query_with_context(
+                        &input.query,
+                        &input.chat_history,
+                        rewrite_api_key,
+                        rewrite_base_url,
+                        rewrite_model,
+                    )
+                );
+                if rewritten != input.query && !rewritten.is_empty() {
+                    Some(rewritten)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 使用改写后的查询（如有）计算向量，确保向量和关键词检索对齐
+        let query_for_vector = rewritten_query.as_deref().unwrap_or(&input.query);
+
         let query_vector: Option<Vec<f32>> =
             if let Some(api_key) = self.config.openai_api_key.as_deref() {
                 let embedder = crate::embedding::Embedder::new(
@@ -1332,27 +1371,35 @@ impl<'a> Operations<'a> {
                 );
                 // H4 fix: 使用全局共享运行时
                 let rt = crate::runtime::shared_runtime();
-                rt.block_on(embedder.embed_batch(&[&input.query]))
+                rt.block_on(embedder.embed_batch(&[query_for_vector]))
                     .ok()
                     .and_then(|v| v.into_iter().next())
             } else {
                 None
             };
 
-        // 将 chat/completions 配置注入 input 以支持模型 rerank。
-        // API key/base URL 使用 expansion 配置（含回退到 openai），模型使用已加载的 expansion_model。
-        let mut input_with_rerank = input.clone();
-        input_with_rerank.rerank_model = Some(self.config.expansion_model.clone());
-        input_with_rerank.rerank_api_key = self
+        // 注入 rerank 和 rewrite 配置，同时设置 max_chunks_per_doc 默认值
+        let mut input_with_config = input.clone();
+        // 如果已经在外部完成了改写，清空 chat_history 避免在 kb_search 中重复改写
+        if let Some(query) = rewritten_query {
+            input_with_config.query = query;
+            input_with_config.chat_history.clear();
+        }
+        input_with_config.rerank_model = Some(self.config.expansion_model.clone());
+        input_with_config.rerank_api_key = self
             .config
             .expansion_api_key_resolved()
             .map(|s| s.to_string());
-        input_with_rerank.rerank_base_url = self
+        input_with_config.rerank_base_url = self
             .config
             .expansion_base_url_resolved()
             .map(|s| s.to_string());
+        // 默认每文档最多 3 个 chunk，避免大文档垄断检索结果
+        if input_with_config.max_chunks_per_doc.is_none() {
+            input_with_config.max_chunks_per_doc = Some(3);
+        }
 
-        crate::kb::search::kb_search(conn, &input_with_rerank, query_vector.as_deref())
+        crate::kb::search::kb_search(conn, &input_with_config, query_vector.as_deref())
     }
 
     /// Combined query across both the brain (pages/chunks) and the KB.

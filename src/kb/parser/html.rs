@@ -21,6 +21,39 @@ static TAG_CLOSE_RE: std::sync::LazyLock<regex::Regex> =
 static CLASS_ATTR_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)class\s*=\s*["']([^"']*)["']"#).unwrap());
 
+// --- 富文本转换预编译正则（避免每次调用重新编译） ---
+
+/// 匹配 <table>...</table>
+static TABLE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<table\b[^>]*>(.*?)</table>").unwrap());
+/// 匹配 <tr>...</tr>
+static TR_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<tr\b[^>]*>(.*?)</tr>").unwrap());
+/// 匹配 <th>/<td> 单元格
+static CELL_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<t[hd]\b[^>]*>(.*?)</t[hd]>").unwrap());
+/// 匹配 colspan 属性
+static COLSPAN_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)colspan\s*=\s*["']?(\d+)"#).unwrap());
+/// 匹配流程图 div（data-type="flow" 或 data-tag="flow"）
+static FLOW_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?is)<div\b[^>]*(?:data-type\s*=\s*["']flow["']|data-tag\s*=\s*["']flow["'])[^>]*>(.*?)</div>"#,
+    ).unwrap()
+});
+/// 匹配 data-code 属性（提取流程图代码）
+static DATA_CODE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)data-code\s*=\s*["']([^"']*)["']"#).unwrap());
+/// 匹配任务列表 <ul data-type="taskList">...</ul>
+static TASKLIST_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?is)<ul\b[^>]*data-type\s*=\s*["']taskList["'][^>]*>(.*?)</ul>"#).unwrap());
+/// 匹配 <li>...</li>
+static LI_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<li\b[^>]*>(.*?)</li>").unwrap());
+/// 匹配 data-checked 属性
+static CHECKED_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)data-checked\s*=\s*["']?(true|1|yes)["']?"#).unwrap());
+
 pub struct HtmlParser;
 
 impl Default for HtmlParser {
@@ -43,6 +76,9 @@ impl DocumentParser for HtmlParser {
         // P2-009: 清理非内容元素
         let cleaned = clean_html(raw);
 
+        // 富文本语义保留：将表格、流程图、任务列表转为 Markdown 格式
+        let enriched = preserve_rich_text(&cleaned);
+
         // 提取 metadata（title, meta 标签）
         let mut metadata = HashMap::new();
         extract_metadata(raw, &mut metadata);
@@ -54,7 +90,7 @@ impl DocumentParser for HtmlParser {
         }
 
         // 正文提取
-        let text = html2text::from_read(cleaned.as_bytes(), 80)
+        let text = html2text::from_read(enriched.as_bytes(), 80)
             .map_err(|e| GBrainError::FileError(format!("HTML parse failed: {}", e)))?;
         let content = clean_html_text(&text);
 
@@ -70,6 +106,137 @@ impl DocumentParser for HtmlParser {
     fn extensions(&self) -> &[&str] {
         &["html", "htm"]
     }
+}
+
+/// 富文本语义保留：在 html2text 处理之前，将 HTML 中的表格、流程图、任务列表
+/// 转换为 Markdown 格式，保留结构语义以支持向量化检索。
+fn preserve_rich_text(html: &str) -> String {
+    let mut result = html.to_string();
+    result = convert_tables_to_markdown(&result);
+    result = convert_flowcharts_to_mermaid(&result);
+    result = convert_tasklists_to_checkbox(&result);
+    result
+}
+
+/// 将 HTML <table> 转换为 Markdown 表格格式。
+///
+/// 处理 <thead>/<tbody>、<th>/<td>、colspan 等常见结构。
+/// 转换后的 Markdown 表格能被向量化引擎保留表格语义。
+fn convert_tables_to_markdown(html: &str) -> String {
+    TABLE_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let table_content = caps.get(1).unwrap().as_str();
+            let mut rows: Vec<Vec<String>> = Vec::new();
+
+            for tr_cap in TR_RE.captures_iter(table_content) {
+                let tr_content = tr_cap.get(1).unwrap().as_str();
+                let mut cells: Vec<String> = Vec::new();
+
+                for cell_cap in CELL_RE.captures_iter(tr_content) {
+                    let cell_text = strip_tags(cell_cap.get(1).unwrap().as_str())
+                        .trim()
+                        .to_string();
+                    // 处理 colspan：重复内容填满跨列
+                    let full_tag = cell_cap.get(0).unwrap().as_str();
+                    let span = COLSPAN_RE
+                        .captures(full_tag)
+                        .and_then(|c| c.get(1).and_then(|m| m.as_str().parse::<usize>().ok()))
+                        .unwrap_or(1);
+                    for _ in 0..span {
+                        cells.push(cell_text.clone());
+                    }
+                }
+                if !cells.is_empty() {
+                    rows.push(cells);
+                }
+            }
+
+            if rows.is_empty() {
+                return String::new();
+            }
+
+            // 统一列数为最大值
+            let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+            for row in &mut rows {
+                while row.len() < max_cols {
+                    row.push(String::new());
+                }
+            }
+
+            // 构建 Markdown 表格
+            let mut md = String::new();
+            for (i, row) in rows.iter().enumerate() {
+                md.push_str("| ");
+                md.push_str(&row.join(" | "));
+                md.push_str(" |\n");
+                // 第一行后添加分隔线
+                if i == 0 {
+                    md.push_str(&format!(
+                        "| {} |\n",
+                        (0..max_cols).map(|_| "---").collect::<Vec<_>>().join(" | ")
+                    ));
+                }
+            }
+            md
+        })
+        .to_string()
+}
+
+/// 将流程图 div（data-type="flow" 或 data-tag="flow"）转为 Mermaid 代码块。
+///
+/// 保留流程图的语义信息，使其能被向量化引擎检索。
+fn convert_flowcharts_to_mermaid(html: &str) -> String {
+    FLOW_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let content = caps.get(1).unwrap().as_str();
+            // 提取 data-code 属性或直接使用内容
+            let code = DATA_CODE_RE
+                .captures(caps.get(0).unwrap().as_str())
+                .map(|c| c.get(1).unwrap().as_str().to_string())
+                .unwrap_or_else(|| strip_tags(content));
+
+            // 解码 HTML 实体和转义换行
+            let decoded = code
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("\\n", "\n");
+
+            if decoded.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n```mermaid\n{}\n```\n", decoded.trim())
+            }
+        })
+        .to_string()
+}
+
+/// 将任务列表（data-type="taskList" 或 data-checked 属性）转为 Markdown checkbox。
+///
+/// 保留任务状态信息，支持待办事项类文档的语义检索。
+fn convert_tasklists_to_checkbox(html: &str) -> String {
+    TASKLIST_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let ul_content = caps.get(1).unwrap().as_str();
+            let mut md = String::new();
+
+            for li_cap in LI_RE.captures_iter(ul_content) {
+                let li_tag = li_cap.get(0).unwrap().as_str();
+                let li_content = strip_tags(li_cap.get(1).unwrap().as_str())
+                    .trim()
+                    .to_string();
+                if li_content.is_empty() {
+                    continue;
+                }
+                let checked = CHECKED_RE.is_match(li_tag);
+                let checkbox = if checked { "[x]" } else { "[ ]" };
+                md.push_str(&format!("- {} {}\n", checkbox, li_content));
+            }
+            md
+        })
+        .to_string()
 }
 
 /// P2-009: 移除 script/style/nav/footer/隐藏元素
@@ -520,5 +687,58 @@ mod tests {
         assert!(!result.content.contains("Menu"));
         assert!(!result.content.contains("bye"));
         assert!(result.metadata.contains_key("title"));
+    }
+
+    #[test]
+    fn test_table_to_markdown() {
+        let html = r#"<html><body><table><tr><th>名称</th><th>数值</th></tr><tr><td>温度</td><td>36.5</td></tr></table></body></html>"#;
+        let result = convert_tables_to_markdown(html);
+        assert!(result.contains("| 名称 | 数值 |"));
+        assert!(result.contains("| 温度 | 36.5 |"));
+        assert!(result.contains("---"));
+    }
+
+    #[test]
+    fn test_table_with_colspan() {
+        let html = r#"<html><body><table><tr><th colspan="2">合并标题</th></tr><tr><td>A</td><td>B</td></tr></table></body></html>"#;
+        let result = convert_tables_to_markdown(html);
+        assert!(result.contains("| 合并标题 | 合并标题 |"));
+    }
+
+    #[test]
+    fn test_flowchart_to_mermaid() {
+        let html = r#"<html><body><div data-type="flow" data-code="graph TD; A-->B">流程图</div><p>其他内容</p></body></html>"#;
+        let result = convert_flowcharts_to_mermaid(html);
+        assert!(result.contains("```mermaid"));
+        assert!(result.contains("graph TD; A-->B"));
+        assert!(result.contains("其他内容"));
+    }
+
+    #[test]
+    fn test_tasklist_to_checkbox() {
+        let html = r#"<html><body><ul data-type="taskList"><li data-checked="true">已完成</li><li data-checked="false">未完成</li></ul></body></html>"#;
+        let result = convert_tasklists_to_checkbox(html);
+        assert!(result.contains("- [x] 已完成"));
+        assert!(result.contains("- [ ] 未完成"));
+    }
+
+    #[test]
+    fn test_preserve_rich_text_integration() {
+        let html = r#"<html><body><table><tr><th>列A</th><th>列B</th></tr><tr><td>1</td><td>2</td></tr></table><ul data-type="taskList"><li data-checked="true">任务1</li></ul></body></html>"#;
+        let result = preserve_rich_text(html);
+        assert!(result.contains("| 列A | 列B |"));
+        assert!(result.contains("- [x] 任务1"));
+    }
+
+    #[test]
+    fn test_full_parse_with_table() {
+        let html = r#"<html><head><title>表格测试</title></head><body><h1>数据表</h1><table><tr><th>名称</th><th>分数</th></tr><tr><td>语文</td><td>95</td></tr><tr><td>数学</td><td>88</td></tr></table></body></html>"#;
+        let parser = HtmlParser::new();
+        let result = parser.parse(html.as_bytes()).unwrap();
+        // 表格应被保留为 Markdown 格式
+        assert!(result.content.contains("语文"));
+        assert!(result.content.contains("95"));
+        assert!(result.content.contains("数学"));
+        assert!(result.content.contains("88"));
     }
 }
