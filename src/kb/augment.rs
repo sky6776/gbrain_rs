@@ -25,7 +25,7 @@ pub struct ChunkAugmentation {
 /// 为单个 chunk 生成增强检索信息。
 ///
 /// 输入过长时会截断以控制 LLM 调用成本。
-/// 调用失败时返回 Ok(None)，由调用方决定是否重试。
+/// 内容为空时返回 `Ok(None)`；传输/API/解析失败返回 `Err`，确保审计日志能区分真正的失败。
 pub async fn augment_chunk(
     content: &str,
     api_key: &str,
@@ -86,27 +86,36 @@ pub async fn augment_chunk(
     )
     .await;
 
+    // 传输/API 层面的失败返回 Err，写入审计 error_message
     let resp = match result {
         Ok(Ok(r)) if r.status().is_success() => r,
         Ok(Ok(r)) => {
-            tracing::debug!("增强生成 API 返回非成功状态: {}", r.status());
-            return Ok(None);
+            let status = r.status();
+            return Err(crate::error::GBrainError::LLM(format!(
+                "增强生成 API 返回非成功状态: {}",
+                status
+            )));
         }
         Ok(Err(e)) => {
-            tracing::debug!("增强生成请求失败: {}", e);
-            return Ok(None);
+            return Err(crate::error::GBrainError::LLM(format!(
+                "增强生成请求失败: {}",
+                e
+            )));
         }
         Err(_) => {
-            tracing::debug!("增强生成超时");
-            return Ok(None);
+            return Err(crate::error::GBrainError::LLM(
+                "增强生成超时（10s）".into(),
+            ));
         }
     };
 
     let data: serde_json::Value = match resp.json().await {
         Ok(d) => d,
         Err(e) => {
-            tracing::debug!("增强生成响应解析失败: {}", e);
-            return Ok(None);
+            return Err(crate::error::GBrainError::LLM(format!(
+                "增强生成响应解析失败: {}",
+                e
+            )));
         }
     };
 
@@ -118,8 +127,13 @@ pub async fn augment_chunk(
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
     {
-        Some(t) => t.trim().to_string(),
-        None => return Ok(None),
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        // 2xx 但响应结构缺少 content 或 content 为空 — 协议/格式异常，记为失败
+        _ => {
+            return Err(crate::error::GBrainError::LLM(
+                "增强生成响应缺少 choices[0].message.content".into(),
+            ));
+        }
     };
 
     // 从输出中提取 JSON（LLM 可能包裹在 markdown code block 中）
@@ -127,8 +141,12 @@ pub async fn augment_chunk(
     let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
         Ok(v) => v,
         Err(_) => {
-            tracing::debug!("增强生成 JSON 解析失败: {}", output_text);
-            return Ok(None);
+            // 安全截断：按字符而非字节，避免切到 UTF-8 多字节字符中间导致 panic
+            let truncated: String = output_text.chars().take(200).collect();
+            return Err(crate::error::GBrainError::LLM(format!(
+                "增强生成 JSON 解析失败，LLM 输出: {}",
+                truncated
+            )));
         }
     };
 
@@ -152,8 +170,11 @@ pub async fn augment_chunk(
         })
         .unwrap_or_default();
 
+    // LLM 返回了内容且 JSON 解析成功，但 schema 不合法（两个字段均为空）— 记为失败
     if keywords.is_empty() && questions.is_empty() {
-        return Ok(None);
+        return Err(crate::error::GBrainError::LLM(
+            "增强生成返回空 keywords 和 questions".into(),
+        ));
     }
 
     Ok(Some(ChunkAugmentation {

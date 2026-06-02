@@ -243,7 +243,8 @@ pub async fn chat_completions_rerank(
     }
 
     if candidates.is_empty() {
-        return Some(Vec::new());
+        // 无候选文本不应记为成功，返回 None 触发 fallback
+        return None;
     }
 
     // Budget guard: estimate ~100 tokens per candidate for the prompt
@@ -328,11 +329,8 @@ pub async fn chat_completions_rerank(
                         status = %resp.status(),
                         "chat_completions_rerank: API returned non-success status"
                     );
-                    // Return what we have so far; caller falls back if empty
-                    if scored.is_empty() {
-                        return None;
-                    }
-                    break;
+                    // 任意批次失败即整体失败，避免部分结果被审计为成功
+                    return None;
                 }
 
                 match resp.json::<serde_json::Value>().await {
@@ -352,41 +350,26 @@ pub async fn chat_completions_rerank(
                                     let parsed = parse_score(&raw);
                                     if parsed.is_none() {
                                         warn!("chat_completions_rerank: unparseable response, aborting");
-                                        if scored.is_empty() {
-                                            return None;
-                                        }
-                                        break;
+                                        return None;
                                     }
                                 }
-                                if scored.is_empty() {
-                                    return None;
-                                }
-                                break;
+                                return None;
                             }
                         }
                     }
                     Err(e) => {
                         warn!(error = %e, "chat_completions_rerank: failed to parse response JSON");
-                        if scored.is_empty() {
-                            return None;
-                        }
-                        break;
+                        return None;
                     }
                 }
             }
             Ok(Err(e)) => {
                 warn!(error = %e, "chat_completions_rerank: HTTP request failed");
-                if scored.is_empty() {
-                    return None;
-                }
-                break;
+                return None;
             }
             Err(_) => {
                 warn!("chat_completions_rerank: request timed out");
-                if scored.is_empty() {
-                    return None;
-                }
-                break;
+                return None;
             }
         }
     }
@@ -417,10 +400,7 @@ fn extract_scores_from_response(data: &serde_json::Value, expected: usize) -> Op
         if scores.len() == expected {
             return Some(scores);
         }
-        // Partial match is acceptable if we got at least some scores
-        if !scores.is_empty() {
-            return Some(scores);
-        }
+        // 分数数量不匹配 — 视为解析失败，避免部分分数被记为成功
     }
 
     // Fallback: try to extract numbers from bracketed text like "[85, 42, 91]"
@@ -430,7 +410,7 @@ fn extract_scores_from_response(data: &serde_json::Value, expected: usize) -> Op
             .split(',')
             .filter_map(|s| parse_score(s.trim()))
             .collect();
-        if !scores.is_empty() {
+        if scores.len() == expected {
             return Some(scores);
         }
     }
@@ -442,7 +422,7 @@ fn extract_scores_from_response(data: &serde_json::Value, expected: usize) -> Op
         .filter_map(|s| s.parse::<f64>().ok())
         .map(|s| s.clamp(0.0, 100.0))
         .collect();
-    if !scores.is_empty() {
+    if scores.len() == expected {
         return Some(scores);
     }
 
@@ -649,6 +629,29 @@ pub async fn try_model_rerank_simple(
 
     // Try chat/completions adapter
     if !reranker.api_key.is_empty() && !reranker.base_url.is_empty() {
+        // 候选文本为空或少于实际会发给模型的候选数时跳过，避免部分/空请求被记为成功
+        // 调用方可能只截取前 rerank_max_candidates 个文本，用 min 对齐
+        let expected_texts = candidates.len().min(config.rerank_max_candidates);
+        if candidate_texts.is_empty() || candidate_texts.len() < expected_texts {
+            debug!(
+                "try_model_rerank_simple: candidate_texts({}) < expected({}), skipping model rerank",
+                candidate_texts.len(),
+                expected_texts
+            );
+            // 未实际发起外部请求，直接返回本地 rerank，标记 attempted=false 避免误写审计
+            let local = local_rerank(candidates, weights);
+            return (
+                local,
+                RerankResult {
+                    model_rerank_attempted: false,
+                    model_rerank_succeeded: false,
+                    fallback_used: false,
+                    fallback_reason: None,
+                    provider: "local".into(),
+                    candidates_reranked: candidates.len(),
+                },
+            );
+        }
         match chat_completions_rerank(&reranker, query, candidate_texts, budget).await {
             Some(scored) => {
                 return (
@@ -798,9 +801,9 @@ mod tests {
                 }
             }]
         });
-        // Expected 3 but got 2 — partial match is still returned
+        // Expected 3 but got 2 — 分数不足时返回 None，避免部分结果被记为成功
         let scores = extract_scores_from_response(&data, 3);
-        assert_eq!(scores, Some(vec![85.0, 42.0]));
+        assert_eq!(scores, None);
     }
 
     #[test]

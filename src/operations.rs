@@ -1359,7 +1359,9 @@ impl<'a> Operations<'a> {
         };
 
         // 使用改写后的查询（如有）计算向量，确保向量和关键词检索对齐
+        // 先做标准化（与 kb_search 内部 normalize_query 一致），避免向量和文本检索使用不同文本
         let query_for_vector = rewritten_query.as_deref().unwrap_or(&input.query);
+        let query_for_vector = crate::kb::search::normalize_query(query_for_vector);
 
         let query_vector: Option<Vec<f32>> =
             if let Some(api_key) = self.config.openai_api_key.as_deref() {
@@ -1371,7 +1373,7 @@ impl<'a> Operations<'a> {
                 );
                 // H4 fix: 使用全局共享运行时
                 let rt = crate::runtime::shared_runtime();
-                rt.block_on(embedder.embed_batch(&[query_for_vector]))
+                rt.block_on(embedder.embed_batch(&[&query_for_vector]))
                     .ok()
                     .and_then(|v| v.into_iter().next())
             } else {
@@ -1382,7 +1384,8 @@ impl<'a> Operations<'a> {
         let mut input_with_config = input.clone();
         // 如果已经在外部完成了改写，清空 chat_history 避免在 kb_search 中重复改写
         if let Some(query) = rewritten_query {
-            input_with_config.query = query;
+            // 改写后的 query 也要标准化后再传入 kb_search，确保完全对齐
+            input_with_config.query = crate::kb::search::normalize_query(&query);
             input_with_config.chat_history.clear();
         }
         input_with_config.rerank_model = Some(self.config.expansion_model.clone());

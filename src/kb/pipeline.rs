@@ -945,7 +945,11 @@ pub async fn process_document_async(
                 .await;
                 let aug_elapsed = aug_start.elapsed().as_millis() as i32;
 
-                // 记录外部调用审计日志
+                // 记录外部调用审计日志：传输/API/解析失败记为 false，并写入 error_message
+                let (success, error_msg): (bool, String) = match &aug_result {
+                    Ok(_) => (true, String::new()),
+                    Err(e) => (false, e.to_string()),
+                };
                 let _ = crate::kb::privacy::log_external_model_call(
                     conn,
                     Some(lib_id),
@@ -957,8 +961,8 @@ pub async fn process_document_async(
                     0,
                     aug_elapsed,
                     0.0,
-                    aug_result.is_ok(),
-                    "",
+                    success,
+                    &error_msg,
                 );
 
                 match aug_result {
@@ -970,7 +974,7 @@ pub async fn process_document_async(
                         );
                         aug_count += 1;
                     }
-                    Ok(None) => {} // 静默跳过
+                    Ok(None) => {} // LLM 返回空结果，正常跳过
                     Err(e) => {
                         tracing::debug!("节点增强失败: {}", e);
                     }

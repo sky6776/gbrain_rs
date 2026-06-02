@@ -39,6 +39,10 @@ const RRF_K: usize = 60;
 /// Perform KB hybrid search with full pipeline:
 /// query normalization → planner → multi-retriever → RRF → rerank → context expansion
 ///
+/// 查询改写职责由调用方（如 operations::kb_query）负责：调用方应先完成改写、
+/// 清空 chat_history，再将改写后的 query 和与之匹配的 embedding 传入本函数。
+/// 本函数不做改写，确保文本检索和向量检索始终对齐到同一查询。
+///
 /// Returns results sorted by descending relevance score.
 pub fn kb_search(
     conn: &Connection,
@@ -47,39 +51,8 @@ pub fn kb_search(
 ) -> Result<Vec<KbSearchResult>> {
     let fetch_k = (input.top_k * 3).max(30);
 
-    // P3-001: query normalization
-    let query_normalized = normalize_query(&input.query);
-
-    // 查询改写：利用多轮对话历史将用户问题改写为独立查询
-    let query_for_search = if !input.chat_history.is_empty() {
-        let api_key = input.rewrite_api_key.as_deref().unwrap_or("");
-        let base_url = input
-            .rewrite_base_url
-            .as_deref()
-            .filter(|u| !u.is_empty())
-            .unwrap_or("https://api.openai.com/v1");
-        let model = input
-            .rewrite_model
-            .as_deref()
-            .filter(|m| !m.is_empty())
-            .unwrap_or("gpt-4o-mini");
-        let rt = crate::runtime::shared_runtime();
-        rt.block_on(rewrite_query_with_context(
-            &query_normalized,
-            &input.chat_history,
-            api_key,
-            base_url,
-            model,
-        ))
-    } else {
-        query_normalized.clone()
-    };
-    // 改写后的查询也要做标准化
-    let final_query = if query_for_search != query_normalized {
-        normalize_query(&query_for_search)
-    } else {
-        query_normalized
-    };
+    // P3-001: query normalization（仅标准化，不做改写）
+    let final_query = normalize_query(&input.query);
 
     // P3-006/P3-007: query planner
     let planner_type = if let Some(ref override_str) = input.planner_override {
@@ -429,24 +402,10 @@ pub fn kb_search(
                     .as_deref()
                     .filter(|u| !u.is_empty())
                     .unwrap_or("https://api.openai.com/v1");
-                // P4-004: 审计外部模型调用
-                let _ = crate::kb::privacy::log_external_model_call(
-                    conn,
-                    input.library_ids.first().copied(),
-                    None,
-                    "rerank",
-                    &rerank_provider,
-                    &rerank_cfg.rerank_model,
-                    final_query.len() as i32,
-                    merged.len() as i32,
-                    0,
-                    0.0,
-                    true,
-                    "",
-                );
                 // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
                 let rt = crate::runtime::shared_runtime();
-                rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+                let rerank_start = std::time::Instant::now();
+                let result = rt.block_on(crate::kb::rerank::try_model_rerank_simple(
                     &rerank_cfg,
                     &final_query,
                     &candidates,
@@ -455,7 +414,27 @@ pub fn kb_search(
                     None,
                     base_url,
                     api_key,
-                ))
+                ));
+                // P4-004: 审计外部模型调用 — 仅在实际发起了外部请求时记录
+                if result.1.model_rerank_attempted {
+                    let success = result.1.model_rerank_succeeded;
+                    let error_msg = result.1.fallback_reason.as_ref().map(|r| r.as_str()).unwrap_or("");
+                    let _ = crate::kb::privacy::log_external_model_call(
+                    conn,
+                    input.library_ids.first().copied(),
+                    None,
+                    "rerank",
+                    &rerank_provider,
+                    &rerank_cfg.rerank_model,
+                    final_query.len() as i32,
+                    merged.len() as i32,
+                    rerank_start.elapsed().as_millis() as i32,
+                    0.0,
+                    success,
+                    error_msg,
+                );
+                }
+                result
             } else {
                 // 跳过模型 rerank，直接本地 rerank
                 let local = crate::kb::rerank::local_rerank(&candidates, &weights);
@@ -565,7 +544,7 @@ pub fn kb_search(
 }
 
 /// P3-001~002: query normalization — trim, lowercase, punctuation, 繁→简
-fn normalize_query(query: &str) -> String {
+pub fn normalize_query(query: &str) -> String {
     let mut q = query.trim().to_lowercase();
     // P3-002: 繁体→简体
     q = crate::nlp::chinese::traditional_to_simplified(&q);
