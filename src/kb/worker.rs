@@ -9,8 +9,11 @@ use crate::embedding::Embedder;
 use crate::engine::BrainEngine;
 use crate::error::{GBrainError, Result};
 use crate::kb::engine::KbEngine;
-use crate::kb::jobs::{claim_next_kb_job, claim_next_ocr_job, complete_kb_job, fail_kb_job};
-use crate::kb::pipeline::process_document_async;
+use crate::kb::jobs::{
+    claim_next_kb_cmd_job, claim_next_kb_job, claim_next_ocr_job, complete_kb_job, fail_kb_job,
+    KbIndexCommand, KbProcessPayload,
+};
+use crate::kb::pipeline::{cleanup_retired_version, process_document_async};
 use crate::kb::raptor::RaptorConfig;
 use crate::sqlite_engine::SqliteEngine;
 use rusqlite::Connection;
@@ -131,6 +134,20 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
 
             complete_kb_job(conn, job_db_id)?;
 
+            // P1 修复：索引完成后自动入队摘要生成 job，实现 summary 检索链路自动闭环。
+            // pipeline 不负责生成摘要，仅通过此处的 enqueue 异步触发 SummarizeDocument。
+            let summary_cmd = KbIndexCommand::SummarizeDocument {
+                document_id: payload.document_id,
+                processing_run_id: String::new(),
+            };
+            if let Err(e) = crate::kb::jobs::enqueue_kb_cmd_job(conn, &summary_cmd) {
+                warn!(
+                    document_id = payload.document_id,
+                    error = %e,
+                    "KB worker: SummarizeDocument 入队失败（非致命）"
+                );
+            }
+
             // E6: enqueue synonym mining job after successful document processing.
             // The dedup guard inside ensures at most one mining job is pending at any time.
             if let Err(e) =
@@ -180,6 +197,287 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                     "KB worker: 更新失败状态到 artifact shadow page 失败"
                 );
             }
+            fail_kb_job(conn, job_db_id, &e.to_string())?;
+            Ok(true)
+        }
+    }
+}
+
+/// P0 修复: 运行一次 KbIndexCommand 作业处理循环。
+/// 认领并处理一个 KbIndexCommand（CleanupRetiredVersion / DeleteDocumentIndex 等）。
+/// 返回是否处理了一个作业。
+pub fn run_kb_cmd_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool> {
+    let conn = engine.connection()?;
+
+    let claimed = claim_next_kb_cmd_job(conn)?;
+    let Some((job_db_id, cmd)) = claimed else {
+        return Ok(false);
+    };
+
+    tracing::info!(
+        job_db_id,
+        cmd_type = cmd.job_type(),
+        "KB cmd worker: 认领命令作业"
+    );
+
+    let result = match cmd {
+        KbIndexCommand::CleanupRetiredVersion { version_id } => {
+            match cleanup_retired_version(conn, version_id) {
+                Ok(()) => {
+                    tracing::info!(job_db_id, version_id, "KB cmd worker: 退役版本清理完成");
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        version_id,
+                        error = %e,
+                        "KB cmd worker: 退役版本清理失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+        KbIndexCommand::DeleteDocumentIndex { document_id } => {
+            // P2 修复: DeleteDocumentIndex — 清理文档的节点/向量/版本
+            match crate::kb::pipeline::delete_document_index(conn, document_id) {
+                Ok(()) => {
+                    tracing::info!(job_db_id, document_id, "KB cmd worker: 文档索引删除完成");
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        document_id,
+                        error = %e,
+                        "KB cmd worker: 文档索引删除失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+        KbIndexCommand::UpdateAcl {
+            document_id,
+            ref policy,
+        } => {
+            // P0 修复: UpdateAcl — 使用 AclPolicy 显式表达访问控制意图
+            match crate::kb::pipeline::update_document_acl(conn, document_id, policy) {
+                Ok(()) => {
+                    tracing::info!(job_db_id, document_id, "KB cmd worker: ACL 更新完成");
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        document_id,
+                        error = %e,
+                        "KB cmd worker: ACL 更新失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+        KbIndexCommand::ReconcileIndexStatus { library_id } => {
+            // P2 修复: ReconcileIndexStatus — 巡检修复 library 的 index_status
+            match crate::kb::pipeline::reconcile_library_index_status(conn, library_id) {
+                Ok(()) => {
+                    tracing::info!(
+                        job_db_id,
+                        library_id,
+                        "KB cmd worker: index_status 巡检完成"
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        library_id,
+                        error = %e,
+                        "KB cmd worker: index_status 巡检失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+        KbIndexCommand::UpsertDocumentVersion {
+            document_id,
+            library_id,
+            ref processing_run_id,
+        } => {
+            // 入队异步 pipeline job，避免同步 process_document 拒绝 PDF/image。
+            // 异步 pipeline 会完成 parse → split → embed → persist 全流程。
+            match conn.query_row(
+                "SELECT storage_path, extension FROM kb_documents WHERE id = ?1",
+                rusqlite::params![document_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                Ok((storage_path, extension)) => {
+                    let payload = KbProcessPayload {
+                        kind: "kb_process_document".into(),
+                        document_id,
+                        library_id,
+                        processing_run_id: processing_run_id.clone(),
+                        storage_path,
+                        extension,
+                    };
+                    match crate::kb::jobs::enqueue_kb_process_job(conn, &payload) {
+                        Ok(job_id) => {
+                            tracing::info!(
+                                job_db_id,
+                                document_id,
+                                async_job_id = job_id,
+                                "KB cmd worker: UpsertDocumentVersion 已入队异步 pipeline"
+                            );
+                            Ok(())
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                job_db_id,
+                                document_id,
+                                error = %e,
+                                "KB cmd worker: UpsertDocumentVersion 入队失败"
+                            );
+                            Err(e)
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("无法查询文档信息: {}", e);
+                    tracing::warn!(job_db_id, document_id, "{}", msg);
+                    Err(GBrainError::InvalidInput(msg))
+                }
+            }
+        }
+        KbIndexCommand::SummarizeDocument {
+            document_id,
+            processing_run_id: _,
+        } => {
+            // 轻量摘要刷新：基于当前版本节点内容生成文档摘要。
+            // 不走完整 pipeline（避免 PDF/image 拒绝 / 重复 chunk/embed）。
+            // summarize_current_version 内部会清理旧摘要后写入新摘要。
+            match crate::kb::pipeline::summarize_current_version(conn, document_id) {
+                Ok(count) => {
+                    tracing::info!(
+                        job_db_id,
+                        document_id,
+                        summary_count = count,
+                        "KB cmd worker: SummarizeDocument 完成"
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        document_id,
+                        error = %e,
+                        "KB cmd worker: SummarizeDocument 失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+        KbIndexCommand::EmbedNodes {
+            document_id,
+            library_id,
+            ref processing_run_id,
+        } => match config.openai_api_key.as_deref().filter(|s| !s.is_empty()) {
+            Some(api_key) => {
+                let embedder = Arc::new(Embedder::new(
+                    api_key,
+                    config.openai_base_url.as_deref(),
+                    Some(&config.embedding_model),
+                    Some(config.embedding_dimensions),
+                ));
+                let rt = crate::runtime::shared_runtime();
+                match rt.block_on(crate::kb::pipeline::embed_nodes_for_document_version(
+                    conn,
+                    document_id,
+                    library_id,
+                    processing_run_id,
+                    embedder,
+                )) {
+                    Ok(count) => {
+                        tracing::info!(
+                            job_db_id,
+                            document_id,
+                            embedded_nodes = count,
+                            "KB cmd worker: EmbedNodes 完成"
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            job_db_id,
+                            document_id,
+                            error = %e,
+                            "KB cmd worker: EmbedNodes 失败"
+                        );
+                        Err(e)
+                    }
+                }
+            }
+            None => {
+                let e = GBrainError::InvalidInput("EmbedNodes 需要配置 openai_api_key".to_string());
+                tracing::warn!(
+                    job_db_id,
+                    document_id,
+                    error = %e,
+                    "KB cmd worker: EmbedNodes 失败"
+                );
+                Err(e)
+            }
+        },
+        KbIndexCommand::FinalizeIndex {
+            document_id,
+            library_id,
+            ref processing_run_id,
+        } => {
+            match crate::kb::pipeline::finalize_index_version(
+                conn,
+                document_id,
+                library_id,
+                processing_run_id,
+            ) {
+                Ok(version_id) => {
+                    tracing::info!(
+                        job_db_id,
+                        document_id,
+                        version_id,
+                        "KB cmd worker: FinalizeIndex 完成"
+                    );
+                    let summary_cmd = KbIndexCommand::SummarizeDocument {
+                        document_id,
+                        processing_run_id: String::new(),
+                    };
+                    if let Err(e) = crate::kb::jobs::enqueue_kb_cmd_job(conn, &summary_cmd) {
+                        tracing::warn!(
+                            job_db_id,
+                            document_id,
+                            error = %e,
+                            "KB cmd worker: FinalizeIndex 后入队 SummarizeDocument 失败（非致命）"
+                        );
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        job_db_id,
+                        document_id,
+                        error = %e,
+                        "KB cmd worker: FinalizeIndex 失败"
+                    );
+                    Err(e)
+                }
+            }
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            complete_kb_job(conn, job_db_id)?;
+            Ok(true)
+        }
+        Err(e) => {
             fail_kb_job(conn, job_db_id, &e.to_string())?;
             Ok(true)
         }
@@ -746,8 +1044,16 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                     if library_id > 0 {
                         let kb2 = KbEngine::new(conn);
                         if let Ok(library) = kb2.get_library(library_id) {
+                            // P0 修复: 查询当前版本 ID，显式传入 rebuild
+                            let version_id: Option<i64> = conn
+                                .query_row(
+                                    "SELECT current_version_id FROM kb_documents WHERE id = ?1",
+                                    rusqlite::params![doc_id],
+                                    |row| row.get(0),
+                                )
+                                .ok();
                             if let Err(e) = rebuild_raptor_after_reembed(
-                                conn, rt, doc_id, &library, config, run_id,
+                                conn, rt, doc_id, version_id, &library, config, run_id,
                             ) {
                                 tracing::warn!(
                                     document_id = doc_id,
@@ -2653,14 +2959,19 @@ fn reembed_document_nodes(
     target_index_id: i64,
     model: &str,
 ) -> Result<usize> {
-    // 解析 target_index_id：0 → active index（通过文档的第一个节点查找所属 library）
+    // 解析 target_index_id：0 → active index（通过文档的当前版本节点查找所属 library）
     let resolved_index_id = if target_index_id > 0 {
         target_index_id
     } else {
         conn.query_row(
             "SELECT ei.id FROM kb_embedding_indexes ei \
              JOIN kb_document_nodes n ON n.library_id = ei.library_id \
-             WHERE n.document_id = ?1 AND ei.is_active = 1 LIMIT 1",
+             JOIN kb_documents d ON d.id = n.document_id \
+             WHERE n.document_id = ?1 AND ei.is_active = 1 \
+             AND d.current_version_id IS NOT NULL \
+             AND n.version_id = d.current_version_id \
+             AND n.retired_at IS NULL \
+             LIMIT 1",
             rusqlite::params![document_id],
             |row| row.get::<_, i64>(0),
         )
@@ -2672,11 +2983,16 @@ fn reembed_document_nodes(
         })?
     };
 
-    // 查找文档中无目标 index embedding 的节点
+    // 查找文档中无目标 index embedding 的当前版本节点
+    // 只处理 current_version_id 且未退役的节点，避免浪费 embedding 调用在旧版本上
     let node_ids: Vec<(i64, String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT n.id, n.content, n.embedding_text FROM kb_document_nodes n \
+             JOIN kb_documents d ON d.id = n.document_id \
              WHERE n.document_id = ?1 \
+             AND d.current_version_id IS NOT NULL \
+             AND n.version_id = d.current_version_id \
+             AND n.retired_at IS NULL \
              AND n.id NOT IN (SELECT node_id FROM kb_node_embeddings \
                               WHERE embedding_index_id = ?2)",
         )?;
@@ -2751,10 +3067,18 @@ fn resolve_target_index(conn: &Connection, node_id: i64, target_index_id: i64) -
 ///
 /// 加载文档叶节点及其嵌入向量，构建 RAPTOR 父节点并持久化到 DB。
 /// 仅在库启用 RAPTOR 且允许外部摘要时执行。
+/// P0 修复: 按版本隔离进行 RAPTOR 重建。
+///
+/// 传入 `version_id` 后，叶节点查询、父节点删除/重置、新父节点插入全部限定
+/// 同一 version_id，避免：
+/// - 叶节点混入退休版本
+/// - 删除/重置误伤其他版本的父节点
+/// - 新父节点 version_id = NULL 被严格检索过滤掉
 fn rebuild_raptor_after_reembed(
     conn: &Connection,
     rt: &tokio::runtime::Runtime,
     doc_id: i64,
+    version_id: Option<i64>,
     library: &crate::kb::types::Library,
     config: &Config,
     run_id: Option<&str>,
@@ -2794,18 +3118,33 @@ fn rebuild_raptor_after_reembed(
         )
         .map_err(|_| GBrainError::InvalidInput("无 active embedding index".into()))?;
 
-    // 加载叶节点 + 嵌入向量
+    // 加载叶节点 + 嵌入向量（限定版本，避免混入退休版本节点）
     let mut nodes: Vec<crate::kb::types::RaptorNode> = {
-        let mut stmt = conn.prepare(
+        let version_filter = if version_id.is_some() {
+            " AND n.version_id = ?3 "
+        } else {
+            " "
+        };
+        let sql = format!(
             "SELECT n.id, n.library_id, n.document_id, n.content, n.chunk_order, \
                     n.title_path, n.page_number, n.source_start, n.source_end, \
                     n.node_metadata, n.embedding_text, e.embedding \
              FROM kb_document_nodes n \
              LEFT JOIN kb_node_embeddings e ON e.node_id = n.id AND e.embedding_index_id = ?1 \
-             WHERE n.document_id = ?2 AND n.level = 0 \
+             WHERE n.document_id = ?2 AND n.level = 0{} \
+             AND n.retired_at IS NULL \
              ORDER BY n.chunk_order",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![index_id, doc_id], |row| {
+            version_filter,
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(index_id), Box::new(doc_id)];
+        if let Some(vid) = version_id {
+            params.push(Box::new(vid));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
             let library_id: i64 = row.get(1)?;
             let document_id: i64 = row.get(2)?;
@@ -2941,27 +3280,67 @@ fn rebuild_raptor_after_reembed(
         }
 
         // 1. 删除旧 RAPTOR 父节点（level > 0）及其 embeddings
+        //    P0 修复: 限定同一 version_id（含 NULL 以清理遗留数据），
+        //    避免误伤其他版本的父节点。
         let old_parent_ids: Vec<i64> = {
-            let mut stmt = conn
-                .prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1 AND level > 0")?;
-            let rows = stmt.query_map(rusqlite::params![doc_id], |row| row.get(0))?;
+            let version_filter = if version_id.is_some() {
+                "AND (version_id = ?2 OR version_id IS NULL)"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT id FROM kb_document_nodes WHERE document_id = ?1 AND level > 0 {}",
+                version_filter,
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> = if let Some(vid) = version_id {
+                vec![Box::new(doc_id), Box::new(vid)]
+            } else {
+                vec![Box::new(doc_id)]
+            };
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), |row| row.get(0))?;
             rows.filter_map(|r| r.ok()).collect()
         };
         for &pid in &old_parent_ids {
             crate::kb::engine::cleanup_node_vectors(conn, pid);
         }
         if !old_parent_ids.is_empty() {
-            conn.execute(
-                "DELETE FROM kb_document_nodes WHERE document_id = ?1 AND level > 0",
-                rusqlite::params![doc_id],
-            )?;
+            let version_filter = if version_id.is_some() {
+                "AND (version_id = ?2 OR version_id IS NULL)"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "DELETE FROM kb_document_nodes WHERE document_id = ?1 AND level > 0 {}",
+                version_filter,
+            );
+            if let Some(vid) = version_id {
+                conn.execute(&sql, rusqlite::params![doc_id, vid])?;
+            } else {
+                conn.execute(&sql, rusqlite::params![doc_id])?;
+            }
         }
 
-        // 2. 重置叶节点的 parent_id（清除指向已删除旧父节点的引用）
-        conn.execute(
-            "UPDATE kb_document_nodes SET parent_id = NULL WHERE document_id = ?1 AND level = 0",
-            rusqlite::params![doc_id],
-        )?;
+        // 2. 重置该版本叶节点的 parent_id（清除指向已删除旧父节点的引用）
+        //    P0 修复: 限定同一 version_id，避免误清零其他版本叶子的 parent_id。
+        {
+            let version_filter = if version_id.is_some() {
+                "AND version_id = ?2"
+            } else {
+                ""
+            };
+            let sql = format!(
+                "UPDATE kb_document_nodes SET parent_id = NULL WHERE document_id = ?1 AND level = 0 {}",
+                version_filter,
+            );
+            if let Some(vid) = version_id {
+                conn.execute(&sql, rusqlite::params![doc_id, vid])?;
+            } else {
+                conn.execute(&sql, rusqlite::params![doc_id])?;
+            }
+        }
 
         // 3. 插入新 RAPTOR 父节点
         let mut id_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
@@ -2977,14 +3356,16 @@ fn rebuild_raptor_after_reembed(
             }
 
             let content_tokens = crate::nlp::chinese::tokenize_content(&node.content);
+            // P0 修复: 插入父节点时写入 version_id，避免被严格检索过滤掉
             conn.execute(
                 "INSERT INTO kb_document_nodes \
-                 (library_id, document_id, content, content_tokens, level, chunk_order, \
+                 (library_id, document_id, version_id, content, content_tokens, level, chunk_order, \
                   title_path, page_number, source_start, source_end, node_metadata, embedding_text) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 rusqlite::params![
                     node.library_id,
                     doc_id,
+                    version_id,
                     node.content,
                     content_tokens,
                     node.level,
@@ -3054,6 +3435,7 @@ fn rebuild_raptor_after_reembed(
 fn run_priority_workers(engine: &SqliteEngine, config: &Config) -> bool {
     let workers: &[(&str, fn(&SqliteEngine, &Config) -> Result<bool>)] = &[
         ("kb", run_kb_worker_once),
+        ("kb_cmd", run_kb_cmd_worker_once),
         ("ocr", run_ocr_worker_once),
         ("reembed", run_reembed_worker_once),
         ("artifact", run_artifact_worker_once),

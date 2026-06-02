@@ -33,6 +33,7 @@ impl DocumentParser for DocxParser {
             content,
             metadata,
             blocks: None,
+            media_refs: Vec::new(),
         })
     }
 

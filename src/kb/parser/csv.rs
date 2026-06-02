@@ -84,6 +84,7 @@ impl DocumentParser for CsvParser {
             content,
             metadata,
             blocks: None,
+            media_refs: Vec::new(),
         })
     }
 

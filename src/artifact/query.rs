@@ -818,6 +818,10 @@ fn query_node_candidates(
          WHERE kb_doc_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
+           AND d.current_version_id IS NOT NULL
+           AND dn.version_id = d.current_version_id
+           AND dn.retired_at IS NULL
+           AND d.index_status = 'ready'
          ORDER BY bm25_score ASC
          LIMIT ?2"
     } else {
@@ -830,6 +834,10 @@ fn query_node_candidates(
          WHERE kb_doc_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
+           AND d.current_version_id IS NOT NULL
+           AND dn.version_id = d.current_version_id
+           AND dn.retired_at IS NULL
+           AND d.index_status = 'ready'
          ORDER BY bm25_score ASC
          LIMIT ?2"
     };
@@ -931,6 +939,10 @@ fn query_passage_candidates(
          WHERE kb_passage_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
+           AND d.current_version_id IS NOT NULL
+           AND dn.version_id = d.current_version_id
+           AND dn.retired_at IS NULL
+           AND d.index_status = 'ready'
          ORDER BY bm25_score ASC
          LIMIT ?2"
     } else {
@@ -944,6 +956,10 @@ fn query_passage_candidates(
          WHERE kb_passage_fts MATCH ?1
            AND d.document_status != 'deleted'
            AND d.deleted_at IS NULL
+           AND d.current_version_id IS NOT NULL
+           AND dn.version_id = d.current_version_id
+           AND dn.retired_at IS NULL
+           AND d.index_status = 'ready'
          ORDER BY bm25_score ASC
          LIMIT ?2"
     };
@@ -1139,6 +1155,10 @@ fn query_passage_candidates_for_document_ids(
                    AND ps.document_id = ?2
                    AND d.document_status != 'deleted'
                    AND d.deleted_at IS NULL
+                   AND d.current_version_id IS NOT NULL
+                   AND dn.version_id = d.current_version_id
+                   AND dn.retired_at IS NULL
+                   AND d.index_status = 'ready'
                  ORDER BY bm25_score ASC
                  LIMIT ?3",
             )
@@ -1352,7 +1372,9 @@ fn rerank_evidence_candidates(
     ));
 
     // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
-    let should_audit = external_allowed && rerank_cfg.model_rerank_enabled && !api_key.is_empty()
+    let should_audit = external_allowed
+        && rerank_cfg.model_rerank_enabled
+        && !api_key.is_empty()
         && rerank_info.model_rerank_attempted;
     if should_audit {
         // 仅收集实际发给外部模型的候选库（与 candidate_texts 截断一致）

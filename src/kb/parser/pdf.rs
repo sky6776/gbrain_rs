@@ -266,6 +266,7 @@ impl DocumentParser for PdfParser {
             content,
             metadata,
             blocks: Some(blocks),
+            media_refs: Vec::new(),
         })
     }
 

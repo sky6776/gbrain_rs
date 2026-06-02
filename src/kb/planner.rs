@@ -43,6 +43,9 @@ impl QueryType {
 pub enum RetrieverType {
     TitleName,
     NodeFts,
+    /// P1 修复: PassageFts 检索器（kb_passage_fts），
+    /// 对短查询/keyword 提供段落级 FTS 兜底召回
+    PassageFts,
     Vector,
     Summary,
     Table,
@@ -116,16 +119,19 @@ pub fn plan(query_type: QueryType) -> PlannerOutput {
             (RetrieverType::Vector, 0.3),
             (RetrieverType::Summary, 0.2),
             (RetrieverType::TitleName, 0.2),
+            (RetrieverType::PassageFts, 0.15),
         ],
         QueryType::FactLookup => vec![
             (RetrieverType::NodeFts, 0.4),
             (RetrieverType::Vector, 0.3),
             (RetrieverType::Metadata, 0.3),
+            (RetrieverType::PassageFts, 0.2),
         ],
         QueryType::Conceptual => vec![
             (RetrieverType::Vector, 0.5),
             (RetrieverType::NodeFts, 0.3),
             (RetrieverType::Summary, 0.2),
+            (RetrieverType::PassageFts, 0.1),
         ],
         QueryType::TableLookup => vec![
             (RetrieverType::Table, 0.5),

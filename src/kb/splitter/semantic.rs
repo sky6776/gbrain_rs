@@ -41,16 +41,16 @@ impl SemanticSplitter {
     }
 
     pub async fn split(&self, text: &str) -> Result<Chunks, GBrainError> {
-        let paragraphs: Vec<&str> = text
-            .split("\n\n")
-            .filter(|p| !p.trim().is_empty())
-            .collect();
+        // P0-4: 双换行切分不足时,启用 CJK 感知句界分割,
+        // 避免中文长段落被整体作为一个 semantic paragraph。
+        let paragraphs: Vec<String> = split_units(text);
 
         if paragraphs.len() <= 1 {
             return Ok(vec![text.to_string()]);
         }
 
-        let embeddings = self.embedder.embed_batch(&paragraphs).await?;
+        let paragraph_refs: Vec<&str> = paragraphs.iter().map(|s| s.as_str()).collect();
+        let embeddings = self.embedder.embed_batch(&paragraph_refs).await?;
 
         if embeddings.len() < 2 {
             return Ok(vec![text.to_string()]);
@@ -75,7 +75,7 @@ impl SemanticSplitter {
             if !current.is_empty() {
                 current.push_str("\n\n");
             }
-            current.push_str(para);
+            current.push_str(para.as_str());
 
             let should_split = i < similarities.len()
                 && similarities[i] < threshold
@@ -147,4 +147,102 @@ fn take_tail(text: &str, max_chars: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     let start = chars.len().saturating_sub(max_chars);
     chars[start..].iter().collect()
+}
+
+/// P0-4: 段落分割单元。优先按双换行切分;若文本无空行(中文长段落常见),
+/// 回退到 CJK 感知句界切分(。!?!?;)。
+///
+/// 修正前问题:中文文档常无空行,split("\n\n") 仅返回 1 个段落,
+/// 导致 semantic splitter 把整篇文档作为一个 paragraph,
+/// 失去语义分块能力,且后续 embedding 会因过长被截断。
+pub fn split_units(text: &str) -> Vec<String> {
+    let paragraphs: Vec<String> = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if paragraphs.len() > 1 {
+        return paragraphs;
+    }
+
+    // 整体作为一个段落时,做 CJK 感知句界切分
+    let single = paragraphs.first().map(String::as_str).unwrap_or("");
+    split_sentences_cjk_aware(single)
+}
+
+/// 在 CJK 句末标点(。!?!??;)之后切分,保留标点在前一段。
+/// 同时考虑 ASCII 句末标点(. ! ?)并避免在"3.14"这种小数点处误切。
+pub fn split_sentences_cjk_aware(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut result: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut prev_ch: Option<char> = None;
+    let chars: Vec<char> = text.chars().collect();
+    for (idx, ch) in chars.iter().enumerate() {
+        current.push(*ch);
+        let is_sentence_end = matches!(ch, '。' | '！' | '？' | '；' | '!' | '?' | ';');
+        // ASCII 句点需要排除小数/版本号场景:前驱是数字且后继也是数字则不切
+        let is_ascii_dot_safe = *ch == '.' && {
+            let prev_is_digit = prev_ch.map(|c| c.is_ascii_digit()).unwrap_or(false);
+            let next_is_digit = chars
+                .get(idx + 1)
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false);
+            !(prev_is_digit && next_is_digit)
+        };
+        if (is_sentence_end || is_ascii_dot_safe) && !current.trim().is_empty() {
+            result.push(std::mem::take(&mut current).trim().to_string());
+        }
+        prev_ch = Some(*ch);
+    }
+    if !current.trim().is_empty() {
+        result.push(current.trim().to_string());
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_units_paragraphs() {
+        let text = "段落一\n\n段落二\n\n段落三";
+        let units = split_units(text);
+        assert_eq!(units.len(), 3);
+        assert_eq!(units[0], "段落一");
+        assert_eq!(units[2], "段落三");
+    }
+
+    #[test]
+    fn test_split_units_cjk_fallback() {
+        let text = "这是第一句。这是第二句!这是第三句?";
+        let units = split_units(text);
+        assert_eq!(units.len(), 3);
+        assert_eq!(units[0], "这是第一句。");
+        assert_eq!(units[1], "这是第二句!");
+        assert_eq!(units[2], "这是第三句?");
+    }
+
+    #[test]
+    fn test_split_sentences_decimal_no_split() {
+        // 小数点不应触发切分
+        let text = "Pi is 3.14 and that's it.";
+        let units = split_sentences_cjk_aware(text);
+        // 最后的 . 是句末,应切一刀,但 3.14 不应切
+        assert!(units.len() <= 2);
+        // 至少 3.14 不应被切散
+        let combined = units.join(" ");
+        assert!(combined.contains("3.14"));
+    }
+
+    #[test]
+    fn test_split_sentences_empty() {
+        assert!(split_sentences_cjk_aware("").is_empty());
+        assert!(split_units("").is_empty());
+    }
 }

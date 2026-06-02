@@ -42,17 +42,20 @@ static FLOW_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| 
     ).unwrap()
 });
 /// 匹配 data-code 属性（提取流程图代码）
-static DATA_CODE_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)data-code\s*=\s*["']([^"']*)["']"#).unwrap());
+static DATA_CODE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)data-code\s*=\s*["']([^"']*)["']"#).unwrap()
+});
 /// 匹配任务列表 <ul data-type="taskList">...</ul>
-static TASKLIST_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?is)<ul\b[^>]*data-type\s*=\s*["']taskList["'][^>]*>(.*?)</ul>"#).unwrap());
+static TASKLIST_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?is)<ul\b[^>]*data-type\s*=\s*["']taskList["'][^>]*>(.*?)</ul>"#).unwrap()
+});
 /// 匹配 <li>...</li>
 static LI_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<li\b[^>]*>(.*?)</li>").unwrap());
 /// 匹配 data-checked 属性
-static CHECKED_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)data-checked\s*=\s*["']?(true|1|yes)["']?"#).unwrap());
+static CHECKED_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)data-checked\s*=\s*["']?(true|1|yes)["']?"#).unwrap()
+});
 
 pub struct HtmlParser;
 
@@ -96,10 +99,13 @@ impl DocumentParser for HtmlParser {
 
         // P1-010/P2-010: 构建结构化 blocks（按标题层级分段）
         let blocks = build_html_blocks(&text, &headings);
+        // P1-2: 抽取图片/附件等媒体引用
+        let media_refs = extract_media_refs(&cleaned);
         Ok(ParsedDocument {
             content,
             metadata,
             blocks: Some(blocks),
+            media_refs,
         })
     }
 
@@ -108,14 +114,79 @@ impl DocumentParser for HtmlParser {
     }
 }
 
+/// P1 修复: HtmlParser 的 RichContentNormalizer 实现。
+/// 将 ParsedDocument 转为标准化 NormalizedDocument，保留已有的
+/// 表格/流程图/任务列表预处理结果，并附加 media_refs。
+impl crate::kb::parser::RichContentNormalizer for HtmlParser {
+    fn normalize(
+        &self,
+        parsed: crate::kb::parser::ParsedDocument,
+    ) -> crate::error::Result<crate::kb::parser::NormalizedDocument> {
+        Ok(crate::kb::parser::NormalizedDocument {
+            markdown: parsed.content,
+            blocks: parsed.blocks.unwrap_or_default(),
+            media_refs: parsed.media_refs.clone(),
+            attachments: parsed.media_refs, // 当前实现中 attachment 与 media_ref 相同
+        })
+    }
+}
+
 /// 富文本语义保留：在 html2text 处理之前，将 HTML 中的表格、流程图、任务列表
 /// 转换为 Markdown 格式，保留结构语义以支持向量化检索。
 fn preserve_rich_text(html: &str) -> String {
     let mut result = html.to_string();
+    result = convert_images_to_markdown(&result);
+    result = convert_attachment_spans_to_markdown(&result);
     result = convert_tables_to_markdown(&result);
     result = convert_flowcharts_to_mermaid(&result);
     result = convert_tasklists_to_checkbox(&result);
     result
+}
+
+fn convert_images_to_markdown(html: &str) -> String {
+    IMG_TAG_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+            let (src, alt, title) = parse_img_attrs(attrs);
+            let Some(src) = src else {
+                return String::new();
+            };
+            if src.starts_with("data:") || src.starts_with("javascript:") {
+                return String::new();
+            }
+            match title {
+                Some(title) if !title.is_empty() => {
+                    format!("\n![{}]({} \"{}\")\n", alt.unwrap_or_default(), src, title)
+                }
+                _ => format!("\n![{}]({})\n", alt.unwrap_or_default(), src),
+            }
+        })
+        .to_string()
+}
+
+fn convert_attachment_spans_to_markdown(html: &str) -> String {
+    ATTACHMENT_SPAN_RE
+        .replace_all(html, |caps: &regex::Captures| {
+            let full = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+            let href = parse_attr(full, "data-href")
+                .or_else(|| parse_attr(full, "href"))
+                .or_else(|| parse_attr(full, "data-url"));
+            let Some(href) = href else {
+                return strip_tags(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
+            };
+            if href.starts_with("data:") || href.starts_with("javascript:") {
+                return String::new();
+            }
+            let label = strip_tags(caps.get(1).map(|m| m.as_str()).unwrap_or(""))
+                .trim()
+                .to_string();
+            if label.is_empty() {
+                format!("\n[{}]({})\n", href, href)
+            } else {
+                format!("\n[{}]({})\n", label, href)
+            }
+        })
+        .to_string()
 }
 
 /// 将 HTML <table> 转换为 Markdown 表格格式。
@@ -572,6 +643,173 @@ fn build_html_blocks(text: &str, headings: &[String]) -> Vec<crate::kb::types::P
             }
         })
         .collect()
+}
+
+// --- P1-2: 富文本媒体引用抽取 ---
+
+/// 匹配 <img ...> 标签
+static IMG_TAG_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?is)<img\b([^>]*)/?>").unwrap());
+
+/// 匹配 HTML 属性（key=value 或 key='value' 或 key="value"）
+static ATTR_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?i)([\w:-]+)\s*=\s*(?:["']([^"']*)["']|([^\s>]+))"#).unwrap()
+});
+
+/// 匹配附件链接（href 指向 pdf/docx/xlsx/zip 等）
+static ATTACHMENT_LINK_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r#"(?is)<a\b([^>]*)>([^<]*)</a>"#).unwrap());
+
+/// 已知附件扩展名
+fn is_attachment_href(href: &str) -> bool {
+    let lower = href.to_lowercase();
+    const EXTS: &[&str] = &[
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".tar",
+        ".gz", ".txt", ".csv", ".json", ".md", ".mp3", ".mp4", ".wav", ".mov",
+    ];
+    EXTS.iter().any(|e| lower.ends_with(e))
+}
+
+/// P1 修复: 匹配 PandaWiki 富文本附件 span（data-tag=attachment）
+static ATTACHMENT_SPAN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"(?is)<span\b[^>]*data-tag\s*=\s*["']attachment["'][^>]*>(.*?)</span>"#)
+        .unwrap()
+});
+
+/// 从 HTML 中抽取图片/附件引用，作为 MediaRef 列表。
+///
+/// - `<img src="..." alt="...">` → `media_type="image"`
+/// - `<a href="*.pdf|docx|...">label</a>` → `media_type="attachment"`
+/// - `<span data-tag="attachment" data-href="...">label</span>` → `media_type="attachment"`（PandaWiki）
+///
+/// 内嵌 data: URL 与 javascript: 会被忽略，避免污染。
+pub fn extract_media_refs(html: &str) -> Vec<crate::kb::types::MediaRef> {
+    let mut refs: Vec<crate::kb::types::MediaRef> = Vec::new();
+
+    // 抽取图片
+    for cap in IMG_TAG_RE.captures_iter(html) {
+        let attrs = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let (src, alt, title) = parse_img_attrs(attrs);
+        let Some(src) = src else { continue };
+        if src.starts_with("data:") || src.starts_with("javascript:") {
+            continue;
+        }
+        refs.push(crate::kb::types::MediaRef {
+            media_type: "image".to_string(),
+            storage_path: src,
+            alt_text: alt,
+            ocr_text: None,
+            caption: title,
+            page_number: None,
+        });
+    }
+
+    // 抽取附件链接（标准 <a> 标签）
+    for cap in ATTACHMENT_LINK_RE.captures_iter(html) {
+        let attrs = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let label = cap
+            .get(2)
+            .map(|m| m.as_str().trim())
+            .unwrap_or("")
+            .to_string();
+        let href = parse_attr(attrs, "href");
+        let Some(href) = href else { continue };
+        if !is_attachment_href(&href) {
+            continue;
+        }
+        refs.push(crate::kb::types::MediaRef {
+            media_type: "attachment".to_string(),
+            storage_path: href,
+            alt_text: if label.is_empty() { None } else { Some(label) },
+            ocr_text: None,
+            caption: None,
+            page_number: None,
+        });
+    }
+
+    // P1 修复: 抽取 PandaWiki 富文本附件 span（data-tag="attachment"）
+    for cap in ATTACHMENT_SPAN_RE.captures_iter(html) {
+        let full_tag = cap.get(0).map(|m| m.as_str()).unwrap_or("");
+        let inner_text = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        // 从 span 标签中提取 data-href 或 data-url 属性
+        let href = parse_attr(full_tag, "data-href").or_else(|| parse_attr(full_tag, "data-url"));
+        let Some(href) = href else { continue };
+        if href.starts_with("data:") || href.starts_with("javascript:") {
+            continue;
+        }
+        refs.push(crate::kb::types::MediaRef {
+            media_type: "attachment".to_string(),
+            storage_path: href,
+            alt_text: if inner_text.is_empty() {
+                None
+            } else {
+                Some(inner_text.to_string())
+            },
+            ocr_text: None,
+            caption: None,
+            page_number: None,
+        });
+    }
+
+    refs
+}
+
+fn parse_img_attrs(attrs: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut src = None;
+    let mut alt = None;
+    let mut title = None;
+    for cap in ATTR_RE.captures_iter(attrs) {
+        let key = cap
+            .get(1)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
+        let val = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .map(|m| m.as_str().to_string());
+        if let Some(v) = val {
+            match key.as_str() {
+                "src" => src = Some(v),
+                "alt" => alt = Some(v),
+                "title" => title = Some(v),
+                _ => {}
+            }
+        }
+    }
+    (src, alt, title)
+}
+
+fn parse_attr(attrs: &str, name: &str) -> Option<String> {
+    for cap in ATTR_RE.captures_iter(attrs) {
+        let key = cap
+            .get(1)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
+        if key == name {
+            return cap
+                .get(2)
+                .or_else(|| cap.get(3))
+                .map(|m| m.as_str().to_string());
+        }
+    }
+    None
+}
+
+/// HTML 默认富文本标准化器：把 ParsedDocument 转为 NormalizedDocument。
+pub struct HtmlRichContentNormalizer;
+
+impl super::RichContentNormalizer for HtmlRichContentNormalizer {
+    fn normalize(
+        &self,
+        parsed: super::ParsedDocument,
+    ) -> crate::error::Result<super::NormalizedDocument> {
+        Ok(super::NormalizedDocument {
+            markdown: parsed.content,
+            blocks: parsed.blocks.unwrap_or_default(),
+            media_refs: parsed.media_refs,
+            attachments: Vec::new(),
+        })
+    }
 }
 
 #[cfg(test)]

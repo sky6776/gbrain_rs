@@ -28,6 +28,7 @@ impl DocumentParser for TextParser {
             content,
             metadata: HashMap::new(),
             blocks: None,
+            media_refs: Vec::new(),
         })
     }
 

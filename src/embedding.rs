@@ -95,15 +95,106 @@ impl Embedder {
     ///
     /// The caller may pass any number of texts; this method splits them into
     /// provider-safe request batches and preserves the original order.
+    ///
+    /// P0-3: 当批次数量超过 1 且环境变量 `GBRAIN_EMBEDDING_CONCURRENCY` > 1 时,
+    /// 并发发送多个 MAX_BATCH_SIZE 子批次,保持原始顺序。并发度上限 8,
+    /// 避免对外部 embedding 服务造成 burst 压力。失败重试 / 退避行为与单线程版本一致。
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
+        let concurrency = std::env::var("GBRAIN_EMBEDDING_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 8);
+
+        // 单子批次或并发度 = 1 时直接走串行路径,避免无谓的 task spawn 开销
+        let chunk_count = texts.chunks(MAX_BATCH_SIZE).count();
+        if concurrency == 1 || chunk_count <= 1 {
+            return self.embed_batch_serial(texts).await;
+        }
+
+        self.embed_batch_concurrent(texts, concurrency).await
+    }
+
+    /// 串行处理批次:逐 MAX_BATCH_SIZE 子批发送请求,保持顺序。
+    async fn embed_batch_serial(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut all_embeddings = Vec::with_capacity(texts.len());
         for batch in texts.chunks(MAX_BATCH_SIZE) {
             let mut embeddings = self.embed_batch_request(batch).await?;
             all_embeddings.append(&mut embeddings);
+        }
+        Ok(all_embeddings)
+    }
+
+    /// 并发处理批次:按 (index, MAX_BATCH_SIZE) 切分子批,使用 bounded semaphore
+    /// 限制并发度,完成后按原始 index 拼回顺序结果。
+    ///
+    /// 失败语义:任一子批失败立即返回错误(其他在飞子批继续完成但结果丢弃),
+    /// 与串行版本"失败即中断"行为一致。
+    async fn embed_batch_concurrent(
+        &self,
+        texts: &[&str],
+        concurrency: usize,
+    ) -> Result<Vec<Vec<f32>>> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        // 收集 (start_index, batch_texts) 子任务。注意:tokio::spawn 要求 'static,
+        // 因此 batch 必须拥有所有权(String)而不是借用(&str)。
+        let mut sub_tasks: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut start = 0usize;
+        for batch in texts.chunks(MAX_BATCH_SIZE) {
+            let owned: Vec<String> = batch.iter().map(|s| s.to_string()).collect();
+            sub_tasks.push((start, owned));
+            start += batch.len();
+        }
+
+        let mut handles: Vec<tokio::task::JoinHandle<Result<(usize, Vec<Vec<f32>>)>>> =
+            Vec::with_capacity(sub_tasks.len());
+
+        for (idx, batch_owned) in sub_tasks {
+            let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
+                GBrainError::Embedding(format!("embedding semaphore closed: {}", e))
+            })?;
+            // 将 self 字段克隆到 owned,使 task 满足 'static
+            let client = self.client.clone();
+            let api_key = self.api_key.clone();
+            let base_url = self.base_url.clone();
+            let model = self.model.clone();
+            let dimensions = self.dimensions;
+            // 复用 self 通过 Arc,避免拷贝大量 batch
+            let this = Arc::new(Self {
+                client,
+                api_key,
+                base_url,
+                model,
+                dimensions,
+            });
+            handles.push(tokio::spawn(async move {
+                let _permit = permit; // 持有 permit 直到请求完成
+                let refs: Vec<&str> = batch_owned.iter().map(|s| s.as_str()).collect();
+                let embeddings = this.embed_batch_request(&refs).await?;
+                Ok::<_, GBrainError>((idx, embeddings))
+            }));
+        }
+
+        // 收集结果并按子批起始索引排序,以保持原始顺序
+        let mut indexed_results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let outcome = handle
+                .await
+                .map_err(|e| GBrainError::Embedding(format!("embedding task panicked: {}", e)))??;
+            indexed_results.push(outcome);
+        }
+        indexed_results.sort_by_key(|(idx, _)| *idx);
+
+        let mut all_embeddings = Vec::with_capacity(texts.len());
+        for (_, embeddings) in indexed_results {
+            all_embeddings.extend(embeddings);
         }
         Ok(all_embeddings)
     }

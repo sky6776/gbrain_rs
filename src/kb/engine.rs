@@ -989,6 +989,42 @@ impl<'a> KbEngine<'a> {
         })
     }
 
+    /// P1-3: 设置文档的 ACL（全量覆盖）。
+    ///
+    /// 调用此接口仅更新 `kb_document_acl`，不触发重新嵌入或重新切分。
+    /// 若 `groups` 为空，等价于删除该文档的所有 ACL 行（变为公开）。
+    pub fn set_document_acl(&self, document_id: i64, groups: &[String]) -> Result<()> {
+        self.transaction(|conn| {
+            conn.execute(
+                "DELETE FROM kb_document_acl WHERE document_id = ?1",
+                [document_id],
+            )?;
+            for g in groups {
+                if g.is_empty() {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO kb_document_acl (document_id, group_id, answerable, visitable) \
+                     VALUES (?1, ?2, 1, 1)",
+                    rusqlite::params![document_id, g],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// P1-3: 列出文档的所有 ACL 行（group_id 列表）。
+    pub fn list_document_acl(&self, document_id: i64) -> Result<Vec<String>> {
+        self.query(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT group_id FROM kb_document_acl WHERE document_id = ?1 AND answerable = 1 \
+                 ORDER BY group_id ASC",
+            )?;
+            let rows = stmt.query_map([document_id], |row| row.get::<_, String>(0))?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+    }
+
     pub fn delete_document(&self, id: i64) -> Result<()> {
         let doc = self.get_document(id)?;
         let storage_path = doc.storage_path;
@@ -1289,14 +1325,18 @@ impl<'a> KbEngine<'a> {
         page_count: i32,
         run_id: Option<&str>,
     ) -> Result<()> {
+        // P0-4: token_count 由调用方 (pipeline) 通过环境计算后传入。为保持向后兼容,
+        // 这里直接基于 char_count 估算:CJK 比例约 1:1,ASCII 比例约 4:1,取折中系数 0.6。
+        // 精确计算由 pipeline 调用 token_counter::count_tokens_heuristic 后单独 UPDATE。
+        let approx_token_count = ((char_count as f64) * 0.6).round() as i32;
         self.transaction(|conn| {
             if let Some(rid) = run_id {
                 // 修复：增加 processing_run_id 条件，防止旧 run 污染 granularity
                 let rows = conn.execute(
                     "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
-                     content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
-                     WHERE id = ?5 AND processing_run_id = ?6",
-                    params![granularity, chunk_strategy, char_count, page_count, id, rid],
+                     content_char_count = ?3, content_token_count = ?4, page_count = ?5, updated_at = datetime('now') \
+                     WHERE id = ?6 AND processing_run_id = ?7",
+                    params![granularity, chunk_strategy, char_count, approx_token_count, page_count, id, rid],
                 )?;
                 if rows == 0 {
                     tracing::warn!(
@@ -1307,9 +1347,9 @@ impl<'a> KbEngine<'a> {
             } else {
                 conn.execute(
                     "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
-                     content_char_count = ?3, page_count = ?4, updated_at = datetime('now') \
-                     WHERE id = ?5",
-                    params![granularity, chunk_strategy, char_count, page_count, id],
+                     content_char_count = ?3, content_token_count = ?4, page_count = ?5, updated_at = datetime('now') \
+                     WHERE id = ?6",
+                    params![granularity, chunk_strategy, char_count, approx_token_count, page_count, id],
                 )?;
             }
             Ok(())

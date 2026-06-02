@@ -488,8 +488,8 @@ impl SqliteEngine {
             )
             .unwrap_or(0);
 
-        // 版本 > 0 但 < 当前版本 → 旧库，拒绝升级
-        if current_version > 0 && current_version < crate::schema::SCHEMA_VERSION {
+        // 仅拒绝无法迁移的旧版本（< 33 的数据库无法迁移）
+        if current_version > 0 && current_version < 33 {
             return Err(GBrainError::Database(format!(
                 "不支持的 schema 版本: 当前 v{}，需要 v{}。旧数据库不支持自动升级，请新建数据库。",
                 current_version,
@@ -500,10 +500,10 @@ impl SqliteEngine {
         Ok(())
     }
 
-    /// 记录当前 schema 版本号。
+    /// 记录当前 schema 版本号并执行必要的迁移。
     ///
-    /// 新数据库通过 SCHEMA_DDL 一次性创建完整 schema，无需逐版本迁移。
-    /// 此函数仅将 SCHEMA_VERSION 写入 schema_version 表，确保版本追踪一致。
+    /// 新数据库通过 SCHEMA_DDL 一次性创建完整 schema。
+    /// 已有数据库通过 ALTER TABLE 等轻量操作完成跨版本迁移。
     pub fn run_pending_migrations(&self) -> Result<()> {
         let conn = self.conn()?;
 
@@ -516,13 +516,25 @@ impl SqliteEngine {
             )
             .unwrap_or(0);
 
-        // 不支持旧版本数据库自动升级：版本 > 0 但 < 当前版本时直接报错
-        if current_version > 0 && current_version < crate::schema::SCHEMA_VERSION {
+        // 仅拒绝无法迁移的旧版本（< 33 的数据库无法迁移）
+        if current_version > 0 && current_version < 33 {
             return Err(GBrainError::Database(format!(
-                "不支持的 schema 版本: 当前 v{}，需要 v{}。旧数据库不支持自动升级，请新建数据库。",
+                "不支持的 schema 版本: 当前 v{}，需要 v{}。旧版本（<33）不支持自动升级，请新建数据库。",
                 current_version,
                 crate::schema::SCHEMA_VERSION,
             )));
+        }
+
+        // v33 → v34: kb_tables 增加 version_id 列，与 active version 原子绑定
+        if current_version > 0 && current_version < 34 {
+            debug!(
+                "执行 schema 迁移 v{} → v34: 为 kb_tables 增加 version_id",
+                current_version
+            );
+            conn.execute_batch(
+                "ALTER TABLE kb_tables ADD COLUMN version_id INTEGER REFERENCES kb_document_versions(id) ON DELETE SET NULL;
+                 CREATE INDEX IF NOT EXISTS idx_kb_tables_version ON kb_tables(version_id);",
+            )?;
         }
 
         // 新数据库（current_version == 0）或已匹配当前版本：记录版本号

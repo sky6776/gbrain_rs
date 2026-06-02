@@ -30,6 +30,7 @@ pub mod passage;
 pub mod pipeline;
 pub mod planner;
 pub mod privacy;
+pub mod queue;
 pub mod raptor;
 pub mod rerank;
 pub mod search;
@@ -39,6 +40,7 @@ pub mod sync;
 pub mod synonyms;
 pub mod table_index;
 pub mod temp_guard;
+pub mod token_counter;
 pub mod types;
 pub mod worker;
 
@@ -47,6 +49,6 @@ pub use pipeline::{ingest_directory, process_document, process_document_async};
 pub use search::kb_search;
 pub use types::*;
 pub use worker::{
-    run_artifact_worker_once, run_kb_worker_loop, run_kb_worker_once,
+    run_artifact_worker_once, run_kb_cmd_worker_once, run_kb_worker_loop, run_kb_worker_once,
     run_mine_synonyms_worker_once, run_ocr_worker_once, spawn_kb_worker_thread,
 };

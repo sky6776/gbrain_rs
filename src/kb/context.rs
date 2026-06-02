@@ -33,7 +33,11 @@ pub fn build_embedding_text(
     if !document_title.is_empty() {
         // 根据 title_weight 计算标题重复次数，增加标题在 embedding 中的权重
         // 防御性处理：NaN 视为 0.0，然后 clamp 防止负数或极大值
-        let w = if title_weight.is_nan() { 0.0 } else { title_weight };
+        let w = if title_weight.is_nan() {
+            0.0
+        } else {
+            title_weight
+        };
         let repeat = if w > 0.0 {
             (w * 3.0).ceil().clamp(1.0, 3.0) as usize
         } else {

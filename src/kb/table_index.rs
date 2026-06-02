@@ -13,19 +13,22 @@ use rusqlite::{params, Connection};
 /// L9: 表格标题（sheet_name）和列名（headers）仅存入 kb_tables 元数据，
 /// 未参与 FTS 全文索引。若需按标题搜索表格，需额外建立 FTS 索引或在写入时
 /// 将标题拼入 row_text 一并索引。
+/// P1 修复：增加 version_id 参数，使表格索引与 active version 原子绑定。
 pub fn insert_table(
     conn: &Connection,
     document_id: i64,
+    version_id: i64,
     sheet_name: &str,
     headers: &[String],
     row_count: i32,
 ) -> Result<i64> {
     let headers_json = serde_json::to_string(headers).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
-        "INSERT INTO kb_tables (document_id, sheet_name, headers, column_count, row_count) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO kb_tables (document_id, version_id, sheet_name, headers, column_count, row_count) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             document_id,
+            version_id,
             sheet_name,
             headers_json,
             headers.len() as i32,

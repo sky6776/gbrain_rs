@@ -43,6 +43,69 @@ fn resolve_doc_title<'a>(format_title: &'a str, original_name: &str) -> std::bor
     }
 }
 
+fn serialize_node_metadata(
+    media_refs: &[MediaRef],
+    node_type: Option<&str>,
+    include_media_refs: bool,
+) -> String {
+    let mut obj = serde_json::Map::new();
+    if let Some(node_type) = node_type {
+        obj.insert(
+            "node_type".to_string(),
+            serde_json::Value::String(node_type.to_string()),
+        );
+    }
+    if include_media_refs || !media_refs.is_empty() {
+        obj.insert(
+            "media_refs".to_string(),
+            serde_json::to_value(media_refs).unwrap_or_else(|_| serde_json::json!([])),
+        );
+    }
+    if obj.is_empty() {
+        String::new()
+    } else {
+        serde_json::Value::Object(obj).to_string()
+    }
+}
+
+fn media_refs_for_chunk(
+    media_refs: &[MediaRef],
+    page_num: Option<i32>,
+    chunk: &str,
+) -> Vec<MediaRef> {
+    media_refs
+        .iter()
+        .filter(|media| media_ref_matches_chunk(media, page_num, chunk))
+        .cloned()
+        .collect()
+}
+
+fn media_ref_matches_chunk(media: &MediaRef, page_num: Option<i32>, chunk: &str) -> bool {
+    if let Some(media_page) = media.page_number {
+        return page_num == Some(media_page);
+    }
+
+    // HTML/Markdown 通常没有页码，只能用 chunk 文本中的 URL/alt/caption/OCR 命中做节点级对齐。
+    if page_num.is_some() {
+        return false;
+    }
+    let chunk_lower = chunk.to_lowercase();
+    let mut probes: Vec<&str> = vec![media.storage_path.as_str()];
+    if let Some(s) = media.alt_text.as_deref() {
+        probes.push(s);
+    }
+    if let Some(s) = media.caption.as_deref() {
+        probes.push(s);
+    }
+    if let Some(s) = media.ocr_text.as_deref() {
+        probes.push(s);
+    }
+    probes.iter().any(|probe| {
+        let probe = probe.trim();
+        !probe.is_empty() && chunk_lower.contains(&probe.to_lowercase())
+    })
+}
+
 /// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
 ///
 /// 严格区分 byte offset 和 char offset：
@@ -288,7 +351,22 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         );
     })?;
 
-    let word_total: i32 = count_words(&parsed.content) as i32;
+    let normalizer = registry.get_normalizer(ext);
+    let normalized = normalizer.normalize(parsed.clone()).unwrap_or_else(|e| {
+        tracing::warn!(
+            doc_id,
+            error = %e,
+            "富文本标准化失败，回退到原始解析结果"
+        );
+        crate::kb::parser::NormalizedDocument {
+            markdown: parsed.content.clone(),
+            blocks: parsed.blocks.clone().unwrap_or_default(),
+            media_refs: parsed.media_refs.clone(),
+            attachments: parsed.media_refs.clone(),
+        }
+    });
+
+    let word_total: i32 = count_words(&normalized.markdown) as i32;
     kb.update_document_status_with_run_guard(
         doc_id,
         Some(STATUS_PROCESSING),
@@ -309,7 +387,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     };
 
     let splitter = create_splitter(&splitter_config);
-    let chunks = splitter.split(&parsed.content).inspect_err(|e| {
+    let chunks = splitter.split(&normalized.markdown).inspect_err(|e| {
         let _ = kb.update_document_status_with_run_guard(
             doc_id,
             Some(STATUS_FAILED),
@@ -336,7 +414,11 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
 
     // --- 阶段 3: 构建 Level-0 节点 ---
     // 稳定标题源：优先使用 metadata 中的 title，其次使用数据库中的 original_name
-    let format_title = parsed.metadata.get("title").map(|s| s.as_str()).unwrap_or("");
+    let format_title = parsed
+        .metadata
+        .get("title")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let original_name: String = conn
         .query_row(
             "SELECT original_name FROM kb_documents WHERE id = ?1",
@@ -351,10 +433,11 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
+            let node_media_refs = media_refs_for_chunk(&normalized.media_refs, None, chunk);
             let embedding_text = crate::kb::context::build_embedding_text(
                 &doc_title,
-                "",    // 同步管道无章节路径
-                None,  // 同步管道无页码
+                "",   // 同步管道无章节路径
+                None, // 同步管道无页码
                 chunk,
                 title_weight,
             );
@@ -371,7 +454,11 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
                 page_number: None,
                 source_start: None,
                 source_end: None,
-                node_metadata: String::new(),
+                node_metadata: serialize_node_metadata(
+                    &node_media_refs,
+                    None,
+                    !normalized.media_refs.is_empty(),
+                ),
                 embedding_text,
             }
         })
@@ -399,7 +486,25 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     {
         let tx = conn.unchecked_transaction()?;
         let result = (|| -> Result<()> {
-            persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &raptor_nodes, Some(run_id))?;
+            // P1-1: active version 生命周期
+            // 1) 开启新版本（building）；同 hash 复用旧 ready 版本
+            // 2) 仅清理同 version 残留节点后写入新节点
+            // 3) 激活新版本，旧版本标记 retired
+            let content_hash = query_document_content_hash(conn, doc_id)?;
+            let version_id = begin_document_version(conn, doc_id, Some(run_id), &content_hash)?;
+            persist_nodes_for_version_inner(
+                conn,
+                doc_id,
+                version_id,
+                lib_id,
+                &raptor_nodes,
+                Some(run_id),
+            )?;
+            activate_document_version(conn, doc_id, Some(run_id), version_id)?;
+            // P1-2: 持久化媒体引用（图片/附件）
+            persist_media_assets(conn, doc_id, lib_id, version_id, &normalized.media_refs)?;
+            // 摘要数据由 SummarizeDocument 命令或外部 engine.insert_summary 管理，
+            // pipeline 不负责生成或清理摘要，避免误删外部写入的摘要数据。
             // 修复：外层已开事务，调用 _inner 避免嵌套 BEGIN（SQLite 不支持）
             kb.update_document_stats_with_run_guard_inner(
                 doc_id,
@@ -545,6 +650,26 @@ pub async fn process_document_async(
         );
     })?;
 
+    // 通过 RichContentNormalizer 标准化富文本
+    // HTML 等富文本格式会在此步完成表格/流程图/附件处理，
+    // 生成结构化的 NormalizedDocument（markdown + blocks + media_refs）。
+    // 标准化后的产物将作为后续 split/embed/media 阶段的主输入，
+    // 替代 parsed.content / parsed.blocks，确保富文本格式获得更好的结构化数据。
+    let normalizer = registry.get_normalizer(ext);
+    let mut normalized = normalizer.normalize(parsed.clone()).unwrap_or_else(|e| {
+        tracing::warn!(
+            doc_id,
+            error = %e,
+            "富文本标准化失败，回退到原始解析结果"
+        );
+        crate::kb::parser::NormalizedDocument {
+            markdown: parsed.content.clone(),
+            blocks: parsed.blocks.clone().unwrap_or_default(),
+            media_refs: parsed.media_refs.clone(),
+            attachments: parsed.media_refs.clone(),
+        }
+    });
+
     // Phase 1+2: PDF OCR 分支 — 解析后、分割前执行 OCR
     // 返回 None 表示异步 OCR 已入队，主 pipeline 应在此提前返回，不执行后续 split/embed/persist
     let parsed = if ext == "pdf" {
@@ -560,7 +685,11 @@ pub async fn process_document_async(
             &file_data,
             &ocr_config,
         )? {
-            Some(p) => p,
+            Some(p) => {
+                // PDF OCR 后更新 normalized 的 markdown，因为 OCR 可能已修改文本内容
+                normalized.markdown = p.content.clone();
+                p
+            }
             None => {
                 // 异步 OCR 已入队，且 maybe_apply_pdf_ocr 已在同一事务中
                 // 写入 document_status=ocr_pending / ocr_status=queued。
@@ -679,7 +808,7 @@ pub async fn process_document_async(
         );
     })?;
     let chunks = splitter
-        .split_async(&parsed.content)
+        .split_async(&normalized.markdown)
         .await
         .inspect_err(|e| {
             let _ = kb.update_document_status_with_run_guard(
@@ -696,29 +825,29 @@ pub async fn process_document_async(
 
     let split_total: i32 = chunks.len() as i32;
 
-    // P1-010: 从 parser blocks 中提取每块的元数据，用 span 匹配而非下标硬匹配
+    // 从标准化后的 blocks 中提取每块的元数据（优先使用 normalized.blocks，
+    // 若标准化器未产出 blocks 则回退到 parsed.blocks），用 span 匹配而非下标硬匹配
     #[allow(clippy::type_complexity)]
-    let block_spans: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = parsed
-        .blocks
-        .as_ref()
-        .map(|blocks| {
-            blocks
-                .iter()
-                .map(|b| {
-                    (
-                        b.title_path.clone(),
-                        b.page_number,
-                        b.source_start,
-                        b.source_end,
-                    )
-                })
-                .collect()
+    let source_blocks: &[crate::kb::types::ParsedBlock] = if normalized.blocks.is_empty() {
+        parsed.blocks.as_deref().unwrap_or(&[])
+    } else {
+        &normalized.blocks
+    };
+    let block_spans: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = source_blocks
+        .iter()
+        .map(|b| {
+            (
+                b.title_path.clone(),
+                b.page_number,
+                b.source_start,
+                b.source_end,
+            )
         })
-        .unwrap_or_default();
+        .collect();
 
     // FIX10-R1: 使用统一的 helper 定位 chunk 字符偏移，max_overlap 按 splitter 类型计算
     // semantic → chunk_overlap; Markdown → 0; Recursive → chunk_overlap.min(chunk_size/2)
-    let full_text = &parsed.content;
+    let full_text = &normalized.markdown;
     let max_overlap = splitter_max_overlap(&splitter_config, embedder.is_some());
     let chunk_offsets: Vec<(usize, usize)> =
         locate_chunk_char_offsets(full_text, &chunks, max_overlap);
@@ -789,6 +918,12 @@ pub async fn process_document_async(
                 chunk,
                 title_weight,
             );
+            // P1-2/P2: 媒体引用写入 node_metadata.media_refs。
+            // PDF 优先按 page_number 对齐；HTML/Markdown 这类无页码文档按 chunk 文本中的
+            // URL/alt/caption/OCR 命中对齐，避免文档级全量媒体污染 prompt。
+            let node_media_refs = media_refs_for_chunk(&normalized.media_refs, page_num, chunk);
+            let node_meta =
+                serialize_node_metadata(&node_media_refs, None, !normalized.media_refs.is_empty());
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -802,86 +937,19 @@ pub async fn process_document_async(
                 page_number: page_num,
                 source_start: src_start,
                 source_end: src_end,
-                node_metadata: String::new(),
+                node_metadata: node_meta,
                 embedding_text,
             }
         })
         .collect();
 
-    // P2-013/P2-014: 表格文档写入 kb_tables / kb_table_rows
-    if granularity == crate::kb::granularity::DocumentGranularity::Table {
-        if let Some(ref blocks) = parsed.blocks {
-            for block in blocks {
-                if block.block_type == "table" && !block.metadata.is_empty() {
-                    if let Ok(sheet_data) =
-                        serde_json::from_str::<serde_json::Value>(&block.metadata)
-                    {
-                        if let Some(name) = sheet_data.get("name").and_then(|v| v.as_str()) {
-                            let headers: Vec<String> = sheet_data
-                                .get("headers")
-                                .and_then(|v| v.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            let row_count = sheet_data
-                                .get("row_count")
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0) as i32;
-                            match crate::kb::table_index::insert_table(
-                                conn, doc_id, name, &headers, row_count,
-                            ) {
-                                Ok(table_id) => {
-                                    if let Some(rows) =
-                                        sheet_data.get("rows").and_then(|v| v.as_array())
-                                    {
-                                        for (ri, row) in rows.iter().enumerate() {
-                                            let row_text = headers
-                                                .iter()
-                                                .filter_map(|h| {
-                                                    row.get(h)
-                                                        .and_then(|v| v.as_str())
-                                                        .map(|s| format!("{}: {}", h, s))
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join(" ");
-                                            let row_json =
-                                                serde_json::to_string(row).unwrap_or_default();
-                                            // FIX11-05: 表格行插入失败不应静默吞下
-                                            if let Err(e) = crate::kb::table_index::insert_table_row(
-                                                conn, table_id, ri as i32, &row_text, &row_json,
-                                            ) {
-                                                tracing::warn!(
-                                                    "表格行插入失败 table_id={} row={}: {}",
-                                                    table_id,
-                                                    ri,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "表格元数据创建失败 doc_id={} table_name={}: {}",
-                                        doc_id,
-                                        name,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // P1 修复：表格写入已移入版本激活事务内（见下方事务块），
+    // 与节点/版本原子绑定，不再在此处删除旧数据。
+    // 旧表格数据的清理由 cleanup_retired_version 按 version_id 精确删除。
 
     // P1-006: micro 文档策略 — 仅保留一个 whole-document node
     if granularity == crate::kb::granularity::DocumentGranularity::Micro && !chunks.is_empty() {
-        let full_text = parsed.content.clone();
+        let full_text = normalized.markdown.clone();
         let embedding_text =
             crate::kb::context::build_micro_embedding_text(&doc_title, &full_text, title_weight);
         nodes = vec![RaptorNode {
@@ -897,7 +965,11 @@ pub async fn process_document_async(
             page_number: None,
             source_start: None,
             source_end: None,
-            node_metadata: "{\"node_type\":\"whole_document\"}".to_string(),
+            node_metadata: serialize_node_metadata(
+                &normalized.media_refs,
+                Some("whole_document"),
+                !normalized.media_refs.is_empty(),
+            ),
             embedding_text,
         }];
     }
@@ -1187,7 +1259,111 @@ pub async fn process_document_async(
         };
         let tx = conn.unchecked_transaction()?;
         let result = (|| -> Result<()> {
-            persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &nodes, Some(run_id))?;
+            // P1-1: active version 生命周期（异步路径）
+            let content_hash = query_document_content_hash(conn, doc_id)?;
+            let version_id = begin_document_version(conn, doc_id, Some(run_id), &content_hash)?;
+            persist_nodes_for_version_inner(
+                conn,
+                doc_id,
+                version_id,
+                lib_id,
+                &nodes,
+                Some(run_id),
+            )?;
+            // P1 修复：表格索引移入版本激活事务，与节点/版本原子绑定。
+            // Table granularity 的文档在此写入 kb_tables/kb_table_rows，
+            // 通过 version_id 精确关联当前版本，避免版本切换时的数据不一致。
+            if granularity == crate::kb::granularity::DocumentGranularity::Table {
+                // 先清理同 version 的旧表格数据（重试场景）
+                let _ = conn.execute(
+                    "DELETE FROM kb_table_rows WHERE table_id IN \
+                     (SELECT id FROM kb_tables WHERE document_id = ?1 AND version_id = ?2)",
+                    rusqlite::params![doc_id, version_id],
+                );
+                let _ = conn.execute(
+                    "DELETE FROM kb_tables WHERE document_id = ?1 AND version_id = ?2",
+                    rusqlite::params![doc_id, version_id],
+                );
+                let table_blocks: &[crate::kb::types::ParsedBlock] = if normalized.blocks.is_empty()
+                {
+                    parsed.blocks.as_deref().unwrap_or(&[])
+                } else {
+                    &normalized.blocks
+                };
+                for block in table_blocks {
+                    if block.block_type == "table" && !block.metadata.is_empty() {
+                        if let Ok(sheet_data) =
+                            serde_json::from_str::<serde_json::Value>(&block.metadata)
+                        {
+                            if let Some(name) = sheet_data.get("name").and_then(|v| v.as_str()) {
+                                let headers: Vec<String> = sheet_data
+                                    .get("headers")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let row_count = sheet_data
+                                    .get("row_count")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0)
+                                    as i32;
+                                match crate::kb::table_index::insert_table(
+                                    conn, doc_id, version_id, name, &headers, row_count,
+                                ) {
+                                    Ok(table_id) => {
+                                        if let Some(rows) =
+                                            sheet_data.get("rows").and_then(|v| v.as_array())
+                                        {
+                                            for (ri, row) in rows.iter().enumerate() {
+                                                let row_text = headers
+                                                    .iter()
+                                                    .filter_map(|h| {
+                                                        row.get(h)
+                                                            .and_then(|v| v.as_str())
+                                                            .map(|s| format!("{}: {}", h, s))
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(" ");
+                                                let row_json =
+                                                    serde_json::to_string(row).unwrap_or_default();
+                                                if let Err(e) =
+                                                    crate::kb::table_index::insert_table_row(
+                                                        conn, table_id, ri as i32, &row_text,
+                                                        &row_json,
+                                                    )
+                                                {
+                                                    tracing::warn!(
+                                                        "表格行插入失败 table_id={} row={}: {}",
+                                                        table_id,
+                                                        ri,
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "表格元数据创建失败 doc_id={} table_name={}: {}",
+                                            doc_id,
+                                            name,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            activate_document_version(conn, doc_id, Some(run_id), version_id)?;
+            // P1-2: 持久化媒体引用
+            persist_media_assets(conn, doc_id, lib_id, version_id, &normalized.media_refs)?;
+            // 摘要数据由 SummarizeDocument 命令或外部 engine.insert_summary 管理，
+            // pipeline 不负责生成或清理摘要，避免误删外部写入的摘要数据。
             // 修复：外层已开事务，调用 _inner 避免嵌套 BEGIN（SQLite 不支持）
             kb.update_document_stats_with_run_guard_inner(
                 doc_id,
@@ -1238,6 +1414,63 @@ pub async fn process_document_async(
 }
 
 // ---------------------------------------------------------------------------
+// 文档摘要刷新
+// ---------------------------------------------------------------------------
+
+/// 基于当前版本节点为文档生成摘要。
+///
+/// 读取 current_version 且未退役的 level-0 节点，取前 N 个节点的内容
+/// 拼接为提取式摘要，写入 `kb_document_summaries`。
+/// 调用方（SummarizeDocument worker）应先在事务外删除旧摘要，
+/// 再调用本函数写入新摘要。
+pub fn summarize_current_version(conn: &Connection, document_id: i64) -> Result<usize> {
+    let kb = KbEngine::new(conn);
+
+    // 读取当前版本的前几个节点内容作为摘要素材
+    let nodes: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.content, COALESCE(d.title, d.original_name) AS doc_title \
+             FROM kb_document_nodes n \
+             JOIN kb_documents d ON d.id = n.document_id \
+             WHERE n.document_id = ?1 \
+             AND d.current_version_id IS NOT NULL \
+             AND n.version_id = d.current_version_id \
+             AND n.retired_at IS NULL \
+             AND n.level = 0 \
+             ORDER BY n.chunk_order, n.id \
+             LIMIT 5",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![document_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    if nodes.is_empty() {
+        return Ok(0);
+    }
+
+    let doc_title = &nodes[0].1;
+    // 提取式摘要：拼接前几个 chunk 的前 300 字符
+    let summary_text: String = nodes
+        .iter()
+        .map(|(content, _)| content.chars().take(300).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+
+    let full_summary = format!("文档: {}\n\n{}", doc_title, summary_text);
+
+    // 清理旧摘要后写入新摘要
+    let _ = conn.execute(
+        "DELETE FROM kb_document_summaries WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    );
+
+    kb.insert_summary(document_id, None, "document", &full_summary, "extractive")?;
+    Ok(1)
+}
+
+// ---------------------------------------------------------------------------
 // 目录批量导入
 // ---------------------------------------------------------------------------
 
@@ -1250,8 +1483,8 @@ pub async fn ingest_directory(
     library_id: i64,
     folder_id: Option<i64>,
     dir_path: &Path,
-    embedder: Option<Arc<Embedder>>,
-    raptor_config: Option<&RaptorConfig>,
+    _embedder: Option<Arc<Embedder>>,
+    _raptor_config: Option<&RaptorConfig>,
     on_progress: Option<&ProgressCallback>,
 ) -> Result<usize> {
     if !dir_path.is_dir() {
@@ -1279,7 +1512,8 @@ pub async fn ingest_directory(
         &format!("找到 {} 个文件待导入", files.len()),
     );
 
-    let mut success_count = 0usize;
+    let mut doc_payloads: Vec<(String, KbProcessPayload)> = Vec::new();
+
     for (i, file_path) in files.iter().enumerate() {
         let original_name = file_path
             .file_name()
@@ -1289,10 +1523,9 @@ pub async fn ingest_directory(
         report_progress(
             on_progress,
             "ingest",
-            &format!("[{}/{}] {}", i + 1, files.len(), original_name),
+            &format!("[{}/{}] 创建文档记录 {}", i + 1, files.len(), original_name),
         );
 
-        // 为每个文件构造 KbProcessPayload
         let ext = file_path
             .extension()
             .and_then(|e| e.to_str())
@@ -1301,7 +1534,6 @@ pub async fn ingest_directory(
 
         let run_id = crate::kb::jobs::new_run_id();
 
-        // Create document record before calling the pipeline
         let kb = KbEngine::new(conn);
         let file_data = match std::fs::read(file_path) {
             Ok(data) => data,
@@ -1355,25 +1587,28 @@ pub async fn ingest_directory(
             storage_path: file_path.to_string_lossy().to_string(),
             extension: ext,
         };
+        doc_payloads.push((original_name, payload));
+    }
 
-        match process_document_async(
-            conn,
-            &payload,
-            embedder.clone(),
-            raptor_config,
-            None,
-            None,
-            None,
-            on_progress,
-        )
-        .await
-        {
-            Ok(_) => success_count += 1,
+    // 批量入队：所有文档创建完毕后统一入队 kb_process_document job，
+    // 由 worker pool 异步并发处理，实现目录导入的吞吐目标。
+    let mut enqueued = 0usize;
+    for (original_name, payload) in &doc_payloads {
+        match crate::kb::jobs::enqueue_kb_process_job(conn, payload) {
+            Ok(job_id) => {
+                enqueued += 1;
+                tracing::info!(
+                    doc_name = %original_name,
+                    doc_id = payload.document_id,
+                    job_id,
+                    "ingest_directory: 已入队处理 job"
+                );
+            }
             Err(e) => {
                 report_progress(
                     on_progress,
                     "ingest",
-                    &format!("失败 {}: {}", original_name, e),
+                    &format!("入队失败 {}: {}", original_name, e),
                 );
             }
         }
@@ -1382,10 +1617,14 @@ pub async fn ingest_directory(
     report_progress(
         on_progress,
         "done",
-        &format!("已导入 {}/{} 个文件", success_count, files.len()),
+        &format!(
+            "已创建 {} 个文档记录，入队 {} 个处理 job",
+            doc_payloads.len(),
+            enqueued
+        ),
     );
 
-    Ok(success_count)
+    Ok(enqueued)
 }
 
 /// 递归收集支持扩展名的文件
@@ -1408,7 +1647,11 @@ fn collect_supported_files(dir: &Path, extensions: &[&str], files: &mut Vec<std:
 // 持久化与嵌入辅助函数
 // ---------------------------------------------------------------------------
 
-/// 在单个逻辑事务中持久化文档节点及其向量
+/// 在单个逻辑事务中持久化文档节点及其向量。
+///
+/// P1-1: 内部使用 active version 生命周期。
+/// 调用方应先通过 `begin_document_version` 拿到 version_id，
+/// 完成后再调用 `activate_document_version` 切换 active 指针。
 pub fn persist_nodes_and_vectors(
     conn: &Connection,
     doc_id: i64,
@@ -1421,7 +1664,14 @@ pub fn persist_nodes_and_vectors(
     // 旧 job 通过 ensure_document_run_current 后，新 run 可能立刻更新 processing_run_id，
     // 旧 job 的 persist 仍会删除新 run 的节点。条件删除确保 run_id 不匹配时操作被拒绝。
     let tx = conn.unchecked_transaction()?;
-    let result = persist_nodes_and_vectors_inner(conn, doc_id, lib_id, nodes, run_id);
+    let result = (|| -> Result<()> {
+        // P1-1: 在事务内开新版本（status=building），并清理同版本残留节点
+        let content_hash = query_document_content_hash(conn, doc_id)?;
+        let version_id = begin_document_version(conn, doc_id, run_id, &content_hash)?;
+        persist_nodes_for_version_inner(conn, doc_id, version_id, lib_id, nodes, run_id)?;
+        activate_document_version(conn, doc_id, run_id, version_id)?;
+        Ok(())
+    })();
     match result {
         Ok(_) => tx.commit()?,
         Err(_) => {
@@ -1431,16 +1681,92 @@ pub fn persist_nodes_and_vectors(
     result
 }
 
-/// persist_nodes_and_vectors 的内部实现，不自带事务，可在外层事务内调用。
-/// 修复：将 persist 和 stats 合入同一事务时，需要此内部版本避免嵌套事务。
-pub(crate) fn persist_nodes_and_vectors_inner(
+/// 读取 kb_documents.content_hash（文档级指纹，用于版本去重）。
+pub fn query_document_content_hash(conn: &Connection, doc_id: i64) -> Result<String> {
+    conn.query_row(
+        "SELECT content_hash FROM kb_documents WHERE id = ?1",
+        [doc_id],
+        |row| row.get(0),
+    )
+    .map_err(|e| GBrainError::Database(format!("查询 content_hash 失败: {}", e)))
+}
+
+/// P1-1: 开启一个新的 document version，状态为 building。
+///
+/// - 同一 (document_id, content_hash, index_status='ready') 已存在时，直接复用并复活该版本
+///   （把 retired_at 清空、状态改回 building），避免重复重建。
+/// - 否则插入新行，返回 version_id。
+///
+/// 调用方应在事务内调用，并随后调用 `persist_nodes_for_version_inner`
+/// 与 `activate_document_version` 完成生命周期。
+pub(crate) fn begin_document_version(
     conn: &Connection,
     doc_id: i64,
+    run_id: Option<&str>,
+    content_hash: &str,
+) -> Result<i64> {
+    // 校验 processing_run_id 仍是当前 run（与 persist 同样的 stale-job 守卫）
+    if let Some(rid) = run_id {
+        let current_run_id: String = conn
+            .query_row(
+                "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                [doc_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| GBrainError::Database(format!("查询 processing_run_id 失败: {}", e)))?;
+        if current_run_id != rid {
+            return Err(GBrainError::InvalidInput(
+                "stale KB processing job; document has a newer run (begin_document_version)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // 优先复用已 ready 且 content_hash 相同的历史版本（幂等重建场景）
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM kb_document_versions \
+             WHERE document_id = ?1 AND content_hash = ?2 AND index_status = 'ready' \
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![doc_id, content_hash],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(vid) = existing {
+        // 复活已有版本：清退役时间，状态改回 building，等待重新写入节点
+        conn.execute(
+            "UPDATE kb_document_versions \
+             SET index_status = 'building', retired_at = NULL, activated_at = NULL, \
+                 processing_run_id = ?1 \
+             WHERE id = ?2",
+            rusqlite::params![run_id.unwrap_or(""), vid],
+        )?;
+        return Ok(vid);
+    }
+
+    // 否则插入新版本行
+    conn.execute(
+        "INSERT INTO kb_document_versions (document_id, version_label, processing_run_id, content_hash, index_status) \
+         VALUES (?1, ?2, ?3, ?4, 'building')",
+        rusqlite::params![doc_id, "", run_id.unwrap_or(""), content_hash],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// P1-1: 持久化指定 version 的节点。
+///
+/// - 仅清理同一 document + 同一 version 下的残留节点（重复处理同一 hash 时复用 version_id）。
+///   绝不删除 current_version_id 指向的活跃版本节点，保证检索路径稳定。
+/// - 插入新节点时写入 `version_id` 列。
+pub(crate) fn persist_nodes_for_version_inner(
+    conn: &Connection,
+    doc_id: i64,
+    version_id: i64,
     _lib_id: i64,
     nodes: &[RaptorNode],
     run_id: Option<&str>,
 ) -> Result<()> {
-    // 修复：如果提供了 run_id，校验 processing_run_id 仍匹配，防止 stale job 覆盖新 run 的节点
+    // 再次校验 run_id（防止 begin 与 persist 之间被新 run 抢占）
     if let Some(rid) = run_id {
         let current_run_id: String = conn
             .query_row(
@@ -1456,24 +1782,21 @@ pub(crate) fn persist_nodes_and_vectors_inner(
         }
     }
 
-    // 删除此文档的旧节点/向量 (内联操作, 避免嵌套事务)
+    // 仅清理同 version 的残留节点（重试场景：上次 building 失败留有部分节点）
     {
         let node_ids: Vec<i64> = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")?;
-            let rows = stmt.query_map([doc_id], |row| row.get(0))?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM kb_document_nodes WHERE document_id = ?1 AND version_id = ?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![doc_id, version_id], |row| row.get(0))?;
             rows.filter_map(|r| r.ok()).collect()
         };
-
-        // FIX12-03: 复用 engine 的 cleanup_node_vectors，统一清理 vec 表 + kb_node_embeddings，
-        // 之前的内联逻辑用 let _ 吞掉所有删除失败，文档重处理时可能留下孤立向量数据
         for &node_id in &node_ids {
             crate::kb::engine::cleanup_node_vectors(conn, node_id);
         }
-
         conn.execute(
-            "DELETE FROM kb_document_nodes WHERE document_id = ?1",
-            [doc_id],
+            "DELETE FROM kb_document_nodes WHERE document_id = ?1 AND version_id = ?2",
+            rusqlite::params![doc_id, version_id],
         )?;
     }
 
@@ -1495,9 +1818,8 @@ pub(crate) fn persist_nodes_and_vectors_inner(
                     .iter()
                     .filter_map(|&key| meta.get(key).and_then(|v| v.as_array()))
                     .flat_map(|arr| {
-                        arr.iter().filter_map(|v| {
-                            v.as_str().map(crate::nlp::chinese::tokenize_content)
-                        })
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(crate::nlp::chinese::tokenize_content))
                     })
                     .collect();
                 if !extra_tokens.is_empty() {
@@ -1508,12 +1830,13 @@ pub(crate) fn persist_nodes_and_vectors_inner(
 
         conn.execute(
             "INSERT INTO kb_document_nodes \
-             (library_id, document_id, content, content_tokens, level, chunk_order, \
+             (library_id, document_id, version_id, content, content_tokens, level, chunk_order, \
               title_path, page_number, source_start, source_end, node_metadata, embedding_text) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 node.library_id,
                 doc_id,
+                version_id,
                 node.content,
                 content_tokens,
                 node.level,
@@ -1617,7 +1940,595 @@ pub(crate) fn persist_nodes_and_vectors_inner(
         }
     }
 
+    // 更新 version 行的 node_count / char_count 统计，便于排查与监控
+    let node_count = sorted_nodes.len() as i64;
+    let char_count: i64 = sorted_nodes
+        .iter()
+        .map(|n| n.content.chars().count() as i64)
+        .sum();
+    conn.execute(
+        "UPDATE kb_document_versions SET node_count = ?1, char_count = ?2 WHERE id = ?3",
+        rusqlite::params![node_count, char_count, version_id],
+    )?;
+
     Ok(())
+}
+
+/// P1-1: 激活版本，原子地把 `current_version_id` 切到新版本。
+///
+/// 操作步骤：
+/// 1. 校验 run_id（同上）。
+/// 2. 读取旧 current_version_id，标记其为 retired（retired_at = now, index_status='retired'）。
+/// 3. 把新版本设为 ready（activated_at = now, index_status='ready'）。
+/// 4. 更新 kb_documents.current_version_id 指向新版本。
+/// 5. 递增 kb_index_state.index_version，使搜索缓存键失效。
+///
+/// 旧版本节点的退役清理（vec/embedding/passage）由后续 cleanup job 异步执行，
+/// 当前函数仅做指针切换，保证检索路径原子可见性。
+pub(crate) fn activate_document_version(
+    conn: &Connection,
+    doc_id: i64,
+    run_id: Option<&str>,
+    version_id: i64,
+) -> Result<()> {
+    if let Some(rid) = run_id {
+        let current_run_id: String = conn
+            .query_row(
+                "SELECT processing_run_id FROM kb_documents WHERE id = ?1",
+                [doc_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| GBrainError::Database(format!("查询 processing_run_id 失败: {}", e)))?;
+        if current_run_id != rid {
+            return Err(GBrainError::InvalidInput(
+                "stale KB processing job; document has a newer run (activate_document_version)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    // 读取旧 current_version_id
+    let old_version_id: Option<i64> = conn
+        .query_row(
+            "SELECT current_version_id FROM kb_documents WHERE id = ?1",
+            [doc_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    // 标记旧版本为 retired（仅当与新版本不同时）
+    if let Some(old) = old_version_id {
+        if old != version_id {
+            conn.execute(
+                "UPDATE kb_document_versions \
+                 SET index_status = 'retired', retired_at = datetime('now') \
+                 WHERE id = ?1",
+                rusqlite::params![old],
+            )?;
+        }
+    }
+
+    // 激活新版本
+    conn.execute(
+        "UPDATE kb_document_versions \
+         SET index_status = 'ready', activated_at = datetime('now'), retired_at = NULL \
+         WHERE id = ?1",
+        rusqlite::params![version_id],
+    )?;
+
+    // 切换 kb_documents.current_version_id
+    conn.execute(
+        "UPDATE kb_documents SET current_version_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![version_id, doc_id],
+    )?;
+
+    // 递增 index_version 使搜索缓存失效
+    crate::kb::embedding_index::increment_index_version(conn, "kb_nodes")?;
+
+    // P0 修复: 版本激活后异步清理退役版本的向量/节点数据。
+    // 入队失败不阻塞版本激活（清理可后续手动触发）。
+    if let Err(e) = crate::kb::jobs::enqueue_cleanup_retired_jobs(conn) {
+        tracing::warn!(
+            doc_id,
+            version_id,
+            error = %e,
+            "入队退役版本清理作业失败（非致命）"
+        );
+    }
+
+    Ok(())
+}
+
+/// P1-2: 把文档级别的媒体引用（图片/附件）持久化到 kb_media_assets。
+///
+/// 调用时机：在 `activate_document_version` 后，文档级 metadata 已稳定时。
+/// 每个 media_ref 对应一行；`node_id` 可为 None（文档级），检索阶段可按
+/// (document_id, media_type) JOIN 把媒体信息附加到结果。
+///
+/// 重复调用：先按 (document_id, version_id) 清理旧记录再插入，保证幂等。
+pub(crate) fn persist_media_assets(
+    conn: &Connection,
+    doc_id: i64,
+    lib_id: i64,
+    version_id: i64,
+    media_refs: &[crate::kb::types::MediaRef],
+) -> Result<()> {
+    // 先清理同版本旧记录（重试场景）
+    conn.execute(
+        "DELETE FROM kb_media_assets WHERE document_id = ?1 AND version_id = ?2",
+        rusqlite::params![doc_id, version_id],
+    )?;
+    if media_refs.is_empty() {
+        return Ok(());
+    }
+    for (idx, m) in media_refs.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO kb_media_assets \
+             (library_id, document_id, version_id, node_id, media_type, storage_path, \
+              alt_text, ocr_text, caption, page_number, sort_order, mime_type, byte_size) \
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '', 0)",
+            rusqlite::params![
+                lib_id,
+                doc_id,
+                version_id,
+                m.media_type,
+                m.storage_path,
+                m.alt_text,
+                m.ocr_text,
+                m.caption,
+                m.page_number,
+                idx as i64,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub async fn embed_nodes_for_document_version(
+    conn: &Connection,
+    document_id: i64,
+    library_id: i64,
+    processing_run_id: &str,
+    embedder: Arc<Embedder>,
+) -> Result<usize> {
+    if !processing_run_id.is_empty() {
+        KbEngine::new(conn).ensure_document_run_current(document_id, processing_run_id)?;
+    }
+
+    let active_index = crate::kb::embedding_index::get_active_index_for_library(conn, library_id)?
+        .ok_or_else(|| {
+            GBrainError::InvalidInput(format!(
+                "library {} 没有 active embedding index",
+                library_id
+            ))
+        })?;
+    let Some(version_id) = staged_or_current_version_id(conn, document_id, processing_run_id)?
+    else {
+        return Err(GBrainError::InvalidInput(format!(
+            "document {} 没有可嵌入的 building/current 版本",
+            document_id
+        )));
+    };
+
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT n.id, COALESCE(NULLIF(n.embedding_text, ''), n.content) \
+             FROM kb_document_nodes n \
+             WHERE n.document_id = ?1 AND n.version_id = ?2 AND n.retired_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM kb_node_embeddings ne \
+                 WHERE ne.node_id = n.id AND ne.embedding_index_id = ?3) \
+             ORDER BY n.level, n.chunk_order, n.id",
+        )?;
+        let mapped = stmt.query_map(
+            rusqlite::params![document_id, version_id, active_index.id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let texts: Vec<String> = rows.iter().map(|(_, text)| text.clone()).collect();
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let vectors = embedder.embed_batch(&text_refs).await?;
+    if vectors.len() != rows.len() {
+        return Err(GBrainError::Embedding(format!(
+            "embedding 返回数量不匹配: expected {}, got {}",
+            rows.len(),
+            vectors.len()
+        )));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let result = (|| -> Result<usize> {
+        if !processing_run_id.is_empty() {
+            KbEngine::new(conn).ensure_document_run_current(document_id, processing_run_id)?;
+        }
+        for ((node_id, _), vector) in rows.iter().zip(vectors.iter()) {
+            crate::kb::embedding_index::upsert_node_embedding_for_index(
+                conn,
+                *node_id,
+                active_index.id,
+                vector,
+                vector.len() as i32,
+                &active_index.model,
+            )?;
+
+            let blob = embedding_to_blob(vector);
+            if let Err(e) = conn.execute(
+                "DELETE FROM vec_kb_nodes WHERE node_id = ?1",
+                rusqlite::params![node_id],
+            ) {
+                tracing::warn!(node_id, error = %e, "清理 legacy vec_kb_nodes 失败");
+            }
+            if let Err(e) = conn.execute(
+                "INSERT INTO vec_kb_nodes (node_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![node_id, &blob],
+            ) {
+                tracing::warn!(node_id, error = %e, "写入 legacy vec_kb_nodes 失败");
+            }
+        }
+        KbEngine::new(conn).update_document_status_with_run_guard(
+            document_id,
+            None,
+            None,
+            None,
+            Some(STATUS_COMPLETED),
+            Some(100),
+            None,
+            if processing_run_id.is_empty() {
+                None
+            } else {
+                Some(processing_run_id)
+            },
+        )?;
+        Ok(rows.len())
+    })();
+    match result {
+        Ok(_) => tx.commit()?,
+        Err(_) => {
+            let _ = tx.rollback();
+        }
+    }
+    result
+}
+
+pub fn finalize_index_version(
+    conn: &Connection,
+    document_id: i64,
+    _library_id: i64,
+    processing_run_id: &str,
+) -> Result<i64> {
+    let Some(version_id) = latest_building_version_id(conn, document_id, processing_run_id)? else {
+        return Err(GBrainError::InvalidInput(format!(
+            "document {} 没有可 finalize 的 building 版本",
+            document_id
+        )));
+    };
+    let run_guard = if processing_run_id.is_empty() {
+        None
+    } else {
+        Some(processing_run_id)
+    };
+    let kb = KbEngine::new(conn);
+    let tx = conn.unchecked_transaction()?;
+    let result = (|| -> Result<i64> {
+        activate_document_version(conn, document_id, run_guard, version_id)?;
+        let split_total: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kb_document_nodes \
+                 WHERE document_id = ?1 AND version_id = ?2 AND level = 0 AND retired_at IS NULL",
+                rusqlite::params![document_id, version_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let word_total: i32 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM kb_document_nodes \
+                 WHERE document_id = ?1 AND version_id = ?2 AND retired_at IS NULL",
+                rusqlite::params![document_id, version_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        kb.update_document_stats_with_run_guard_inner(
+            document_id,
+            word_total,
+            split_total,
+            None,
+            run_guard,
+        )?;
+        Ok(version_id)
+    })();
+    match result {
+        Ok(_) => tx.commit()?,
+        Err(_) => {
+            let _ = tx.rollback();
+        }
+    }
+    result
+}
+
+fn staged_or_current_version_id(
+    conn: &Connection,
+    document_id: i64,
+    processing_run_id: &str,
+) -> Result<Option<i64>> {
+    if let Some(version_id) = latest_building_version_id(conn, document_id, processing_run_id)? {
+        return Ok(Some(version_id));
+    }
+    let current = conn
+        .query_row(
+            "SELECT current_version_id FROM kb_documents WHERE id = ?1",
+            rusqlite::params![document_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten();
+    Ok(current)
+}
+
+fn latest_building_version_id(
+    conn: &Connection,
+    document_id: i64,
+    processing_run_id: &str,
+) -> Result<Option<i64>> {
+    let mut sql = String::from(
+        "SELECT id FROM kb_document_versions \
+         WHERE document_id = ?1 AND index_status = 'building'",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(document_id)];
+    if !processing_run_id.is_empty() {
+        sql.push_str(" AND processing_run_id = ?2");
+        params.push(Box::new(processing_run_id.to_string()));
+    }
+    sql.push_str(" ORDER BY id DESC LIMIT 1");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(param_refs.as_slice())?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// P1-1 + P2: 清理退役版本（retired version）的物理数据。
+///
+/// 调用时机：active version 切换后，由 `kb_cleanup_retired_versions` job 异步触发，
+/// 不阻塞前台检索。仅在 version.index_status='retired' 时执行，避免误删。
+///
+/// 清理顺序：
+/// 1. 收集该版本下所有 node_id；
+/// 2. 调用 `cleanup_node_vectors` 清理 vec 表 + BLOB；
+/// 3. 删除 kb_document_nodes（CASCADE 触发 kb_passage_spans / FTS 等）；
+/// 4. 删除 kb_media_assets（同 version_id）；
+/// 5. 删除 kb_document_versions 行。
+pub fn cleanup_retired_version(conn: &Connection, version_id: i64) -> Result<()> {
+    // 校验版本状态，避免误删 building/ready 版本
+    // 版本可能已被并发清理删除，幂等返回 Ok 而非报错
+    let status: String = match conn.query_row(
+        "SELECT index_status FROM kb_document_versions WHERE id = ?1",
+        rusqlite::params![version_id],
+        |row| row.get(0),
+    ) {
+        Ok(s) => s,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            tracing::warn!(
+                version_id,
+                "cleanup_retired_version: 版本不存在，可能已被并发清理，跳过"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if status != "retired" {
+        return Err(GBrainError::InvalidInput(format!(
+            "version {} 状态为 {}，仅 retired 版本可清理",
+            version_id, status
+        )));
+    }
+
+    // 收集所有节点
+    let node_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM kb_document_nodes WHERE version_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![version_id], |row| row.get(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    // 清理向量
+    for &node_id in &node_ids {
+        crate::kb::engine::cleanup_node_vectors(conn, node_id);
+    }
+
+    // 删除节点（CASCADE 触发 passage_spans/FTS）
+    conn.execute(
+        "DELETE FROM kb_document_nodes WHERE version_id = ?1",
+        rusqlite::params![version_id],
+    )?;
+
+    // 删除表格索引（P1 修复：按 version_id 清理表格数据）
+    conn.execute(
+        "DELETE FROM kb_table_rows WHERE table_id IN \
+         (SELECT id FROM kb_tables WHERE version_id = ?1)",
+        rusqlite::params![version_id],
+    )?;
+    conn.execute(
+        "DELETE FROM kb_tables WHERE version_id = ?1",
+        rusqlite::params![version_id],
+    )?;
+
+    // 删除媒体资产
+    conn.execute(
+        "DELETE FROM kb_media_assets WHERE version_id = ?1",
+        rusqlite::params![version_id],
+    )?;
+
+    // 删除版本行
+    conn.execute(
+        "DELETE FROM kb_document_versions WHERE id = ?1",
+        rusqlite::params![version_id],
+    )?;
+
+    tracing::info!(version_id, node_count = node_ids.len(), "已清理退役版本");
+    Ok(())
+}
+
+/// P2 修复: 删除文档索引（保留文件，仅清理节点/向量/版本/FTS）。
+/// 调用时机：文档从库中移除或重新上传前清理旧索引。
+pub fn delete_document_index(conn: &Connection, document_id: i64) -> Result<()> {
+    // 收集所有节点 ID 用于清理向量
+    let node_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM kb_document_nodes WHERE document_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![document_id], |row| row.get(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    // 清理向量
+    for &node_id in &node_ids {
+        crate::kb::engine::cleanup_node_vectors(conn, node_id);
+    }
+
+    // 删除表格索引（P1 修复：按 document_id 清理表格数据）
+    conn.execute(
+        "DELETE FROM kb_table_rows WHERE table_id IN \
+         (SELECT id FROM kb_tables WHERE document_id = ?1)",
+        rusqlite::params![document_id],
+    )?;
+    conn.execute(
+        "DELETE FROM kb_tables WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    )?;
+
+    // 删除媒体资产
+    conn.execute(
+        "DELETE FROM kb_media_assets WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    )?;
+
+    // 删除节点（CASCADE 触发 passage_spans/FTS）
+    conn.execute(
+        "DELETE FROM kb_document_nodes WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    )?;
+
+    // 删除版本记录
+    conn.execute(
+        "DELETE FROM kb_document_versions WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    )?;
+
+    // FTS 内容触发器会级联清理，此处额外确保 FTS content 同步
+    conn.execute(
+        "INSERT INTO kb_doc_fts(kb_doc_fts, rowid, tokens, library_id, level) \
+         VALUES ('delete', 0, '', 0, 0)",
+        [],
+    )
+    .ok(); // 刷新 FTS 索引
+
+    tracing::info!(document_id, node_count = node_ids.len(), "已删除文档索引");
+    Ok(())
+}
+
+/// P0 修复: 更新文档 ACL（不重嵌入）。
+///
+/// 根据 `AclPolicy` 显式表达访问控制意图：
+/// - Public:  删除所有 ACL 行（无记录 = 公开文档）
+/// - Restricted: 插入 answerable=1 行，限定用户组
+/// - Private:  插入 answerable=0 哨兵行（deny-all，关闭给所有人）
+pub fn update_document_acl(
+    conn: &Connection,
+    document_id: i64,
+    policy: &crate::kb::jobs::AclPolicy,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM kb_document_acl WHERE document_id = ?1",
+        rusqlite::params![document_id],
+    )?;
+
+    match policy {
+        crate::kb::jobs::AclPolicy::Public => {
+            // 删除所有行后不插入任何记录 = 公开文档
+        }
+        crate::kb::jobs::AclPolicy::Restricted(groups) => {
+            for group_id in groups {
+                conn.execute(
+                    "INSERT INTO kb_document_acl (document_id, group_id, answerable) VALUES (?1, ?2, 1)",
+                    rusqlite::params![document_id, group_id],
+                )?;
+            }
+        }
+        crate::kb::jobs::AclPolicy::Private => {
+            // 插入 answerable=0 哨兵行，搜索侧按 deny-only 处理
+            conn.execute(
+                "INSERT INTO kb_document_acl (document_id, group_id, answerable) VALUES (?1, '__private__', 0)",
+                rusqlite::params![document_id],
+            )?;
+        }
+    }
+
+    // 递增 index_version 使搜索缓存失效
+    crate::kb::embedding_index::increment_index_version(conn, "kb_nodes")?;
+
+    tracing::info!(
+        document_id,
+        policy = ?policy,
+        "已更新文档 ACL"
+    );
+    Ok(())
+}
+
+/// P2 修复: 巡检修复 library 下所有文档的 index_status。
+/// 遍历 library 的文档，根据节点/向量/版本状态修正 index_status。
+pub fn reconcile_library_index_status(conn: &Connection, library_id: i64) -> Result<()> {
+    // 查找存在当前版本节点但 index_status 不一致的文档。
+    // 仅检查 current_version 且未退役的节点（retired 节点不应影响 status 判定）。
+    let inconsistent: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT d.id, d.index_status, \
+             CASE WHEN EXISTS(\
+               SELECT 1 FROM kb_document_nodes n \
+               WHERE n.document_id = d.id \
+               AND n.version_id = d.current_version_id \
+               AND n.retired_at IS NULL\
+             ) THEN 'ready' ELSE 'pending' END AS expected_status \
+             FROM kb_documents d \
+             WHERE d.library_id = ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted' \
+             AND d.index_status != CASE WHEN EXISTS(\
+               SELECT 1 FROM kb_document_nodes n \
+               WHERE n.document_id = d.id \
+               AND n.version_id = d.current_version_id \
+               AND n.retired_at IS NULL\
+             ) THEN 'ready' ELSE 'pending' END",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![library_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut fixed = 0usize;
+    for (doc_id, _current, expected) in &inconsistent {
+        conn.execute(
+            "UPDATE kb_documents SET index_status = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![expected, doc_id],
+        )?;
+        fixed += 1;
+    }
+
+    tracing::info!(
+        library_id,
+        total = inconsistent.len(),
+        fixed,
+        "已完成 library index_status 巡检"
+    );
+    Ok(())
+}
+
+// P0 修复: 在 activate_document_version 后入队 retired version 清理作业
+pub fn enqueue_retired_cleanup_if_needed(conn: &Connection) -> Result<usize> {
+    crate::kb::jobs::enqueue_cleanup_retired_jobs(conn)
 }
 
 /// 将 f32 嵌入向量转换为小端序 BLOB 用于 SQLite 存储
@@ -2207,6 +3118,8 @@ fn maybe_apply_pdf_ocr(
         // 这些文档状态、页状态和 job 入队必须同事务提交，否则 OCR worker
         // 可能在 job 可见后立刻跑完，又被外层/后续状态更新覆盖回 queued/ocr_pending。
         let char_count = parsed.content.chars().count();
+        // P0-4: 同步写入 content_token_count(精确启发式)
+        let token_count = crate::kb::token_counter::count_tokens_heuristic(&parsed.content);
         let granularity =
             crate::kb::granularity::classify_granularity("pdf", char_count, total_pages);
         let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
@@ -2233,14 +3146,15 @@ fn maybe_apply_pdf_ocr(
         let enqueue_result = (|| -> Result<i64> {
             let rows = conn.execute(
                 "UPDATE kb_documents SET document_granularity = ?1, chunk_strategy = ?2, \
-                 content_char_count = ?3, page_count = ?4, parsing_status = ?5, \
-                 parsing_progress = ?6, document_status = 'ocr_pending', \
-                 ocr_status = ?7, ocr_text_coverage = 0.0, updated_at = datetime('now') \
-                 WHERE id = ?8 AND processing_run_id = ?9",
+                 content_char_count = ?3, content_token_count = ?4, page_count = ?5, parsing_status = ?6, \
+                 parsing_progress = ?7, document_status = 'ocr_pending', \
+                 ocr_status = ?8, ocr_text_coverage = 0.0, updated_at = datetime('now') \
+                 WHERE id = ?9 AND processing_run_id = ?10",
                 rusqlite::params![
                     granularity.as_str(),
                     chunk_strategy,
                     char_count as i32,
+                    token_count as i32,
                     total_pages as i32,
                     STATUS_PROCESSING,
                     30,

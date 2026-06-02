@@ -119,6 +119,7 @@ impl DocumentParser for XlsxParser {
             content,
             metadata,
             blocks: Some(blocks),
+            media_refs: Vec::new(),
         })
     }
 

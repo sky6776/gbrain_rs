@@ -1868,9 +1868,14 @@ fn load_artifact_content_from_kb(conn: &Connection, artifact_id: i64) -> Result<
     // M30 修复：将 prepare 移到循环外，避免每次迭代重复编译 SQL 语句
     let mut stmt = conn
         .prepare(
-            "SELECT content FROM kb_document_nodes
-             WHERE document_id = ?1 AND level = 0
-             ORDER BY chunk_order, id",
+            "SELECT n.content FROM kb_document_nodes n
+             JOIN kb_documents d ON d.id = n.document_id
+             WHERE n.document_id = ?1 AND n.level = 0
+             AND d.current_version_id IS NOT NULL
+             AND n.version_id = d.current_version_id
+             AND n.retired_at IS NULL
+             AND d.index_status = 'ready'
+             ORDER BY n.chunk_order, n.id",
         )
         .map_err(|e| GBrainError::Database(e.to_string()))?;
 

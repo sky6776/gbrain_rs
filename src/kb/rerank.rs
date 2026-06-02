@@ -120,12 +120,14 @@ pub fn local_rerank(candidates: &[(i64, LocalRankSignals)], weights: &[f64]) -> 
     let mut scored: Vec<(i64, f64)> = candidates
         .iter()
         .map(|(doc_id, signals)| {
-            let score = signals.fts_score * weights.first().copied().unwrap_or(0.3)
-                + signals.vector_score * weights.get(1).copied().unwrap_or(0.3)
-                + signals.title_score * weights.get(2).copied().unwrap_or(0.2)
-                + signals.exact_match_score * weights.get(3).copied().unwrap_or(0.0)
-                + signals.metadata_score * weights.get(4).copied().unwrap_or(0.1)
-                + signals.freshness_score * weights.get(5).copied().unwrap_or(0.1);
+            let score = signals.fts_score * weights.first().copied().unwrap_or(0.25)
+                + signals.vector_score * weights.get(1).copied().unwrap_or(0.25)
+                + signals.title_score * weights.get(2).copied().unwrap_or(0.15)
+                + signals.exact_match_score * weights.get(3).copied().unwrap_or(0.05)
+                + signals.metadata_score * weights.get(4).copied().unwrap_or(0.05)
+                + signals.summary_score * weights.get(5).copied().unwrap_or(0.05)
+                + signals.table_score * weights.get(6).copied().unwrap_or(0.05)
+                + signals.freshness_score * weights.get(7).copied().unwrap_or(0.1);
             (*doc_id, score)
         })
         .collect();

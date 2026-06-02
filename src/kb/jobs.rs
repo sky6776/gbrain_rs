@@ -33,6 +33,109 @@ pub struct KbProcessPayload {
     pub extension: String,
 }
 
+/// P0 修复: ACL 策略 — 显式表达文档的访问控制意图。
+///
+/// 避免调用方用空数组表达"私有"(deny-all)时被误解释为"公开"。
+/// PandaWiki 的 open/partial/closed 语义与此枚举对应：
+/// - Public   → "open"  (无 ACL 记录，所有人可访问)
+/// - Restricted → "partial" (仅指定用户组可访问)
+/// - Private  → "closed" (deny-all，插入 answerable=0 哨兵行)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AclPolicy {
+    /// 公开 — 所有人都可访问
+    Public,
+    /// 受限 — 仅指定用户组可访问
+    Restricted(Vec<String>),
+    /// 私有 — 关闭给所有人（deny-all）
+    Private,
+}
+
+/// P1-4: KB 索引命令模型。
+///
+/// 把索引生命周期拆分为独立的命令，每种命令对应一种状态变更，
+/// 不再依赖单一巨型 `kb_process_document` payload。便于：
+/// - ACL 更新独立于内容索引
+/// - 删除/清理与重建解耦
+/// - 后续切换到外部 MQ（NATS/Redis）时直接序列化命令即可
+///
+/// 现阶段 P1 最小实现仅引入命令枚举与 `to_job_input` 转换；
+/// 调度路径仍以现有 `KbProcessPayload` 为主，新命令逐步接入。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command")]
+pub enum KbIndexCommand {
+    /// 创建/更新文档版本（触发 parse → chunk → embed → raptor → activate）
+    UpsertDocumentVersion {
+        document_id: i64,
+        library_id: i64,
+        processing_run_id: String,
+    },
+    /// 删除文档索引（保留 file，仅清理节点/向量/版本）
+    DeleteDocumentIndex { document_id: i64 },
+    /// 更新文档 ACL（不重嵌入），使用 AclPolicy 显式表达访问控制意图
+    UpdateAcl { document_id: i64, policy: AclPolicy },
+    /// 生成/刷新文档摘要
+    SummarizeDocument {
+        document_id: i64,
+        processing_run_id: String,
+    },
+    /// 重新计算 library 下所有文档的 index_status（巡检/修复）
+    ReconcileIndexStatus { library_id: i64 },
+    /// P0 修复: 清理退役版本（retired version）的向量/节点/版本数据
+    CleanupRetiredVersion { version_id: i64 },
+    /// P1 修复: 阶段 2 — 仅对已解析的文档节点执行嵌入（不重新解析）
+    EmbedNodes {
+        document_id: i64,
+        library_id: i64,
+        processing_run_id: String,
+    },
+    /// P1 修复: 阶段 3 — 对已嵌入的文档执行版本激活与最终持久化
+    FinalizeIndex {
+        document_id: i64,
+        library_id: i64,
+        processing_run_id: String,
+    },
+}
+
+impl KbIndexCommand {
+    /// 序列化为 job payload JSON（写入 jobs.payload）。
+    pub fn to_payload_json(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| GBrainError::InvalidInput(format!("序列化 KbIndexCommand 失败: {}", e)))
+    }
+
+    /// 反序列化 job payload JSON。
+    pub fn from_payload_json(s: &str) -> Result<Self> {
+        serde_json::from_str(s)
+            .map_err(|e| GBrainError::InvalidInput(format!("反序列化 KbIndexCommand 失败: {}", e)))
+    }
+
+    /// 推荐的 job_type 字符串（用于 jobs 表）。
+    pub fn job_type(&self) -> &'static str {
+        match self {
+            Self::UpsertDocumentVersion { .. } => "kb_cmd_upsert_version",
+            Self::DeleteDocumentIndex { .. } => "kb_cmd_delete_index",
+            Self::UpdateAcl { .. } => "kb_cmd_update_acl",
+            Self::SummarizeDocument { .. } => "kb_cmd_summarize",
+            Self::ReconcileIndexStatus { .. } => "kb_cmd_reconcile_status",
+            Self::CleanupRetiredVersion { .. } => "kb_cmd_cleanup_retired",
+            Self::EmbedNodes { .. } => "kb_cmd_embed_nodes",
+            Self::FinalizeIndex { .. } => "kb_cmd_finalize_index",
+        }
+    }
+
+    /// 入队：把命令包装成 JobInput。
+    pub fn to_job_input(&self) -> Result<JobInput> {
+        let value = serde_json::to_value(self)
+            .map_err(|e| GBrainError::InvalidInput(format!("序列化 KbIndexCommand 失败: {}", e)))?;
+        Ok(JobInput {
+            job_type: self.job_type().to_string(),
+            payload: value,
+            priority: Some(0),
+            max_attempts: Some(3),
+        })
+    }
+}
+
 /// Phase 3: OCR 文档处理 job payload
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbOcrPayload {
@@ -141,6 +244,87 @@ pub fn claim_next_kb_job(conn: &Connection) -> Result<Option<(i64, KbProcessPayl
         Ok(None) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// P0 修复: 入队 KbIndexCommand 作业。
+pub fn enqueue_kb_cmd_job(conn: &Connection, cmd: &KbIndexCommand) -> Result<i64> {
+    let queue = JobQueue::new(conn);
+    let input = cmd.to_job_input()?;
+    queue.enqueue(input)
+}
+
+/// P0 修复: 认领下一个 KbIndexCommand 作业。
+/// 遍历所有 kb_cmd_* 类型的 pending job，反序列化为 KbIndexCommand。
+pub fn claim_next_kb_cmd_job(conn: &Connection) -> Result<Option<(i64, KbIndexCommand)>> {
+    let queue = JobQueue::new(conn);
+    // 按优先级尝试认领各类型命令作业
+    // P2 修复: 添加 UpsertDocumentVersion 和 SummarizeDocument，
+    // 避免这些命令入队后一直 pending。
+    let cmd_types = [
+        "kb_cmd_upsert_version",
+        "kb_cmd_summarize",
+        "kb_cmd_embed_nodes",
+        "kb_cmd_finalize_index",
+        "kb_cmd_delete_index",
+        "kb_cmd_cleanup_retired",
+        "kb_cmd_update_acl",
+        "kb_cmd_reconcile_status",
+    ];
+    for cmd_type in &cmd_types {
+        match queue.dequeue_by_type(cmd_type) {
+            Ok(Some(job)) => {
+                let cmd: KbIndexCommand = KbIndexCommand::from_payload_json(
+                    &serde_json::to_string(&job.payload).unwrap_or_default(),
+                )?;
+                return Ok(Some((job.id, cmd)));
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
+/// P0 修复: 扫描所有 retired 版本并入队清理作业（幂等）。
+///
+/// 遍历 kb_document_versions 中 index_status='retired' 的记录，
+/// 为每个 retired 版本入队一个 CleanupRetiredVersion 命令。
+///
+/// P2 修复: 入队前检查是否已存在同 version_id 的 pending 清理作业，
+/// 避免重复入队导致第二次执行时因版本已清理而失败重试。
+pub fn enqueue_cleanup_retired_jobs(conn: &Connection) -> Result<usize> {
+    let mut stmt =
+        conn.prepare("SELECT id FROM kb_document_versions WHERE index_status = 'retired'")?;
+    let retired_ids: Vec<i64> = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut count = 0;
+    for version_id in retired_ids {
+        // 检查是否已存在 pending 或 running 清理作业（幂等去重）
+        // running 状态也需要检查：job claim 后从 pending → running，
+        // 如果只查 pending 会导致已认领但未完成的作业被重复入队。
+        let already_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM jobs \
+                 WHERE job_type = 'kb_cmd_cleanup_retired' \
+                 AND (status = 'pending' OR status = 'running') \
+                 AND json_extract(payload, '$.version_id') = ?1 \
+                 LIMIT 1",
+                rusqlite::params![version_id],
+                |_row| Ok(()),
+            )
+            .is_ok();
+        if already_exists {
+            continue;
+        }
+        let cmd = KbIndexCommand::CleanupRetiredVersion { version_id };
+        if enqueue_kb_cmd_job(conn, &cmd).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// 认领下一个 re-embed 作业（kb_reembed 或 kb_reembed_node）。

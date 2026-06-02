@@ -1324,28 +1324,32 @@ impl<'a> Operations<'a> {
         // 查询改写：在向量计算前完成，确保 FTS 和向量检索对齐到同一查询
         // 如果有 chat_history 且有 rewrite 配置，先改写查询
         let rewritten_query = if !input.chat_history.is_empty() {
-            let rewrite_api_key = input.rewrite_api_key.as_deref()
+            let rewrite_api_key = input
+                .rewrite_api_key
+                .as_deref()
                 .or_else(|| self.config.expansion_api_key_resolved())
                 .unwrap_or("");
-            let rewrite_base_url = input.rewrite_base_url.as_deref()
+            let rewrite_base_url = input
+                .rewrite_base_url
+                .as_deref()
                 .or_else(|| self.config.expansion_base_url_resolved())
                 .unwrap_or("https://api.openai.com/v1");
-            let rewrite_model = input.rewrite_model.as_deref()
+            let rewrite_model = input
+                .rewrite_model
+                .as_deref()
                 .or(Some(self.config.expansion_model.as_str()))
                 .unwrap_or("gpt-4o-mini");
 
             if !rewrite_api_key.is_empty() {
                 let rt = crate::runtime::shared_runtime();
                 // rewrite_query_with_context 内部会做标准化，直接传入原始查询
-                let rewritten = rt.block_on(
-                    crate::kb::search::rewrite_query_with_context(
-                        &input.query,
-                        &input.chat_history,
-                        rewrite_api_key,
-                        rewrite_base_url,
-                        rewrite_model,
-                    )
-                );
+                let rewritten = rt.block_on(crate::kb::search::rewrite_query_with_context(
+                    &input.query,
+                    &input.chat_history,
+                    rewrite_api_key,
+                    rewrite_base_url,
+                    rewrite_model,
+                ));
                 if rewritten != input.query && !rewritten.is_empty() {
                     Some(rewritten)
                 } else {

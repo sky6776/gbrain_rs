@@ -454,6 +454,16 @@ pub struct KbSearchInput {
     #[serde(skip_serializing)]
     pub rerank_api_key: Option<String>,
     pub rerank_base_url: Option<String>,
+    /// 用户所属组 ID 列表,用于检索阶段 ACL 过滤。
+    /// 空 Vec + enforce_acl=true 表示只允许公开文档(无 ACL 记录)。
+    #[serde(default)]
+    pub user_group_ids: Vec<String>,
+    /// 是否启用 ACL 过滤。本地单用户/管理员场景可设为 false。
+    #[serde(default)]
+    pub enforce_acl: bool,
+    /// 可选质量门控配置。None 表示使用 profile 派生的默认 gate。
+    #[serde(default)]
+    pub quality_gate: Option<SearchQualityGate>,
 }
 
 impl Default for KbSearchInput {
@@ -481,6 +491,85 @@ impl Default for KbSearchInput {
             rewrite_api_key: None,
             rewrite_base_url: None,
             rewrite_model: None,
+            user_group_ids: Vec::new(),
+            enforce_acl: false,
+            quality_gate: None,
+        }
+    }
+}
+
+/// 质量门控配置。RRF 融合后,rerank 前应用,以避免低质量噪声进入 rerank。
+///
+/// 关键修正:PandaWiki 直接做 `score >= 0.2` 的相似度阈值过滤不适合 gbrain_rs,
+/// 因为这里的 score 可能是 RRF 分、rerank 分或本地融合分,不是统一的语义相似度。
+/// 本结构使用原始信号(vector_similarity / fts_rank_score / exact_match / 多检索器命中)
+/// 进行门控判断。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQualityGate {
+    /// 向量相似度最小阈值(如 0.55)。命中即视为通过。
+    pub min_vector_similarity: Option<f64>,
+    /// FTS rank 派生分数(`1/rank`)最小阈值。命中即视为通过。
+    pub min_fts_rank_score: Option<f64>,
+    /// 摘要检索器 rank 分数(`1/rank`)最小阈值。
+    pub min_summary_score: Option<f64>,
+    /// 表格检索器 rank 分数(`1/rank`)最小阈值。
+    pub min_table_score: Option<f64>,
+    /// 元数据检索器 rank 分数(`1/rank`)最小阈值。
+    pub min_metadata_score: Option<f64>,
+    /// 是否允许精确标题匹配豁免(命中即通过,无视其他阈值)
+    pub allow_exact_title_match: bool,
+    /// 是否允许多检索器命中豁免(>=2 retrievers 即通过)
+    pub allow_multi_retriever_match: bool,
+}
+
+impl Default for SearchQualityGate {
+    fn default() -> Self {
+        // balanced 默认:任一信号足够好即通过
+        Self {
+            min_vector_similarity: Some(0.55),
+            min_fts_rank_score: Some(0.18),
+            min_summary_score: Some(0.2),
+            min_table_score: Some(0.2),
+            min_metadata_score: Some(0.2),
+            allow_exact_title_match: true,
+            allow_multi_retriever_match: true,
+        }
+    }
+}
+
+impl SearchQualityGate {
+    /// precise profile:更严格,要求至少一个信号明显高于阈值。
+    fn precise() -> Self {
+        Self {
+            min_vector_similarity: Some(0.7),
+            min_fts_rank_score: Some(0.3),
+            min_summary_score: Some(0.5),
+            min_table_score: Some(0.5),
+            min_metadata_score: Some(0.5),
+            allow_exact_title_match: true,
+            allow_multi_retriever_match: true,
+        }
+    }
+
+    /// recall profile:更宽松,容忍单检索器低分命中(用于召回优先场景)
+    fn recall() -> Self {
+        Self {
+            min_vector_similarity: Some(0.4),
+            min_fts_rank_score: Some(0.1),
+            min_summary_score: Some(0.1),
+            min_table_score: Some(0.1),
+            min_metadata_score: Some(0.1),
+            allow_exact_title_match: true,
+            allow_multi_retriever_match: false,
+        }
+    }
+
+    /// 按 search profile 名派生默认质量门控。
+    pub fn from_profile(profile: &str) -> Self {
+        match profile {
+            "precise" => Self::precise(),
+            "recall" => Self::recall(),
+            _ => Self::default(),
         }
     }
 }
@@ -515,6 +604,9 @@ pub struct KbSearchResult {
     // P3-025: group_by_document metadata
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_hits: Option<Vec<KbSearchResult>>,
+    /// P1-2: 命中文档关联的媒体引用（图片/附件），用于在 prompt 中保留富文本上下文
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_refs: Option<Vec<MediaRef>>,
 }
 
 /// P3-025: Document group for group_by_document search.
@@ -527,11 +619,114 @@ pub struct DocumentGroup {
     pub hits: Vec<KbSearchResult>,
 }
 
+/// 检索器类型枚举,标识命中的来源检索通道。
+/// 用于 signal-preserving fusion,在 RRF 合并后保留每条结果来自哪些检索器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetrieverKind {
+    /// 标题/文件名检索器(kb_doc_name_fts)
+    TitleName,
+    /// 节点内容 FTS 检索器(kb_doc_fts)
+    NodeFts,
+    /// Passage 检索器(kb_passage_fts,目前未独立调用,预留)
+    PassageFts,
+    /// 向量检索器(sqlite-vec / fallback cosine)
+    Vector,
+    /// 摘要检索器(kb_document_summaries)
+    Summary,
+    /// 表格检索器(kb_table_rows)
+    Table,
+    /// 元数据检索器(kb_documents title/keywords/entity_names)
+    Metadata,
+}
+
+/// 单条候选结果的检索信号集合。
+/// RRF 融合时不会丢弃任何来源信号,后续 rerank 阶段可使用完整信号加权。
+#[derive(Debug, Clone, Default)]
+pub struct RankSignals {
+    /// 累加的 RRF 分数(各检索器贡献之和)
+    pub rrf_score: f64,
+    /// 来源检索器的原始分数(取最高者),语义不一定统一
+    pub source_score: f64,
+    /// FTS5 BM25 原始分数(lower is better,仅 FTS 检索器写入)
+    pub fts_bm25_raw: Option<f64>,
+    /// 由 FTS rank 派生的分数(`1/(rank+1)`),用于跨检索器归一
+    pub fts_rank_score: Option<f64>,
+    /// 向量相似度(余弦相似度,通常 0.0~1.0)
+    pub vector_similarity: Option<f64>,
+    /// 标题匹配分数
+    pub title_score: Option<f64>,
+    /// 摘要匹配分数
+    pub summary_score: Option<f64>,
+    /// 表格匹配分数
+    pub table_score: Option<f64>,
+    /// 元数据匹配分数
+    pub metadata_score: Option<f64>,
+    /// 是否触发精确标题匹配(质量门控可豁免)
+    pub exact_match: bool,
+    /// 命中此节点的检索器集合
+    pub retrievers: Vec<RetrieverKind>,
+}
+
+impl RankSignals {
+    /// 合并另一组信号(用于 RRF 合并阶段)。rrf_score 累加,可选字段取已存在或新值,
+    /// retrievers 取并集,exact_match 取或。
+    pub fn merge_from(&mut self, other: &RankSignals) {
+        self.rrf_score += other.rrf_score;
+        if self.source_score < other.source_score {
+            self.source_score = other.source_score;
+        }
+        if self.fts_bm25_raw.is_none() && other.fts_bm25_raw.is_some() {
+            self.fts_bm25_raw = other.fts_bm25_raw;
+        }
+        if self.fts_rank_score.is_none() && other.fts_rank_score.is_some() {
+            self.fts_rank_score = other.fts_rank_score;
+        }
+        if self.vector_similarity.is_none() && other.vector_similarity.is_some() {
+            self.vector_similarity = other.vector_similarity;
+        }
+        if self.title_score.is_none() && other.title_score.is_some() {
+            self.title_score = other.title_score;
+        }
+        if self.summary_score.is_none() && other.summary_score.is_some() {
+            self.summary_score = other.summary_score;
+        }
+        if self.table_score.is_none() && other.table_score.is_some() {
+            self.table_score = other.table_score;
+        }
+        if self.metadata_score.is_none() && other.metadata_score.is_some() {
+            self.metadata_score = other.metadata_score;
+        }
+        if other.exact_match {
+            self.exact_match = true;
+        }
+        for k in &other.retrievers {
+            if !self.retrievers.contains(k) {
+                self.retrievers.push(*k);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RankedResult {
     pub node_id: i64,
     pub rank: usize,
     pub score: f64,
+    /// 保留信号:RRF 累加前后的所有来源分数。向后兼容字段,
+    /// 单检索器路径默认为空 signals。
+    pub signals: RankSignals,
+}
+
+impl RankedResult {
+    /// 创建仅含 node_id 与默认 signals 的占位结果(各 retriever 会回填信号)
+    pub fn placeholder(node_id: i64) -> Self {
+        Self {
+            node_id,
+            rank: 0,
+            score: 0.0,
+            signals: RankSignals::default(),
+        }
+    }
 }
 
 // --- Pipeline model ---
@@ -564,6 +759,30 @@ pub struct ParsedBlock {
     pub block_type: String,
     /// 扩展元数据 JSON
     pub metadata: String,
+}
+
+// --- P1-2: 富文本标准化与媒体引用 ---
+
+/// 媒体引用：从富文本（HTML/PDF）中抽取的图片/附件引用。
+/// 写入 `kb_media_assets`，并在 `node_metadata.media_refs` 中以 JSON 形式保留。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaRef {
+    /// 媒体类型：image / attachment / audio / video
+    pub media_type: String,
+    /// 存储路径或远程 URL
+    pub storage_path: String,
+    /// alt 文本（图片）或链接文本（附件）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_text: Option<String>,
+    /// OCR 提取的文本（图片）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_text: Option<String>,
+    /// 图注 / 标题
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    /// 来源页码
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_number: Option<i32>,
 }
 
 impl ParsedBlock {

@@ -896,8 +896,14 @@ pub fn writeback_ocr_results(
     // 任一写入失败时回滚，禁止先暴露 done
     let tx = conn.unchecked_transaction()?;
     let result = (|| -> Result<()> {
-        // 持久化 nodes
-        crate::kb::pipeline::persist_nodes_and_vectors_inner(conn, doc_id, lib_id, &nodes, run_id)?;
+        // P1-1: active version 生命周期（OCR 完成路径）
+        let content_hash = crate::kb::pipeline::query_document_content_hash(conn, doc_id)?;
+        let version_id =
+            crate::kb::pipeline::begin_document_version(conn, doc_id, run_id, &content_hash)?;
+        crate::kb::pipeline::persist_nodes_for_version_inner(
+            conn, doc_id, version_id, lib_id, &nodes, run_id,
+        )?;
+        crate::kb::pipeline::activate_document_version(conn, doc_id, run_id, version_id)?;
         // 更新文档统计（词数/分块数），embedding 标记为 pending
         kb.update_document_stats_with_run_guard_inner(
             doc_id,

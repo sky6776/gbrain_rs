@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 32;
+pub const SCHEMA_VERSION: i32 = 34;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -464,6 +464,12 @@ CREATE TABLE IF NOT EXISTS kb_document_nodes (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
     document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    -- P1-1: 节点所属版本。NULL 表示在 active-version 改造前已存在的遗留节点,
+    -- 检索阶段会回退到"无版本约束"或通过 migration 回填到 baseline version。
+    version_id INTEGER REFERENCES kb_document_versions(id) ON DELETE SET NULL,
+    -- P1-1: 节点退役时间。active version 切换时旧节点标记 retired_at,
+    -- 由后续 cleanup job 异步清理 vec/embedding/passage 引用。
+    retired_at TEXT,
     content TEXT NOT NULL,
     content_tokens TEXT NOT NULL DEFAULT '',
     level INTEGER NOT NULL DEFAULT 0,
@@ -486,6 +492,9 @@ CREATE INDEX IF NOT EXISTS idx_kb_nodes_doc_level_order
     ON kb_document_nodes(document_id, level, chunk_order);
 CREATE INDEX IF NOT EXISTS idx_kb_nodes_section_id ON kb_document_nodes(section_id);
 CREATE INDEX IF NOT EXISTS idx_kb_nodes_page_number ON kb_document_nodes(page_number);
+-- P1-1: 检索阶段按 (document_id, version_id) 索引 active version 节点
+CREATE INDEX IF NOT EXISTS idx_kb_nodes_doc_version
+    ON kb_document_nodes(document_id, version_id, level, chunk_order);
 
 -- KB Embedding 索引注册表
 CREATE TABLE IF NOT EXISTS kb_embedding_indexes (
@@ -514,6 +523,9 @@ CREATE TABLE IF NOT EXISTS kb_node_embeddings (
 CREATE INDEX IF NOT EXISTS idx_kb_node_emb_index_id ON kb_node_embeddings(embedding_index_id);
 
 -- KB 文档版本
+-- P1-1: 升级为 active index version。每个版本有完整生命周期:
+-- pending -> building -> ready(activated) -> retired。
+-- 检索阶段只读 status=ready 且为文档 current_version_id 的版本节点。
 CREATE TABLE IF NOT EXISTS kb_document_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -522,9 +534,18 @@ CREATE TABLE IF NOT EXISTS kb_document_versions (
     processing_run_id TEXT NOT NULL DEFAULT '',
     char_count INTEGER NOT NULL DEFAULT 0,
     node_count INTEGER NOT NULL DEFAULT 0,
-    index_status TEXT NOT NULL DEFAULT 'pending'
+    index_status TEXT NOT NULL DEFAULT 'pending',
+    -- P1-1: 内容指纹,用于幂等去重(同一文档相同 hash 不重建)
+    content_hash TEXT NOT NULL DEFAULT '',
+    -- P1-1: 版本激活时间(状态变为 ready 时写入)
+    activated_at TEXT,
+    -- P1-1: 版本退役时间(被新版本替代时写入)
+    retired_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_doc ON kb_document_versions(document_id);
+-- P1-1: 检索阶段按 status 索引,快速过滤 ready 版本
+CREATE INDEX IF NOT EXISTS idx_kb_doc_versions_status
+    ON kb_document_versions(document_id, index_status);
 
 -- KB 文档章节
 CREATE TABLE IF NOT EXISTS kb_document_sections (
@@ -612,16 +633,19 @@ CREATE TABLE IF NOT EXISTS kb_search_feedback (
 );
 
 -- KB 表格索引
+-- P1 修复：增加 version_id 关联 active version，使表格索引与节点版本原子绑定
 CREATE TABLE IF NOT EXISTS kb_tables (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    version_id INTEGER REFERENCES kb_document_versions(id) ON DELETE SET NULL,
     sheet_name TEXT NOT NULL DEFAULT '',
     headers TEXT NOT NULL DEFAULT '[]',
     column_count INTEGER NOT NULL DEFAULT 0,
     row_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_kb_tables_doc ON kb_tables(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_tables_version ON kb_tables(version_id);
 
 -- KB 表格行
 CREATE TABLE IF NOT EXISTS kb_table_rows (
@@ -684,6 +708,51 @@ CREATE TABLE IF NOT EXISTS kb_source_items (
     UNIQUE(source_id, item_path)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
+
+-- P1-3: KB 文档 ACL(访问控制列表)
+-- 权限变化只更新本表,不触发 re-embedding。
+-- 检索阶段在 retriever SQL 中前置过滤,而不是检索后过滤。
+CREATE TABLE IF NOT EXISTS kb_document_acl (
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL,
+    -- answerable=1 表示该组可对文档提问/检索;visitable 当前预留(用于 UI 可见性)
+    answerable INTEGER NOT NULL DEFAULT 1,
+    visitable INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(document_id, group_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_acl_group_answerable
+    ON kb_document_acl(group_id, answerable, document_id);
+
+-- P2-1: KB 媒体资产表
+-- 用于 OCR 文本/caption/图片引用保真,后续可在此基础上接入 CLIP 跨模态向量。
+-- P1-2: 增加 version_id 关联 active version,支持版本切换时同步清理;
+--       sort_order 保留原文中的出现顺序;mime_type/byte_size 为预留字段。
+CREATE TABLE IF NOT EXISTS kb_media_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES kb_libraries(id) ON DELETE CASCADE,
+    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    version_id INTEGER REFERENCES kb_document_versions(id) ON DELETE SET NULL,
+    node_id INTEGER REFERENCES kb_document_nodes(id) ON DELETE SET NULL,
+    page_number INTEGER,
+    media_type TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    alt_text TEXT,
+    ocr_text TEXT,
+    caption TEXT,
+    bbox_json TEXT,
+    mime_type TEXT NOT NULL DEFAULT '',
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_media_doc ON kb_media_assets(document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_media_doc_version ON kb_media_assets(document_id, version_id);
+CREATE INDEX IF NOT EXISTS idx_kb_media_node ON kb_media_assets(node_id);
+CREATE INDEX IF NOT EXISTS idx_kb_media_lib_type ON kb_media_assets(library_id, media_type);
 
 -- KB 节点 FTS5 全文索引
 CREATE VIRTUAL TABLE IF NOT EXISTS kb_doc_fts USING fts5(
@@ -1073,7 +1142,12 @@ pub fn vec_chunks_ddl(dimensions: usize) -> String {
     )
 }
 
-/// 生成 sqlite-vec KB 节点虚拟表 DDL
+/// 生成 sqlite-vec KB 节点虚拟表 DDL。
+///
+/// P1 修复说明: sqlite-vec `vec0` 默认使用 cosine distance 作为距离度量，
+/// 即 `distance = 1 - cosine_similarity`。当前未在 DDL 中声明距离度量
+/// （vec0 不支持表级声明），但检索侧已改为 rank-based normalization，
+/// 不再直接依赖 `1.0 - distance`，因此与底层距离度量解耦。
 pub fn vec_kb_nodes_ddl(dimensions: usize) -> String {
     format!(
         r#"CREATE VIRTUAL TABLE IF NOT EXISTS vec_kb_nodes USING vec0(

@@ -103,9 +103,7 @@ pub async fn augment_chunk(
             )));
         }
         Err(_) => {
-            return Err(crate::error::GBrainError::LLM(
-                "增强生成超时（10s）".into(),
-            ));
+            return Err(crate::error::GBrainError::LLM("增强生成超时（10s）".into()));
         }
     };
 
@@ -235,7 +233,11 @@ pub fn merge_augmentation_into_metadata(
     let mut meta: serde_json::Value = if existing_metadata.is_empty() || existing_metadata == "{}" {
         serde_json::json!({})
     } else {
-        serde_json::from_str(existing_metadata).unwrap_or(serde_json::json!({}))
+        match serde_json::from_str(existing_metadata).unwrap_or(serde_json::json!({})) {
+            serde_json::Value::Object(obj) => serde_json::Value::Object(obj),
+            serde_json::Value::Array(arr) => serde_json::json!({ "media_refs": arr }),
+            _ => serde_json::json!({}),
+        }
     };
 
     if let Some(obj) = meta.as_object_mut() {
