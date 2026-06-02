@@ -33,8 +33,15 @@ pub fn create_embedding_index(
     )?;
     let index_id = conn.last_insert_rowid();
 
-    // P5-012: Create dedicated sqlite-vec virtual table for this index
-    let _ = create_vec_table_for_index(conn, index_id, dimensions);
+    // 创建专用 sqlite-vec 虚拟表（如果失败，后续写入会 fallback 到 BLOB 表）
+    if let Err(e) = create_vec_table_for_index(conn, index_id, dimensions) {
+        tracing::warn!(
+            index_id,
+            dimensions,
+            error = %e,
+            "创建 embedding index vec 虚拟表失败，将回退到 BLOB 存储；请确认 sqlite-vec 扩展已加载"
+        );
+    }
 
     Ok(index_id)
 }
@@ -205,8 +212,15 @@ pub fn upsert_node_embedding_for_index(
         rusqlite::params![node_id, embedding_index_id, blob, dimensions, model],
     )?;
 
-    // 2. 确保 per-index vec 虚表存在
-    let _ = create_vec_table_for_index(conn, embedding_index_id, dimensions);
+    // 2. 确保 per-index vec 虚表存在（失败时 fallback 到 BLOB 表）
+    if let Err(e) = create_vec_table_for_index(conn, embedding_index_id, dimensions) {
+        tracing::warn!(
+            embedding_index_id,
+            dimensions,
+            error = %e,
+            "写入嵌入时 vec 虚表创建失败，该索引将仅使用 BLOB 存储"
+        );
+    }
 
     // 3. 写入 per-index vec 虚表：先 DELETE 旧行再 INSERT
     //    vec0 虚表无主键/唯一约束，INSERT OR REPLACE 不会替换重复行，必须先删后插
@@ -241,11 +255,16 @@ pub fn vec_table_name_for_index(index_id: i64) -> String {
 }
 
 /// Create a dedicated sqlite-vec virtual table for an embedding index.
+///
+/// 显式声明 `distance_metric=cosine`，确保 vec0 返回的距离为
+/// cosine distance (= 1 - cosine_similarity)。sqlite-vec 默认使用 L2，
+/// 不声明会导致 `1.0 - distance` 的 similarity 转换语义错误。
 pub fn create_vec_table_for_index(conn: &Connection, index_id: i64, dimensions: i32) -> Result<()> {
     let table_name = vec_table_name_for_index(index_id);
     let sql = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(\
-         embedding float[{}], node_id integer)",
+         embedding float[{}] distance_metric=cosine, \
+         node_id integer)",
         table_name, dimensions,
     );
     conn.execute_batch(&sql)

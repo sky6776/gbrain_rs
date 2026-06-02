@@ -87,8 +87,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         )?;
         if !title_results.is_empty() {
             all_candidates.push(title_results);
@@ -99,7 +97,6 @@ pub fn kb_search(
     let profile = input.profile.as_deref().unwrap_or("balanced");
 
     // Node FTS retriever (P3-009)
-    // ACL 前置过滤：将 ACL 条件注入 FTS SQL，避免无权文档挤占 fetch_k 配额
     if retriever_set.contains(&crate::kb::planner::RetrieverType::NodeFts) {
         let fts_results = kb_fts_search(
             conn,
@@ -107,8 +104,6 @@ pub fn kb_search(
             &input.library_ids,
             input.level,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         )?;
         if !fts_results.is_empty() {
             all_candidates.push(fts_results);
@@ -125,8 +120,6 @@ pub fn kb_search(
                 input.level,
                 fetch_k,
                 input.embedding_index_id,
-                input.enforce_acl,
-                &input.user_group_ids,
             )?;
             if !vec_results.is_empty() {
                 all_candidates.push(vec_results);
@@ -141,8 +134,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !sr.is_empty() {
                 all_candidates.push(sr);
@@ -157,8 +148,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !tr.is_empty() {
                 all_candidates.push(tr);
@@ -173,8 +162,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !mr.is_empty() {
                 all_candidates.push(mr);
@@ -189,20 +176,10 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !pr.is_empty() {
                 all_candidates.push(pr);
             }
-        }
-    }
-
-    // P1-3: 对所有候选池统一应用 ACL 过滤。
-    // 在 RRF merge 前过滤,避免无权文档占用 top_k 配额。
-    if input.enforce_acl {
-        for bucket in all_candidates.iter_mut() {
-            *bucket = apply_acl_filter(conn, std::mem::take(bucket), true, &input.user_group_ids);
         }
     }
 
@@ -224,16 +201,14 @@ pub fn kb_search(
     let eidx_str = input
         .embedding_index_id
         .map_or_else(|| "-".to_string(), |e| e.to_string());
-    // P0 修复: cache key 纳入 ACL 信息，防止不同权限用户复用彼此的候选集
-    let acl_key_part = if input.enforce_acl {
-        let mut sorted_ids = input.user_group_ids.clone();
-        sorted_ids.sort();
-        format!("acl:{}", sorted_ids.join(","))
-    } else {
-        "acl:off".to_string()
-    };
+    // planner_override 会改变 retriever 集合（如 exact vs conceptual），
+    // 必须纳入缓存 key，否则同一 query/profile 下不同 override 会复用错误候选集。
+    let planner_str = input
+        .planner_override
+        .as_deref()
+        .unwrap_or("-");
     let merge_cache_key = format!(
-        "merge:{}|libs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}|{}",
+        "merge:{}|libs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}|plan:{}",
         final_query,
         input
             .library_ids
@@ -248,7 +223,7 @@ pub fn kb_search(
         folder_str,
         eidx_str,
         query_vector.is_some(),
-        acl_key_part,
+        planner_str,
     );
     let cached_merged = RETRIEVAL_CACHE
         .lock()
@@ -274,15 +249,12 @@ pub fn kb_search(
         let mut variants = crate::nlp::chinese::expand_query_with_synonyms(&final_query);
         variants.extend(crate::nlp::chinese::expand_query_with_aliases(&final_query));
         for variant in variants.iter().skip(1).take(3) {
-            // P0 修复：fallback 链的 FTS 调用传入 ACL 参数，避免无权文档挤占 fallback 配额
             if let Ok(fr) = kb_fts_search(
                 conn,
                 variant,
                 &input.library_ids,
                 input.level,
                 fetch_k * 2,
-                input.enforce_acl,
-                &input.user_group_ids,
             ) {
                 if !fr.is_empty() {
                     merged.extend(fr);
@@ -299,15 +271,12 @@ pub fn kb_search(
             .collect::<Vec<_>>()
             .join(" OR ");
         if broad_query != final_query {
-            // P0 修复：fallback 链的 FTS 调用传入 ACL 参数
             if let Ok(fr) = kb_fts_search(
                 conn,
                 &broad_query,
                 &input.library_ids,
                 input.level,
                 fetch_k * 2,
-                input.enforce_acl,
-                &input.user_group_ids,
             ) {
                 if !fr.is_empty() {
                     merged.extend(fr);
@@ -318,15 +287,12 @@ pub fn kb_search(
     }
     if merged.is_empty() && crate::nlp::chinese::detect_pinyin_query(&final_query) {
         // Level 3: pinyin — 对中文字段做拼音匹配
-        // P0 修复：fallback 链的 FTS 调用传入 ACL 参数
         if let Ok(fr) = kb_fts_search(
             conn,
             &input.query,
             &input.library_ids,
             input.level,
             fetch_k * 3,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !fr.is_empty() {
                 merged.extend(fr);
@@ -341,8 +307,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k * 3,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !fr.is_empty() {
                 merged.extend(fr);
@@ -357,8 +321,6 @@ pub fn kb_search(
             &final_query,
             &input.library_ids,
             fetch_k * 3,
-            input.enforce_acl,
-            &input.user_group_ids,
         ) {
             if !sr.is_empty() {
                 merged.extend(sr);
@@ -377,8 +339,6 @@ pub fn kb_search(
                 input.level,
                 fetch_k * 5,
                 input.embedding_index_id,
-                input.enforce_acl,
-                &input.user_group_ids,
             ) {
                 if !fr.is_empty() {
                     merged.extend(fr);
@@ -388,15 +348,6 @@ pub fn kb_search(
         }
     }
     merged = dedup_by_node(merged);
-
-    // P0 修复: fallback 链结果未经过 ACL 过滤，在此统一补做。
-    // 即使初始 all_candidates 已在 RRF merge 前过滤过，fallback 链新增的
-    // 结果（synonym/alias/broaden/pinyin/title_name/summary/vector fallback）
-    // 是直接调用底层 retriever 获得的，未套 ACL。这里对整个 merged 集
-    // 再做一次 ACL 过滤（幂等，已过滤的结果不会受影响）。
-    if input.enforce_acl && !merged.is_empty() {
-        merged = apply_acl_filter(conn, merged, true, &input.user_group_ids);
-    }
 
     // P0-2: 质量门控 (signal-preserving quality gate)
     // 注意:不要在 fallback chain 之前应用 gate,否则空结果时无法触发 fallback。
@@ -428,13 +379,7 @@ pub fn kb_search(
         merged = filter_by_folder(conn, merged, folder_id);
     }
 
-    // P4-003: 基于实际候选 node_ids 解析隐私策略，取最严格约束
-    // 候选为空时可默认允许（不会发送任何内容到外部模型）
-    let (external_rerank_allowed, redaction_enabled) = if merged.is_empty() {
-        (true, false)
-    } else {
-        resolve_rerank_policy_for_candidate_nodes(conn, &merged)?
-    };
+    // 外部 rerank 始终允许，脱敏始终关闭
 
     // P3-016/P3-020/P4-003~005: 模型 rerank 优先，失败 fallback 本地 rerank
     let rerank_info = if !merged.is_empty() && merged.len() <= 50 {
@@ -461,7 +406,6 @@ pub fn kb_search(
                 .to_string(),
             rerank_timeout_ms: 5000,
             rerank_max_candidates: 50,
-            external_rerank_allowed,
         };
 
         // P0-1: 构建 LocalRankSignals 时映射完整来源信号(fts/vector/title/summary/exact_match)
@@ -496,14 +440,10 @@ pub fn kb_search(
                 )
                 .ok()
                 .map(|text| {
-                    let safe_text = if redaction_enabled && external_rerank_allowed {
-                        crate::kb::privacy::redact_content(&text)
-                    } else {
-                        text
-                    };
+                    // 脱敏已关闭，直接使用原文
                     crate::kb::rerank::RerankCandidate {
                         doc_id: r.node_id,
-                        text: safe_text,
+                        text,
                     }
                 })
             })
@@ -521,7 +461,7 @@ pub fn kb_search(
             .as_deref()
             .is_some_and(|k| !k.is_empty());
         let (scored, rerank_result) =
-            if external_rerank_allowed && rerank_cfg.model_rerank_enabled && has_api_key {
+            if rerank_cfg.model_rerank_enabled && has_api_key {
                 let api_key = input.rerank_api_key.as_deref().unwrap_or("");
                 let base_url = input
                     .rerank_base_url
@@ -569,11 +509,7 @@ pub fn kb_search(
             } else {
                 // 跳过模型 rerank，直接本地 rerank
                 let local = crate::kb::rerank::local_rerank(&candidates, &weights);
-                let reason = if !external_rerank_allowed {
-                    crate::kb::rerank::FallbackReason::PrivacyBlocked
-                } else {
-                    crate::kb::rerank::FallbackReason::NotConfigured
-                };
+                let reason = crate::kb::rerank::FallbackReason::NotConfigured;
                 (
                     local,
                     crate::kb::rerank::RerankResult {
@@ -679,6 +615,7 @@ pub fn kb_search(
                     }).collect::<Vec<_>>(),
                     "rrf_score": s.rrf_score,
                     "vector_similarity": s.vector_similarity,
+                    "vector_distance": s.vector_distance,
                     "fts_rank_score": s.fts_rank_score,
                     "fts_bm25_raw": s.fts_bm25_raw,
                     "title_score": s.title_score,
@@ -755,8 +692,6 @@ fn title_name_retriever(
     query: &str,
     library_ids: &[i64],
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
     if token_query.is_empty() {
@@ -788,10 +723,6 @@ fn title_name_retriever(
         for &id in library_ids {
             param_values.push(Box::new(id));
         }
-    }
-
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
     }
 
     let limit_idx = param_values.len() + 1;
@@ -846,8 +777,6 @@ fn passage_fts_retriever(
     query: &str,
     library_ids: &[i64],
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
     if token_query.is_empty() {
@@ -882,10 +811,6 @@ fn passage_fts_retriever(
         for &id in library_ids {
             param_values.push(Box::new(id));
         }
-    }
-
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
     }
 
     let limit_idx = param_values.len() + 1;
@@ -1302,45 +1227,6 @@ fn build_open_target(
 // P3-011/012/013: Summary, Table, Metadata retrievers
 // ---------------------------------------------------------------------------
 
-/// 追加 ACL SQL 前置过滤片段，并同步追加绑定参数。
-///
-/// 语义：
-/// - 空用户组：只允许无 ACL 记录的公开文档。
-/// - 非空用户组：允许公开文档，或至少命中一个 answerable=1 的用户组。
-fn append_acl_sql_filter(
-    sql: &mut String,
-    param_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
-    user_group_ids: &[String],
-    table_alias: &str,
-) {
-    sql.push_str(&format!(
-        " AND (NOT EXISTS (SELECT 1 FROM kb_document_acl acl_f \
-         WHERE acl_f.document_id = {a}.id)",
-        a = table_alias
-    ));
-
-    if !user_group_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = user_group_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " OR EXISTS (SELECT 1 FROM kb_document_acl acl_f \
-             WHERE acl_f.document_id = {a}.id \
-             AND acl_f.group_id IN ({groups}) AND acl_f.answerable = 1)",
-            a = table_alias,
-            groups = placeholders.join(",")
-        ));
-        for group_id in user_group_ids {
-            param_values.push(Box::new(group_id.clone()));
-        }
-    }
-
-    sql.push(')');
-}
-
 /// P3-011: 摘要检索器 — 在 kb_document_summaries 中搜索
 ///
 /// Returns one node_id per matched document (first chunk by chunk_order).
@@ -1350,8 +1236,6 @@ fn summary_retriever(
     query: &str,
     library_ids: &[i64],
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let mut sql = String::from(
         "SELECT MIN(n.id) FROM kb_document_summaries s \
@@ -1378,10 +1262,6 @@ fn summary_retriever(
         for &id in library_ids {
             param_values.push(Box::new(id));
         }
-    }
-
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
     }
 
     let limit_idx = param_values.len() + 1;
@@ -1420,8 +1300,6 @@ fn table_retriever(
     query: &str,
     library_ids: &[i64],
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     // P1 修复：表格检索器按 active version 过滤，通过 t.version_id = d.current_version_id
     // 确保表格索引与当前版本节点原子一致，不会返回退役版本的表格行。
@@ -1452,10 +1330,6 @@ fn table_retriever(
         for &id in library_ids {
             param_values.push(Box::new(id));
         }
-    }
-
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
     }
 
     let limit_idx = param_values.len() + 1;
@@ -1494,8 +1368,6 @@ fn metadata_retriever(
     query: &str,
     library_ids: &[i64],
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let mut sql = String::from(
         "SELECT MIN(n.id) FROM kb_documents d \
@@ -1524,10 +1396,6 @@ fn metadata_retriever(
         }
     }
 
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
-    }
-
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY d.id LIMIT ?{}", limit_idx));
     param_values.push(Box::new(top_k as i64));
@@ -1553,128 +1421,6 @@ fn metadata_retriever(
         r.signals.source_score = rank_score;
     }
     Ok(results)
-}
-
-/// P1-3: ACL 过滤：保留用户组可见的文档节点。
-///
-/// 语义：
-/// - `enforce_acl = false`：直接返回原列表（本地单用户/管理员场景）。
-/// - `enforce_acl = true` 且 `user_group_ids` 为空：只允许 *无任何* ACL 记录的文档（公开文档）。
-/// - `enforce_acl = true` 且 `user_group_ids` 不为空：允许无 ACL 记录的文档 *或* 命中
-///   至少一个 answerable=1 的用户组。
-///
-/// 通过单次批量查询拉取所有相关 document 的 ACL 行，再在内存里做集合判断，
-/// 避免在循环中多次往返数据库。
-fn apply_acl_filter(
-    conn: &Connection,
-    candidates: Vec<RankedResult>,
-    enforce_acl: bool,
-    user_group_ids: &[String],
-) -> Vec<RankedResult> {
-    if !enforce_acl || candidates.is_empty() {
-        return candidates;
-    }
-
-    // 收集所有候选节点对应的 document_id
-    let mut doc_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    // 节点 → document_id 映射（候选可能来自同一文档）
-    let mut node_to_doc: HashMap<i64, i64> = HashMap::new();
-    {
-        let ids: Vec<i64> = candidates.iter().map(|r| r.node_id).collect();
-        let placeholders: Vec<String> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT id, document_id FROM kb_document_nodes WHERE id IN ({})",
-            placeholders.join(",")
-        );
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids
-            .iter()
-            .map(|&id| Box::new(id) as Box<dyn rusqlite::types::ToSql>)
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map(param_refs.as_slice(), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                for r in rows.flatten() {
-                    node_to_doc.insert(r.0, r.1);
-                    doc_ids.insert(r.1);
-                }
-            }
-        }
-    }
-    if doc_ids.is_empty() {
-        return Vec::new();
-    }
-
-    // 拉取所有相关文档的 ACL 行（同时查询 answerable=1 和 answerable=0，
-    // 以区分"无 ACL 记录→公开"和"仅有 deny-only 记录→禁止访问"）
-    let mut doc_acls: HashMap<i64, std::collections::HashSet<String>> = HashMap::new();
-    // P0 修复: 记录存在任意 ACL 记录的文档，防止 deny-only 文档被当作公开
-    let mut doc_has_any_acl: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    {
-        let ids: Vec<i64> = doc_ids.iter().copied().collect();
-        let placeholders: Vec<String> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        // 不再过滤 answerable: 同时拉取 answerable=1 和 answerable=0 的行
-        let sql = format!(
-            "SELECT document_id, group_id, answerable FROM kb_document_acl WHERE document_id IN ({})",
-            placeholders.join(",")
-        );
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids
-            .iter()
-            .map(|&id| Box::new(id) as Box<dyn rusqlite::types::ToSql>)
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map(param_refs.as_slice(), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i32>(2)?,
-                ))
-            }) {
-                for r in rows.flatten() {
-                    doc_has_any_acl.insert(r.0);
-                    if r.2 == 1 {
-                        // 仅收集 answerable=1 的 group
-                        doc_acls.entry(r.0).or_default().insert(r.1);
-                    }
-                }
-            }
-        }
-    }
-
-    let user_set: std::collections::HashSet<&str> =
-        user_group_ids.iter().map(String::as_str).collect();
-
-    candidates
-        .into_iter()
-        .filter(|cand| {
-            let Some(doc_id) = node_to_doc.get(&cand.node_id) else {
-                return false;
-            };
-            // P0 修复: 区分三种情况
-            // 1. 无任何 ACL 记录 → 公开文档，允许访问
-            // 2. 存在 answerable=1 的 group 匹配用户 → 允许访问
-            // 3. 存在 ACL 记录但无 answerable=1（deny-only）→ 禁止访问
-            if !doc_has_any_acl.contains(doc_id) {
-                return true; // 无 ACL 记录 → 公开
-            }
-            match doc_acls.get(doc_id) {
-                None => false, // deny-only: 有 ACL 记录但无 answerable=1 → 禁止
-                Some(acl_groups) => acl_groups.iter().any(|g| user_set.contains(g.as_str())),
-            }
-        })
-        .collect()
 }
 
 /// P1-004: 过滤掉已删除文档的结果
@@ -1816,8 +1562,6 @@ pub fn kb_vector_search(
     level: Option<i32>,
     top_k: usize,
     embedding_index_id: Option<i64>,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let query_blob = embedding_to_blob(embedding);
 
@@ -1831,11 +1575,17 @@ pub fn kb_vector_search(
             level,
             top_k,
             &per_index_table,
-            enforce_acl,
-            user_group_ids,
         );
         match result {
-            Ok(results) if !results.is_empty() => return Ok(results),
+            // 结果充足时直接返回
+            Ok(results) if results.len() >= top_k => return Ok(results),
+            // 结果不足 top_k：尝试 fallback 补充
+            Ok(results) if !results.is_empty() => {
+                return supplement_with_fallback(
+                    conn, embedding, library_ids, level, top_k,
+                    embedding_index_id, results,
+                );
+            }
             _ => {
                 // 不 fallback 到 legacy vec_kb_nodes，只 fallback 到同 index 的 BLOB 表
                 return vector_search_fallback(
@@ -1845,8 +1595,6 @@ pub fn kb_vector_search(
                     level,
                     top_k,
                     embedding_index_id,
-                    enforce_acl,
-                    user_group_ids,
                 );
             }
         }
@@ -1860,11 +1608,15 @@ pub fn kb_vector_search(
         level,
         top_k,
         "vec_kb_nodes",
-        enforce_acl,
-        user_group_ids,
     );
     match result {
-        Ok(results) if !results.is_empty() => Ok(results),
+        Ok(results) if results.len() >= top_k => Ok(results),
+        Ok(results) if !results.is_empty() => {
+            supplement_with_fallback(
+                conn, embedding, library_ids, level, top_k,
+                embedding_index_id, results,
+            )
+        }
         _ => vector_search_fallback(
             conn,
             embedding,
@@ -1872,8 +1624,6 @@ pub fn kb_vector_search(
             level,
             top_k,
             embedding_index_id,
-            enforce_acl,
-            user_group_ids,
         ),
     }
 }
@@ -1889,8 +1639,6 @@ pub fn kb_fts_search(
     library_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
 
@@ -1932,11 +1680,6 @@ pub fn kb_fts_search(
         param_values.push(Box::new(lvl));
     }
 
-    // ACL 前置过滤：在 SQL 中注入，避免无权文档挤占 fetch_k 配额
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
-    }
-
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(
         " ORDER BY bm25(kb_doc_fts) ASC LIMIT ?{}",
@@ -1961,8 +1704,11 @@ pub fn kb_fts_search(
         sig.fts_bm25_raw = Some(bm25_raw);
         sig.fts_rank_score = Some(rank_score);
         sig.source_score = rank_score;
-        // SQLite FTS5 BM25 lower-is-better; 这里转为 higher-is-better 的派生分数
-        sig.exact_match = bm25_raw <= 1.0;
+        // 注意：FTS 检索器不再设置 exact_match。
+        // exact_match 应仅由 title_name_retriever 通过规范化 query 与文档名
+        // 的精确字符串等值比较来设置（见 title_name_retriever 中的逻辑）。
+        // 此前 bm25_raw <= 1.0 被误标为 exact_match，导致普通 FTS 命中绕开
+        // min_fts_rank_score 质量门控，与"精确标题匹配豁免"的设计语义不符。
         results.push(RankedResult {
             node_id,
             rank,
@@ -2072,6 +1818,63 @@ pub fn rrf_merge(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// 当 sqlite-vec KNN 因过度过滤（retired/版本等）返回不足 `top_k` 条结果时，
+/// 用 brute-force cosine fallback 补充缺失的名额。
+/// 已由 KNN 返回的 node_id 不会重复计入；补充后统一按 score 降序重排 rank。
+fn supplement_with_fallback(
+    conn: &Connection,
+    embedding: &[f32],
+    library_ids: &[i64],
+    level: Option<i32>,
+    top_k: usize,
+    embedding_index_id: Option<i64>,
+    existing: Vec<RankedResult>,
+) -> Result<Vec<RankedResult>> {
+    let deficit = top_k.saturating_sub(existing.len());
+    if deficit == 0 {
+        return Ok(existing);
+    }
+    tracing::debug!(
+        existing = existing.len(),
+        top_k,
+        "sqlite-vec KNN 结果不足，用 fallback 补充"
+    );
+    // fallback 请求 top_k 数量（而非 deficit），以便按相似度排序后取最优补充
+    let fallback_results = vector_search_fallback(
+        conn,
+        embedding,
+        library_ids,
+        level,
+        top_k,
+        embedding_index_id,
+    )?;
+
+    let existing_ids: std::collections::HashSet<i64> =
+        existing.iter().map(|r| r.node_id).collect();
+
+    // 合并所有非重复 fallback 候选，而非提前停止。
+    // KNN 中可能有低分项，fallback 中有高分非重复项，全量合并后统一排序才能取到最优 top_k。
+    let mut merged = existing;
+    for r in fallback_results {
+        if !existing_ids.contains(&r.node_id) {
+            merged.push(r);
+        }
+    }
+
+    // 按 score 降序重排，截断到 top_k，再更新 rank
+    merged.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(top_k);
+    for (i, r) in merged.iter_mut().enumerate() {
+        r.rank = i + 1;
+    }
+
+    Ok(merged)
+}
+
 /// Attempt sqlite-vec KNN search.
 fn try_vec_knn(
     conn: &Connection,
@@ -2080,8 +1883,6 @@ fn try_vec_knn(
     level: Option<i32>,
     top_k: usize,
     table_name: &str,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     // 修复：JOIN kb_documents 过滤已删除文档，否则向量搜索会返回已软删的节点
     // P1-1: 同时过滤退役节点与非 active version 节点
@@ -2097,14 +1898,12 @@ fn try_vec_knn(
         table_name,
     );
 
-    let knn_k = if enforce_acl {
-        top_k
-            .saturating_mul(10)
-            .max(top_k)
-            .min(VECTOR_FALLBACK_MAX_ROWS)
-    } else {
-        top_k
-    };
+    // 始终 over-fetch：sqlite-vec 在 JOIN/WHERE 过滤之前会先从全表中取 top-k，
+    // 如果只取精确的 top_k，retired 节点或旧版本向量可能挤占当前版本的名额。
+    let knn_k = top_k
+        .saturating_mul(10)
+        .max(top_k)
+        .min(VECTOR_FALLBACK_MAX_ROWS);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
         vec![Box::new(query_blob.to_vec()), Box::new(knn_k as i64)];
 
@@ -2130,10 +1929,6 @@ fn try_vec_knn(
         param_values.push(Box::new(lvl));
     }
 
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
-    }
-
     sql.push_str(" ORDER BY v.distance ASC");
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -2147,14 +1942,17 @@ fn try_vec_knn(
             while let Ok(Some(row)) = rows.next() {
                 if let Ok(node_id) = row.get::<_, i64>(0) {
                     let rank = results.len() + 1;
-                    // 使用 rank-based 归一化替代 1.0 - distance，
-                    // 避免依赖 sqlite-vec 距离度量类型（cosine/L2/dot）。
-                    // rank=1 → 1.0, rank=2 → 0.5, rank=3 → 0.333, ...
-                    // 确保首条命中不会被 min_vector_similarity 质量门槛误杀。
-                    let similarity = 1.0 / rank as f64;
+                    // 读取 sqlite-vec 返回的原始 distance 值
+                    let raw_distance: f64 = row.get::<_, f64>(1).unwrap_or(0.0);
+                    // 将 distance 转为 similarity：
+                    // vec0 建表时已声明 distance_metric=cosine，
+                    // 因此 distance = 1 - cosine_similarity，similarity = 1.0 - distance。
+                    // 距离越低表示越相似，clamp 防止浮点误差越界。
+                    let similarity = (1.0 - raw_distance).clamp(0.0, 1.0);
                     let mut sig = RankSignals::default();
                     sig.retrievers.push(RetrieverKind::Vector);
                     sig.vector_similarity = Some(similarity);
+                    sig.vector_distance = Some(raw_distance);
                     sig.source_score = similarity;
                     results.push(RankedResult {
                         node_id,
@@ -2186,8 +1984,6 @@ fn vector_search_fallback(
     level: Option<i32>,
     top_k: usize,
     embedding_index_id: Option<i64>,
-    enforce_acl: bool,
-    user_group_ids: &[String],
 ) -> Result<Vec<RankedResult>> {
     // 修复：JOIN kb_documents 过滤已删除文档，否则 fallback 向量搜索也会返回已软删的节点
     // P1-1: 同时过滤退役节点与非 active version 节点
@@ -2230,10 +2026,6 @@ fn vector_search_fallback(
         let idx = param_values.len() + 1;
         sql.push_str(&format!(" AND n.level = ?{}", idx));
         param_values.push(Box::new(lvl));
-    }
-
-    if enforce_acl {
-        append_acl_sql_filter(&mut sql, &mut param_values, user_group_ids, "d");
     }
 
     // Cap candidate rows to prevent unbounded memory allocation
@@ -2283,53 +2075,7 @@ fn vector_search_fallback(
         .collect())
 }
 
-/// P4-003: 基于候选 node_id 反查所属 library 的隐私策略，取最严格约束。
-///
-/// 不依赖 `input.library_ids`（可能为空，表示全库搜索），而是按实际命中的
-/// 节点所属 library 逐条判断。任一库禁止外部 rerank 则全局禁用；任一库要求
-/// 脱敏则全局启用。
-fn resolve_rerank_policy_for_candidate_nodes(
-    conn: &Connection,
-    merged: &[RankedResult],
-) -> Result<(bool, bool)> {
-    let placeholders: Vec<String> = merged
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect();
-    // 查询所有候选节点所属 library 的隐私策略（DISTINCT 去重）
-    let sql = format!(
-        "SELECT DISTINCT l.external_rerank_allowed, l.redaction_enabled \
-         FROM kb_document_nodes n \
-         JOIN kb_libraries l ON l.id = n.library_id \
-         WHERE n.id IN ({})",
-        placeholders.join(",")
-    );
-    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = merged
-        .iter()
-        .map(|r| Box::new(r.node_id) as Box<dyn rusqlite::types::ToSql>)
-        .collect();
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
-    })?;
-
-    let mut all_allowed = true;
-    let mut any_redaction = false;
-    for r in rows {
-        let (allowed, redact) = r?;
-        if allowed == 0 {
-            all_allowed = false;
-        }
-        if redact != 0 {
-            any_redaction = true;
-        }
-    }
-    Ok((all_allowed, any_redaction))
-}
+/// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
 
 /// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
 fn filter_by_folder(

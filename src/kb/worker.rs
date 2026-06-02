@@ -256,27 +256,6 @@ pub fn run_kb_cmd_worker_once(engine: &SqliteEngine, config: &Config) -> Result<
                 }
             }
         }
-        KbIndexCommand::UpdateAcl {
-            document_id,
-            ref policy,
-        } => {
-            // P0 修复: UpdateAcl — 使用 AclPolicy 显式表达访问控制意图
-            match crate::kb::pipeline::update_document_acl(conn, document_id, policy) {
-                Ok(()) => {
-                    tracing::info!(job_db_id, document_id, "KB cmd worker: ACL 更新完成");
-                    Ok(())
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        job_db_id,
-                        document_id,
-                        error = %e,
-                        "KB cmd worker: ACL 更新失败"
-                    );
-                    Err(e)
-                }
-            }
-        }
         KbIndexCommand::ReconcileIndexStatus { library_id } => {
             // P2 修复: ReconcileIndexStatus — 巡检修复 library 的 index_status
             match crate::kb::pipeline::reconcile_library_index_status(conn, library_id) {
@@ -867,67 +846,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 }
             }
 
-            // 库级隐私策略检查：禁止外部 embedding 时跳过
-            let library_id: i64 = conn
-                .query_row(
-                    "SELECT library_id FROM kb_document_nodes WHERE document_id = ?1 LIMIT 1",
-                    rusqlite::params![doc_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap_or(0);
-            if library_id > 0 {
-                let kb = KbEngine::new(conn);
-                if let Ok(library) = kb.get_library(library_id) {
-                    if !library.external_embedding_allowed {
-                        tracing::warn!(
-                            document_id = doc_id,
-                            library_id,
-                            "re-embed worker: 库级策略禁止外部 embedding，跳过嵌入"
-                        );
-                        // 跳过嵌入，标记为 STATUS_SKIPPED（对应 keyword_only 语义）。
-                        // 与主 pipeline 策略一致：embedding 被禁用时不代表"完成"，而是"跳过"，
-                        // 避免无向量的文档被误标为向量索引 ready。
-                        let (word_total, split_total): (i32, i32) = conn
-                            .query_row(
-                                "SELECT word_total, split_total FROM kb_documents WHERE id = ?1",
-                                rusqlite::params![doc_id],
-                                |row| Ok((row.get(0)?, row.get(1)?)),
-                            )
-                            .unwrap_or((0, 0));
-                        let kb = KbEngine::new(conn);
-                        if let Err(e) = kb.update_document_stats_with_run_guard(
-                            doc_id,
-                            word_total,
-                            split_total,
-                            Some(crate::kb::types::STATUS_SKIPPED),
-                            payload.get("processing_run_id").and_then(|v| v.as_str()),
-                        ) {
-                            warn!(
-                                document_id = doc_id,
-                                error = %e,
-                                "re-embed worker: keyword_only 状态更新失败"
-                            );
-                            fail_kb_job(
-                                conn,
-                                job_db_id,
-                                &format!("keyword_only 状态更新失败: {}", e),
-                            )?;
-                            return Ok(true);
-                        }
-                        if finalize_ocr_writeback_reembed_if_needed(
-                            conn,
-                            job_db_id,
-                            &payload,
-                            doc_id,
-                            "reembed_worker_embedding_policy_skipped",
-                        )? {
-                            return Ok(true);
-                        }
-                        complete_kb_job(conn, job_db_id)?;
-                        return Ok(true);
-                    }
-                }
-            }
+            // 外部 embedding 始终允许，不再检查库级策略
 
             // 未配置 embedding API key 时，跳过嵌入并标记为 STATUS_SKIPPED。
             // 节点已有内容可用于关键词检索，不应让文档卡在 pending/processing。
@@ -1440,58 +1359,8 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
         Some(&payload.processing_run_id),
     )?;
 
-    // 检查库隐私策略：外部 OCR 是否被允许、是否启用脱敏
-    let library = kb.get_library(payload.library_id)?;
-    if !library.external_ocr_allowed {
-        warn!(
-            document_id = payload.document_id,
-            library_id = payload.library_id,
-            "OCR worker: 库已关闭外部 OCR，跳过"
-        );
-        // 策略阻断：标为 needed 而非 failed，表示文本层已索引但扫描内容未检索
-        crate::kb::ocr::update_ocr_pages_status(
-            conn,
-            payload.document_id,
-            &payload.pages,
-            "needed",
-            "库策略已关闭外部 OCR",
-            &payload.provider,
-            &payload.model,
-            &payload.processing_run_id,
-        )?;
-        return complete_ocr_with_native_text_fallback(
-            conn,
-            job_db_id,
-            &payload,
-            embedder.clone(),
-            "ocr_external_policy_disabled",
-        );
-    }
-    if library.redaction_enabled {
-        warn!(
-            document_id = payload.document_id,
-            library_id = payload.library_id,
-            "OCR worker: 库已启用脱敏，禁止外部 OCR"
-        );
-        // 策略阻断：标为 needed 而非 failed，表示文本层已索引但扫描内容未检索
-        crate::kb::ocr::update_ocr_pages_status(
-            conn,
-            payload.document_id,
-            &payload.pages,
-            "needed",
-            "库已启用脱敏，禁止外部 OCR",
-            &payload.provider,
-            &payload.model,
-            &payload.processing_run_id,
-        )?;
-        return complete_ocr_with_native_text_fallback(
-            conn,
-            job_db_id,
-            &payload,
-            embedder.clone(),
-            "ocr_redaction_policy_disabled",
-        );
-    }
+    // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
+    let _library = kb.get_library(payload.library_id)?;
 
     // 全局 OCR 开关检查（作为最终边界，防止已入队任务绕过全局开关）
     if !config.ocr_enabled {
@@ -3083,7 +2952,7 @@ fn rebuild_raptor_after_reembed(
     config: &Config,
     run_id: Option<&str>,
 ) -> Result<()> {
-    if !library.raptor_enabled || !library.external_summary_allowed {
+    if !library.raptor_enabled {
         return Ok(());
     }
 

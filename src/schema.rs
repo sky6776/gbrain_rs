@@ -361,11 +361,6 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     rerank_enabled INTEGER NOT NULL DEFAULT 1,
     rerank_provider TEXT NOT NULL DEFAULT '',
     summary_enabled INTEGER NOT NULL DEFAULT 0,
-    external_embedding_allowed INTEGER NOT NULL DEFAULT 1,
-    external_rerank_allowed INTEGER NOT NULL DEFAULT 1,
-    external_summary_allowed INTEGER NOT NULL DEFAULT 1,
-    external_ocr_allowed INTEGER NOT NULL DEFAULT 1,
-    redaction_enabled INTEGER NOT NULL DEFAULT 0,
     title_weight REAL NOT NULL DEFAULT 0.2,
     augmentation_enabled INTEGER NOT NULL DEFAULT 1,
     deleted_at TEXT -- 软删除时间戳，NULL 表示未删除
@@ -708,22 +703,6 @@ CREATE TABLE IF NOT EXISTS kb_source_items (
     UNIQUE(source_id, item_path)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_source_items_source ON kb_source_items(source_id);
-
--- P1-3: KB 文档 ACL(访问控制列表)
--- 权限变化只更新本表,不触发 re-embedding。
--- 检索阶段在 retriever SQL 中前置过滤,而不是检索后过滤。
-CREATE TABLE IF NOT EXISTS kb_document_acl (
-    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
-    group_id TEXT NOT NULL,
-    -- answerable=1 表示该组可对文档提问/检索;visitable 当前预留(用于 UI 可见性)
-    answerable INTEGER NOT NULL DEFAULT 1,
-    visitable INTEGER NOT NULL DEFAULT 1,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY(document_id, group_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_kb_acl_group_answerable
-    ON kb_document_acl(group_id, answerable, document_id);
 
 -- P2-1: KB 媒体资产表
 -- 用于 OCR 文本/caption/图片引用保真,后续可在此基础上接入 CLIP 跨模态向量。
@@ -1132,11 +1111,14 @@ CREATE INDEX IF NOT EXISTS idx_token_syn_lookup
 
 /// Generate sqlite-vec virtual table DDL
 /// Returns DDL for the vec_chunks virtual table
+///
+/// 声明 `distance_metric=cosine`，确保 distance = 1 - cosine_similarity，
+/// 使检索侧 `1.0 - distance` 的语义正确。
 pub fn vec_chunks_ddl(dimensions: usize) -> String {
     format!(
         r#"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
     chunk_id INTEGER PRIMARY KEY,
-    embedding float[{}]
+    embedding float[{}] distance_metric=cosine
 );"#,
         dimensions
     )
@@ -1144,15 +1126,16 @@ pub fn vec_chunks_ddl(dimensions: usize) -> String {
 
 /// 生成 sqlite-vec KB 节点虚拟表 DDL。
 ///
-/// P1 修复说明: sqlite-vec `vec0` 默认使用 cosine distance 作为距离度量，
-/// 即 `distance = 1 - cosine_similarity`。当前未在 DDL 中声明距离度量
-/// （vec0 不支持表级声明），但检索侧已改为 rank-based normalization，
-/// 不再直接依赖 `1.0 - distance`，因此与底层距离度量解耦。
+/// 显式声明 `distance_metric=cosine`，确保 vec0 返回的距离为
+/// cosine distance（即 distance = 1 - cosine_similarity）。
+/// sqlite-vec float 类型的默认距离度量是 L2，必须显式声明 cosine
+/// 才能使检索侧 `similarity = 1.0 - distance` 的语义正确。
+/// 参见: https://alexgarcia.xyz/sqlite-vec/api-reference/vec0.html
 pub fn vec_kb_nodes_ddl(dimensions: usize) -> String {
     format!(
         r#"CREATE VIRTUAL TABLE IF NOT EXISTS vec_kb_nodes USING vec0(
     node_id INTEGER PRIMARY KEY,
-    embedding float[{}]
+    embedding float[{}] distance_metric=cosine
 );"#,
         dimensions
     )

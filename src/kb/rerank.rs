@@ -35,7 +35,6 @@ pub struct RerankConfig {
     pub rerank_model: String,
     pub rerank_timeout_ms: u64,
     pub rerank_max_candidates: usize,
-    pub external_rerank_allowed: bool,
 }
 
 impl Default for RerankConfig {
@@ -46,7 +45,6 @@ impl Default for RerankConfig {
             rerank_model: "gpt-4o-mini".into(),
             rerank_timeout_ms: 5000,
             rerank_max_candidates: 50,
-            external_rerank_allowed: true,
         }
     }
 }
@@ -486,21 +484,7 @@ pub async fn try_model_rerank(
         );
     }
 
-    // Privacy/budget pre-check
-    if !config.external_rerank_allowed {
-        let local = local_rerank(candidates, weights);
-        return (
-            local,
-            RerankResult {
-                model_rerank_attempted: false,
-                model_rerank_succeeded: false,
-                fallback_used: true,
-                fallback_reason: Some(FallbackReason::PrivacyBlocked),
-                provider: "local".into(),
-                candidates_reranked: candidates.len(),
-            },
-        );
-    }
+    // 外部 rerank 始终允许，跳过隐私检查
 
     if let Some(b) = budget {
         if b.remaining() == 0 {
@@ -597,20 +581,7 @@ pub async fn try_model_rerank_simple(
         );
     }
 
-    if !config.external_rerank_allowed {
-        let local = local_rerank(candidates, weights);
-        return (
-            local,
-            RerankResult {
-                model_rerank_attempted: false,
-                model_rerank_succeeded: false,
-                fallback_used: true,
-                fallback_reason: Some(FallbackReason::PrivacyBlocked),
-                provider: "local".into(),
-                candidates_reranked: candidates.len(),
-            },
-        );
-    }
+    // 外部 rerank 始终允许
 
     if let Some(b) = budget {
         if b.remaining() == 0 {
@@ -888,43 +859,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_try_model_rerank_simple_privacy_blocked() {
-        let config = RerankConfig {
-            model_rerank_enabled: true,
-            external_rerank_allowed: false,
-            ..Default::default()
-        };
-        let candidates = vec![(
-            1,
-            LocalRankSignals {
-                fts_score: 0.9,
-                ..Default::default()
-            },
-        )];
-        let candidate_texts = vec![RerankCandidate {
-            doc_id: 1,
-            text: "test".into(),
-        }];
-        let (_, result) = try_model_rerank_simple(
-            &config,
-            "query",
-            &candidates,
-            &candidate_texts,
-            &[0.4, 0.3, 0.2, 0.1, 0.0, 0.0],
-            None,
-            "https://api.openai.com/v1",
-            "sk-key",
-        )
-        .await;
-        assert!(result.fallback_used);
-        assert_eq!(result.fallback_reason, Some(FallbackReason::PrivacyBlocked));
-    }
-
-    #[tokio::test]
     async fn test_try_model_rerank_simple_budget_exceeded() {
         let config = RerankConfig {
             model_rerank_enabled: true,
-            external_rerank_allowed: true,
             ..Default::default()
         };
         let budget = crate::kb::cost::TokenBudget::new(0); // zero budget

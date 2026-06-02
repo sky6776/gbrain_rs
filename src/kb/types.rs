@@ -75,11 +75,6 @@ pub struct Library {
     pub rerank_enabled: bool,
     pub rerank_provider: String,
     pub summary_enabled: bool,
-    pub external_embedding_allowed: bool,
-    pub external_rerank_allowed: bool,
-    pub external_summary_allowed: bool,
-    pub external_ocr_allowed: bool,
-    pub redaction_enabled: bool,
     /// 标题/文件名在 embedding 文本中的权重 (0.0-1.0)。默认 0.2。
     /// 权重越高，标题重复次数越多，文档级检索越准确。
     pub title_weight: f32,
@@ -124,16 +119,6 @@ pub struct CreateLibraryInput {
     #[serde(default)]
     pub summary_enabled: Option<bool>,
     #[serde(default)]
-    pub external_embedding_allowed: Option<bool>,
-    #[serde(default)]
-    pub external_rerank_allowed: Option<bool>,
-    #[serde(default)]
-    pub external_summary_allowed: Option<bool>,
-    #[serde(default)]
-    pub external_ocr_allowed: Option<bool>,
-    #[serde(default)]
-    pub redaction_enabled: Option<bool>,
-    #[serde(default)]
     pub title_weight: Option<f32>,
     #[serde(default)]
     pub augmentation_enabled: Option<bool>,
@@ -157,11 +142,6 @@ pub struct UpdateLibraryInput {
     pub rerank_enabled: Option<bool>,
     pub rerank_provider: Option<String>,
     pub summary_enabled: Option<bool>,
-    pub external_embedding_allowed: Option<bool>,
-    pub external_rerank_allowed: Option<bool>,
-    pub external_summary_allowed: Option<bool>,
-    pub external_ocr_allowed: Option<bool>,
-    pub redaction_enabled: Option<bool>,
     pub title_weight: Option<f32>,
     pub augmentation_enabled: Option<bool>,
 }
@@ -454,13 +434,7 @@ pub struct KbSearchInput {
     #[serde(skip_serializing)]
     pub rerank_api_key: Option<String>,
     pub rerank_base_url: Option<String>,
-    /// 用户所属组 ID 列表,用于检索阶段 ACL 过滤。
-    /// 空 Vec + enforce_acl=true 表示只允许公开文档(无 ACL 记录)。
-    #[serde(default)]
-    pub user_group_ids: Vec<String>,
-    /// 是否启用 ACL 过滤。本地单用户/管理员场景可设为 false。
-    #[serde(default)]
-    pub enforce_acl: bool,
+    // ACL 已移除 — 个人使用全库可见，不需要访问控制
     /// 可选质量门控配置。None 表示使用 profile 派生的默认 gate。
     #[serde(default)]
     pub quality_gate: Option<SearchQualityGate>,
@@ -491,8 +465,6 @@ impl Default for KbSearchInput {
             rewrite_api_key: None,
             rewrite_base_url: None,
             rewrite_model: None,
-            user_group_ids: Vec::new(),
-            enforce_acl: false,
             quality_gate: None,
         }
     }
@@ -653,6 +625,9 @@ pub struct RankSignals {
     pub fts_rank_score: Option<f64>,
     /// 向量相似度(余弦相似度,通常 0.0~1.0)
     pub vector_similarity: Option<f64>,
+    /// 向量原始距离(sqlite-vec 返回的 distance 值，仅向量检索器写入)
+    /// cosine 距离下 similarity = 1.0 - distance
+    pub vector_distance: Option<f64>,
     /// 标题匹配分数
     pub title_score: Option<f64>,
     /// 摘要匹配分数
@@ -683,6 +658,9 @@ impl RankSignals {
         }
         if self.vector_similarity.is_none() && other.vector_similarity.is_some() {
             self.vector_similarity = other.vector_similarity;
+        }
+        if self.vector_distance.is_none() && other.vector_distance.is_some() {
+            self.vector_distance = other.vector_distance;
         }
         if self.title_score.is_none() && other.title_score.is_some() {
             self.title_score = other.title_score;

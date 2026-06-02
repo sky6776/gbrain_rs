@@ -1,41 +1,10 @@
-//! 隐私与外部模型治理 (P5-019, P5-020)
+//! 隐私工具模块 — 保留脱敏函数和外部模型调用审计日志
 //!
-//! 每个 library 可控制是否调用外部模型，支持敏感信息脱敏。
+//! 库级隐私开关（external_*_allowed / redaction_enabled）已移除，
+//! 外部服务始终允许，脱敏始终关闭。
 
 use regex::Regex;
 use std::sync::OnceLock;
-
-/// Library 隐私策略（对齐 kb_libraries 中的 governance 字段）
-#[derive(Debug, Clone)]
-pub struct PrivacyPolicy {
-    pub external_embedding_allowed: bool,
-    pub external_rerank_allowed: bool,
-    pub external_summary_allowed: bool,
-    pub external_ocr_allowed: bool,
-    pub redaction_enabled: bool,
-}
-
-impl Default for PrivacyPolicy {
-    fn default() -> Self {
-        Self {
-            external_embedding_allowed: true,
-            external_rerank_allowed: true,
-            external_summary_allowed: true,
-            external_ocr_allowed: true,
-            redaction_enabled: false,
-        }
-    }
-}
-
-impl PrivacyPolicy {
-    /// 是否允许任何外部模型调用
-    pub fn any_external_allowed(&self) -> bool {
-        self.external_embedding_allowed
-            || self.external_rerank_allowed
-            || self.external_summary_allowed
-            || self.external_ocr_allowed
-    }
-}
 
 /// P5-020: 对发送给外部模型的文本进行脱敏
 pub fn redact_content(text: &str) -> String {
@@ -164,13 +133,6 @@ mod tests {
         let text = "This is normal text without PII";
         let redacted = redact_content(text);
         assert_eq!(text, redacted);
-    }
-
-    #[test]
-    fn test_privacy_policy_default() {
-        let policy = PrivacyPolicy::default();
-        assert!(policy.external_rerank_allowed);
-        assert!(!policy.redaction_enabled);
     }
 
     #[test]

@@ -196,8 +196,6 @@ impl<'a> KbEngine<'a> {
                         sort_order, \
                         embedding_provider, embedding_model, embedding_dimensions, \
                         search_profile, rerank_enabled, rerank_provider, summary_enabled, \
-                        external_embedding_allowed, external_rerank_allowed, \
-                        external_summary_allowed, external_ocr_allowed, redaction_enabled, \
                         title_weight, augmentation_enabled \
                  FROM kb_libraries ORDER BY sort_order DESC, id DESC",
             )?;
@@ -225,13 +223,8 @@ impl<'a> KbEngine<'a> {
                     rerank_enabled: row.get::<_, i32>(18)? != 0,
                     rerank_provider: row.get(19)?,
                     summary_enabled: row.get::<_, i32>(20)? != 0,
-                    external_embedding_allowed: row.get::<_, i32>(21)? != 0,
-                    external_rerank_allowed: row.get::<_, i32>(22)? != 0,
-                    external_summary_allowed: row.get::<_, i32>(23)? != 0,
-                    external_ocr_allowed: row.get::<_, i32>(24)? != 0,
-                    redaction_enabled: row.get::<_, i32>(25)? != 0,
-                    title_weight: row.get::<_, f32>(26)?,
-                    augmentation_enabled: row.get::<_, i32>(27)? != 0,
+                    title_weight: row.get::<_, f32>(21)?,
+                    augmentation_enabled: row.get::<_, i32>(22)? != 0,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -295,10 +288,8 @@ impl<'a> KbEngine<'a> {
                   chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, sort_order, \
                   embedding_provider, embedding_model, embedding_dimensions, \
                   search_profile, rerank_enabled, rerank_provider, summary_enabled, \
-                  external_embedding_allowed, external_rerank_allowed, \
-                  external_summary_allowed, external_ocr_allowed, redaction_enabled, \
                   title_weight, augmentation_enabled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     input.name,
                     semantic,
@@ -318,14 +309,6 @@ impl<'a> KbEngine<'a> {
                     input.rerank_enabled.unwrap_or(true) as i32,
                     input.rerank_provider.as_deref().unwrap_or(""),
                     input.summary_enabled.unwrap_or(false) as i32,
-                    input.external_embedding_allowed.unwrap_or(true) as i32,
-                    input.external_rerank_allowed.unwrap_or(true) as i32,
-                    input.external_summary_allowed.unwrap_or(true) as i32,
-                    input.external_ocr_allowed.unwrap_or_else(|| {
-                        crate::config::parse_env_bool("GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT")
-                            .unwrap_or(true)
-                    }) as i32,
-                    input.redaction_enabled.unwrap_or(false) as i32,
                     input.title_weight.unwrap_or(0.2).clamp(0.0, 1.0),
                     input.augmentation_enabled.unwrap_or(true) as i32,
                 ],
@@ -358,8 +341,6 @@ impl<'a> KbEngine<'a> {
                         sort_order, \
                         embedding_provider, embedding_model, embedding_dimensions, \
                         search_profile, rerank_enabled, rerank_provider, summary_enabled, \
-                        external_embedding_allowed, external_rerank_allowed, \
-                        external_summary_allowed, external_ocr_allowed, redaction_enabled, \
                         title_weight, augmentation_enabled \
                  FROM kb_libraries WHERE id = ?1",
                 [id],
@@ -387,13 +368,8 @@ impl<'a> KbEngine<'a> {
                         rerank_enabled: row.get::<_, i32>(18)? != 0,
                         rerank_provider: row.get(19)?,
                         summary_enabled: row.get::<_, i32>(20)? != 0,
-                        external_embedding_allowed: row.get::<_, i32>(21)? != 0,
-                        external_rerank_allowed: row.get::<_, i32>(22)? != 0,
-                        external_summary_allowed: row.get::<_, i32>(23)? != 0,
-                        external_ocr_allowed: row.get::<_, i32>(24)? != 0,
-                        redaction_enabled: row.get::<_, i32>(25)? != 0,
-                        title_weight: row.get::<_, f32>(26)?,
-                        augmentation_enabled: row.get::<_, i32>(27)? != 0,
+                        title_weight: row.get::<_, f32>(21)?,
+                        augmentation_enabled: row.get::<_, i32>(22)? != 0,
                     })
                 },
             )
@@ -450,21 +426,6 @@ impl<'a> KbEngine<'a> {
             }
             if let Some(v) = input.summary_enabled {
                 update.push_set("summary_enabled", v as i32);
-            }
-            if let Some(v) = input.external_embedding_allowed {
-                update.push_set("external_embedding_allowed", v as i32);
-            }
-            if let Some(v) = input.external_rerank_allowed {
-                update.push_set("external_rerank_allowed", v as i32);
-            }
-            if let Some(v) = input.external_summary_allowed {
-                update.push_set("external_summary_allowed", v as i32);
-            }
-            if let Some(v) = input.external_ocr_allowed {
-                update.push_set("external_ocr_allowed", v as i32);
-            }
-            if let Some(v) = input.redaction_enabled {
-                update.push_set("redaction_enabled", v as i32);
             }
             if let Some(v) = input.title_weight {
                 update.push_set("title_weight", v.clamp(0.0, 1.0));
@@ -989,42 +950,6 @@ impl<'a> KbEngine<'a> {
         })
     }
 
-    /// P1-3: 设置文档的 ACL（全量覆盖）。
-    ///
-    /// 调用此接口仅更新 `kb_document_acl`，不触发重新嵌入或重新切分。
-    /// 若 `groups` 为空，等价于删除该文档的所有 ACL 行（变为公开）。
-    pub fn set_document_acl(&self, document_id: i64, groups: &[String]) -> Result<()> {
-        self.transaction(|conn| {
-            conn.execute(
-                "DELETE FROM kb_document_acl WHERE document_id = ?1",
-                [document_id],
-            )?;
-            for g in groups {
-                if g.is_empty() {
-                    continue;
-                }
-                conn.execute(
-                    "INSERT OR IGNORE INTO kb_document_acl (document_id, group_id, answerable, visitable) \
-                     VALUES (?1, ?2, 1, 1)",
-                    rusqlite::params![document_id, g],
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    /// P1-3: 列出文档的所有 ACL 行（group_id 列表）。
-    pub fn list_document_acl(&self, document_id: i64) -> Result<Vec<String>> {
-        self.query(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT group_id FROM kb_document_acl WHERE document_id = ?1 AND answerable = 1 \
-                 ORDER BY group_id ASC",
-            )?;
-            let rows = stmt.query_map([document_id], |row| row.get::<_, String>(0))?;
-            Ok(rows.filter_map(|r| r.ok()).collect())
-        })
-    }
-
     pub fn delete_document(&self, id: i64) -> Result<()> {
         let doc = self.get_document(id)?;
         let storage_path = doc.storage_path;
@@ -1302,6 +1227,7 @@ impl<'a> KbEngine<'a> {
         chunk_strategy: &str,
         char_count: i32,
         page_count: i32,
+        token_count: Option<i32>,
     ) -> Result<()> {
         self.update_document_granularity_with_run_guard(
             id,
@@ -1309,6 +1235,7 @@ impl<'a> KbEngine<'a> {
             chunk_strategy,
             char_count,
             page_count,
+            token_count,
             None,
         )
     }
@@ -1323,12 +1250,13 @@ impl<'a> KbEngine<'a> {
         chunk_strategy: &str,
         char_count: i32,
         page_count: i32,
+        token_count: Option<i32>,
         run_id: Option<&str>,
     ) -> Result<()> {
-        // P0-4: token_count 由调用方 (pipeline) 通过环境计算后传入。为保持向后兼容,
-        // 这里直接基于 char_count 估算:CJK 比例约 1:1,ASCII 比例约 4:1,取折中系数 0.6。
-        // 精确计算由 pipeline 调用 token_counter::count_tokens_heuristic 后单独 UPDATE。
-        let approx_token_count = ((char_count as f64) * 0.6).round() as i32;
+        // 优先使用调用方通过 token_counter::count_tokens_heuristic 计算的精确值；
+        // 未提供时回退到 char_count * 0.6 的粗略估算（向后兼容）。
+        let approx_token_count = token_count
+            .unwrap_or_else(|| ((char_count as f64) * 0.6).round() as i32);
         self.transaction(|conn| {
             if let Some(rid) = run_id {
                 // 修复：增加 processing_run_id 条件，防止旧 run 污染 granularity

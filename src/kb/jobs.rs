@@ -33,33 +33,14 @@ pub struct KbProcessPayload {
     pub extension: String,
 }
 
-/// P0 修复: ACL 策略 — 显式表达文档的访问控制意图。
-///
-/// 避免调用方用空数组表达"私有"(deny-all)时被误解释为"公开"。
-/// PandaWiki 的 open/partial/closed 语义与此枚举对应：
-/// - Public   → "open"  (无 ACL 记录，所有人可访问)
-/// - Restricted → "partial" (仅指定用户组可访问)
-/// - Private  → "closed" (deny-all，插入 answerable=0 哨兵行)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AclPolicy {
-    /// 公开 — 所有人都可访问
-    Public,
-    /// 受限 — 仅指定用户组可访问
-    Restricted(Vec<String>),
-    /// 私有 — 关闭给所有人（deny-all）
-    Private,
-}
-
 /// P1-4: KB 索引命令模型。
 ///
 /// 把索引生命周期拆分为独立的命令，每种命令对应一种状态变更，
 /// 不再依赖单一巨型 `kb_process_document` payload。便于：
-/// - ACL 更新独立于内容索引
 /// - 删除/清理与重建解耦
-/// - 后续切换到外部 MQ（NATS/Redis）时直接序列化命令即可
+/// - 各命令可以独立调度和重试
 ///
-/// 现阶段 P1 最小实现仅引入命令枚举与 `to_job_input` 转换；
-/// 调度路径仍以现有 `KbProcessPayload` 为主，新命令逐步接入。
+/// 调度路径以 `KbIndexCommand` 为主，worker 逐条 claim 并执行。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command")]
 pub enum KbIndexCommand {
@@ -71,8 +52,6 @@ pub enum KbIndexCommand {
     },
     /// 删除文档索引（保留 file，仅清理节点/向量/版本）
     DeleteDocumentIndex { document_id: i64 },
-    /// 更新文档 ACL（不重嵌入），使用 AclPolicy 显式表达访问控制意图
-    UpdateAcl { document_id: i64, policy: AclPolicy },
     /// 生成/刷新文档摘要
     SummarizeDocument {
         document_id: i64,
@@ -114,7 +93,6 @@ impl KbIndexCommand {
         match self {
             Self::UpsertDocumentVersion { .. } => "kb_cmd_upsert_version",
             Self::DeleteDocumentIndex { .. } => "kb_cmd_delete_index",
-            Self::UpdateAcl { .. } => "kb_cmd_update_acl",
             Self::SummarizeDocument { .. } => "kb_cmd_summarize",
             Self::ReconcileIndexStatus { .. } => "kb_cmd_reconcile_status",
             Self::CleanupRetiredVersion { .. } => "kb_cmd_cleanup_retired",
@@ -258,8 +236,6 @@ pub fn enqueue_kb_cmd_job(conn: &Connection, cmd: &KbIndexCommand) -> Result<i64
 pub fn claim_next_kb_cmd_job(conn: &Connection) -> Result<Option<(i64, KbIndexCommand)>> {
     let queue = JobQueue::new(conn);
     // 按优先级尝试认领各类型命令作业
-    // P2 修复: 添加 UpsertDocumentVersion 和 SummarizeDocument，
-    // 避免这些命令入队后一直 pending。
     let cmd_types = [
         "kb_cmd_upsert_version",
         "kb_cmd_summarize",
@@ -267,7 +243,6 @@ pub fn claim_next_kb_cmd_job(conn: &Connection) -> Result<Option<(i64, KbIndexCo
         "kb_cmd_finalize_index",
         "kb_cmd_delete_index",
         "kb_cmd_cleanup_retired",
-        "kb_cmd_update_acl",
         "kb_cmd_reconcile_status",
     ];
     for cmd_type in &cmd_types {

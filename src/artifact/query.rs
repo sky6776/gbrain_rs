@@ -1306,7 +1306,8 @@ fn rerank_evidence_candidates(
     });
 
     // P1: 读取库级 rerank_enabled / rerank_provider，与 kb_search 策略保持一致
-    let (external_allowed, redaction_enabled, lib_rerank_enabled, rerank_provider_str) =
+    // 外部 rerank 始终允许，脱敏始终关闭
+    let (_, _, lib_rerank_enabled, rerank_provider_str) =
         resolve_evidence_rerank_policy(conn, &candidates)?;
     let rerank_cfg = crate::kb::rerank::RerankConfig {
         model_rerank_enabled: lib_rerank_enabled,
@@ -1318,7 +1319,6 @@ fn rerank_evidence_candidates(
         rerank_model: config.expansion_model.clone(),
         rerank_timeout_ms: 5000,
         rerank_max_candidates: 50,
-        external_rerank_allowed: external_allowed,
     };
 
     let local_candidates: Vec<(i64, crate::kb::rerank::LocalRankSignals)> = candidates
@@ -1340,14 +1340,10 @@ fn rerank_evidence_candidates(
         .iter()
         .take(rerank_cfg.rerank_max_candidates)
         .map(|c| {
-            let text = if redaction_enabled && external_allowed {
-                crate::kb::privacy::redact_content(&c.content)
-            } else {
-                c.content.clone()
-            };
+            // 脱敏已关闭，直接使用原文
             crate::kb::rerank::RerankCandidate {
                 doc_id: c.candidate_id,
-                text,
+                text: c.content.clone(),
             }
         })
         .collect();
@@ -1372,8 +1368,7 @@ fn rerank_evidence_candidates(
     ));
 
     // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
-    let should_audit = external_allowed
-        && rerank_cfg.model_rerank_enabled
+    let should_audit = rerank_cfg.model_rerank_enabled
         && !api_key.is_empty()
         && rerank_info.model_rerank_attempted;
     if should_audit {
@@ -1465,14 +1460,13 @@ fn normalize_score(score: f64, min: f64, max: f64) -> f64 {
     ((score - min) / width).clamp(0.0, 1.0)
 }
 
-/// m-7 修复：使用 WHERE id IN (...) 一次性查询所有涉及的库策略，
-/// 替代之前的逐个 library_id 查询（N 个库 = N 次 SQL round-trip）。
-/// 通常候选只涉及 1-5 个库，但即使是 5 个也只需 1 次查询。
+/// 查询库级 rerank 配置（rerank_enabled, rerank_provider）。
+/// 外部 rerank 始终允许，脱敏始终关闭，不再查询已删除的列。
 fn resolve_evidence_rerank_policy(
     conn: &Connection,
     candidates: &[EvidenceCandidate],
 ) -> Result<(bool, bool, bool, String)> {
-    // 返回: (external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider)
+    // 返回: (外部 rerank 允许=true, 脱敏=false, rerank_enabled, rerank_provider)
     let library_ids: HashSet<i64> = candidates.iter().map(|c| c.library_id).collect();
     if library_ids.is_empty() {
         return Ok((true, false, true, String::new()));
@@ -1485,7 +1479,7 @@ fn resolve_evidence_rerank_policy(
         .map(|(i, _)| format!("?{}", i + 1))
         .collect();
     let sql = format!(
-        "SELECT external_rerank_allowed, redaction_enabled, rerank_enabled, rerank_provider \
+        "SELECT rerank_enabled, rerank_provider \
          FROM kb_libraries WHERE id IN ({})",
         placeholders.join(",")
     );
@@ -1500,28 +1494,15 @@ fn resolve_evidence_rerank_policy(
         .map_err(|e| GBrainError::Database(format!("准备库策略批量查询失败: {}", e)))?;
     let rows = stmt
         .query_map(param_refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, i32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, String>(3)?,
-            ))
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|e| GBrainError::Database(format!("库策略批量查询失败: {}", e)))?;
 
-    let mut external_allowed = true;
-    let mut redaction_enabled = false;
     let mut rerank_enabled = true;
     let mut rerank_provider = String::new();
     for row in rows {
-        let (allowed, redact, re_enabled, re_provider) =
+        let (re_enabled, re_provider) =
             row.map_err(|e| GBrainError::Database(format!("读取库策略行失败: {}", e)))?;
-        if allowed == 0 {
-            external_allowed = false;
-        }
-        if redact != 0 {
-            redaction_enabled = true;
-        }
         // 任一库禁用 rerank 则全局禁用，取最保守策略
         if re_enabled == 0 {
             rerank_enabled = false;
@@ -1530,12 +1511,7 @@ fn resolve_evidence_rerank_policy(
             rerank_provider = re_provider;
         }
     }
-    Ok((
-        external_allowed,
-        redaction_enabled,
-        rerank_enabled,
-        rerank_provider,
-    ))
+    Ok((true, false, rerank_enabled, rerank_provider))
 }
 
 const RERANK_EXCERPT_CHARS: usize = 1200;

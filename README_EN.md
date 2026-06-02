@@ -900,12 +900,11 @@ PDF parsing performs page-level OCR selection first. In `auto` mode, only pages 
 
 JPG/PNG uploads are queued directly as single-page OCR documents. Recognized text is written back as KB text nodes and re-embedded. Single images follow GLM-OCR's 10 MiB limit; images have no PDF-style native text layer, so if OCR is disabled, missing credentials, or blocked by library policy, there is no local text fallback.
 
-External OCR is additionally gated by library privacy policy: PDF pages and JPG/PNG images are sent to the external OCR service only when `external_ocr_allowed=true` and `redaction_enabled=false`. Otherwise, PDF extractable native text is retained, while images are marked needed/failed until policy or credentials are restored and OCR is retried.
+External OCR is always allowed (library-level privacy switches have been removed). As long as the global switch `GBRAIN_OCR_ENABLED=true` and an API key is configured, PDF pages and JPG/PNG images will be sent to the external OCR service.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GBRAIN_OCR_ENABLED` | Global switch for PDF/image OCR | `true` |
-| `GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT` | Allow external OCR by default for newly created KB libraries | `true` |
 | `GBRAIN_OCR_API_KEY` | GLM-OCR API key; read only from the environment | — |
 | `ZHIPU_API_KEY` | Compatibility alias for the OCR API key, used only if `GBRAIN_OCR_API_KEY` is empty | — |
 | `GBRAIN_OCR_BASE_URL` | GLM-OCR endpoint; a custom URL also requires the safety gate below | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |

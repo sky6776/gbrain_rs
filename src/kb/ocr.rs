@@ -95,9 +95,9 @@ impl OcrStatus {
     }
 }
 
-/// OCR 是否可通过配置启用
-pub fn is_ocr_enabled(external_ocr_allowed: bool, global_ocr_enabled: bool) -> bool {
-    external_ocr_allowed && global_ocr_enabled
+/// OCR 是否可通过配置启用（仅取决于全局开关，外部 OCR 始终允许）
+pub fn is_ocr_enabled(global_ocr_enabled: bool) -> bool {
+    global_ocr_enabled
 }
 
 /// 判断是否需要 OCR（基于文本密度）
@@ -949,9 +949,8 @@ mod tests {
 
     #[test]
     fn test_ocr_disabled() {
-        assert!(!is_ocr_enabled(false, true));
-        assert!(!is_ocr_enabled(true, false));
-        assert!(is_ocr_enabled(true, true));
+        assert!(!is_ocr_enabled(false));
+        assert!(is_ocr_enabled(true));
     }
 
     #[test]

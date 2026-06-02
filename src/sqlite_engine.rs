@@ -771,11 +771,23 @@ impl BrainEngine for SqliteEngine {
 
         conn.execute_batch(SCHEMA_DDL)?;
 
-        // 尝试创建 sqlite-vec 虚拟表（扩展未加载时忽略错误）
+        // 尝试创建 sqlite-vec 虚拟表（扩展未加载时输出 warning，查询将回退到 BLOB 表）
         let vec_ddl = crate::schema::vec_chunks_ddl(self.embedding_dimensions);
-        let _ = conn.execute_batch(&vec_ddl);
+        if let Err(e) = conn.execute_batch(&vec_ddl) {
+            tracing::warn!(
+                dimensions = self.embedding_dimensions,
+                error = %e,
+                "vec_chunks 虚拟表创建失败，向量检索将回退到 BLOB 表；请确认 sqlite-vec 扩展已加载"
+            );
+        }
         let vec_kb_ddl = crate::schema::vec_kb_nodes_ddl(self.embedding_dimensions);
-        let _ = conn.execute_batch(&vec_kb_ddl);
+        if let Err(e) = conn.execute_batch(&vec_kb_ddl) {
+            tracing::warn!(
+                dimensions = self.embedding_dimensions,
+                error = %e,
+                "vec_kb_nodes 虚拟表创建失败，KB 向量检索将回退到 BLOB 表；请确认 sqlite-vec 扩展已加载"
+            );
+        }
 
         // 记录版本号（旧库已在前置检查中拦截，此处仅处理新库或已匹配版本）
         self.run_pending_migrations()?;
@@ -1686,8 +1698,9 @@ impl BrainEngine for SqliteEngine {
                 Some(PageType::from_str_lossy(&page_type_str))
             };
 
-            // Convert cosine distance to similarity score
-            // sqlite-vec returns distance = 1 - cosine_similarity for cosine metric
+            // 将 cosine distance 转为 similarity score
+            // vec_chunks 建表时已声明 distance_metric=cosine，
+            // 因此 distance = 1 - cosine_similarity
             let score = (1.0f32 - distance) as f64;
 
             results.push(SearchResult {

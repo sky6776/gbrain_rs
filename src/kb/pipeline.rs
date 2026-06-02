@@ -764,6 +764,8 @@ pub async fn process_document_async(
         .unwrap_or(0);
     let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
     let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
+    // P0-4: 使用统一的启发式 token counter 计算精确 token 数
+    let token_count = crate::kb::token_counter::count_tokens_heuristic(&parsed.content) as i32;
     // 修复：传入 run_id，防止旧 job 污染新 run 的 granularity
     kb.update_document_granularity_with_run_guard(
         doc_id,
@@ -771,6 +773,7 @@ pub async fn process_document_async(
         chunk_strategy,
         char_count as i32,
         page_count as i32,
+        Some(token_count),
         Some(run_id),
     )?;
 
@@ -976,7 +979,7 @@ pub async fn process_document_async(
 
     // --- 阶段 2.5: 自动关键词与问题生成（可选） ---
     // 需要库级 augmentation_enabled 开关 + 外部摘要允许（增强是外部 LLM 调用）
-    if library.augmentation_enabled && library.external_summary_allowed && !nodes.is_empty() {
+    if library.augmentation_enabled && !nodes.is_empty() {
         // 解析 LLM 配置（复用 RAPTOR 的配置解析逻辑）
         let llm_cfg = raptor::resolve_raptor_llm_config(
             Some(&library),
@@ -999,12 +1002,8 @@ pub async fn process_document_async(
                     continue;
                 }
 
-                // 隐私红线：如果启用脱敏，对外发内容做脱敏处理
-                let content_for_augment = if library.redaction_enabled {
-                    crate::kb::privacy::redact_content(&node.content)
-                } else {
-                    node.content.clone()
-                };
+                // 脱敏已关闭，直接使用原始内容
+                let content_for_augment = node.content.clone();
 
                 // 审计外部模型调用
                 let aug_start = std::time::Instant::now();
@@ -1068,7 +1067,7 @@ pub async fn process_document_async(
     // --- 阶段 3: 嵌入 ---
     // FIX9-02: 区分 embedding_failed 和 embedding_skipped（因隐私策略跳过）
     let mut embedding_failed = false;
-    let mut embedding_skipped = false;
+    let embedding_skipped = false;
     if let Some(emb) = embedder.as_ref() {
         report_progress(
             on_progress,
@@ -1087,78 +1086,63 @@ pub async fn process_document_async(
             Some(run_id),
         )?;
 
-        // P0-016: 检查库级隐私策略 — 禁止外部 embedding 时跳过
-        if !library.external_embedding_allowed {
-            embedding_skipped = true;
-            report_progress(
-                on_progress,
-                "embedding",
-                "库级策略禁止外部 embedding，跳过嵌入阶段",
-            );
-        } else {
-            // P1-012: embedding 使用 embedding_text，为空时 fallback 到 content
-            let texts: Vec<&str> = nodes
-                .iter()
-                .map(|n| {
-                    if n.embedding_text.is_empty() {
-                        n.content.as_str()
-                    } else {
-                        n.embedding_text.as_str()
-                    }
-                })
-                .collect();
-            match emb.embed_batch(&texts).await {
-                Ok(vectors) => {
-                    for (i, node) in nodes.iter_mut().enumerate() {
-                        if i < vectors.len() {
-                            node.vector = Some(vectors[i].clone());
-                        }
-                    }
-                    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
-                    kb.update_document_status_with_run_guard(
-                        doc_id,
-                        None,
-                        None,
-                        None,
-                        Some(STATUS_PROCESSING),
-                        Some(80),
-                        None,
-                        Some(run_id),
-                    )?;
+        // 外部 embedding 始终允许
+        // P1-012: embedding 使用 embedding_text，为空时 fallback 到 content
+        let texts: Vec<&str> = nodes
+            .iter()
+            .map(|n| {
+                if n.embedding_text.is_empty() {
+                    n.content.as_str()
+                } else {
+                    n.embedding_text.as_str()
                 }
-                Err(e) => {
-                    embedding_failed = true;
-                    report_progress(
-                        on_progress,
-                        "embedding",
-                        &format!("嵌入失败: {}, 标记为 embedding_failed", e),
-                    );
-                    // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
-                    kb.update_document_status_with_run_guard(
-                        doc_id,
-                        None,
-                        None,
-                        None,
-                        Some(STATUS_FAILED),
-                        Some(80),
-                        Some(&format!("embedding failed: {}", e)),
-                        Some(run_id),
-                    )?;
+            })
+            .collect();
+        match emb.embed_batch(&texts).await {
+            Ok(vectors) => {
+                for (i, node) in nodes.iter_mut().enumerate() {
+                    if i < vectors.len() {
+                        node.vector = Some(vectors[i].clone());
+                    }
                 }
+                // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+                kb.update_document_status_with_run_guard(
+                    doc_id,
+                    None,
+                    None,
+                    None,
+                    Some(STATUS_PROCESSING),
+                    Some(80),
+                    None,
+                    Some(run_id),
+                )?;
+            }
+            Err(e) => {
+                embedding_failed = true;
+                report_progress(
+                    on_progress,
+                    "embedding",
+                    &format!("嵌入失败: {}, 标记为 embedding_failed", e),
+                );
+                // 修复：中间状态更新传入 run_id，防止旧 job 污染新 run 的文档状态
+                kb.update_document_status_with_run_guard(
+                    doc_id,
+                    None,
+                    None,
+                    None,
+                    Some(STATUS_FAILED),
+                    Some(80),
+                    Some(&format!("embedding failed: {}", e)),
+                    Some(run_id),
+                )?;
             }
         }
     }
 
     // --- 阶段 4: RAPTOR ---
-    // P0-016: 检查库级隐私策略 — 禁止外部摘要时跳过 RAPTOR
+    // 外部摘要始终允许
     if library.raptor_enabled && nodes.len() >= 3 {
-        if !library.external_summary_allowed {
-            report_progress(
-                on_progress,
-                "raptor",
-                "库级策略禁止外部摘要，跳过 RAPTOR 阶段",
-            );
-        } else if let Some(rc) = raptor_config {
+        if let Some(rc) = raptor_config {
             report_progress(on_progress, "raptor", "构建 RAPTOR 树");
 
             match raptor::resolve_raptor_llm_config(
@@ -2431,54 +2415,6 @@ pub fn delete_document_index(conn: &Connection, document_id: i64) -> Result<()> 
     Ok(())
 }
 
-/// P0 修复: 更新文档 ACL（不重嵌入）。
-///
-/// 根据 `AclPolicy` 显式表达访问控制意图：
-/// - Public:  删除所有 ACL 行（无记录 = 公开文档）
-/// - Restricted: 插入 answerable=1 行，限定用户组
-/// - Private:  插入 answerable=0 哨兵行（deny-all，关闭给所有人）
-pub fn update_document_acl(
-    conn: &Connection,
-    document_id: i64,
-    policy: &crate::kb::jobs::AclPolicy,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM kb_document_acl WHERE document_id = ?1",
-        rusqlite::params![document_id],
-    )?;
-
-    match policy {
-        crate::kb::jobs::AclPolicy::Public => {
-            // 删除所有行后不插入任何记录 = 公开文档
-        }
-        crate::kb::jobs::AclPolicy::Restricted(groups) => {
-            for group_id in groups {
-                conn.execute(
-                    "INSERT INTO kb_document_acl (document_id, group_id, answerable) VALUES (?1, ?2, 1)",
-                    rusqlite::params![document_id, group_id],
-                )?;
-            }
-        }
-        crate::kb::jobs::AclPolicy::Private => {
-            // 插入 answerable=0 哨兵行，搜索侧按 deny-only 处理
-            conn.execute(
-                "INSERT INTO kb_document_acl (document_id, group_id, answerable) VALUES (?1, '__private__', 0)",
-                rusqlite::params![document_id],
-            )?;
-        }
-    }
-
-    // 递增 index_version 使搜索缓存失效
-    crate::kb::embedding_index::increment_index_version(conn, "kb_nodes")?;
-
-    tracing::info!(
-        document_id,
-        policy = ?policy,
-        "已更新文档 ACL"
-    );
-    Ok(())
-}
-
 /// P2 修复: 巡检修复 library 下所有文档的 index_status。
 /// 遍历 library 的文档，根据节点/向量/版本状态修正 index_status。
 pub fn reconcile_library_index_status(conn: &Connection, library_id: i64) -> Result<()> {
@@ -2575,7 +2511,7 @@ fn enqueue_image_ocr(
     run_id: &str,
     storage_path: &str,
     ext: &str,
-    library: &Library,
+    _library: &Library,
     file_data: &[u8],
     config: &crate::config::Config,
 ) -> Result<()> {
@@ -2623,30 +2559,8 @@ fn enqueue_image_ocr(
         return Err(GBrainError::InvalidInput(reason));
     }
 
-    if !config.ocr_enabled || !library.external_ocr_allowed {
-        let reason = if !config.ocr_enabled && !library.external_ocr_allowed {
-            "global OCR and library external OCR are disabled"
-        } else if !config.ocr_enabled {
-            "global OCR is disabled (GBRAIN_OCR_ENABLED=false)"
-        } else {
-            "library policy disables external OCR"
-        };
-        mark_image_ocr_unavailable(
-            conn,
-            doc_id,
-            run_id,
-            &ext_lower,
-            &mime_type,
-            config,
-            "needed",
-            crate::kb::ocr::OcrStatus::Needed,
-            reason,
-        )?;
-        return Err(GBrainError::InvalidInput(reason.to_string()));
-    }
-
-    if library.redaction_enabled {
-        let reason = "library redaction is enabled; external OCR is not allowed";
+    if !config.ocr_enabled {
+        let reason = "global OCR is disabled (GBRAIN_OCR_ENABLED=false)";
         mark_image_ocr_unavailable(
             conn,
             doc_id,
@@ -2821,7 +2735,7 @@ fn maybe_apply_pdf_ocr(
     run_id: &str,
     storage_path: &str,
     parsed: &ParsedDocument,
-    library: &crate::kb::types::Library,
+    _library: &crate::kb::types::Library,
     file_data: &[u8],
     config: &crate::config::Config,
 ) -> Result<Option<ParsedDocument>> {
@@ -2830,7 +2744,7 @@ fn maybe_apply_pdf_ocr(
     use crate::kb::ocr_provider::OcrMode;
 
     let ocr_enabled = config.ocr_enabled;
-    let external_allowed = library.external_ocr_allowed;
+    // 外部 OCR 始终允许，不再检查 library.external_ocr_allowed
 
     // 从 metadata 中读取页级分析
     let page_analyses_raw = parsed
@@ -3029,21 +2943,14 @@ fn maybe_apply_pdf_ocr(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    // 检查 OCR 是否启用和外部 OCR 是否允许
-    if !ocr_enabled || !external_allowed {
+    // 检查全局 OCR 是否启用
+    if !ocr_enabled {
         tracing::warn!(
             doc_id,
             ocr_enabled,
-            external_allowed,
-            "PDF 需要 OCR 但 OCR 或外部 OCR 被关闭"
+            "PDF 需要 OCR 但全局 OCR 已关闭"
         );
-        let reason = if !ocr_enabled && !external_allowed {
-            "全局 OCR 和库外部 OCR 均已关闭"
-        } else if !ocr_enabled {
-            "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)"
-        } else {
-            "库策略已关闭外部 OCR"
-        };
+        let reason = "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)";
         crate::kb::ocr::update_ocr_pages_status(
             conn,
             doc_id,
@@ -3059,23 +2966,7 @@ fn maybe_apply_pdf_ocr(
         return Ok(Some(parsed.clone()));
     }
 
-    // 检查隐私策略：redaction_enabled 时禁止外部 OCR
-    if library.redaction_enabled {
-        tracing::warn!(doc_id, "PDF 需要 OCR 但 library 启用了脱敏，禁止外部 OCR");
-        crate::kb::ocr::update_ocr_pages_status(
-            conn,
-            doc_id,
-            &detection.ocr_pages,
-            "needed",
-            "库已启用脱敏，禁止外部 OCR",
-            "glm_ocr",
-            &config.ocr_model,
-            run_id,
-        )?;
-        // 通过聚合函数更新文档 OCR 状态，确保 skipped + needed → partial
-        crate::kb::ocr::update_document_ocr_status(conn, doc_id, doc_page_count, Some(run_id))?;
-        return Ok(Some(parsed.clone()));
-    }
+    // 脱敏已关闭，外部 OCR 始终允许
 
     // 检查 API key
     if config.ocr_api_key.is_none() {

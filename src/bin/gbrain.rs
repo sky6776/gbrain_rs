@@ -1383,23 +1383,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let is_image =
                     gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
-                // 检查库隐私策略
-                {
-                    let kb = gbrain_core::kb::engine::KbEngine::new(conn);
-                    let library = kb.get_library(library_id).map_err(|e| {
-                        gbrain_core::error::GBrainError::Database(format!("查询库失败: {}", e))
-                    })?;
-                    if !library.external_ocr_allowed {
-                        return Err(gbrain_core::error::GBrainError::InvalidInput(
-                            "库已关闭外部 OCR，无法执行 OCR".to_string(),
-                        ));
-                    }
-                    if library.redaction_enabled {
-                        return Err(gbrain_core::error::GBrainError::InvalidInput(
-                            "库已启用脱敏，禁止外部 OCR".to_string(),
-                        ));
-                    }
-                }
+                // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
 
                 let total_pages = if is_image {
                     // 图片文档固定 1 页，不需要 PDF 解析器
@@ -1616,23 +1600,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 let is_image =
                     gbrain_core::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
-                // 检查库隐私策略
-                {
-                    let kb = gbrain_core::kb::engine::KbEngine::new(conn);
-                    let library = kb.get_library(library_id).map_err(|e| {
-                        gbrain_core::error::GBrainError::Database(format!("查询库失败: {}", e))
-                    })?;
-                    if !library.external_ocr_allowed {
-                        return Err(gbrain_core::error::GBrainError::InvalidInput(
-                            "库已关闭外部 OCR，无法执行 OCR 重试".to_string(),
-                        ));
-                    }
-                    if library.redaction_enabled {
-                        return Err(gbrain_core::error::GBrainError::InvalidInput(
-                            "库已启用脱敏，禁止外部 OCR".to_string(),
-                        ));
-                    }
-                }
+                // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
 
                 // 全局 OCR 开关和 API key 检查
                 {

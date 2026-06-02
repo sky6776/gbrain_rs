@@ -105,8 +105,6 @@ pub struct Config {
     // --- OCR 子系统配置 ---
     /// OCR 是否启用（默认 true）
     pub ocr_enabled: bool,
-    /// 新建 library 默认是否允许外部 OCR（默认 true）
-    pub ocr_external_allowed_default: bool,
     /// OCR API key（仅从环境变量读取: GBRAIN_OCR_API_KEY > ZHIPU_API_KEY）
     /// L13: 使用 skip_serializing 允许从配置文件读取（向后兼容），但写入时不持久化密钥。
     /// 环境变量优先级高于配置文件值（见 apply_env_overrides）。
@@ -255,7 +253,6 @@ impl Default for Config {
 
             // OCR 子系统默认配置
             ocr_enabled: true,
-            ocr_external_allowed_default: true,
             ocr_api_key: None,
             ocr_base_url: "https://open.bigmodel.cn/api/paas/v4/layout_parsing".to_string(),
             ocr_allow_custom_base_url: false,
@@ -475,8 +472,6 @@ impl Config {
 
         // --- OCR 子系统环境变量 ---
         config.ocr_enabled = parse_env_bool("GBRAIN_OCR_ENABLED").unwrap_or(config.ocr_enabled);
-        config.ocr_external_allowed_default = parse_env_bool("GBRAIN_OCR_EXTERNAL_ALLOWED_DEFAULT")
-            .unwrap_or(config.ocr_external_allowed_default);
         // API key: GBRAIN_OCR_API_KEY 优先，兼容 ZHIPU_API_KEY
         if let Some(key) = first_nonempty_env(&["GBRAIN_OCR_API_KEY", "ZHIPU_API_KEY"]) {
             config.ocr_api_key = Some(key);
@@ -1081,7 +1076,6 @@ impl Config {
         self.artifact_manual_memory_to_kb = other.artifact_manual_memory_to_kb;
         // OCR 子系统 — always take config file values
         self.ocr_enabled = other.ocr_enabled;
-        self.ocr_external_allowed_default = other.ocr_external_allowed_default;
         // ocr_api_key 不从配置文件合并，只从环境变量读取
         if !other.ocr_base_url.is_empty() {
             self.ocr_base_url = other.ocr_base_url;

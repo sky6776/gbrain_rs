@@ -30,7 +30,6 @@ pub mod passage;
 pub mod pipeline;
 pub mod planner;
 pub mod privacy;
-pub mod queue;
 pub mod raptor;
 pub mod rerank;
 pub mod search;

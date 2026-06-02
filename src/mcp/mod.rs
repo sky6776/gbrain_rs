@@ -988,19 +988,7 @@ impl McpServer {
                 let (title, storage_path, library_id, run_id, extension) = doc_row;
                 let is_image = crate::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
-                // 检查库隐私策略
-                let kb = crate::kb::engine::KbEngine::new(conn);
-                let library = kb.get_library(library_id)?;
-                if !library.external_ocr_allowed {
-                    return Err(crate::error::GBrainError::InvalidInput(
-                        "库已关闭外部 OCR，无法执行".to_string(),
-                    ));
-                }
-                if library.redaction_enabled {
-                    return Err(crate::error::GBrainError::InvalidInput(
-                        "库已启用脱敏，禁止外部 OCR".to_string(),
-                    ));
-                }
+                // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
 
                 let total_pages = if is_image {
                     // 图片文档固定 1 页，不需要 PDF 解析器
@@ -1262,19 +1250,7 @@ impl McpServer {
                 let (title, library_id, run_id, page_count, storage_path, extension) = doc_row;
                 let is_image = crate::artifact::types::is_ocr_image_file(&extension.to_lowercase());
 
-                // 检查库隐私策略（与 kb_ocr_run 保持一致）
-                let kb = crate::kb::engine::KbEngine::new(conn);
-                let library = kb.get_library(library_id)?;
-                if !library.external_ocr_allowed {
-                    return Err(crate::error::GBrainError::InvalidInput(
-                        "库已关闭外部 OCR".to_string(),
-                    ));
-                }
-                if library.redaction_enabled {
-                    return Err(crate::error::GBrainError::InvalidInput(
-                        "库已启用脱敏，禁止外部 OCR".to_string(),
-                    ));
-                }
+                // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
 
                 // 全局 OCR 开关和 API key 检查（与 kb_ocr_run 保持一致）
                 let config = crate::config::Config::load().unwrap_or_default();
