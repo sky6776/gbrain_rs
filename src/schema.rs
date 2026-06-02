@@ -344,7 +344,6 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     name TEXT NOT NULL,
-    semantic_segmentation_enabled INTEGER NOT NULL DEFAULT 0,
     raptor_enabled INTEGER NOT NULL DEFAULT 1,
     raptor_llm_base_url TEXT NOT NULL DEFAULT '',
     raptor_llm_secret_ref TEXT NOT NULL DEFAULT '',
@@ -360,7 +359,6 @@ CREATE TABLE IF NOT EXISTS kb_libraries (
     search_profile TEXT NOT NULL DEFAULT '',
     rerank_enabled INTEGER NOT NULL DEFAULT 1,
     rerank_provider TEXT NOT NULL DEFAULT '',
-    summary_enabled INTEGER NOT NULL DEFAULT 0,
     title_weight REAL NOT NULL DEFAULT 0.2,
     augmentation_enabled INTEGER NOT NULL DEFAULT 1,
     deleted_at TEXT -- 软删除时间戳，NULL 表示未删除

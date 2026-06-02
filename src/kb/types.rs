@@ -54,7 +54,6 @@ pub struct Library {
     pub created_at: String,
     pub updated_at: String,
     pub name: String,
-    pub semantic_segmentation_enabled: bool,
     pub raptor_enabled: bool,
     pub raptor_llm_base_url: String,
     #[serde(skip_serializing)]
@@ -74,7 +73,6 @@ pub struct Library {
     pub search_profile: String,
     pub rerank_enabled: bool,
     pub rerank_provider: String,
-    pub summary_enabled: bool,
     /// 标题/文件名在 embedding 文本中的权重 (0.0-1.0)。默认 0.2。
     /// 权重越高，标题重复次数越多，文档级检索越准确。
     pub title_weight: f32,
@@ -85,8 +83,6 @@ pub struct Library {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateLibraryInput {
     pub name: String,
-    #[serde(default)]
-    pub semantic_segmentation_enabled: Option<bool>,
     #[serde(default)]
     pub raptor_enabled: Option<bool>,
     #[serde(default)]
@@ -117,8 +113,6 @@ pub struct CreateLibraryInput {
     #[serde(default)]
     pub rerank_provider: Option<String>,
     #[serde(default)]
-    pub summary_enabled: Option<bool>,
-    #[serde(default)]
     pub title_weight: Option<f32>,
     #[serde(default)]
     pub augmentation_enabled: Option<bool>,
@@ -127,7 +121,6 @@ pub struct CreateLibraryInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateLibraryInput {
     pub name: Option<String>,
-    pub semantic_segmentation_enabled: Option<bool>,
     pub raptor_enabled: Option<bool>,
     pub raptor_llm_base_url: Option<String>,
     pub raptor_llm_secret_ref: Option<String>,
@@ -141,7 +134,6 @@ pub struct UpdateLibraryInput {
     pub search_profile: Option<String>,
     pub rerank_enabled: Option<bool>,
     pub rerank_provider: Option<String>,
-    pub summary_enabled: Option<bool>,
     pub title_weight: Option<f32>,
     pub augmentation_enabled: Option<bool>,
 }
@@ -154,7 +146,6 @@ pub struct LibraryListItem {
     pub chunk_count: i64,
     pub sort_order: i32,
     pub raptor_enabled: bool,
-    pub semantic_segmentation_enabled: bool,
     pub has_raptor_secret: bool,
 }
 

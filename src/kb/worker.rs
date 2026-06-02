@@ -1934,20 +1934,19 @@ fn writeback_pages_and_enqueue_reembed(
             |row| row.get::<_, String>(0),
         )
         .unwrap_or_default();
-    let (chunk_size, chunk_overlap, semantic_enabled, title_weight): (usize, usize, bool, f32) = conn
+    let (chunk_size, chunk_overlap, title_weight): (usize, usize, f32) = conn
         .query_row(
-            "SELECT chunk_size, chunk_overlap, semantic_segmentation_enabled, COALESCE(title_weight, 0.2) FROM kb_libraries WHERE id = ?1",
+            "SELECT chunk_size, chunk_overlap, COALESCE(title_weight, 0.2) FROM kb_libraries WHERE id = ?1",
             rusqlite::params![payload.library_id],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)? as usize,
                     row.get::<_, i64>(1)? as usize,
-                    row.get::<_, i32>(2)? != 0,
-                    row.get::<_, f32>(3)?,
+                    row.get::<_, f32>(2)?,
                 ))
             },
         )
-        .unwrap_or((1024, 200, false, 0.2));
+        .unwrap_or((1024, 200, 0.2));
 
     let writeback_result = crate::kb::ocr::writeback_ocr_results(
         conn,
@@ -1959,7 +1958,6 @@ fn writeback_pages_and_enqueue_reembed(
         &doc_title,
         total_pages,
         Some(&payload.processing_run_id),
-        semantic_enabled,
         embedder,
         title_weight,
     )?;

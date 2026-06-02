@@ -190,12 +190,12 @@ impl<'a> KbEngine<'a> {
         self.query(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, created_at, updated_at, name, \
-                        semantic_segmentation_enabled, raptor_enabled, \
+                        raptor_enabled, \
                         raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
                         chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, \
                         sort_order, \
                         embedding_provider, embedding_model, embedding_dimensions, \
-                        search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                        search_profile, rerank_enabled, rerank_provider, \
                         title_weight, augmentation_enabled \
                  FROM kb_libraries ORDER BY sort_order DESC, id DESC",
             )?;
@@ -205,26 +205,23 @@ impl<'a> KbEngine<'a> {
                     created_at: row.get(1)?,
                     updated_at: row.get(2)?,
                     name: row.get(3)?,
-                    semantic_segmentation_enabled: row.get::<_, i32>(4)? != 0,
-                    raptor_enabled: row.get::<_, i32>(5)? != 0,
-                    raptor_llm_base_url: row.get(6)?,
-                    raptor_llm_secret_ref: row.get(7)?,
-                    raptor_llm_model: row.get(8)?,
-                    chunk_size: row.get::<_, i32>(9)? as usize,
-                    chunk_overlap: row.get::<_, i32>(10)? as usize,
-                    batch_max_documents: row.get::<_, i32>(11)? as usize,
-                    batch_max_chunks: row.get::<_, i32>(12)? as usize,
-                    sort_order: row.get(13)?,
-                    // P0-016: governance fields 从数据库读取
-                    embedding_provider: row.get(14)?,
-                    embedding_model: row.get(15)?,
-                    embedding_dimensions: row.get(16)?,
-                    search_profile: row.get(17)?,
-                    rerank_enabled: row.get::<_, i32>(18)? != 0,
-                    rerank_provider: row.get(19)?,
-                    summary_enabled: row.get::<_, i32>(20)? != 0,
-                    title_weight: row.get::<_, f32>(21)?,
-                    augmentation_enabled: row.get::<_, i32>(22)? != 0,
+                    raptor_enabled: row.get::<_, i32>(4)? != 0,
+                    raptor_llm_base_url: row.get(5)?,
+                    raptor_llm_secret_ref: row.get(6)?,
+                    raptor_llm_model: row.get(7)?,
+                    chunk_size: row.get::<_, i32>(8)? as usize,
+                    chunk_overlap: row.get::<_, i32>(9)? as usize,
+                    batch_max_documents: row.get::<_, i32>(10)? as usize,
+                    batch_max_chunks: row.get::<_, i32>(11)? as usize,
+                    sort_order: row.get(12)?,
+                    embedding_provider: row.get(13)?,
+                    embedding_model: row.get(14)?,
+                    embedding_dimensions: row.get(15)?,
+                    search_profile: row.get(16)?,
+                    rerank_enabled: row.get::<_, i32>(17)? != 0,
+                    rerank_provider: row.get(18)?,
+                    title_weight: row.get::<_, f32>(19)?,
+                    augmentation_enabled: row.get::<_, i32>(20)? != 0,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -237,7 +234,7 @@ impl<'a> KbEngine<'a> {
         self.query(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT l.id, l.name, l.sort_order, l.raptor_enabled, \
-                        l.semantic_segmentation_enabled, l.raptor_llm_secret_ref, \
+                        l.raptor_llm_secret_ref, \
                         COALESCE(d.doc_count, 0), COALESCE(n.chunk_count, 0) \
                  FROM kb_libraries l \
                  LEFT JOIN (SELECT library_id, COUNT(*) as doc_count FROM kb_documents GROUP BY library_id) d \
@@ -250,12 +247,11 @@ impl<'a> KbEngine<'a> {
                 Ok(LibraryListItem {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    document_count: row.get(6)?,
-                    chunk_count: row.get(7)?,
+                    document_count: row.get(5)?,
+                    chunk_count: row.get(6)?,
                     sort_order: row.get(2)?,
                     raptor_enabled: row.get::<_, i32>(3)? != 0,
-                    semantic_segmentation_enabled: row.get::<_, i32>(4)? != 0,
-                    has_raptor_secret: !row.get::<_, String>(5)?.is_empty(),
+                    has_raptor_secret: !row.get::<_, String>(4)?.is_empty(),
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -270,7 +266,6 @@ impl<'a> KbEngine<'a> {
             let batch_max_docs = input.batch_max_documents.unwrap_or(3).clamp(1, 5) as i32;
             let batch_max_chunks = input.batch_max_chunks.unwrap_or(10).clamp(1, 20) as i32;
             let raptor_enabled = input.raptor_enabled.unwrap_or(true) as i32;
-            let semantic = input.semantic_segmentation_enabled.unwrap_or(false) as i32;
 
             // Get next sort_order from MAX+1
             let max_sort: i32 = conn
@@ -283,16 +278,15 @@ impl<'a> KbEngine<'a> {
 
             conn.execute(
                 "INSERT INTO kb_libraries \
-                 (name, semantic_segmentation_enabled, raptor_enabled, \
+                 (name, raptor_enabled, \
                   raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
                   chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, sort_order, \
                   embedding_provider, embedding_model, embedding_dimensions, \
-                  search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                  search_profile, rerank_enabled, rerank_provider, \
                   title_weight, augmentation_enabled) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     input.name,
-                    semantic,
                     raptor_enabled,
                     input.raptor_llm_base_url.as_deref().unwrap_or(""),
                     input.raptor_llm_secret_ref.as_deref().unwrap_or(""),
@@ -308,7 +302,6 @@ impl<'a> KbEngine<'a> {
                     input.search_profile.as_deref().unwrap_or("balanced"),
                     input.rerank_enabled.unwrap_or(true) as i32,
                     input.rerank_provider.as_deref().unwrap_or(""),
-                    input.summary_enabled.unwrap_or(false) as i32,
                     input.title_weight.unwrap_or(0.2).clamp(0.0, 1.0),
                     input.augmentation_enabled.unwrap_or(true) as i32,
                 ],
@@ -335,12 +328,12 @@ impl<'a> KbEngine<'a> {
         self.query(|conn| {
             conn.query_row(
                 "SELECT id, created_at, updated_at, name, \
-                        semantic_segmentation_enabled, raptor_enabled, \
+                        raptor_enabled, \
                         raptor_llm_base_url, raptor_llm_secret_ref, raptor_llm_model, \
                         chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks, \
                         sort_order, \
                         embedding_provider, embedding_model, embedding_dimensions, \
-                        search_profile, rerank_enabled, rerank_provider, summary_enabled, \
+                        search_profile, rerank_enabled, rerank_provider, \
                         title_weight, augmentation_enabled \
                  FROM kb_libraries WHERE id = ?1",
                 [id],
@@ -350,26 +343,23 @@ impl<'a> KbEngine<'a> {
                         created_at: row.get(1)?,
                         updated_at: row.get(2)?,
                         name: row.get(3)?,
-                        semantic_segmentation_enabled: row.get::<_, i32>(4)? != 0,
-                        raptor_enabled: row.get::<_, i32>(5)? != 0,
-                        raptor_llm_base_url: row.get(6)?,
-                        raptor_llm_secret_ref: row.get(7)?,
-                        raptor_llm_model: row.get(8)?,
-                        chunk_size: row.get::<_, i32>(9)? as usize,
-                        chunk_overlap: row.get::<_, i32>(10)? as usize,
-                        batch_max_documents: row.get::<_, i32>(11)? as usize,
-                        batch_max_chunks: row.get::<_, i32>(12)? as usize,
-                        sort_order: row.get(13)?,
-                        // P0-016: 从数据库真实读取治理字段
-                        embedding_provider: row.get(14)?,
-                        embedding_model: row.get(15)?,
-                        embedding_dimensions: row.get(16)?,
-                        search_profile: row.get(17)?,
-                        rerank_enabled: row.get::<_, i32>(18)? != 0,
-                        rerank_provider: row.get(19)?,
-                        summary_enabled: row.get::<_, i32>(20)? != 0,
-                        title_weight: row.get::<_, f32>(21)?,
-                        augmentation_enabled: row.get::<_, i32>(22)? != 0,
+                        raptor_enabled: row.get::<_, i32>(4)? != 0,
+                        raptor_llm_base_url: row.get(5)?,
+                        raptor_llm_secret_ref: row.get(6)?,
+                        raptor_llm_model: row.get(7)?,
+                        chunk_size: row.get::<_, i32>(8)? as usize,
+                        chunk_overlap: row.get::<_, i32>(9)? as usize,
+                        batch_max_documents: row.get::<_, i32>(10)? as usize,
+                        batch_max_chunks: row.get::<_, i32>(11)? as usize,
+                        sort_order: row.get(12)?,
+                        embedding_provider: row.get(13)?,
+                        embedding_model: row.get(14)?,
+                        embedding_dimensions: row.get(15)?,
+                        search_profile: row.get(16)?,
+                        rerank_enabled: row.get::<_, i32>(17)? != 0,
+                        rerank_provider: row.get(18)?,
+                        title_weight: row.get::<_, f32>(19)?,
+                        augmentation_enabled: row.get::<_, i32>(20)? != 0,
                     })
                 },
             )
@@ -383,9 +373,6 @@ impl<'a> KbEngine<'a> {
 
             if let Some(ref name) = input.name {
                 update.push_set("name", name.clone());
-            }
-            if let Some(semantic) = input.semantic_segmentation_enabled {
-                update.push_set("semantic_segmentation_enabled", semantic as i32);
             }
             if let Some(raptor) = input.raptor_enabled {
                 update.push_set("raptor_enabled", raptor as i32);
@@ -423,9 +410,6 @@ impl<'a> KbEngine<'a> {
             }
             if let Some(ref v) = input.rerank_provider {
                 update.push_set("rerank_provider", v.clone());
-            }
-            if let Some(v) = input.summary_enabled {
-                update.push_set("summary_enabled", v as i32);
             }
             if let Some(v) = input.title_weight {
                 update.push_set("title_weight", v.clamp(0.0, 1.0));

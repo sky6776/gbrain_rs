@@ -703,6 +703,12 @@ pub struct EvidenceHit {
     pub source_end: Option<i64>,
     /// 是否建议 focused 读取更多上下文
     pub needs_more_context: bool,
+    /// P3: 同 section 前一个 chunk 的上下文文本
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_before: Option<String>,
+    /// P3: 同 section 后一个 chunk 的上下文文本
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_after: Option<String>,
     /// 关联的原件信息
     pub artifact: Option<SourceArtifact>,
     /// 关联的影子页面 slug

@@ -36,6 +36,15 @@ static RERANK_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec
 /// positions, making the merge more robust to outlier rankings.
 const RRF_K: usize = 60;
 
+// ---------------------------------------------------------------------------
+// P3: 轻量查询上下文扩展 — 内部默认常量
+// ---------------------------------------------------------------------------
+
+/// 上下文扩展时是否限定同 title_path（同 section）
+const SAME_TITLE_PATH_ONLY: bool = true;
+/// 每个命中结果扩展上下文的最大字符数
+const MAX_EXPANDED_CHARS_PER_HIT: usize = 2500;
+
 /// Perform KB hybrid search with full pipeline:
 /// query normalization → planner → multi-retriever → RRF → rerank → context expansion
 ///
@@ -1093,10 +1102,12 @@ fn enrich_results(
     }
 }
 
-/// P1 修复: 从相邻 node 获取上下文（版本感知）。
+/// P1 修复: 从相邻 node 获取上下文（版本感知 + title_path 过滤）。
 ///
-/// 读取命中节点的 version_id，在上下文查询中限定同一 version_id 且未退役，
-/// 避免新旧版本短时间共存时 context_before/after 拼入退休版本的片段。
+/// 读取命中节点的 version_id 和 title_path，在上下文查询中限定：
+/// - 同一 version_id 且未退役（避免新旧版本共存时拼入退休版本片段）
+/// - 同 title_path（P3: same_title_path_only，确保上下文来自同一 section）
+/// - 扩展上下文总字符数不超过 MAX_EXPANDED_CHARS_PER_HIT
 ///
 /// P3-023/P3-024: 从相邻 node 获取上下文
 fn get_node_context(
@@ -1106,42 +1117,57 @@ fn get_node_context(
     context_before_chars: usize,
     context_after_chars: usize,
 ) -> Result<(Option<String>, Option<String>)> {
-    // 获取当前 node 的 chunk_order 和 version_id
-    let (chunk_order, version_id): (i32, Option<i64>) = conn.query_row(
-        "SELECT chunk_order, version_id FROM kb_document_nodes WHERE id = ?1",
+    // P3: 获取当前 node 的 chunk_order、version_id 和 title_path
+    let (chunk_order, version_id, title_path): (i32, Option<i64>, String) = conn.query_row(
+        "SELECT chunk_order, version_id, COALESCE(title_path, '') FROM kb_document_nodes WHERE id = ?1",
         rusqlite::params![node_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
-    /// 构建版本感知的上下文查询 SQL
-    fn build_context_sql(op: &str, use_version: bool) -> String {
-        let base = format!(
-            "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order {} ?2",
-            op,
+    // P3: 内部函数 — 查找指定方向的邻居 chunk
+    // 注意：此函数与 artifact/query.rs 的 `neighbor_content` 实现相同模式。
+    // 如需修改 SQL 构建逻辑，请同步更新两处。
+    fn find_neighbor(
+        conn: &Connection,
+        document_id: i64,
+        target_order: i32,
+        version_id: Option<i64>,
+        title_path: &str,
+        same_title: bool,
+    ) -> Option<String> {
+        let mut sql = String::from(
+            "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
         );
-        if use_version {
-            format!("{} AND version_id = ?3 AND retired_at IS NULL", base)
-        } else {
-            format!("{} AND retired_at IS NULL", base)
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(document_id),
+            Box::new(target_order),
+        ];
+        if let Some(vid) = version_id {
+            sql.push_str(" AND version_id = ?3");
+            params.push(Box::new(vid));
         }
+        // P3: 同 title_path 过滤，确保上下文来自同一 section
+        if same_title && !title_path.is_empty() {
+            let idx = params.len() + 1;
+            sql.push_str(&format!(" AND title_path = ?{}", idx));
+            params.push(Box::new(title_path.to_string()));
+        }
+        sql.push_str(" AND retired_at IS NULL");
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, String>(0))
+            .ok()
     }
 
-    // 前一个 node（版本感知）
+    // 前一个 node（版本感知 + title_path 过滤）
     let before = if chunk_order > 0 {
-        if let Some(vid) = version_id {
-            conn.query_row(
-                &build_context_sql("=", true),
-                rusqlite::params![document_id, chunk_order - 1, vid],
-                |row| row.get::<_, String>(0),
-            )
-        } else {
-            conn.query_row(
-                &build_context_sql("=", false),
-                rusqlite::params![document_id, chunk_order - 1],
-                |row| row.get::<_, String>(0),
-            )
-        }
-        .ok()
+        find_neighbor(
+            conn,
+            document_id,
+            chunk_order - 1,
+            version_id,
+            &title_path,
+            SAME_TITLE_PATH_ONLY,
+        )
         .map(|s| {
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(context_before_chars);
@@ -1151,27 +1177,43 @@ fn get_node_context(
         None
     };
 
-    // 后一个 node（版本感知）
-    let after = {
-        let result = if let Some(vid) = version_id {
-            conn.query_row(
-                &build_context_sql("=", true),
-                rusqlite::params![document_id, chunk_order + 1, vid],
-                |row| row.get::<_, String>(0),
-            )
-        } else {
-            conn.query_row(
-                &build_context_sql("=", false),
-                rusqlite::params![document_id, chunk_order + 1],
-                |row| row.get::<_, String>(0),
-            )
-        };
-        result.ok().map(|s| {
+    // 后一个 node（版本感知 + title_path 过滤）
+    let after = find_neighbor(
+        conn,
+        document_id,
+        chunk_order + 1,
+        version_id,
+        &title_path,
+        SAME_TITLE_PATH_ONLY,
+    )
+    .map(|s| {
+        let chars: Vec<char> = s.chars().collect();
+        let end = context_after_chars.min(chars.len());
+        chars[..end].iter().collect()
+    });
+
+    // P3: 限制扩展上下文总字符数不超过 MAX_EXPANDED_CHARS_PER_HIT
+    let cap = MAX_EXPANDED_CHARS_PER_HIT;
+    let before_len = before.as_ref().map_or(0, |s: &String| s.chars().count());
+    let after_len = after.as_ref().map_or(0, |s: &String| s.chars().count());
+    if before_len + after_len > cap {
+        // 按比例缩减前后文长度
+        let ratio = cap as f64 / (before_len + after_len) as f64;
+        let before_capped = (before_len as f64 * ratio) as usize;
+        let after_capped = (after_len as f64 * ratio) as usize;
+        let before = before.map(|s| {
             let chars: Vec<char> = s.chars().collect();
-            let end = context_after_chars.min(chars.len());
+            let start = chars.len().saturating_sub(before_capped);
+            chars[start..].iter().collect()
+        });
+        let after = after.map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            let end = after_capped.min(chars.len());
             chars[..end].iter().collect()
-        })
-    };
+        });
+        return Ok((before, after));
+    }
+
     Ok((before, after))
 }
 

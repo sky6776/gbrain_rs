@@ -378,10 +378,111 @@ fn query_kb_evidence(
         plan.core_terms
     );
 
-    candidates
+    let mut hits: Vec<EvidenceHit> = candidates
         .into_iter()
         .map(|candidate| candidate.into_hit(conn, query, filter_slug, &plan))
-        .collect()
+        .collect::<Result<_>>()?;
+
+    // P3: 为证据命中扩展同 section 前后 chunk 上下文
+    expand_evidence_context(conn, &mut hits);
+
+    Ok(hits)
+}
+
+/// P3: 为证据命中扩展同 section 前后 chunk 上下文。
+///
+/// 对每个有 passage_id 的证据命中，通过 kb_passage_spans 反查 node_id，
+/// 再查询同 document_id + title_path 的前后 chunk，填充 context_before/context_after。
+/// 每个邻居最多取 EVIDENCE_CTX_CHARS_PER_SIDE 字符（当前 200）。
+fn expand_evidence_context(conn: &Connection, hits: &mut [EvidenceHit]) {
+    /// 证据上下文每侧最大字符数（与 search.rs 的 context_before/context_after 默认值对齐）
+    const EVIDENCE_CTX_CHARS_PER_SIDE: usize = 200;
+    for hit in hits.iter_mut() {
+        let Some(passage_id) = hit.passage_id else {
+            continue;
+        };
+        // 通过 passage → node 反查 node_id
+        let node_id: Option<i64> = conn
+            .query_row(
+                "SELECT node_id FROM kb_passage_spans WHERE id = ?1",
+                rusqlite::params![passage_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(node_id) = node_id else {
+            continue;
+        };
+        // 获取命中节点的 chunk_order、version_id、title_path
+        let (chunk_order, version_id, title_path): (i32, Option<i64>, String) = match conn
+            .query_row(
+                "SELECT chunk_order, version_id, COALESCE(title_path, '') \
+                 FROM kb_document_nodes WHERE id = ?1",
+                rusqlite::params![node_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let doc_id = hit.kb_document_id;
+        // 查找前一个 chunk（同 title_path + 同 version）
+        let before = if chunk_order > 0 {
+            neighbor_content(
+                conn, doc_id, chunk_order - 1, version_id, &title_path,
+            )
+            .map(|s| {
+                let chars: Vec<char> = s.chars().collect();
+                let start = chars.len().saturating_sub(EVIDENCE_CTX_CHARS_PER_SIDE);
+                chars[start..].iter().collect()
+            })
+        } else {
+            None
+        };
+        // 查找后一个 chunk
+        let after = neighbor_content(
+            conn, doc_id, chunk_order + 1, version_id, &title_path,
+        )
+        .map(|s| {
+            let chars: Vec<char> = s.chars().collect();
+            let end = EVIDENCE_CTX_CHARS_PER_SIDE.min(chars.len());
+            chars[..end].iter().collect()
+        });
+        hit.context_before = before;
+        hit.context_after = after;
+    }
+}
+
+/// 查找邻居 chunk 内容（同 document_id + chunk_order + 可选 version_id + title_path）
+///
+/// 注意：此函数与 search.rs 的 `find_neighbor` 实现相同模式。
+/// 如需修改 SQL 构建逻辑，请同步更新两处。
+fn neighbor_content(
+    conn: &Connection,
+    document_id: i64,
+    target_order: i32,
+    version_id: Option<i64>,
+    title_path: &str,
+) -> Option<String> {
+    let mut sql = String::from(
+        "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
+    );
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(document_id),
+        Box::new(target_order),
+    ];
+    if let Some(vid) = version_id {
+        sql.push_str(" AND version_id = ?3");
+        params.push(Box::new(vid));
+    }
+    // P3: 同 title_path 确保上下文来自同一 section
+    if !title_path.is_empty() {
+        let idx = params.len() + 1;
+        sql.push_str(&format!(" AND title_path = ?{}", idx));
+        params.push(Box::new(title_path.to_string()));
+    }
+    sql.push_str(" AND retired_at IS NULL");
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .ok()
 }
 
 /// 修复：把 evidence 的 artifact / shadow_page_slug 补全抽成 helper，
@@ -770,6 +871,9 @@ impl EvidenceCandidate {
             source_end: snippet_source_end,
             needs_more_context: self.was_truncated
                 || self.content.chars().count() > EVIDENCE_SNIPPET_CHARS,
+            // P3: 上下文扩展字段，稍后由 expand_evidence_context 填充
+            context_before: None,
+            context_after: None,
             artifact,
             shadow_page_slug,
             projections: Vec::new(),

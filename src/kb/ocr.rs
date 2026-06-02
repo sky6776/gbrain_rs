@@ -8,6 +8,7 @@ use crate::error::{GBrainError, Result};
 pub const MAX_OCR_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 use crate::kb::context;
 use crate::kb::engine::KbEngine;
+use crate::kb::pipeline::{serialize_node_metadata_ex, ChunkMeta};
 use crate::kb::types::*;
 use crate::nlp::chinese;
 use rusqlite::Connection;
@@ -632,10 +633,7 @@ pub fn ocr_to_parsed_blocks(ocr_pages: &[OcrWritebackPage]) -> Vec<ParsedBlock> 
 /// 调用方应在 OCR 完成后调用此函数。
 ///
 /// `run_id` 用于防止过期 OCR 覆盖新上传产生的节点，传 None 则不做守卫。
-/// `semantic_enabled` 控制 splitter 选择：true 且有 embedder 时使用语义分割器，
-/// false 或无 embedder 时使用普通 Recursive splitter（向后兼容）。
-/// `embedder` 用于语义分割器计算嵌入相似度；传 None 时即使 semantic_enabled=true
-/// 也会回退到 Recursive splitter。
+/// `embedder` 用于语义分割器计算嵌入相似度；传 None 时使用递归分割。
 /// 在同一事务内完成空内容回写的 OCR 状态与文档统计更新。
 ///
 /// 正常含正文路径已将节点、统计与 OCR 状态放在一个事务内；
@@ -683,7 +681,6 @@ pub fn writeback_ocr_results(
     doc_title: &str,
     total_page_count: i32,
     run_id: Option<&str>,
-    semantic_enabled: bool,
     embedder: Option<std::sync::Arc<crate::embedding::Embedder>>,
     title_weight: f32,
 ) -> Result<WritebackResult> {
@@ -739,14 +736,11 @@ pub fn writeback_ocr_results(
         });
     }
 
-    // P2 修复：使用 create_async_splitter 以真正支持语义分割。
-    // 只有 semantic_enabled=true 且传入 embedder 时才返回语义分割器，
-    // 否则自动回退到 Recursive splitter。
+    // 自适应分割：有 embedder 时大块可语义细分，否则递归细分
     let splitter_config = crate::kb::splitter::SplitterConfig {
-        file_path: String::new(), // OCR 回写无文件路径，走 Recursive splitter
+        file_path: String::new(), // OCR 回写无文件路径，走通用分割
         chunk_size,
         chunk_overlap,
-        semantic_enabled,
     };
     // FIX10-R1: 在 embedder 被 move 之前记录是否有 embedder，用于后续 overlap 计算
     let has_embedder = embedder.is_some();
@@ -838,11 +832,37 @@ pub fn writeback_ocr_results(
             let src_end = Some(chunk_end as i32);
 
             // 跨页 chunk：在 metadata 中记录所有来源页
-            let node_metadata = if overlapping_pages.len() > 1 {
-                serde_json::json!({"page_numbers": overlapping_pages}).to_string()
-            } else {
-                String::new()
+            // P2: 使用 ChunkMeta 写入自适应分块元数据
+            let ocr_chunk_meta = ChunkMeta {
+                strategy: "adaptive",
+                segment_kind: "pdf_page",
+                semantic_refined: false,
+                modality: "pdf_page",
             };
+            let mut node_metadata = serialize_node_metadata_ex(
+                &[],     // OCR writeback 无 media_refs 传入
+                None,
+                false,
+                Some(ocr_chunk_meta),
+            );
+            // 跨页 chunk：合并 page_numbers 到已有的 metadata JSON 中
+            if overlapping_pages.len() > 1 {
+                if let Ok(mut meta_obj) =
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        &node_metadata,
+                    )
+                {
+                    meta_obj.insert(
+                        "page_numbers".to_string(),
+                        serde_json::json!(overlapping_pages),
+                    );
+                    node_metadata = serde_json::Value::Object(meta_obj).to_string();
+                } else {
+                    // fallback：metadata 解析失败时直接写入 page_numbers
+                    node_metadata =
+                        serde_json::json!({"page_numbers": overlapping_pages}).to_string();
+                }
+            }
 
             let embedding_text = context::build_embedding_text(
                 doc_title,

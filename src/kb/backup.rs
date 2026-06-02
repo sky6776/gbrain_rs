@@ -638,9 +638,9 @@ pub fn import_library(
 
     // Create new library
     conn.execute(
-        "INSERT INTO kb_libraries (name, sort_order, semantic_segmentation_enabled, raptor_enabled, \
+        "INSERT INTO kb_libraries (name, sort_order, raptor_enabled, \
          chunk_size, chunk_overlap, batch_max_documents, batch_max_chunks) \
-         VALUES (?1, 0, 0, 1, 512, 50, 3, 10)",
+         VALUES (?1, 0, 1, 512, 50, 3, 10)",
         params![final_name],
     )?;
     let new_lib_id = conn.last_insert_rowid();

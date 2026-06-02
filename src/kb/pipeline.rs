@@ -43,10 +43,24 @@ fn resolve_doc_title<'a>(format_title: &'a str, original_name: &str) -> std::bor
     }
 }
 
-fn serialize_node_metadata(
+/// 节点元数据中的分块策略标记
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChunkMeta {
+    /// 分块策略："adaptive"
+    pub strategy: &'static str,
+    /// 段落类型：heading_section / paragraph / table / code / image_ocr / pdf_page / whole_document
+    pub segment_kind: &'static str,
+    /// 是否经过语义细分
+    pub semantic_refined: bool,
+    /// 内容模态：text / image_ocr / table / pdf_page / code
+    pub modality: &'static str,
+}
+
+pub(crate) fn serialize_node_metadata_ex(
     media_refs: &[MediaRef],
     node_type: Option<&str>,
     include_media_refs: bool,
+    chunk_meta: Option<ChunkMeta>,
 ) -> String {
     let mut obj = serde_json::Map::new();
     if let Some(node_type) = node_type {
@@ -61,11 +75,80 @@ fn serialize_node_metadata(
             serde_json::to_value(media_refs).unwrap_or_else(|_| serde_json::json!([])),
         );
     }
+    // P2: 写入自适应分块元数据标记
+    if let Some(meta) = chunk_meta {
+        obj.insert(
+            "chunk_strategy".to_string(),
+            serde_json::Value::String(meta.strategy.to_string()),
+        );
+        obj.insert(
+            "segment_kind".to_string(),
+            serde_json::Value::String(meta.segment_kind.to_string()),
+        );
+        if meta.semantic_refined {
+            obj.insert(
+                "semantic_refined".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        obj.insert(
+            "modality".to_string(),
+            serde_json::Value::String(meta.modality.to_string()),
+        );
+    }
     if obj.is_empty() {
         String::new()
     } else {
         serde_json::Value::Object(obj).to_string()
     }
+}
+
+/// P2: 根据文件扩展名推断内容模态
+fn infer_modality(ext: &str) -> &'static str {
+    match ext {
+        "pdf" => "pdf_page",
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "webp" => "image_ocr",
+        "csv" | "tsv" | "xlsx" | "xls" => "table",
+        // 代码文件（P4: 列表与 infer_segment_kind / is_code_extension 对齐）
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
+            | "hpp" | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml"
+            | "json" | "xml" => "code",
+        _ => "text",
+    }
+}
+
+/// P2: 根据文件扩展名和 block 信息推断段落类型
+fn infer_segment_kind(ext: &str, block_spans: &[(String, Option<i32>, Option<i32>, Option<i32>)]) -> &'static str {
+    // 表格文件
+    if matches!(ext, "csv" | "tsv" | "xlsx" | "xls") {
+        return "table";
+    }
+    // 代码文件（P4: 扩展列表与 adaptive.rs is_code_extension 对齐）
+    if matches!(
+        ext,
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
+            | "hpp" | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml"
+            | "json" | "xml"
+    ) {
+        return "code";
+    }
+    // Markdown 文件：始终标记为 heading_section（M1 修复）
+    if matches!(ext, "md" | "markdown") {
+        return "heading_section";
+    }
+    // PDF 按页
+    if ext == "pdf" {
+        return "pdf_page";
+    }
+    // 图片 OCR
+    if matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "webp") {
+        return "image_ocr";
+    }
+    // 有标题路径的块 → 标题段落（HTML/DOCX 等可能有结构化标题）
+    if !block_spans.is_empty() && block_spans.iter().any(|(tp, _, _, _)| !tp.is_empty()) {
+        return "heading_section";
+    }
+    "paragraph"
 }
 
 fn media_refs_for_chunk(
@@ -231,26 +314,23 @@ fn actual_overlap_chars(prev: &str, curr: &str, max_overlap: usize) -> usize {
 
 /// 根据 splitter 配置计算最大可能 overlap 字符数
 ///
-/// 优先级与 `create_async_splitter` 一致：
-/// 1. semantic_enabled + 有 embedder → SemanticSplitter 有 overlap → 返回 chunk_overlap
-/// 2. semantic_enabled 但无 embedder → 回退到 Markdown/Recursive
-/// 3. Markdown 扩展名 → MarkdownHeaderSplitter 无 overlap → 返回 0
-/// 4. 其余 → RecursiveCharSplitter，内部 cap 到 chunk_size/2 → 返回 chunk_overlap.min(chunk_size/2)
-///
-/// `has_embedder` 参数指示调用方是否实际提供了 embedder，
-/// 用于匹配 `create_async_splitter` 中 semantic_enabled=true 但无 embedder 的回退逻辑。
+/// 自适应分割策略下的 overlap 计算：
+/// 1. 有 embedder → AdaptiveSplitter 大块可能走 SemanticSplitter → 返回 chunk_overlap
+/// 2. Markdown → 先 header 切（无 overlap），大块可能走 recursive/semantic → 返回 chunk_overlap
+/// 3. 其余 → RecursiveCharSplitter，内部 cap 到 chunk_size/2 → 返回 chunk_overlap.min(chunk_size/2)
 pub fn splitter_max_overlap(config: &SplitterConfig, has_embedder: bool) -> usize {
-    if config.semantic_enabled && has_embedder {
-        return config.chunk_overlap;
-    }
-    // semantic_enabled=true 但无 embedder 时，回退到与 create_splitter 相同的逻辑
     let ext = std::path::Path::new(&config.file_path)
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    if ext == "md" || ext == "markdown" {
-        0
+
+    if has_embedder {
+        // 有 embedder 时，adaptive splitter 的大块会用 SemanticSplitter（带 overlap）
+        config.chunk_overlap
+    } else if ext == "md" || ext == "markdown" {
+        // Markdown：header 切无 overlap，但大块 recursive refine 有 overlap
+        config.chunk_overlap
     } else {
         config.chunk_overlap.min(config.chunk_size / 2)
     }
@@ -383,7 +463,6 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         file_path: storage_path.to_string(),
         chunk_size: library.chunk_size,
         chunk_overlap: library.chunk_overlap,
-        semantic_enabled: library.semantic_segmentation_enabled,
     };
 
     let splitter = create_splitter(&splitter_config);
@@ -428,6 +507,14 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         .unwrap_or_default();
     let doc_title = resolve_doc_title(format_title, &original_name);
     let title_weight = library.title_weight;
+    // P2: 同步管道 ChunkMeta — 根据文件扩展名推断模态和段落类型
+    let sync_ext = payload_ext.to_lowercase();
+    let sync_chunk_meta = ChunkMeta {
+        strategy: "adaptive",
+        segment_kind: infer_segment_kind(&sync_ext, &[]), // 同步管道无 block_spans，传空列表
+        semantic_refined: false,
+        modality: infer_modality(&sync_ext),
+    };
 
     let raptor_nodes: Vec<RaptorNode> = chunks
         .iter()
@@ -454,10 +541,11 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
                 page_number: None,
                 source_start: None,
                 source_end: None,
-                node_metadata: serialize_node_metadata(
+                node_metadata: serialize_node_metadata_ex(
                     &node_media_refs,
                     None,
                     !normalized.media_refs.is_empty(),
+                    Some(sync_chunk_meta),
                 ),
                 embedding_text,
             }
@@ -795,7 +883,6 @@ pub async fn process_document_async(
         file_path: storage_path.to_string(),
         chunk_size: library.chunk_size,
         chunk_overlap: library.chunk_overlap,
-        semantic_enabled: library.semantic_segmentation_enabled,
     };
 
     let splitter = create_async_splitter(&splitter_config, embedder.clone()).inspect_err(|e| {
@@ -891,6 +978,19 @@ pub async fn process_document_async(
         .unwrap_or_default();
     let doc_title = resolve_doc_title(format_title, &original_name);
     let title_weight = library.title_weight;
+    // P2: 根据文件扩展名推断默认 modality 和 segment_kind
+    let file_ext = std::path::Path::new(storage_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let default_chunk_meta = ChunkMeta {
+        strategy: "adaptive",
+        segment_kind: infer_segment_kind(&file_ext, &block_spans),
+        // M2 修复：有 embedder 时大块可能走语义细分，标记为 true
+        semantic_refined: embedder.is_some(),
+        modality: infer_modality(&file_ext),
+    };
     let mut nodes: Vec<RaptorNode> = chunks
         .iter()
         .enumerate()
@@ -926,7 +1026,7 @@ pub async fn process_document_async(
             // URL/alt/caption/OCR 命中对齐，避免文档级全量媒体污染 prompt。
             let node_media_refs = media_refs_for_chunk(&normalized.media_refs, page_num, chunk);
             let node_meta =
-                serialize_node_metadata(&node_media_refs, None, !normalized.media_refs.is_empty());
+                serialize_node_metadata_ex(&node_media_refs, None, !normalized.media_refs.is_empty(), Some(default_chunk_meta));
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -955,6 +1055,12 @@ pub async fn process_document_async(
         let full_text = normalized.markdown.clone();
         let embedding_text =
             crate::kb::context::build_micro_embedding_text(&doc_title, &full_text, title_weight);
+        let micro_meta = ChunkMeta {
+            strategy: "adaptive",
+            segment_kind: "whole_document",
+            semantic_refined: false,
+            modality: infer_modality(&file_ext),
+        };
         nodes = vec![RaptorNode {
             id: -1,
             library_id: lib_id,
@@ -968,10 +1074,11 @@ pub async fn process_document_async(
             page_number: None,
             source_start: None,
             source_end: None,
-            node_metadata: serialize_node_metadata(
+            node_metadata: serialize_node_metadata_ex(
                 &normalized.media_refs,
                 Some("whole_document"),
                 !normalized.media_refs.is_empty(),
+                Some(micro_meta),
             ),
             embedding_text,
         }];
