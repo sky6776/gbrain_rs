@@ -6,68 +6,83 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// P5-020: 对发送给外部模型的文本进行脱敏
+/// P5-020: 对发送给外部模型的文本进行脱敏。
+/// 注意：当前脱敏功能已关闭（外部调用始终允许），此函数保留以备将来启用。
 pub fn redact_content(text: &str) -> String {
     let mut result = text.to_string();
 
     // 邮箱
-    if let Ok(re) = email_regex() {
-        result = re.replace_all(&result, "[EMAIL]").to_string();
-    }
+    result = email_regex()
+        .replace_all(&result, "[EMAIL]")
+        .to_string();
 
-    // 手机号（中国）
-    if let Ok(re) = phone_regex() {
-        result = re.replace_all(&result, "[PHONE]").to_string();
-    }
+    // 手机号（中国大陆）
+    result = phone_regex()
+        .replace_all(&result, "[PHONE]")
+        .to_string();
 
     // 身份证号
-    if let Ok(re) = id_card_regex() {
-        result = re.replace_all(&result, "[ID_NUMBER]").to_string();
-    }
+    result = id_card_regex()
+        .replace_all(&result, "[ID_NUMBER]")
+        .to_string();
 
-    // API key 模式（sk-..., pk-..., etc）
-    if let Ok(re) = api_key_regex() {
-        result = re.replace_all(&result, "[API_KEY]").to_string();
-    }
+    // API key 模式（sk-...、pk-... 等）
+    result = api_key_regex()
+        .replace_all(&result, "[API_KEY]")
+        .to_string();
 
-    // 银行卡号（16-19位数字）
-    if let Ok(re) = bank_card_regex() {
-        result = re.replace_all(&result, "[BANK_CARD]").to_string();
-    }
+    // 银行卡号（16-19 位数字）
+    result = bank_card_regex()
+        .replace_all(&result, "[BANK_CARD]")
+        .to_string();
 
     result
 }
 
-fn email_regex() -> Result<&'static Regex, regex::Error> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap());
-    Ok(RE.get().unwrap())
-}
-
-fn phone_regex() -> Result<&'static Regex, regex::Error> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"1[3-9]\d{9}").unwrap());
-    Ok(RE.get().unwrap())
-}
-
-fn id_card_regex() -> Result<&'static Regex, regex::Error> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\d{17}[\dXx]").unwrap());
-    Ok(RE.get().unwrap())
-}
-
-fn api_key_regex() -> Result<&'static Regex, regex::Error> {
+/// 编译静态邮箱正则表达式。
+/// 正则字面量已知有效，编译不会失败，直接返回 `&'static Regex`。
+fn email_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b(sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|[a-zA-Z0-9]{32,})\b").unwrap()
-    });
-    Ok(RE.get().unwrap())
+        Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+            .expect("邮箱正则字面量已知有效，编译不应失败")
+    })
 }
 
-fn bank_card_regex() -> Result<&'static Regex, regex::Error> {
+/// 编译静态手机号正则表达式（中国大陆）。
+fn phone_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b\d{16,19}\b").unwrap());
-    Ok(RE.get().unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"1[3-9]\d{9}")
+            .expect("手机号正则字面量已知有效，编译不应失败")
+    })
+}
+
+/// 编译静态身份证号正则表达式。
+fn id_card_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\d{17}[\dXx]")
+            .expect("身份证号正则字面量已知有效，编译不应失败")
+    })
+}
+
+/// 编译静态 API key 正则表达式（sk-...、pk-... 等常见格式）。
+fn api_key_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b(sk-[a-zA-Z0-9]{20,}|pk-[a-zA-Z0-9]{20,}|[a-zA-Z0-9]{32,})\b")
+            .expect("API key 正则字面量已知有效，编译不应失败")
+    })
+}
+
+/// 编译静态银行卡号正则表达式（16-19 位数字）。
+fn bank_card_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\b\d{16,19}\b")
+            .expect("银行卡号正则字面量已知有效，编译不应失败")
+    })
 }
 
 /// 记录外部模型调用（写入 kb_external_model_calls）

@@ -243,9 +243,18 @@ fn strip_code_blocks(content: &str) -> String {
         i += 1;
     }
 
-    // SAFETY: 原始内容是有效 UTF-8，我们只将 ASCII 反引号/代码内容替换为
-    // ASCII 空格，不破坏多字节 UTF-8 序列（多字节字符的首字节 >= 0x80）
-    unsafe { String::from_utf8_unchecked(result) }
+    // 原始内容是有效 UTF-8，替换操作仅针对 ASCII 反引号和代码内容，
+    // 不会破坏多字节 UTF-8 序列（多字节字符的首字节 >= 0x80）。
+    // 使用安全的 from_utf8 替代 unsafe from_utf8_unchecked，
+    // 万一 invariants 被破坏也能返回错误而非 UB。
+    String::from_utf8(result).unwrap_or_else(|e| {
+        // 极端 fallback：如果 UTF-8 invariants 被破坏，丢弃非法字节后的内容
+        let valid_up_to = e.utf8_error().valid_up_to();
+        let mut truncated = e.into_bytes();
+        truncated.truncate(valid_up_to);
+        // SAFETY: truncated 只保留 valid_up_to 之前的有效 UTF-8 前缀
+        unsafe { String::from_utf8_unchecked(truncated) }
+    })
 }
 
 /// Extract entity references from markdown content

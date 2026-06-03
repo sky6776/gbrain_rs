@@ -15,22 +15,11 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// P4-006: 查询 embedding 缓存（按 model/dimensions 隔离）
-#[allow(dead_code)]
-static EMBEDDING_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<f32>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(1000, 3600)));
-/// P4-007: 查询分词缓存
-#[allow(dead_code)]
-static TOKENS_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<String>>> =
-    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(5000, 14400)));
-/// P4-008: 召回结果缓存（短 TTL）
+/// P4-008: 召回结果缓存（短 TTL），用于缓存 RRF merge 后的候选集。
+/// 缓存 key 包含 index_version 和 planner_override，索引变更或查询策略变化时自动失效。
 static RETRIEVAL_CACHE: std::sync::LazyLock<
     Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 30)));
-/// P4-009: rerank 结果缓存（按 provider/model/profile 隔离）
-#[allow(dead_code)]
-static RERANK_CACHE: std::sync::LazyLock<Mutex<crate::kb::cache::SearchCache<Vec<RankedResult>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(crate::kb::cache::SearchCache::new(200, 60)));
 
 /// RRF smoothing constant. Higher k dampens the effect of individual rank
 /// positions, making the merge more robust to outlier rankings.

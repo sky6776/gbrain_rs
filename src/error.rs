@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Top-level error type for gbrain operations
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum GBrainError {
     #[error("Database error: {0}")]
     Database(String),

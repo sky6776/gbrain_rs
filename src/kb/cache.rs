@@ -67,7 +67,9 @@ impl<T: Clone> SearchCache<T> {
             }
 
             if entries.len() >= self.max_entries {
-                // 当前 max_entries=100，O(n) 遍历可接受；若需更大容量应改用 OrderedDict 等结构
+                // 当前 max_entries 较小（默认 100-200），O(n) 扫描可接受。
+                // TODO: 若将来 max_entries 增长至数千以上，应改用 OrderedDict 或
+                // 基于时间轮的数据结构，避免每次写入都做全量扫描。
                 // 淘汰最近最少使用的条目，而不是最早创建的条目。
                 if let Some(oldest_key) = entries
                     .iter()

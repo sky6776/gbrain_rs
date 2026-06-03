@@ -392,6 +392,11 @@ impl Config {
         config.kb_enabled = std::env::var("GBRAIN_KB_ENABLED")
             .map(|v| v == "true")
             .unwrap_or(config.kb_enabled);
+        // kb_raptor_secret_ref 是一个间接引用（indirection）：
+        // 它存储的是另一个环境变量的名称（而非密钥值本身）。
+        // 当 GBRAIN_KB_RAPTOR_API_KEY 存在时，secret_ref 设为该字面字符串，
+        // raptor_config_resolved() 会通过 secret_ref 指向的变量名再次查找实际值。
+        // 这一间接层允许在运行时切换密钥来源而无需修改配置。
         config.kb_raptor_secret_ref = std::env::var("GBRAIN_KB_RAPTOR_API_KEY")
             .ok()
             .map(|_| "GBRAIN_KB_RAPTOR_API_KEY".to_string())

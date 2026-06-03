@@ -404,7 +404,7 @@ fn uuid_simple() -> String {
     let seq = counter.fetch_add(1, Ordering::Relaxed);
     let t = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
+        .expect("系统时钟不应早于 Unix epoch (1970-01-01)");
     format!("{:x}-{:x}-{:x}", t.as_nanos(), seq, std::process::id())
 }
 
