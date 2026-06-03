@@ -2308,7 +2308,7 @@ fn vector_search_fallback_legacy(
 }
 
 /// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
-
+///
 /// P3-028: 按 folder_id 过滤结果（仅保留属于指定 folder 的文档的节点）
 fn filter_by_folder(
     conn: &Connection,

@@ -9,7 +9,7 @@
 //! - Idempotent put
 
 use gbrain_core::artifact::promotion::{self, CreateCandidateInput};
-use gbrain_core::artifact::service::{ArtifactContentOptions, ArtifactService};
+use gbrain_core::artifact::service::ArtifactService;
 use gbrain_core::artifact::types::{CandidateType, ReviewCandidateInput, RiskLevel};
 use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
@@ -23,7 +23,7 @@ fn make_engine() -> SqliteEngine {
     engine.init_schema().expect("init_schema");
     // Ensure jobs table exists (needed by KB document processing)
     let conn = engine.connection().expect("connection");
-    gbrain_core::jobs::JobQueue::new(&conn)
+    gbrain_core::jobs::JobQueue::new(conn)
         .init()
         .expect("init_jobs");
     engine
@@ -38,6 +38,7 @@ fn make_svc<'a>(engine: &'a SqliteEngine, config: &'a Config) -> ArtifactService
     ArtifactService::new(engine, ctx, config)
 }
 
+#[allow(dead_code)]
 fn seed_kb_artifact(
     conn: &rusqlite::Connection,
     slug: &str,
@@ -704,7 +705,7 @@ fn artifact_put_dry_run_zero_side_effects() {
     // artifact 不应存在
     let conn = engine.connection().expect("connection");
     let artifact =
-        gbrain_core::artifact::store::find_artifact_by_slug(&conn, "people/dry-run-test")
+        gbrain_core::artifact::store::find_artifact_by_slug(conn, "people/dry-run-test")
             .expect("find_artifact_by_slug");
     assert!(artifact.is_none(), "dry-run 不应创建 artifact");
 }
@@ -975,7 +976,7 @@ fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
 
     let conn = engine.connection().expect("connection");
     let occurrences =
-        gbrain_core::artifact::store::find_occurrences_by_artifact(&conn, artifact_id)
+        gbrain_core::artifact::store::find_occurrences_by_artifact(conn, artifact_id)
             .expect("find_occurrences");
     assert!(!occurrences.is_empty(), "应有 occurrence");
 
@@ -1025,7 +1026,7 @@ fn artifact_put_promote_creates_shadow_page() {
     // 检查 shadow projection 是否存在
     let conn = engine.connection().expect("connection");
     let projections =
-        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id)
+        gbrain_core::artifact::store::find_projections_by_artifact(conn, artifact_id)
             .expect("find_projections");
     let has_shadow = projections
         .iter()
@@ -1328,7 +1329,7 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
     // 验证第一次 put 的 shadow projection 为 active
     let conn = engine.connection().expect("connection");
     let projections1 =
-        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
+        gbrain_core::artifact::store::find_projections_by_artifact(conn, artifact_id_1)
             .expect("find_projections");
     let shadow_active_1 = projections1
         .iter()
@@ -1363,7 +1364,7 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
 
     // 验证旧 artifact 的 shadow projection 变 stale
     let projections1_after =
-        gbrain_core::artifact::store::find_projections_by_artifact(&conn, artifact_id_1)
+        gbrain_core::artifact::store::find_projections_by_artifact(conn, artifact_id_1)
             .expect("find_projections after update");
     let shadow_stale_1 = projections1_after.iter().any(|p| {
         p.projection_type == "brain_shadow_page"
@@ -1394,13 +1395,13 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
         .or_else(|| result2.get("id"))
         .and_then(|v| v.as_i64())
         .expect("should have artifact_id for second put");
-    let artifact2 = gbrain_core::artifact::store::find_artifact_by_id(&conn, artifact_id_2)
+    let artifact2 = gbrain_core::artifact::store::find_artifact_by_id(conn, artifact_id_2)
         .expect("find_artifact_by_id")
         .unwrap();
     assert!(
         page.frontmatter
             .as_ref()
-            .map_or(false, |fm| fm.contains(&artifact2.artifact_uid)),
+            .is_some_and(|fm| fm.contains(&artifact2.artifact_uid)),
         "shadow page frontmatter 应包含新 artifact UID"
     );
 
@@ -1447,7 +1448,7 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
             |row| row.get(0),
         ).expect("查询最新快照内容");
     // 第一次写入的 artifact UID 应出现在快照中（旧版本的 shadow page）
-    let artifact1 = gbrain_core::artifact::store::find_artifact_by_id(&conn, artifact_id_1)
+    let artifact1 = gbrain_core::artifact::store::find_artifact_by_id(conn, artifact_id_1)
         .expect("find_artifact_by_id")
         .unwrap();
     assert!(
@@ -1584,7 +1585,7 @@ fn mcp_tools_call_artifact_query() {
     // 验证 include_sources=false 时 sources 为空
     let sources = result.get("sources").and_then(|v| v.as_array());
     assert!(
-        sources.is_none() || sources.map_or(true, |s| s.is_empty()),
+        sources.is_none() || sources.is_none_or(|s| s.is_empty()),
         "MCP dispatch: include_sources=false 时顶层 sources 应为空"
     );
 
@@ -1860,7 +1861,7 @@ fn artifact_put_conflict_detection_on_human_edit() {
         .and_then(|v| v.as_i64())
         .expect("冲突分支应返回 artifact_id");
     let conflict_projections =
-        gbrain_core::artifact::store::find_projections_by_artifact(&conn, conflict_artifact_id)
+        gbrain_core::artifact::store::find_projections_by_artifact(conn, conflict_artifact_id)
             .expect("查询冲突 artifact 投影");
     let has_active_brain_page_update = conflict_projections
         .iter()
@@ -2351,7 +2352,7 @@ fn apply_projection_ref_matches_baseline_query() {
 
     // P1-11 核心断言：baseline 查询能查到 apply 后的投影
     let baseline_hash = gbrain_core::artifact::store::find_latest_page_update_hash_by_slug(
-        &conn,
+        conn,
         "people/apply-projref-test",
     )
     .expect("baseline 查询不应报错");
@@ -2780,7 +2781,7 @@ fn rollback_then_put_no_false_conflict_from_rolled_back_projection() {
 
     // P1-12 核心测试：rollback 后，baseline 查询不应返回已回滚投影的 hash
     let baseline_hash = gbrain_core::artifact::store::find_latest_page_update_hash_by_slug(
-        &conn,
+        conn,
         "people/rollback-conflict-test",
     )
     .expect("baseline 查询不应报错");
@@ -2985,7 +2986,7 @@ fn rollback_fact_claim_restores_page_content() {
 
     // 创建 fact_claim 候选
     let candidate_id = promotion::create_candidate(
-        &conn,
+        conn,
         CreateCandidateInput {
             artifact_id,
             occurrence_id: None,
@@ -3005,7 +3006,7 @@ fn rollback_fact_claim_restores_page_content() {
 
     // 接受候选
     promotion::review_candidate(
-        &conn,
+        conn,
         &ReviewCandidateInput {
             candidate_id,
             action: "accept".to_string(),
@@ -3016,7 +3017,7 @@ fn rollback_fact_claim_restores_page_content() {
     .expect("接受候选应成功");
 
     // 应用候选
-    let applied = promotion::apply_candidate(&conn, candidate_id).expect("应用候选应成功");
+    let applied = promotion::apply_candidate(conn, candidate_id).expect("应用候选应成功");
     assert_eq!(applied.status, "applied");
 
     // 验证页面内容已变更（包含 facts 条目）
@@ -3034,7 +3035,7 @@ fn rollback_fact_claim_restores_page_content() {
     );
 
     // 回滚候选
-    let rolled_back = promotion::rollback_candidate(&conn, candidate_id).expect("回滚候选应成功");
+    let rolled_back = promotion::rollback_candidate(conn, candidate_id).expect("回滚候选应成功");
     assert_eq!(rolled_back.status, "rolled_back");
 
     // 验证页面内容恢复
@@ -3095,7 +3096,7 @@ fn rollback_page_create_soft_deletes_page() {
 
     // 创建 page_create 候选
     let candidate_id = promotion::create_candidate(
-        &conn,
+        conn,
         CreateCandidateInput {
             artifact_id,
             occurrence_id: None,
@@ -3116,7 +3117,7 @@ fn rollback_page_create_soft_deletes_page() {
 
     // 接受并应用
     promotion::review_candidate(
-        &conn,
+        conn,
         &ReviewCandidateInput {
             candidate_id,
             action: "accept".to_string(),
@@ -3126,7 +3127,7 @@ fn rollback_page_create_soft_deletes_page() {
     )
     .expect("接受 page_create 候选应成功");
 
-    let applied = promotion::apply_candidate(&conn, candidate_id).expect("应用 page_create 应成功");
+    let applied = promotion::apply_candidate(conn, candidate_id).expect("应用 page_create 应成功");
     assert_eq!(applied.status, "applied");
 
     // 验证页面已创建
@@ -3144,7 +3145,7 @@ fn rollback_page_create_soft_deletes_page() {
 
     // 回滚
     let rolled_back =
-        promotion::rollback_candidate(&conn, candidate_id).expect("回滚 page_create 应成功");
+        promotion::rollback_candidate(conn, candidate_id).expect("回滚 page_create 应成功");
     assert_eq!(rolled_back.status, "rolled_back");
 
     // 验证页面已被软删除
@@ -3206,7 +3207,7 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
 
     // 第一个 fact_claim 候选
     let candidate_1_id = promotion::create_candidate(
-        &conn,
+        conn,
         CreateCandidateInput {
             artifact_id,
             occurrence_id: None,
@@ -3225,7 +3226,7 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
     .expect("创建第一个候选");
 
     promotion::review_candidate(
-        &conn,
+        conn,
         &ReviewCandidateInput {
             candidate_id: candidate_1_id,
             action: "accept".to_string(),
@@ -3235,11 +3236,11 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
     )
     .expect("接受第一个候选");
 
-    let _applied1 = promotion::apply_candidate(&conn, candidate_1_id).expect("应用第一个候选");
+    let _applied1 = promotion::apply_candidate(conn, candidate_1_id).expect("应用第一个候选");
 
     // 第二个 fact_claim 候选
     let candidate_2_id = promotion::create_candidate(
-        &conn,
+        conn,
         CreateCandidateInput {
             artifact_id,
             occurrence_id: None,
@@ -3258,7 +3259,7 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
     .expect("创建第二个候选");
 
     promotion::review_candidate(
-        &conn,
+        conn,
         &ReviewCandidateInput {
             candidate_id: candidate_2_id,
             action: "accept".to_string(),
@@ -3268,7 +3269,7 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
     )
     .expect("接受第二个候选");
 
-    let _applied2 = promotion::apply_candidate(&conn, candidate_2_id).expect("应用第二个候选");
+    let _applied2 = promotion::apply_candidate(conn, candidate_2_id).expect("应用第二个候选");
 
     // 记录两个候选应用后的页面内容
     let content_before_rollback: String = conn
@@ -3280,7 +3281,7 @@ fn rollback_older_fact_claim_rejected_after_newer_applied() {
         .expect("查询页面内容");
 
     // 尝试回滚较早的候选 → 应失败
-    let rollback_result = promotion::rollback_candidate(&conn, candidate_1_id);
+    let rollback_result = promotion::rollback_candidate(conn, candidate_1_id);
     assert!(
         rollback_result.is_err(),
         "P2 修复：rollback 较早候选应被拒绝，因为不是最新 applied 候选"

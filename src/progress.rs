@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_progress_json_mode() {
-        let _buf: Box<Vec<u8>> = Box::new(Vec::new());
+        let _buf: Box<Vec<u8>> = Box::default();
         // Can't use Vec directly with 'static, so skip for now
     }
 

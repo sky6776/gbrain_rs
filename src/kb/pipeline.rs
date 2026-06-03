@@ -8,6 +8,9 @@ use crate::embedding::Embedder;
 use crate::error::{GBrainError, Result};
 use crate::kb::engine::KbEngine;
 use crate::kb::jobs::KbProcessPayload;
+
+/// Block span tuple: (title_path, page_number, source_start, source_end).
+type BlockSpan = (String, Option<i32>, Option<i32>, Option<i32>);
 use crate::kb::parser::{ParsedDocument, ParserRegistry};
 use crate::kb::raptor::{self, RaptorConfig};
 use crate::kb::splitter::{create_async_splitter, create_splitter, SplitterConfig};
@@ -118,7 +121,7 @@ fn infer_modality(ext: &str) -> &'static str {
 }
 
 /// P2: 根据文件扩展名和 block 信息推断段落类型
-fn infer_segment_kind(ext: &str, block_spans: &[(String, Option<i32>, Option<i32>, Option<i32>)]) -> &'static str {
+fn infer_segment_kind(ext: &str, block_spans: &[BlockSpan]) -> &'static str {
     // 表格文件
     if matches!(ext, "csv" | "tsv" | "xlsx" | "xls") {
         return "table";
@@ -925,7 +928,7 @@ pub async fn process_document_async(
     } else {
         &normalized.blocks
     };
-    let block_spans: Vec<(String, Option<i32>, Option<i32>, Option<i32>)> = source_blocks
+    let block_spans: Vec<BlockSpan> = source_blocks
         .iter()
         .map(|b| {
             (

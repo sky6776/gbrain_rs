@@ -6,6 +6,9 @@ use crate::error::Result;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+/// Grouped library index: (model, dimensions, [(index_id, [library_ids])])
+pub type LibraryIndexGroup = Vec<(String, i32, Vec<(i64, Vec<i64>)>)>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingIndex {
     pub id: i64,
@@ -342,7 +345,7 @@ pub fn get_active_index_for_library(
 pub fn group_libraries_by_active_index(
     conn: &Connection,
     library_ids: &[i64],
-) -> Result<Vec<(String, i32, Vec<(i64, Vec<i64>)>)>> {
+) -> Result<LibraryIndexGroup> {
     if library_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -381,7 +384,7 @@ pub fn group_libraries_by_active_index(
 
     // 按 (model, dimensions) 分组
     // 不同 model 即使同维度也分到不同组——向量不可互换
-    let mut groups: Vec<(String, i32, Vec<(i64, Vec<i64>)>)> = Vec::new();
+    let mut groups: LibraryIndexGroup = Vec::new();
     for (lib_id, idx_id, model, dims) in lib_indexes {
         if let Some(group) = groups.iter_mut().find(|(m, d, _)| *m == model && *d == dims) {
             // 同一 model+dim 组内，按 index_id 聚合 library_ids

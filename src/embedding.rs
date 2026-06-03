@@ -10,6 +10,11 @@ use crate::error::{GBrainError, Result};
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
+/// Batch embedding result type alias.
+type EmbeddingBatchResult = Result<(usize, Vec<Vec<f32>>)>;
+/// JoinHandle for batch embedding tasks.
+type EmbeddingBatchHandle = tokio::task::JoinHandle<EmbeddingBatchResult>;
+
 /// Default embedding model
 pub const DEFAULT_MODEL: &str = "text-embedding-3-large";
 
@@ -153,7 +158,7 @@ impl Embedder {
             start += batch.len();
         }
 
-        let mut handles: Vec<tokio::task::JoinHandle<Result<(usize, Vec<Vec<f32>>)>>> =
+        let mut handles: Vec<EmbeddingBatchHandle> =
             Vec::with_capacity(sub_tasks.len());
 
         for (idx, batch_owned) in sub_tasks {

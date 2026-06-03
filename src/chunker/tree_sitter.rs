@@ -1801,7 +1801,7 @@ class Greeter:
             || indexed.chunks.iter().any(|c| {
                 c.symbol_name
                     .as_ref()
-                    .map_or(false, |n| n.contains("Greeter"))
+                    .is_some_and(|n| n.contains("Greeter"))
             });
         assert!(has_greeter, "Should find Greeter class");
 
@@ -1814,7 +1814,7 @@ class Greeter:
                 c.parent_symbol_path.as_deref() == Some("Greeter")
                     && c.symbol_name
                         .as_ref()
-                        .map_or(false, |n| n.contains("hello"))
+                        .is_some_and(|n| n.contains("hello"))
             });
         assert!(
             has_hello,
@@ -1854,7 +1854,7 @@ function isRelevant(r: SearchResult): boolean {
             || indexed.chunks.iter().any(|c| {
                 c.symbol_name
                     .as_ref()
-                    .map_or(false, |n| n.contains("searchKeyword"))
+                    .is_some_and(|n| n.contains("searchKeyword"))
             });
         assert!(found_search, "Should find searchKeyword");
     }

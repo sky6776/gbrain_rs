@@ -1227,6 +1227,7 @@ impl<'a> KbEngine<'a> {
     /// 修复：带 run_id 守卫的 update_document_granularity。
     /// 如果提供了 run_id，UPDATE 语句增加 `AND processing_run_id = ?` 条件，
     /// 防止旧 job 在过期后继续写 granularity，污染新 run 的文档。
+    #[allow(clippy::too_many_arguments)]
     pub fn update_document_granularity_with_run_guard(
         &self,
         id: i64,

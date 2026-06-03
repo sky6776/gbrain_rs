@@ -963,91 +963,6 @@ pub struct WritebackResult {
     pub ocr_text_coverage: f64,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ocr_disabled() {
-        assert!(!is_ocr_enabled(false));
-        assert!(is_ocr_enabled(true));
-    }
-
-    #[test]
-    fn test_needs_ocr() {
-        assert!(needs_ocr(0.01, 0.05));
-        assert!(!needs_ocr(0.1, 0.05));
-    }
-
-    #[test]
-    fn test_ocr_to_parsed_blocks_empty() {
-        let blocks = ocr_to_parsed_blocks(&[]);
-        assert!(blocks.is_empty());
-    }
-
-    #[test]
-    fn test_ocr_to_parsed_blocks_single_page() {
-        let pages = vec![OcrWritebackPage {
-            page_number: 1,
-            text: "Hello world".to_string(),
-        }];
-        let blocks = ocr_to_parsed_blocks(&pages);
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].text, "Hello world");
-        assert_eq!(blocks[0].page_number, Some(1));
-        assert_eq!(blocks[0].block_type, "ocr_text");
-        assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[0].source_end, Some(20));
-    }
-
-    #[test]
-    fn test_ocr_to_parsed_blocks_multi_page() {
-        let pages = vec![
-            OcrWritebackPage {
-                page_number: 1,
-                text: "Page one".to_string(),
-            },
-            OcrWritebackPage {
-                page_number: 2,
-                text: "Page two".to_string(),
-            },
-        ];
-        let blocks = ocr_to_parsed_blocks(&pages);
-        assert_eq!(blocks.len(), 2);
-        // Spans include the page marker and the two-character separator.
-        assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[1].source_start, Some(19));
-        assert_eq!(blocks[1].source_end, Some(36));
-    }
-
-    #[test]
-    fn test_ocr_to_parsed_blocks_chinese() {
-        let pages = vec![
-            OcrWritebackPage {
-                page_number: 1,
-                text: "第一页内容".to_string(),
-            },
-            OcrWritebackPage {
-                page_number: 2,
-                text: "第二页内容".to_string(),
-            },
-        ];
-        let blocks = ocr_to_parsed_blocks(&pages);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].source_start, Some(0));
-        assert_eq!(blocks[0].source_end, Some(14));
-        assert_eq!(blocks[1].source_start, Some(16));
-        assert_eq!(blocks[1].source_end, Some(30));
-    }
-
-    #[test]
-    fn test_ocr_status_as_str() {
-        assert_eq!(OcrStatus::Done.as_str(), "done");
-        assert_eq!(OcrStatus::Needed.as_str(), "needed");
-        assert_eq!(OcrStatus::Failed.as_str(), "failed");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // OCR 响应脱敏工具
 // ---------------------------------------------------------------------------
@@ -1266,4 +1181,89 @@ pub fn sanitize_error_text_with_secret(error: &str, sensitive_value: Option<&str
         sanitized.push_str("...[TRUNCATED]");
     }
     sanitized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ocr_disabled() {
+        assert!(!is_ocr_enabled(false));
+        assert!(is_ocr_enabled(true));
+    }
+
+    #[test]
+    fn test_needs_ocr() {
+        assert!(needs_ocr(0.01, 0.05));
+        assert!(!needs_ocr(0.1, 0.05));
+    }
+
+    #[test]
+    fn test_ocr_to_parsed_blocks_empty() {
+        let blocks = ocr_to_parsed_blocks(&[]);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_ocr_to_parsed_blocks_single_page() {
+        let pages = vec![OcrWritebackPage {
+            page_number: 1,
+            text: "Hello world".to_string(),
+        }];
+        let blocks = ocr_to_parsed_blocks(&pages);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "Hello world");
+        assert_eq!(blocks[0].page_number, Some(1));
+        assert_eq!(blocks[0].block_type, "ocr_text");
+        assert_eq!(blocks[0].source_start, Some(0));
+        assert_eq!(blocks[0].source_end, Some(20));
+    }
+
+    #[test]
+    fn test_ocr_to_parsed_blocks_multi_page() {
+        let pages = vec![
+            OcrWritebackPage {
+                page_number: 1,
+                text: "Page one".to_string(),
+            },
+            OcrWritebackPage {
+                page_number: 2,
+                text: "Page two".to_string(),
+            },
+        ];
+        let blocks = ocr_to_parsed_blocks(&pages);
+        assert_eq!(blocks.len(), 2);
+        // Spans include the page marker and the two-character separator.
+        assert_eq!(blocks[0].source_start, Some(0));
+        assert_eq!(blocks[1].source_start, Some(19));
+        assert_eq!(blocks[1].source_end, Some(36));
+    }
+
+    #[test]
+    fn test_ocr_to_parsed_blocks_chinese() {
+        let pages = vec![
+            OcrWritebackPage {
+                page_number: 1,
+                text: "第一页内容".to_string(),
+            },
+            OcrWritebackPage {
+                page_number: 2,
+                text: "第二页内容".to_string(),
+            },
+        ];
+        let blocks = ocr_to_parsed_blocks(&pages);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].source_start, Some(0));
+        assert_eq!(blocks[0].source_end, Some(14));
+        assert_eq!(blocks[1].source_start, Some(16));
+        assert_eq!(blocks[1].source_end, Some(30));
+    }
+
+    #[test]
+    fn test_ocr_status_as_str() {
+        assert_eq!(OcrStatus::Done.as_str(), "done");
+        assert_eq!(OcrStatus::Needed.as_str(), "needed");
+        assert_eq!(OcrStatus::Failed.as_str(), "failed");
+    }
 }

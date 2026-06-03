@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_concatenate_cluster() {
-        let nodes = vec![
+        let nodes = [
             RaptorNode {
                 id: 1,
                 library_id: 1,

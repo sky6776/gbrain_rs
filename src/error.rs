@@ -42,7 +42,7 @@ pub enum GBrainError {
     Migration(String),
 
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(String),
 
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -245,6 +245,12 @@ impl From<rusqlite::Error> for GBrainError {
 impl From<serde_json::Error> for GBrainError {
     fn from(err: serde_json::Error) -> Self {
         GBrainError::Serialization(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for GBrainError {
+    fn from(err: std::io::Error) -> Self {
+        GBrainError::Io(err.to_string())
     }
 }
 

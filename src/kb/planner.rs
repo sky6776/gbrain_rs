@@ -67,7 +67,7 @@ pub struct PlannerOutput {
 fn is_exact_lookup_pattern(q: &str) -> bool {
     // 文件扩展名模式: report.pdf, data.xlsx, document.docx 等
     if q.contains('.')
-        && q.split('.').last().map_or(false, |ext| {
+        && q.split('.').next_back().is_some_and(|ext| {
             ext.len() >= 2 && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphabetic())
         })
     {

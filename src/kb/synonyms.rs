@@ -848,7 +848,7 @@ mod tests {
 
     fn test_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&schema::SCHEMA_DDL).unwrap();
+        conn.execute_batch(schema::SCHEMA_DDL).unwrap();
         conn
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn blob_roundtrip() {
-        let original = vec![1.0_f32, -2.5, 0.0, 3.14];
+        let original = vec![1.0_f32, -2.5, 0.0, std::f32::consts::PI];
         let blob = embedding_to_blob(&original);
         let restored = blob_to_f32(&blob);
         assert_eq!(original, restored);
