@@ -80,12 +80,7 @@ pub fn kb_search(
 
     // Title/name retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::TitleName) {
-        let title_results = title_name_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k,
-        )?;
+        let title_results = title_name_retriever(conn, &final_query, &input.library_ids, fetch_k)?;
         if !title_results.is_empty() {
             all_candidates.push(title_results);
         }
@@ -96,13 +91,8 @@ pub fn kb_search(
 
     // Node FTS retriever (P3-009)
     if retriever_set.contains(&crate::kb::planner::RetrieverType::NodeFts) {
-        let fts_results = kb_fts_search(
-            conn,
-            &final_query,
-            &input.library_ids,
-            input.level,
-            fetch_k,
-        )?;
+        let fts_results =
+            kb_fts_search(conn, &final_query, &input.library_ids, input.level, fetch_k)?;
         if !fts_results.is_empty() {
             all_candidates.push(fts_results);
         }
@@ -127,12 +117,7 @@ pub fn kb_search(
 
     // P3-011: Summary retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Summary) {
-        if let Ok(sr) = summary_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k,
-        ) {
+        if let Ok(sr) = summary_retriever(conn, &final_query, &input.library_ids, fetch_k) {
             if !sr.is_empty() {
                 all_candidates.push(sr);
             }
@@ -141,12 +126,7 @@ pub fn kb_search(
 
     // P3-012: Table retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Table) {
-        if let Ok(tr) = table_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k,
-        ) {
+        if let Ok(tr) = table_retriever(conn, &final_query, &input.library_ids, fetch_k) {
             if !tr.is_empty() {
                 all_candidates.push(tr);
             }
@@ -155,12 +135,7 @@ pub fn kb_search(
 
     // P3-013: Metadata retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Metadata) {
-        if let Ok(mr) = metadata_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k,
-        ) {
+        if let Ok(mr) = metadata_retriever(conn, &final_query, &input.library_ids, fetch_k) {
             if !mr.is_empty() {
                 all_candidates.push(mr);
             }
@@ -169,12 +144,7 @@ pub fn kb_search(
 
     // P1 修复: PassageFts retriever — 段落级 FTS 兜底召回
     if retriever_set.contains(&crate::kb::planner::RetrieverType::PassageFts) {
-        if let Ok(pr) = passage_fts_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k,
-        ) {
+        if let Ok(pr) = passage_fts_retriever(conn, &final_query, &input.library_ids, fetch_k) {
             if !pr.is_empty() {
                 all_candidates.push(pr);
             }
@@ -201,10 +171,7 @@ pub fn kb_search(
         .map_or_else(|| "-".to_string(), |e| e.to_string());
     // planner_override 会改变 retriever 集合（如 exact vs conceptual），
     // 必须纳入缓存 key，否则同一 query/profile 下不同 override 会复用错误候选集。
-    let planner_str = input
-        .planner_override
-        .as_deref()
-        .unwrap_or("-");
+    let planner_str = input.planner_override.as_deref().unwrap_or("-");
     let merge_cache_key = format!(
         "merge:{}|libs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}|plan:{}",
         final_query,
@@ -247,13 +214,9 @@ pub fn kb_search(
         let mut variants = crate::nlp::chinese::expand_query_with_synonyms(&final_query);
         variants.extend(crate::nlp::chinese::expand_query_with_aliases(&final_query));
         for variant in variants.iter().skip(1).take(3) {
-            if let Ok(fr) = kb_fts_search(
-                conn,
-                variant,
-                &input.library_ids,
-                input.level,
-                fetch_k * 2,
-            ) {
+            if let Ok(fr) =
+                kb_fts_search(conn, variant, &input.library_ids, input.level, fetch_k * 2)
+            {
                 if !fr.is_empty() {
                     merged.extend(fr);
                     fallbacks_used.push("synonym_alias_expand");
@@ -300,12 +263,7 @@ pub fn kb_search(
     }
     if merged.is_empty() {
         // Level 4: title_name_expand — 扩展到文件名/标题检索
-        if let Ok(fr) = title_name_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k * 3,
-        ) {
+        if let Ok(fr) = title_name_retriever(conn, &final_query, &input.library_ids, fetch_k * 3) {
             if !fr.is_empty() {
                 merged.extend(fr);
                 fallbacks_used.push("title_name_expand");
@@ -314,12 +272,7 @@ pub fn kb_search(
     }
     if merged.is_empty() {
         // Level 5: summary_search — 搜索摘要
-        if let Ok(sr) = summary_retriever(
-            conn,
-            &final_query,
-            &input.library_ids,
-            fetch_k * 3,
-        ) {
+        if let Ok(sr) = summary_retriever(conn, &final_query, &input.library_ids, fetch_k * 3) {
             if !sr.is_empty() {
                 merged.extend(sr);
                 fallbacks_used.push("summary_search");
@@ -458,68 +411,67 @@ pub fn kb_search(
             .rerank_api_key
             .as_deref()
             .is_some_and(|k| !k.is_empty());
-        let (scored, rerank_result) =
-            if rerank_cfg.model_rerank_enabled && has_api_key {
-                let api_key = input.rerank_api_key.as_deref().unwrap_or("");
-                let base_url = input
-                    .rerank_base_url
-                    .as_deref()
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or("https://api.openai.com/v1");
-                // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
-                let rt = crate::runtime::shared_runtime();
-                let rerank_start = std::time::Instant::now();
-                let result = rt.block_on(crate::kb::rerank::try_model_rerank_simple(
-                    &rerank_cfg,
-                    &final_query,
-                    &candidates,
-                    &candidate_texts,
-                    &weights,
+        let (scored, rerank_result) = if rerank_cfg.model_rerank_enabled && has_api_key {
+            let api_key = input.rerank_api_key.as_deref().unwrap_or("");
+            let base_url = input
+                .rerank_base_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .unwrap_or("https://api.openai.com/v1");
+            // H2 fix: 使用全局共享运行时，避免每次搜索创建新运行时（线程/IO驱动初始化开销）
+            let rt = crate::runtime::shared_runtime();
+            let rerank_start = std::time::Instant::now();
+            let result = rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+                &rerank_cfg,
+                &final_query,
+                &candidates,
+                &candidate_texts,
+                &weights,
+                None,
+                base_url,
+                api_key,
+            ));
+            // P4-004: 审计外部模型调用 — 仅在实际发起了外部请求时记录
+            if result.1.model_rerank_attempted {
+                let success = result.1.model_rerank_succeeded;
+                let error_msg = result
+                    .1
+                    .fallback_reason
+                    .as_ref()
+                    .map(|r| r.as_str())
+                    .unwrap_or("");
+                let _ = crate::kb::privacy::log_external_model_call(
+                    conn,
+                    input.library_ids.first().copied(),
                     None,
-                    base_url,
-                    api_key,
-                ));
-                // P4-004: 审计外部模型调用 — 仅在实际发起了外部请求时记录
-                if result.1.model_rerank_attempted {
-                    let success = result.1.model_rerank_succeeded;
-                    let error_msg = result
-                        .1
-                        .fallback_reason
-                        .as_ref()
-                        .map(|r| r.as_str())
-                        .unwrap_or("");
-                    let _ = crate::kb::privacy::log_external_model_call(
-                        conn,
-                        input.library_ids.first().copied(),
-                        None,
-                        "rerank",
-                        &rerank_provider,
-                        &rerank_cfg.rerank_model,
-                        final_query.len() as i32,
-                        merged.len() as i32,
-                        rerank_start.elapsed().as_millis() as i32,
-                        0.0,
-                        success,
-                        error_msg,
-                    );
-                }
-                result
-            } else {
-                // 跳过模型 rerank，直接本地 rerank
-                let local = crate::kb::rerank::local_rerank(&candidates, &weights);
-                let reason = crate::kb::rerank::FallbackReason::NotConfigured;
-                (
-                    local,
-                    crate::kb::rerank::RerankResult {
-                        model_rerank_attempted: false,
-                        model_rerank_succeeded: false,
-                        fallback_used: true,
-                        fallback_reason: Some(reason),
-                        provider: "local".into(),
-                        candidates_reranked: merged.len(),
-                    },
-                )
-            };
+                    "rerank",
+                    &rerank_provider,
+                    &rerank_cfg.rerank_model,
+                    final_query.len() as i32,
+                    merged.len() as i32,
+                    rerank_start.elapsed().as_millis() as i32,
+                    0.0,
+                    success,
+                    error_msg,
+                );
+            }
+            result
+        } else {
+            // 跳过模型 rerank，直接本地 rerank
+            let local = crate::kb::rerank::local_rerank(&candidates, &weights);
+            let reason = crate::kb::rerank::FallbackReason::NotConfigured;
+            (
+                local,
+                crate::kb::rerank::RerankResult {
+                    model_rerank_attempted: false,
+                    model_rerank_succeeded: false,
+                    fallback_used: true,
+                    fallback_reason: Some(reason),
+                    provider: "local".into(),
+                    candidates_reranked: merged.len(),
+                },
+            )
+        };
 
         // 按 rerank 分数重排 merged
         let score_map: HashMap<i64, f64> = scored.iter().map(|(id, s)| (*id, *s)).collect();
@@ -1137,10 +1089,8 @@ fn get_node_context(
         let mut sql = String::from(
             "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
         );
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-            Box::new(document_id),
-            Box::new(target_order),
-        ];
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(document_id), Box::new(target_order)];
         if let Some(vid) = version_id {
             sql.push_str(" AND version_id = ?3");
             params.push(Box::new(vid));
@@ -1152,7 +1102,8 @@ fn get_node_context(
             params.push(Box::new(title_path.to_string()));
         }
         sql.push_str(" AND retired_at IS NULL");
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, String>(0))
             .ok()
     }
@@ -1632,8 +1583,10 @@ pub fn kb_vector_search(
 
             if !libs_to_resolve.is_empty() {
                 // P3 修复: propagate error instead of if let Ok
-                let groups =
-                    crate::kb::embedding_index::group_libraries_by_active_index(conn, &libs_to_resolve)?;
+                let groups = crate::kb::embedding_index::group_libraries_by_active_index(
+                    conn,
+                    &libs_to_resolve,
+                )?;
                 // 验证单模型：如果多个库用了不同 embedding 模型且 embedding_index_id 未指定，
                 // 传入的 query_vector 只对应一个模型，无法跨模型检索
                 if groups.len() > 1 {
@@ -1663,16 +1616,10 @@ pub fn kb_vector_search(
         let mut seen_nodes: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         for (index_id, ref lib_ids) in &index_entries {
-            let per_index_table =
-                crate::kb::embedding_index::vec_table_name_for_index(*index_id);
-            if let Ok(results) = try_vec_knn(
-                conn,
-                &query_blob,
-                lib_ids,
-                level,
-                top_k,
-                &per_index_table,
-            ) {
+            let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(*index_id);
+            if let Ok(results) =
+                try_vec_knn(conn, &query_blob, lib_ids, level, top_k, &per_index_table)
+            {
                 for r in results {
                     if seen_nodes.insert(r.node_id) {
                         all_results.push(r);
@@ -1738,29 +1685,13 @@ pub fn kb_vector_search(
 
     // 没有任何 active index：legacy 路径，
     // 先查 legacy vec 表，再 fallback BLOB（向后兼容无 active index 的旧库）
-    let result = try_vec_knn(
-        conn,
-        &query_blob,
-        library_ids,
-        level,
-        top_k,
-        "vec_kb_nodes",
-    );
+    let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, "vec_kb_nodes");
     match result {
         Ok(results) if results.len() >= top_k => Ok(results),
         Ok(results) if !results.is_empty() => {
-            supplement_with_fallback(
-                conn, embedding, library_ids, level, top_k,
-                None, results,
-            )
+            supplement_with_fallback(conn, embedding, library_ids, level, top_k, None, results)
         }
-        _ => vector_search_fallback_legacy(
-            conn,
-            embedding,
-            library_ids,
-            level,
-            top_k,
-        ),
+        _ => vector_search_fallback_legacy(conn, embedding, library_ids, level, top_k),
     }
 }
 
@@ -1987,17 +1918,10 @@ fn supplement_with_fallback(
             &[(index_id, library_ids.to_vec())],
         )?
     } else {
-        vector_search_fallback_legacy(
-            conn,
-            embedding,
-            library_ids,
-            level,
-            top_k,
-        )?
+        vector_search_fallback_legacy(conn, embedding, library_ids, level, top_k)?
     };
 
-    let existing_ids: std::collections::HashSet<i64> =
-        existing.iter().map(|r| r.node_id).collect();
+    let existing_ids: std::collections::HashSet<i64> = existing.iter().map(|r| r.node_id).collect();
 
     // 合并所有非重复 fallback 候选，而非提前停止。
     // KNN 中可能有低分项，fallback 中有高分非重复项，全量合并后统一排序才能取到最优 top_k。
@@ -2149,8 +2073,7 @@ fn vector_search_fallback_multi_index(
              AND d.index_status = 'ready'",
         );
 
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(*index_id)];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(*index_id)];
 
         // 限制 library 范围
         if !lib_ids.is_empty() {

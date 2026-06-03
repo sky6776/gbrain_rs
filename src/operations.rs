@@ -1437,40 +1437,42 @@ impl<'a> Operations<'a> {
 
         // P2 修复: 如果模型解析失败（多模型冲突等），跳过向量检索，
         // 仅执行 title/FTS/metadata 等非向量召回。
-        let query_vector: Option<Vec<f32>> =
-            if embedding_dims_for_query.is_none() && embedding_model_for_query.is_empty() {
-                // 多模型冲突降级：不生成 query vector
-                tracing::info!("kb_query: 向量检索已被禁用，仅执行非向量召回");
-                None
-            } else if let Some(api_key) = self.config.openai_api_key.as_deref() {
-                let embedder = crate::embedding::Embedder::new(
-                    api_key,
-                    self.config.openai_base_url.as_deref(),
-                    Some(&embedding_model_for_query),
-                    embedding_dims_for_query,
-                );
-                // H4 fix: 使用全局共享运行时
-                let rt = crate::runtime::shared_runtime();
-                let vec_result = rt.block_on(embedder.embed_batch(&[&query_for_vector]))
-                    .ok()
-                    .and_then(|v| v.into_iter().next());
+        let query_vector: Option<Vec<f32>> = if embedding_dims_for_query.is_none()
+            && embedding_model_for_query.is_empty()
+        {
+            // 多模型冲突降级：不生成 query vector
+            tracing::info!("kb_query: 向量检索已被禁用，仅执行非向量召回");
+            None
+        } else if let Some(api_key) = self.config.openai_api_key.as_deref() {
+            let embedder = crate::embedding::Embedder::new(
+                api_key,
+                self.config.openai_base_url.as_deref(),
+                Some(&embedding_model_for_query),
+                embedding_dims_for_query,
+            );
+            // H4 fix: 使用全局共享运行时
+            let rt = crate::runtime::shared_runtime();
+            let vec_result = rt
+                .block_on(embedder.embed_batch(&[&query_for_vector]))
+                .ok()
+                .and_then(|v| v.into_iter().next());
 
-                // P1 修复: 验证生成的向量维度与目标一致
-                if let (Some(ref vec), Some(expected_dims)) = (&vec_result, embedding_dims_for_query) {
-                    let actual_dims = vec.len();
-                    if actual_dims != expected_dims {
-                        return Err(crate::error::GBrainError::InvalidInput(format!(
-                            "生成的查询向量维度 ({}) 与目标维度 ({}) 不一致，\
+            // P1 修复: 验证生成的向量维度与目标一致
+            if let (Some(ref vec), Some(expected_dims)) = (&vec_result, embedding_dims_for_query) {
+                let actual_dims = vec.len();
+                if actual_dims != expected_dims {
+                    return Err(crate::error::GBrainError::InvalidInput(format!(
+                        "生成的查询向量维度 ({}) 与目标维度 ({}) 不一致，\
                              请检查 embedding 模型配置: model={}",
-                            actual_dims, expected_dims, embedding_model_for_query
-                        )));
-                    }
+                        actual_dims, expected_dims, embedding_model_for_query
+                    )));
                 }
+            }
 
-                vec_result
-            } else {
-                None
-            };
+            vec_result
+        } else {
+            None
+        };
 
         // 注入 rerank 和 rewrite 配置，同时设置 max_chunks_per_doc 默认值
         let mut input_with_config = input.clone();

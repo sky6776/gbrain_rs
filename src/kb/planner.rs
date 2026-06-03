@@ -86,8 +86,8 @@ fn is_exact_lookup_pattern(q: &str) -> bool {
     }
 
     // 版本号/日期模式: v2.1, 2024-Q3, rev3
-    let has_version_like = q.starts_with('v')
-        && q.chars().skip(1).all(|c| c.is_ascii_digit() || c == '.');
+    let has_version_like =
+        q.starts_with('v') && q.chars().skip(1).all(|c| c.is_ascii_digit() || c == '.');
     if has_version_like && q.len() >= 3 {
         return true;
     }

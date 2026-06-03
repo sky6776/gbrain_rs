@@ -704,9 +704,8 @@ fn artifact_put_dry_run_zero_side_effects() {
 
     // artifact 不应存在
     let conn = engine.connection().expect("connection");
-    let artifact =
-        gbrain_core::artifact::store::find_artifact_by_slug(conn, "people/dry-run-test")
-            .expect("find_artifact_by_slug");
+    let artifact = gbrain_core::artifact::store::find_artifact_by_slug(conn, "people/dry-run-test")
+        .expect("find_artifact_by_slug");
     assert!(artifact.is_none(), "dry-run 不应创建 artifact");
 }
 
@@ -975,9 +974,8 @@ fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
         .expect("should have artifact_id");
 
     let conn = engine.connection().expect("connection");
-    let occurrences =
-        gbrain_core::artifact::store::find_occurrences_by_artifact(conn, artifact_id)
-            .expect("find_occurrences");
+    let occurrences = gbrain_core::artifact::store::find_occurrences_by_artifact(conn, artifact_id)
+        .expect("find_occurrences");
     assert!(!occurrences.is_empty(), "应有 occurrence");
 
     let occ = &occurrences[0];
@@ -1025,9 +1023,8 @@ fn artifact_put_promote_creates_shadow_page() {
 
     // 检查 shadow projection 是否存在
     let conn = engine.connection().expect("connection");
-    let projections =
-        gbrain_core::artifact::store::find_projections_by_artifact(conn, artifact_id)
-            .expect("find_projections");
+    let projections = gbrain_core::artifact::store::find_projections_by_artifact(conn, artifact_id)
+        .expect("find_projections");
     let has_shadow = projections
         .iter()
         .any(|p| p.projection_type == "brain_shadow_page" && p.status == "active");

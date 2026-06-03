@@ -426,10 +426,7 @@ fn expand_evidence_context(conn: &Connection, hits: &mut [EvidenceHit]) {
         let doc_id = hit.kb_document_id;
         // 查找前一个 chunk（同 title_path + 同 version）
         let before = if chunk_order > 0 {
-            neighbor_content(
-                conn, doc_id, chunk_order - 1, version_id, &title_path,
-            )
-            .map(|s| {
+            neighbor_content(conn, doc_id, chunk_order - 1, version_id, &title_path).map(|s| {
                 let chars: Vec<char> = s.chars().collect();
                 let start = chars.len().saturating_sub(EVIDENCE_CTX_CHARS_PER_SIDE);
                 chars[start..].iter().collect()
@@ -438,14 +435,12 @@ fn expand_evidence_context(conn: &Connection, hits: &mut [EvidenceHit]) {
             None
         };
         // 查找后一个 chunk
-        let after = neighbor_content(
-            conn, doc_id, chunk_order + 1, version_id, &title_path,
-        )
-        .map(|s| {
-            let chars: Vec<char> = s.chars().collect();
-            let end = EVIDENCE_CTX_CHARS_PER_SIDE.min(chars.len());
-            chars[..end].iter().collect()
-        });
+        let after =
+            neighbor_content(conn, doc_id, chunk_order + 1, version_id, &title_path).map(|s| {
+                let chars: Vec<char> = s.chars().collect();
+                let end = EVIDENCE_CTX_CHARS_PER_SIDE.min(chars.len());
+                chars[..end].iter().collect()
+            });
         hit.context_before = before;
         hit.context_after = after;
     }
@@ -465,10 +460,8 @@ fn neighbor_content(
     let mut sql = String::from(
         "SELECT content FROM kb_document_nodes WHERE document_id = ?1 AND chunk_order = ?2",
     );
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(document_id),
-        Box::new(target_order),
-    ];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(document_id), Box::new(target_order)];
     if let Some(vid) = version_id {
         sql.push_str(" AND version_id = ?3");
         params.push(Box::new(vid));

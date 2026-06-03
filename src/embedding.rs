@@ -158,8 +158,7 @@ impl Embedder {
             start += batch.len();
         }
 
-        let mut handles: Vec<EmbeddingBatchHandle> =
-            Vec::with_capacity(sub_tasks.len());
+        let mut handles: Vec<EmbeddingBatchHandle> = Vec::with_capacity(sub_tasks.len());
 
         for (idx, batch_owned) in sub_tasks {
             let permit = semaphore.clone().acquire_owned().await.map_err(|e| {

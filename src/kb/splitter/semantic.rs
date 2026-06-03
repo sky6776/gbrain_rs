@@ -39,7 +39,9 @@ impl SemanticSplitter {
     }
 
     pub fn with_config(embedder: Arc<Embedder>, chunk_size: usize, chunk_overlap: usize) -> Self {
-        let max_chunk_size = chunk_size.saturating_mul(Self::MAX_CHUNK_MULTIPLIER).max(chunk_size * 2);
+        let max_chunk_size = chunk_size
+            .saturating_mul(Self::MAX_CHUNK_MULTIPLIER)
+            .max(chunk_size * 2);
         Self {
             embedder,
             percentile_threshold: 0.6,
@@ -121,7 +123,9 @@ impl SemanticSplitter {
         // P1 修复: 语义分割后验证每个 chunk 不超过 max_chunk_size。
         // 如果有超大 chunk（如相似度不足以切分的同质长文本），
         // 清空结果让调用方回退到 recursive char splitter。
-        let has_oversized = chunks.iter().any(|c| c.chars().count() > self.max_chunk_size);
+        let has_oversized = chunks
+            .iter()
+            .any(|c| c.chars().count() > self.max_chunk_size);
         if has_oversized {
             return Ok(Vec::new()); // 信号：产出超大 chunk，无法信任语义分块结果
         }

@@ -337,7 +337,6 @@ impl AdaptiveSplitter {
 
     /// 提取的多段落核心处理逻辑（按大小分组合并）。
     async fn split_by_paragraphs_core(&self, paragraphs: &[&str]) -> Result<Chunks, GBrainError> {
-
         // 多段落：按大小分组，同组段落合并为一个 chunk
         let mut result = Vec::new();
         let mut current = String::new();
@@ -397,9 +396,13 @@ impl AdaptiveSplitter {
             // 回退到 recursive char splitter。这处理以下场景：
             // - 无空行中文 / 长 OCR / 压缩文本 / 表格导出文本
             // - 篇幅远超 chunk_size 但只有单个 paragraph unit 的内容
-            let max_chunk_size = self.config.chunk_size.saturating_mul(3).max(self.config.chunk_size * 2);
-            let needs_recursive_fallback = filtered.is_empty()
-                || filtered.iter().any(|c| c.chars().count() > max_chunk_size);
+            let max_chunk_size = self
+                .config
+                .chunk_size
+                .saturating_mul(3)
+                .max(self.config.chunk_size * 2);
+            let needs_recursive_fallback =
+                filtered.is_empty() || filtered.iter().any(|c| c.chars().count() > max_chunk_size);
 
             if needs_recursive_fallback {
                 tracing::debug!(
@@ -408,10 +411,8 @@ impl AdaptiveSplitter {
                     chunk_size = self.config.chunk_size,
                     "语义分块产出空/超大 chunk，回退到 recursive char splitter"
                 );
-                let recursive = RecursiveCharSplitter::new(
-                    self.config.chunk_size,
-                    self.config.chunk_overlap,
-                );
+                let recursive =
+                    RecursiveCharSplitter::new(self.config.chunk_size, self.config.chunk_overlap);
                 let fallback = recursive.split(section)?;
                 return Ok(fallback
                     .into_iter()
@@ -451,9 +452,28 @@ fn is_table_extension(ext: &str) -> bool {
 fn is_code_extension(ext: &str) -> bool {
     matches!(
         ext,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
-            | "hpp" | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml"
-            | "json" | "xml"
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "rb"
+            | "php"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "sql"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "xml"
     )
 }
 
@@ -567,7 +587,11 @@ mod tests {
         let chunks = splitter.split(&md).await.unwrap();
 
         // MarkdownHeaderSplitter 内部已经将大块细分，所以应得到多个 chunk
-        assert!(chunks.len() > 1, "大 section 应被细分，实际得到 {} 个 chunk", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "大 section 应被细分，实际得到 {} 个 chunk",
+            chunks.len()
+        );
         // 第一个 chunk 应包含标题
         assert!(chunks[0].contains("大节"));
     }
@@ -607,7 +631,8 @@ mod tests {
         };
         let splitter = AdaptiveSplitter::new(config, None);
 
-        let text = "第一段内容。这是一些文字。\n\n第二段内容。更多文字在这里。\n\n第三段内容。继续写。";
+        let text =
+            "第一段内容。这是一些文字。\n\n第二段内容。更多文字在这里。\n\n第三段内容。继续写。";
         let chunks = splitter.split(text).await.unwrap();
         assert!(!chunks.is_empty());
     }
@@ -649,7 +674,11 @@ mod tests {
         // 每个函数应该被切分成独立段（或至少各函数边界可识别）
         assert!(!chunks.is_empty());
         // 至少应产生多个 chunk（3 个函数应被分开）
-        assert!(chunks.len() >= 2, "代码应按函数边界切分，得到 {} 个 chunk", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "代码应按函数边界切分，得到 {} 个 chunk",
+            chunks.len()
+        );
     }
 
     #[tokio::test]
@@ -664,7 +693,11 @@ mod tests {
         let pdf_text = "[PAGE:1]\n第一页的内容在这里。\n\n[PAGE:2]\n第二页的内容在这里。\n\n[PAGE:3]\n第三页的内容在这里。";
         let chunks = splitter.split(pdf_text).await.unwrap();
         // PDF 应按页切分
-        assert!(chunks.len() >= 3, "PDF 应按页切分，得到 {} 个 chunk", chunks.len());
+        assert!(
+            chunks.len() >= 3,
+            "PDF 应按页切分，得到 {} 个 chunk",
+            chunks.len()
+        );
         assert!(chunks[0].contains("第一页"));
         assert!(chunks[1].contains("第二页"));
         assert!(chunks[2].contains("第三页"));
@@ -680,7 +713,8 @@ mod tests {
         let splitter = AdaptiveSplitter::new(config, None);
 
         // 无 [PAGE:N] 标记的文本，应回退到通用分割
-        let text = "这是一段没有页面标记的文本。内容可能来自纯文本提取。它应该被正常分割而不是报错。";
+        let text =
+            "这是一段没有页面标记的文本。内容可能来自纯文本提取。它应该被正常分割而不是报错。";
         let chunks = splitter.split(text).await.unwrap();
         assert!(!chunks.is_empty());
     }

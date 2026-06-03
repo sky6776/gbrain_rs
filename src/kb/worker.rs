@@ -44,42 +44,41 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
     // P1 修复: 创建 embedder 时优先使用库 active embedding index 的模型/维度，
     // 而不是全局 config 的默认值。这确保生成的向量与库的索引维度一致。
     let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
-        let (model, dims): (String, Option<usize>) = match crate::kb::embedding_index::get_active_index_for_library(
-            conn,
-            payload.library_id,
-        ) {
-            Ok(Some(idx)) => {
-                tracing::debug!(
-                    library_id = payload.library_id,
-                    index_id = idx.id,
-                    model = idx.model.as_str(),
-                    dimensions = idx.dimensions,
-                    "KB worker: 使用库 active embedding index 配置 embedder"
-                );
-                (idx.model, Some(idx.dimensions as usize))
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    library_id = payload.library_id,
-                    "KB worker: 库无 active embedding index，回退到全局 config"
-                );
-                (
-                    config.embedding_model.clone(),
-                    Some(config.embedding_dimensions),
-                )
-            }
-            Err(e) => {
-                tracing::warn!(
-                    library_id = payload.library_id,
-                    error = %e,
-                    "KB worker: 解析 active embedding index 失败，回退到全局 config"
-                );
-                (
-                    config.embedding_model.clone(),
-                    Some(config.embedding_dimensions),
-                )
-            }
-        };
+        let (model, dims): (String, Option<usize>) =
+            match crate::kb::embedding_index::get_active_index_for_library(conn, payload.library_id)
+            {
+                Ok(Some(idx)) => {
+                    tracing::debug!(
+                        library_id = payload.library_id,
+                        index_id = idx.id,
+                        model = idx.model.as_str(),
+                        dimensions = idx.dimensions,
+                        "KB worker: 使用库 active embedding index 配置 embedder"
+                    );
+                    (idx.model, Some(idx.dimensions as usize))
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        library_id = payload.library_id,
+                        "KB worker: 库无 active embedding index，回退到全局 config"
+                    );
+                    (
+                        config.embedding_model.clone(),
+                        Some(config.embedding_dimensions),
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        library_id = payload.library_id,
+                        error = %e,
+                        "KB worker: 解析 active embedding index 失败，回退到全局 config"
+                    );
+                    (
+                        config.embedding_model.clone(),
+                        Some(config.embedding_dimensions),
+                    )
+                }
+            };
         Arc::new(Embedder::new(
             api_key,
             config.openai_base_url.as_deref(),
@@ -853,8 +852,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
     let resolve_embedder_config =
         |conn: &Connection, library_id: i64| -> (Option<Arc<Embedder>>, String) {
             let (model, dims): (String, Option<usize>) =
-                match crate::kb::embedding_index::get_active_index_for_library(conn, library_id)
-                {
+                match crate::kb::embedding_index::get_active_index_for_library(conn, library_id) {
                     Ok(Some(idx)) => {
                         tracing::debug!(
                             library_id,
@@ -1161,10 +1159,9 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
             // P3 修复: reembed 成功写入后递增检索缓存版本。
             // 缓存 TTL 为 30 秒，不递增会让重嵌入后立即查询仍可能复用旧候选集。
             if count > 0 {
-                if let Err(e) = crate::kb::embedding_index::increment_index_version(
-                    conn,
-                    "retrieval_cache",
-                ) {
+                if let Err(e) =
+                    crate::kb::embedding_index::increment_index_version(conn, "retrieval_cache")
+                {
                     tracing::warn!(
                         error = %e,
                         "re-embed worker: 递增检索缓存版本失败，缓存可能返回过期结果"

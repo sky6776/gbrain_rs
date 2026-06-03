@@ -113,9 +113,9 @@ fn infer_modality(ext: &str) -> &'static str {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "webp" => "image_ocr",
         "csv" | "tsv" | "xlsx" | "xls" => "table",
         // 代码文件（P4: 列表与 infer_segment_kind / is_code_extension 对齐）
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
-            | "hpp" | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml"
-            | "json" | "xml" => "code",
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h" | "hpp"
+        | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml" | "json"
+        | "xml" => "code",
         _ => "text",
     }
 }
@@ -129,9 +129,28 @@ fn infer_segment_kind(ext: &str, block_spans: &[BlockSpan]) -> &'static str {
     // 代码文件（P4: 扩展列表与 adaptive.rs is_code_extension 对齐）
     if matches!(
         ext,
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
-            | "hpp" | "rb" | "php" | "sh" | "bash" | "zsh" | "sql" | "toml" | "yaml" | "yml"
-            | "json" | "xml"
+        "rs" | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "go"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "rb"
+            | "php"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "sql"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "json"
+            | "xml"
     ) {
         return "code";
     }
@@ -144,7 +163,10 @@ fn infer_segment_kind(ext: &str, block_spans: &[BlockSpan]) -> &'static str {
         return "pdf_page";
     }
     // 图片 OCR
-    if matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "webp") {
+    if matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tiff" | "webp"
+    ) {
         return "image_ocr";
     }
     // 有标题路径的块 → 标题段落（HTML/DOCX 等可能有结构化标题）
@@ -1030,8 +1052,12 @@ pub async fn process_document_async(
             // PDF 优先按 page_number 对齐；HTML/Markdown 这类无页码文档按 chunk 文本中的
             // URL/alt/caption/OCR 命中对齐，避免文档级全量媒体污染 prompt。
             let node_media_refs = media_refs_for_chunk(&normalized.media_refs, page_num, chunk);
-            let node_meta =
-                serialize_node_metadata_ex(&node_media_refs, None, !normalized.media_refs.is_empty(), Some(default_chunk_meta));
+            let node_meta = serialize_node_metadata_ex(
+                &node_media_refs,
+                None,
+                !normalized.media_refs.is_empty(),
+                Some(default_chunk_meta),
+            );
             RaptorNode {
                 id: -((i as i64) + 1),
                 library_id: lib_id,
@@ -3060,11 +3086,7 @@ fn maybe_apply_pdf_ocr(
 
     // 检查全局 OCR 是否启用
     if !ocr_enabled {
-        tracing::warn!(
-            doc_id,
-            ocr_enabled,
-            "PDF 需要 OCR 但全局 OCR 已关闭"
-        );
+        tracing::warn!(doc_id, ocr_enabled, "PDF 需要 OCR 但全局 OCR 已关闭");
         let reason = "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)";
         crate::kb::ocr::update_ocr_pages_status(
             conn,

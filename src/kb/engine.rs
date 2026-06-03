@@ -1240,8 +1240,8 @@ impl<'a> KbEngine<'a> {
     ) -> Result<()> {
         // 优先使用调用方通过 token_counter::count_tokens_heuristic 计算的精确值；
         // 未提供时回退到 char_count * 0.6 的粗略估算（向后兼容）。
-        let approx_token_count = token_count
-            .unwrap_or_else(|| ((char_count as f64) * 0.6).round() as i32);
+        let approx_token_count =
+            token_count.unwrap_or_else(|| ((char_count as f64) * 0.6).round() as i32);
         self.transaction(|conn| {
             if let Some(rid) = run_id {
                 // 修复：增加 processing_run_id 条件，防止旧 run 污染 granularity

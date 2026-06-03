@@ -840,17 +840,16 @@ pub fn writeback_ocr_results(
                 modality: "pdf_page",
             };
             let mut node_metadata = serialize_node_metadata_ex(
-                &[],     // OCR writeback 无 media_refs 传入
+                &[], // OCR writeback 无 media_refs 传入
                 None,
                 false,
                 Some(ocr_chunk_meta),
             );
             // 跨页 chunk：合并 page_numbers 到已有的 metadata JSON 中
             if overlapping_pages.len() > 1 {
-                if let Ok(mut meta_obj) =
-                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
-                        &node_metadata,
-                    )
+                if let Ok(mut meta_obj) = serde_json::from_str::<
+                    serde_json::Map<String, serde_json::Value>,
+                >(&node_metadata)
                 {
                     meta_obj.insert(
                         "page_numbers".to_string(),

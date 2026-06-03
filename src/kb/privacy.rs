@@ -12,14 +12,10 @@ pub fn redact_content(text: &str) -> String {
     let mut result = text.to_string();
 
     // 邮箱
-    result = email_regex()
-        .replace_all(&result, "[EMAIL]")
-        .to_string();
+    result = email_regex().replace_all(&result, "[EMAIL]").to_string();
 
     // 手机号（中国大陆）
-    result = phone_regex()
-        .replace_all(&result, "[PHONE]")
-        .to_string();
+    result = phone_regex().replace_all(&result, "[PHONE]").to_string();
 
     // 身份证号
     result = id_card_regex()
@@ -52,18 +48,14 @@ fn email_regex() -> &'static Regex {
 /// 编译静态手机号正则表达式（中国大陆）。
 fn phone_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"1[3-9]\d{9}")
-            .expect("手机号正则字面量已知有效，编译不应失败")
-    })
+    RE.get_or_init(|| Regex::new(r"1[3-9]\d{9}").expect("手机号正则字面量已知有效，编译不应失败"))
 }
 
 /// 编译静态身份证号正则表达式。
 fn id_card_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\d{17}[\dXx]")
-            .expect("身份证号正则字面量已知有效，编译不应失败")
+        Regex::new(r"\d{17}[\dXx]").expect("身份证号正则字面量已知有效，编译不应失败")
     })
 }
 
@@ -80,8 +72,7 @@ fn api_key_regex() -> &'static Regex {
 fn bank_card_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\b\d{16,19}\b")
-            .expect("银行卡号正则字面量已知有效，编译不应失败")
+        Regex::new(r"\b\d{16,19}\b").expect("银行卡号正则字面量已知有效，编译不应失败")
     })
 }
 

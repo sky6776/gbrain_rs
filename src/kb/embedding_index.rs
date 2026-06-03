@@ -386,7 +386,10 @@ pub fn group_libraries_by_active_index(
     // 不同 model 即使同维度也分到不同组——向量不可互换
     let mut groups: LibraryIndexGroup = Vec::new();
     for (lib_id, idx_id, model, dims) in lib_indexes {
-        if let Some(group) = groups.iter_mut().find(|(m, d, _)| *m == model && *d == dims) {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|(m, d, _)| *m == model && *d == dims)
+        {
             // 同一 model+dim 组内，按 index_id 聚合 library_ids
             if let Some(entry) = group.2.iter_mut().find(|(id, _)| *id == idx_id) {
                 entry.1.push(lib_id);
@@ -427,10 +430,7 @@ pub fn resolve_active_index_for_libraries(
     }
     // 单组：返回该组的 model/dims，以及第一个 index_id 作为代表
     let (model, dims, entries) = groups.into_iter().next().unwrap();
-    let first_id = entries
-        .first()
-        .map(|(id, _)| *id)
-        .unwrap_or(0);
+    let first_id = entries.first().map(|(id, _)| *id).unwrap_or(0);
     Ok(Some((first_id, model, dims)))
 }
 
@@ -447,7 +447,13 @@ pub fn resolve_active_index_for_node(
          INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
          WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
         params![node_id],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)?)),
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
+        },
     );
     match result {
         Ok(t) => Ok(Some(t)),
@@ -461,9 +467,8 @@ pub fn resolve_active_index_for_node(
 /// 用于全库查询（library_ids=[]）时展开为所有有效库，避免走 legacy 路径
 /// 扫描历史/非 active 向量。
 pub fn all_library_ids_with_active_index(conn: &Connection) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT library_id FROM kb_embedding_indexes WHERE is_active = 1",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT library_id FROM kb_embedding_indexes WHERE is_active = 1")?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     let results: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
     Ok(results)

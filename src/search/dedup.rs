@@ -481,7 +481,10 @@ mod tests {
         assert_eq!(deduped.len(), 3);
         let a_chunks: Vec<_> = deduped.iter().filter(|r| r.slug == "a").collect();
         assert!(a_chunks.len() <= 2, "Page 'a' should have at most 2 chunks");
-        assert!(!a_chunks.is_empty(), "Page 'a' should have at least 1 chunk");
+        assert!(
+            !a_chunks.is_empty(),
+            "Page 'a' should have at least 1 chunk"
+        );
     }
 
     #[test]

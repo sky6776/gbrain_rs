@@ -1812,9 +1812,7 @@ class Greeter:
             .any(|s| s.name == "hello" && s.parent_symbol.as_deref() == Some("Greeter"))
             || indexed.chunks.iter().any(|c| {
                 c.parent_symbol_path.as_deref() == Some("Greeter")
-                    && c.symbol_name
-                        .as_ref()
-                        .is_some_and(|n| n.contains("hello"))
+                    && c.symbol_name.as_ref().is_some_and(|n| n.contains("hello"))
             });
         assert!(
             has_hello,
