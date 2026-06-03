@@ -11,7 +11,11 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Once;
 use tracing::{debug, info, trace, warn};
+
+/// 在进程生命周期内只注册一次 sqlite-vec 扩展
+static VEC_EXT_REGISTERED: Once = Once::new();
 
 /// Convert empty string Option to None to maintain consistency
 /// between put_page (which stores "" for None) and get_page (which reads Some("") back).
@@ -726,6 +730,14 @@ impl BrainEngine for SqliteEngine {
 
     fn connect(&mut self) -> Result<()> {
         debug!(db_path = %self.db_path, "Opening SQLite connection");
+
+        // 注册 sqlite-vec 扩展（进程生命周期内仅执行一次）
+        VEC_EXT_REGISTERED.call_once(|| unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        });
+
         // R3-07: Use Connection::open_in_memory() for ":memory:" paths.
         // Connection::open(":memory:") creates a FILE named ":memory:" on disk,
         // not a true in-memory database. Only Connection::open_in_memory()

@@ -12,6 +12,7 @@ path = "src/bin/gbrain.rs"
 [dependencies]
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
+sqlite-vec = "0.1"
 
 # Async runtime (for CLI/MCP layer, engine itself is sync)
 tokio = { version = "1", features = ["full"] }
