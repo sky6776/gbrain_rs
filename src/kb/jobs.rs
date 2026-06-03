@@ -468,6 +468,26 @@ pub fn list_kb_jobs(conn: &Connection, library_id: Option<i64>) -> Result<Vec<(i
     Ok(results)
 }
 
+/// 取消指定文档的待处理 KB job（仅 pending 状态，不影响正在处理的 job）。
+///
+/// 用于 reprocess 场景：在入队新 job 前，先取消排队的旧 pending job，
+/// 防止旧 job 被认领后因 processing_run_id 不匹配被判定为 stale。
+/// 注意：不取消 processing 状态的 job，因为 worker 线程正在同步执行中，
+/// 改 DB 状态无法中断正在运行的处理，应让 run guard 自然处理。
+pub fn cancel_pending_kb_jobs_by_document_id(
+    conn: &Connection,
+    document_id: i64,
+) -> Result<usize> {
+    let changed = conn.execute(
+        "UPDATE jobs SET status = 'cancelled', updated_at = datetime('now') \
+         WHERE job_type = 'kb_process_document' \
+         AND status = 'pending' \
+         AND payload->>'$.document_id' = ?1",
+        rusqlite::params![document_id],
+    )?;
+    Ok(changed)
+}
+
 /// Pause KB job processing for a library by cancelling pending jobs.
 pub fn pause_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
     conn.execute(

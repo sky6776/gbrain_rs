@@ -203,6 +203,20 @@ pub fn create_kb_projection(
                     storage_path: artifact.storage_path.clone(),
                     extension: artifact.extension.clone(),
                 };
+
+                // 修复：入队新 job 前先取消该文档的旧 pending job，
+                // 防止旧 job 被认领后因 run_id 不匹配被判定为 stale。
+                // 不取消 processing 状态的 job（worker 正在执行，无法中断）。
+                if let Err(e) =
+                    crate::kb::jobs::cancel_pending_kb_jobs_by_document_id(conn, doc_id)
+                {
+                    tracing::warn!(
+                        doc_id,
+                        error = %e,
+                        "reprocess 取消旧 KB job 失败，继续入队新 job"
+                    );
+                }
+
                 let payload_json = serde_json::to_string(&payload).map_err(|e| {
                     GBrainError::Serialization(format!("序列化 KB job payload 失败: {}", e))
                 })?;

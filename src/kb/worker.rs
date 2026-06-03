@@ -239,7 +239,24 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                     "KB worker: 更新失败状态到 artifact shadow page 失败"
                 );
             }
-            fail_kb_job(conn, job_db_id, &e.to_string())?;
+            // 检测 stale job：processing_run_id 不匹配意味着文档已被重新处理，
+            // 重试必然继续失败（run_id 永远不会再次匹配），直接跳过重试，永久失败。
+            let err_msg = e.to_string();
+            if err_msg.contains("stale KB processing job") {
+                // 非关键操作：即使 UPDATE 失败也要确保 fail_kb_job 被执行，
+                // 否则 job 会永久卡在 running 状态。
+                if let Err(e2) = conn.execute(
+                    "UPDATE jobs SET max_attempts = attempts WHERE id = ?1",
+                    rusqlite::params![job_db_id],
+                ) {
+                    tracing::warn!(
+                        job_db_id,
+                        error = %e2,
+                        "KB worker: 设置 stale job max_attempts 失败，重试仍可能发生"
+                    );
+                }
+            }
+            fail_kb_job(conn, job_db_id, &err_msg)?;
             Ok(true)
         }
     }

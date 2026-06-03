@@ -206,7 +206,7 @@ impl Default for Config {
             kb_enabled: true,
             kb_raptor_secret_ref: Some("GBRAIN_KB_RAPTOR_API_KEY".to_string()),
             kb_raptor_base_url: None,
-            kb_raptor_model: "gpt-4o-mini".to_string(),
+            kb_raptor_model: String::new(), // 空=未配置，回退到 expansion_model → chunker_model → "gpt-4o-mini"
             kb_max_file_size_mb: 50,
             kb_allowed_extensions: vec![
                 // 修复：默认 KB 允许列表与 KB_SUPPORTED_EXTENSIONS 保持一致，
