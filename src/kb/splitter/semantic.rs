@@ -17,9 +17,16 @@ pub struct SemanticSplitter {
     min_chunk_size: usize,
     chunk_size: usize,
     chunk_overlap: usize,
+    /// P1 修复: 语义分块最大允许的 chunk 大小（chunk_size 的倍数）。
+    /// 超过此值的 chunk 说明语义分割器无法有效切分该文本，
+    /// 调用方应回退到 recursive char splitter。
+    max_chunk_size: usize,
 }
 
 impl SemanticSplitter {
+    /// P1 修复: 语义分块最大允许的 chunk 倍数。超过 chunk_size * 3 视为不可切分。
+    const MAX_CHUNK_MULTIPLIER: usize = 3;
+
     pub fn new(embedder: Arc<Embedder>) -> Self {
         Self {
             embedder,
@@ -27,16 +34,19 @@ impl SemanticSplitter {
             min_chunk_size: 300,
             chunk_size: 512,
             chunk_overlap: 50,
+            max_chunk_size: 512 * Self::MAX_CHUNK_MULTIPLIER,
         }
     }
 
     pub fn with_config(embedder: Arc<Embedder>, chunk_size: usize, chunk_overlap: usize) -> Self {
+        let max_chunk_size = chunk_size.saturating_mul(Self::MAX_CHUNK_MULTIPLIER).max(chunk_size * 2);
         Self {
             embedder,
             percentile_threshold: 0.6,
             min_chunk_size: chunk_size / 2,
             chunk_size,
             chunk_overlap,
+            max_chunk_size,
         }
     }
 
@@ -45,7 +55,13 @@ impl SemanticSplitter {
         // 避免中文长段落被整体作为一个 semantic paragraph。
         let paragraphs: Vec<String> = split_units(text);
 
+        // P1 修复: 单段落/缺少 units 时，检查文本长度是否超过 max_chunk_size。
+        // 超过则回退到空结果（由调用方降级到 recursive char splitter），
+        // 避免无空行中文、长 OCR、压缩文本等产生超大 chunk。
         if paragraphs.len() <= 1 {
+            if text.chars().count() > self.max_chunk_size {
+                return Ok(Vec::new()); // 信号：语义分割器无法切分
+            }
             return Ok(vec![text.to_string()]);
         }
 
@@ -53,6 +69,9 @@ impl SemanticSplitter {
         let embeddings = self.embedder.embed_batch(&paragraph_refs).await?;
 
         if embeddings.len() < 2 {
+            if text.chars().count() > self.max_chunk_size {
+                return Ok(Vec::new()); // 信号：语义分割器无法切分
+            }
             return Ok(vec![text.to_string()]);
         }
 
@@ -97,6 +116,14 @@ impl SemanticSplitter {
 
         if !current.trim().is_empty() {
             chunks.push(current.trim().to_string());
+        }
+
+        // P1 修复: 语义分割后验证每个 chunk 不超过 max_chunk_size。
+        // 如果有超大 chunk（如相似度不足以切分的同质长文本），
+        // 清空结果让调用方回退到 recursive char splitter。
+        let has_oversized = chunks.iter().any(|c| c.chars().count() > self.max_chunk_size);
+        if has_oversized {
+            return Ok(Vec::new()); // 信号：产出超大 chunk，无法信任语义分块结果
         }
 
         Ok(chunks)

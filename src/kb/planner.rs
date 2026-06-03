@@ -59,6 +59,43 @@ pub struct PlannerOutput {
     pub retrievers: Vec<(RetrieverType, f64)>,
 }
 
+/// 判断查询是否看起来像精确文件名/ID/路径查找（而非概念查询）。
+///
+/// P2 修复: 短查询不再无条件归为 ExactLookup。
+/// 只有明显匹配文件名/扩展名/路径/编号/代码模式的查询才走精确查找，
+/// "RAG"、"OCR"、"向量检索" 这类短概念查询保留语义召回能力。
+fn is_exact_lookup_pattern(q: &str) -> bool {
+    // 文件扩展名模式: report.pdf, data.xlsx, document.docx 等
+    if q.contains('.')
+        && q.split('.').last().map_or(false, |ext| {
+            ext.len() >= 2 && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphabetic())
+        })
+    {
+        return true;
+    }
+
+    // 路径模式: /path/to/file 或 \path\to\file 或 docs/api-guide
+    if q.contains('/') || q.contains('\\') {
+        return true;
+    }
+
+    // 纯编号/ID 模式: 工单号 "TICKET-1234", "ABC-123", 纯数字, 或类似代码格式
+    let is_code_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '#';
+    if q.chars().all(&is_code_char) {
+        return q.chars().any(|c| c.is_ascii_digit()); // 至少包含一个数字
+    }
+
+    // 版本号/日期模式: v2.1, 2024-Q3, rev3
+    let has_version_like = q.starts_with('v')
+        && q.chars().skip(1).all(|c| c.is_ascii_digit() || c == '.');
+    if has_version_like && q.len() >= 3 {
+        return true;
+    }
+
+    // 其他模式不视为精确查找
+    false
+}
+
 /// 基于规则识别查询类型
 pub fn classify_query(query: &str) -> QueryType {
     let q = query.trim().to_lowercase();
@@ -98,8 +135,10 @@ pub fn classify_query(query: &str) -> QueryType {
         return QueryType::FactLookup;
     }
 
-    // 精确查找：短 query (< 8 chars) 且包含编号/代码模式
-    if q.chars().count() < 8 {
+    // P2 修复: 精确查找只给明显文件名/ID/路径模式的查询，
+    // 短概念查询（"RAG"、"OCR"、"向量检索" 等）归为 Conceptual 以保留语义召回。
+    // 不再简单按长度 < 8 一刀切，而是用 is_exact_lookup_pattern 语义判断。
+    if is_exact_lookup_pattern(&q) {
         return QueryType::ExactLookup;
     }
 
@@ -109,10 +148,14 @@ pub fn classify_query(query: &str) -> QueryType {
 /// 根据查询类型输出 retriever 组合和权重
 pub fn plan(query_type: QueryType) -> PlannerOutput {
     let retrievers = match query_type {
+        // P2 修复: ExactLookup 保留低权重 Vector 和 PassageFts 召回。
+        // 即使文件名/ID 模式匹配，关键词 retriever 返回弱结果时也需要语义兜底。
         QueryType::ExactLookup => vec![
-            (RetrieverType::TitleName, 0.6),
+            (RetrieverType::TitleName, 0.5),
             (RetrieverType::Metadata, 0.2),
             (RetrieverType::NodeFts, 0.2),
+            (RetrieverType::Vector, 0.15),
+            (RetrieverType::PassageFts, 0.1),
         ],
         QueryType::HowTo => vec![
             (RetrieverType::NodeFts, 0.3),
@@ -174,7 +217,12 @@ mod tests {
 
     #[test]
     fn test_classify_exact() {
+        // 字母数字代码模式仍应归类为 ExactLookup
         assert_eq!(classify_query("ABC-123"), QueryType::ExactLookup);
+        // 文件扩展名模式
+        assert_eq!(classify_query("report.pdf"), QueryType::ExactLookup);
+        // 纯数字编号
+        assert_eq!(classify_query("12345"), QueryType::ExactLookup);
     }
 
     #[test]
@@ -183,12 +231,17 @@ mod tests {
             classify_query("机器学习在自然语言处理中的应用"),
             QueryType::Conceptual
         );
+        // P2 修复: 短概念查询不再归为 ExactLookup
+        assert_eq!(classify_query("RAG"), QueryType::Conceptual);
+        assert_eq!(classify_query("OCR"), QueryType::Conceptual);
+        assert_eq!(classify_query("向量检索"), QueryType::Conceptual);
     }
 
     #[test]
     fn test_plan_output() {
         let plan = plan(QueryType::ExactLookup);
-        assert_eq!(plan.retrievers.len(), 3);
-        assert!((plan.retrievers[0].1 - 0.6).abs() < 0.01);
+        // P2 修复: ExactLookup 现在包含 5 个 retriever（增加 Vector + PassageFts）
+        assert_eq!(plan.retrievers.len(), 5);
+        assert!((plan.retrievers[0].1 - 0.5).abs() < 0.01); // TitleName 权重降为 0.5
     }
 }

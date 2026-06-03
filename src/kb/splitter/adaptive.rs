@@ -158,7 +158,7 @@ impl AdaptiveSplitter {
         let mut result = Vec::new();
         let mut current = String::new();
 
-        for para in &paragraphs {
+        for para in paragraphs {
             if !current.is_empty() {
                 current.push_str("\n\n");
             }
@@ -309,20 +309,40 @@ impl AdaptiveSplitter {
             return Ok(vec![text.trim().to_string()]);
         }
 
-        // 段落数 <= 1 时，整篇文档视为一个大块
+        // P1 修复: 段落数 <= 1 时，如果文本包含 CJK 且长度超过阈值，
+        // 尝试用单 \n 切分（insert_sentence_breaks 插入的是单 \n）。
+        // 处理无空行中文、长 OCR、压缩文本等边界场景。
         if paragraphs.len() <= 1 {
             let full = paragraphs.first().copied().unwrap_or(text.trim());
             if full.chars().count() <= LARGE_CHUNK_THRESHOLD {
                 return Ok(vec![full.to_string()]);
             }
+            // CJK 文本：尝试按单 \n 切分（中文断句后的段落边界）
+            if crate::nlp::chinese::has_chinese(full) {
+                let single_nl_paras: Vec<&str> = full
+                    .split('\n')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if single_nl_paras.len() > 1 {
+                    // 用单 \n 切分后的段落重新走 split_by_paragraphs 逻辑
+                    return self.split_by_paragraphs_core(&single_nl_paras).await;
+                }
+            }
             return self.refine_large_section(full).await;
         }
+
+        self.split_by_paragraphs_core(&paragraphs).await
+    }
+
+    /// 提取的多段落核心处理逻辑（按大小分组合并）。
+    async fn split_by_paragraphs_core(&self, paragraphs: &[&str]) -> Result<Chunks, GBrainError> {
 
         // 多段落：按大小分组，同组段落合并为一个 chunk
         let mut result = Vec::new();
         let mut current = String::new();
 
-        for para in &paragraphs {
+        for para in paragraphs {
             if !current.is_empty() {
                 current.push_str("\n\n");
             }
@@ -354,7 +374,11 @@ impl AdaptiveSplitter {
         Ok(result)
     }
 
-    /// 对大 section 进行细分：有 embedder 时语义细分，否则递归细分
+    /// 对大 section 进行细分：有 embedder 时语义细分，否则递归细分。
+    ///
+    /// P1 修复: 语义分块后增加硬性 chunk_size/max_chunk_size 校验。
+    /// 当 SemanticSplitter 返回空（无法切分）或产出超大 chunk 时，
+    /// 回退到 RecursiveCharSplitter 确保每个 chunk 不超过目标大小。
     async fn refine_large_section(&self, section: &str) -> Result<Chunks, GBrainError> {
         if let Some(ref embedder) = self.embedder {
             // 有 embedder → 语义细分
@@ -364,11 +388,38 @@ impl AdaptiveSplitter {
                 self.config.chunk_overlap,
             );
             let chunks = semantic.split(section).await?;
-            // 过滤空块
-            Ok(chunks
+            let filtered: Chunks = chunks
                 .into_iter()
                 .filter(|c| !c.trim().is_empty())
-                .collect())
+                .collect();
+
+            // P1 修复: 语义分块返回空结果或产出超大 chunk 时，
+            // 回退到 recursive char splitter。这处理以下场景：
+            // - 无空行中文 / 长 OCR / 压缩文本 / 表格导出文本
+            // - 篇幅远超 chunk_size 但只有单个 paragraph unit 的内容
+            let max_chunk_size = self.config.chunk_size.saturating_mul(3).max(self.config.chunk_size * 2);
+            let needs_recursive_fallback = filtered.is_empty()
+                || filtered.iter().any(|c| c.chars().count() > max_chunk_size);
+
+            if needs_recursive_fallback {
+                tracing::debug!(
+                    semantic_chunks = filtered.len(),
+                    section_len = section.chars().count(),
+                    chunk_size = self.config.chunk_size,
+                    "语义分块产出空/超大 chunk，回退到 recursive char splitter"
+                );
+                let recursive = RecursiveCharSplitter::new(
+                    self.config.chunk_size,
+                    self.config.chunk_overlap,
+                );
+                let fallback = recursive.split(section)?;
+                return Ok(fallback
+                    .into_iter()
+                    .filter(|c| !c.trim().is_empty())
+                    .collect());
+            }
+
+            Ok(filtered)
         } else {
             // 无 embedder → 递归长度细分
             let recursive =

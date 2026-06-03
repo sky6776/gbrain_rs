@@ -47,6 +47,8 @@ pub struct RaptorLlmConfig {
 /// 2. KB-level config (kb_raptor_secret_ref, kb_raptor_base_url, kb_raptor_model)
 /// 3. GBRAIN_EXPANSION_* env vars
 /// 4. GBRAIN_CHUNKER_* env vars
+/// 5. resolved_config (config.raptor_config_resolved() 的完整结果，包含 api_key/base_url/model，
+///    来自已加载 config 文件 + 环境变量，优先级高于 GBRAIN_OPENAI_API_KEY 环境变量回退)
 ///
 /// Returns an error if no API key can be resolved.
 pub fn resolve_raptor_llm_config(
@@ -54,6 +56,7 @@ pub fn resolve_raptor_llm_config(
     kb_raptor_secret_ref: Option<&str>,
     kb_raptor_base_url: Option<&str>,
     kb_raptor_model: Option<&str>,
+    resolved_config: Option<&crate::config::ResolvedRaptorConfig>,
 ) -> Result<RaptorLlmConfig, GBrainError> {
     // Try library-specific config first
     if let Some(lib) = library {
@@ -134,9 +137,43 @@ pub fn resolve_raptor_llm_config(
         }
     }
 
+    // P3 修复: Fallback 到调用方传入的 resolved_config（来自 config.raptor_config_resolved()）。
+    // 该配置已合并 config 文件 + 环境变量，包含完整的 api_key/base_url/model。
+    // 先前版本只给 shared_api_key，base_url/model 仍读环境变量——如果用户把
+    // openai_base_url/expansion_base_url 等写在 config 文件里而不是环境变量，
+    // RAPTOR summary/augmentation 仍不可用或把自定义 key 发到默认 OpenAI 地址。
+    if let Some(rc) = resolved_config {
+        if !rc.api_key.is_empty() {
+            return Ok(RaptorLlmConfig {
+                api_key: rc.api_key.clone(),
+                base_url: rc.base_url.clone(),
+                model: rc.model.clone(),
+            });
+        }
+    }
+
+    // 最后尝试 GBRAIN_OPENAI_API_KEY 环境变量（兼容未传入 config 的路径）
+    if let Ok(api_key) = std::env::var("GBRAIN_OPENAI_API_KEY") {
+        if !api_key.is_empty() {
+            let base_url = std::env::var("GBRAIN_OPENAI_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = std::env::var("GBRAIN_OPENAI_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            return Ok(RaptorLlmConfig {
+                api_key,
+                base_url,
+                model,
+            });
+        }
+    }
+
     Err(GBrainError::Config(
         "No RAPTOR LLM API key configured. Set library raptor_llm_secret_ref, \
-         GBRAIN_EXPANSION_API_KEY, or GBRAIN_CHUNKER_API_KEY"
+         GBRAIN_EXPANSION_API_KEY, GBRAIN_CHUNKER_API_KEY, or config openai_api_key"
             .to_string(),
     ))
 }

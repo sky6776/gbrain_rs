@@ -68,6 +68,9 @@ pub fn list_embedding_indexes(conn: &Connection, library_id: i64) -> Result<Vec<
 }
 
 /// 激活某个 embedding index（只影响同一 library 下的其他 index）
+///
+/// P3 修复: 切换 active index 后递增 index_version，使 retrieval cache 立即失效。
+/// 缓存 key 依赖 MAX(index_version)，不递增会导致 30 秒内复用旧 active index 的候选集。
 pub fn activate_index(conn: &Connection, index_id: i64) -> Result<()> {
     // 先查目标 index 所属的 library_id，限定 UPDATE 作用域
     let library_id: i64 = conn
@@ -83,10 +86,20 @@ pub fn activate_index(conn: &Connection, index_id: i64) -> Result<()> {
          WHERE library_id = ?2",
         params![index_id, library_id],
     )?;
+    // P3 修复: 递增版本号，立即失效 retrieval cache
+    if let Err(e) = increment_index_version(conn, "retrieval_cache") {
+        tracing::warn!(
+            index_id,
+            error = %e,
+            "激活 embedding index 后递增 index_version 失败，缓存可能返回过期结果"
+        );
+    }
     Ok(())
 }
 
 /// 删除 embedding index，同时删除对应的 sqlite-vec 虚表和关联的 kb_node_embeddings 行
+///
+/// P3 修复: 删除后递增 index_version，使 retrieval cache 立即失效。
 pub fn delete_embedding_index(conn: &Connection, index_id: i64) -> Result<()> {
     // P5-012: Drop the per-index vec table
     let _ = drop_vec_table_for_index(conn, index_id);
@@ -102,6 +115,15 @@ pub fn delete_embedding_index(conn: &Connection, index_id: i64) -> Result<()> {
         "DELETE FROM kb_embedding_indexes WHERE id = ?1",
         params![index_id],
     )?;
+
+    // P3 修复: 递增版本号，立即失效 retrieval cache
+    if let Err(e) = increment_index_version(conn, "retrieval_cache") {
+        tracing::warn!(
+            index_id,
+            error = %e,
+            "删除 embedding index 后递增 index_version 失败，缓存可能返回过期结果"
+        );
+    }
     Ok(())
 }
 
@@ -308,6 +330,140 @@ pub fn get_active_index_for_library(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// P1 修复: 按 (model, dimensions) 对多个 library 的 active embedding index 分组。
+///
+/// 每个分组代表一组可以用同一模型/维度生成查询向量的库。不同 model 的向量不可互换，
+/// 需要各自生成查询向量并分别检索各自的 vec 表后合并结果。
+///
+/// 返回 Vec<(model, dimensions, [(index_id, [使用此 index 的 library_ids])])>，
+/// 无 library 或所有库都无 active index 时返回空 Vec。
+pub fn group_libraries_by_active_index(
+    conn: &Connection,
+    library_ids: &[i64],
+) -> Result<Vec<(String, i32, Vec<(i64, Vec<i64>)>)>> {
+    if library_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 收集所有 (library_id, index_id, model, dimensions)
+    let mut lib_indexes: Vec<(i64, i64, String, i32)> = Vec::new();
+    for &lib_id in library_ids {
+        match get_active_index_for_library(conn, lib_id)? {
+            Some(idx) => {
+                lib_indexes.push((lib_id, idx.id, idx.model, idx.dimensions));
+            }
+            None => {
+                tracing::warn!(
+                    library_id = lib_id,
+                    "库没有 active embedding index，跳过该库的向量检索"
+                );
+            }
+        }
+    }
+
+    if lib_indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 验证所有 index 的维度一致性（不同维度无法合并结果）
+    let first_dims = lib_indexes[0].3;
+    for &(lib_id, _, _, dims) in &lib_indexes {
+        if dims != first_dims {
+            return Err(GBrainError::InvalidInput(format!(
+                "库 {} 的 active embedding index 维度 ({}) 与其他库 ({}) 不一致，\
+                 请确保所有查询库使用相同维度的 embedding index",
+                lib_id, dims, first_dims
+            )));
+        }
+    }
+
+    // 按 (model, dimensions) 分组
+    // 不同 model 即使同维度也分到不同组——向量不可互换
+    let mut groups: Vec<(String, i32, Vec<(i64, Vec<i64>)>)> = Vec::new();
+    for (lib_id, idx_id, model, dims) in lib_indexes {
+        if let Some(group) = groups.iter_mut().find(|(m, d, _)| *m == model && *d == dims) {
+            // 同一 model+dim 组内，按 index_id 聚合 library_ids
+            if let Some(entry) = group.2.iter_mut().find(|(id, _)| *id == idx_id) {
+                entry.1.push(lib_id);
+            } else {
+                group.2.push((idx_id, vec![lib_id]));
+            }
+        } else {
+            groups.push((model, dims, vec![(idx_id, vec![lib_id])]));
+        }
+    }
+
+    Ok(groups)
+}
+
+/// P1 修复: 从多个 library ID 解析共识 active embedding index。
+///
+/// 调用 group_libraries_by_active_index，若所有库的 active index 模型和维度一致，
+/// 返回共识的 (id, model, dimensions)；否则返回错误。
+/// 无 library 或任一库无 active index 时返回 None。
+///
+/// 注意：此函数用于需要单一 index 的旧调用路径。新代码应优先使用
+/// group_libraries_by_active_index 以正确处理多模型/多 index 场景。
+pub fn resolve_active_index_for_libraries(
+    conn: &Connection,
+    library_ids: &[i64],
+) -> Result<Option<(i64, String, i32)>> {
+    let groups = group_libraries_by_active_index(conn, library_ids)?;
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    if groups.len() > 1 {
+        return Err(GBrainError::InvalidInput(format!(
+            "查询的多个库使用了不同的 embedding 模型 ({}、{})，\
+             向量不可互换。请确保所有库使用相同的 embedding 模型，\
+             或使用支持多模型分组检索的查询接口",
+            groups[0].0, groups[1].0
+        )));
+    }
+    // 单组：返回该组的 model/dims，以及第一个 index_id 作为代表
+    let (model, dims, entries) = groups.into_iter().next().unwrap();
+    let first_id = entries
+        .first()
+        .map(|(id, _)| *id)
+        .unwrap_or(0);
+    Ok(Some((first_id, model, dims)))
+}
+
+/// P1 修复: 从 kb_document_nodes 所属库解析 active embedding index。
+///
+/// 适用于已有 node_id 但尚未确定 library 的防御路径。
+pub fn resolve_active_index_for_node(
+    conn: &Connection,
+    node_id: i64,
+) -> Result<Option<(i64, String, i32)>> {
+    let result = conn.query_row(
+        "SELECT ei.id, ei.model, ei.dimensions \
+         FROM kb_embedding_indexes ei \
+         INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
+         WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
+        params![node_id],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i32>(2)?)),
+    );
+    match result {
+        Ok(t) => Ok(Some(t)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// P1 修复: 获取所有拥有 active embedding index 的库 ID 列表。
+///
+/// 用于全库查询（library_ids=[]）时展开为所有有效库，避免走 legacy 路径
+/// 扫描历史/非 active 向量。
+pub fn all_library_ids_with_active_index(conn: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT library_id FROM kb_embedding_indexes WHERE is_active = 1",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    let results: Vec<i64> = rows.filter_map(|r| r.ok()).collect();
+    Ok(results)
 }
 
 #[cfg(test)]

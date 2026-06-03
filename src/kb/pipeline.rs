@@ -652,6 +652,8 @@ pub async fn process_document_async(
     kb_raptor_base_url: Option<&str>,
     kb_raptor_model: Option<&str>,
     on_progress: Option<&ProgressCallback>,
+    // P3 修复: 完整 resolved RAPTOR config（api_key+base_url+model 均已合并 config 文件+环境变量）
+    resolved_raptor_config: Option<&crate::config::ResolvedRaptorConfig>,
 ) -> Result<ProcessResult> {
     let kb = KbEngine::new(conn);
     let doc_id = payload.document_id;
@@ -1093,6 +1095,7 @@ pub async fn process_document_async(
             kb_raptor_secret_ref,
             kb_raptor_base_url,
             kb_raptor_model,
+            resolved_raptor_config,
         );
 
         if let Ok(cfg) = llm_cfg {
@@ -1257,6 +1260,7 @@ pub async fn process_document_async(
                 kb_raptor_secret_ref,
                 kb_raptor_base_url,
                 kb_raptor_model,
+                resolved_raptor_config,
             ) {
                 Ok(llm_config) => {
                     let max_tokens = rc.max_tokens_per_summary;
@@ -1987,14 +1991,14 @@ pub(crate) fn persist_nodes_for_version_inner(
                 ))
             })?;
 
-            // 解析该节点所属 library 的 active embedding index
-            let active_index_id: i64 = conn
+            // 解析该节点所属 library 的 active embedding index（含模型名）
+            let (active_index_id, index_model): (i64, String) = conn
                 .query_row(
-                    "SELECT ei.id FROM kb_embedding_indexes ei \
+                    "SELECT ei.id, ei.model FROM kb_embedding_indexes ei \
                  INNER JOIN kb_document_nodes dn ON dn.library_id = ei.library_id \
                  WHERE dn.id = ?1 AND ei.is_active = 1 LIMIT 1",
                     rusqlite::params![db_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .map_err(|_| {
                     GBrainError::InvalidInput(format!(
@@ -2003,6 +2007,7 @@ pub(crate) fn persist_nodes_for_version_inner(
                     ))
                 })?;
 
+            // P1 修复: 使用库 active index 的实际模型名，不再硬编码
             // 统一写入（BLOB 表 + per-index vec 表）
             crate::kb::embedding_index::upsert_node_embedding_for_index(
                 conn,
@@ -2010,7 +2015,7 @@ pub(crate) fn persist_nodes_for_version_inner(
                 active_index_id,
                 vector,
                 vector.len() as i32,
-                "text-embedding-3-large",
+                &index_model,
             )?;
 
             // 向后兼容：同步写入 legacy vec_kb_nodes

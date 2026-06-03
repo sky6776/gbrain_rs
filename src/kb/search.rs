@@ -708,6 +708,9 @@ fn title_name_retriever(
     }
 
     // P1 修复: 同时返回 d.original_name 用于 exact_match 判断
+    // P2 修复: 添加 ORDER BY bm25(kb_doc_name_fts) ASC 确保 FTS 相关性排序稳定。
+    // 之前 GROUP BY ... LIMIT 没有 ORDER BY，返回顺序依赖 FTS/rowid 实现细节，
+    // 标题 retriever 权重高，不稳定的排序会把无关文档推到前排。
     let mut sql = String::from(
         "SELECT MIN(n.id), d.original_name FROM kb_doc_name_fts f \
          JOIN kb_documents d ON d.id = f.rowid \
@@ -734,15 +737,22 @@ fn title_name_retriever(
         }
     }
 
+    // P2 修复: ORDER BY bm25 确保按 FTS 相关性排序。
+    // bm25 值越低表示越相关（FTS5 中 bm25 返回负值表示更高相关性），
+    // ASC 排序使最相关的文档排在最前面。
     let limit_idx = param_values.len() + 1;
-    sql.push_str(&format!(" GROUP BY f.rowid LIMIT ?{}", limit_idx));
+    sql.push_str(&format!(
+        " GROUP BY f.rowid ORDER BY bm25(kb_doc_name_fts) ASC LIMIT ?{}",
+        limit_idx
+    ));
     param_values.push(Box::new(top_k as i64));
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> =
         param_values.iter().map(|p| p.as_ref()).collect();
 
-    // 规范化查询字符串用于精确匹配比较
-    let normalized_query = query.trim().to_lowercase();
+    // P2 修复: 查询也走 normalize_name_for_match 去掉扩展名，
+    // 确保 "report.pdf" 与去扩展名后的文档名 "report" 能精确匹配。
+    let normalized_query = normalize_name_for_match(query);
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
@@ -1607,42 +1617,138 @@ pub fn kb_vector_search(
 ) -> Result<Vec<RankedResult>> {
     let query_blob = embedding_to_blob(embedding);
 
-    // P5-012: 指定 index 时只查 per-index vec 表，失败则 fallback 到同 index 的 BLOB 表
-    if let Some(index_id) = embedding_index_id {
-        let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(index_id);
-        let result = try_vec_knn(
+    // P1 修复: 收集所有需要检索的 (index_id, [library_ids]) 对。
+    // 不再只查第一个库的 vec 表——多库场景下每个库有自己的 vec_kb_{index_id} 表，
+    // 必须全部检索才能拿到所有库的向量结果。
+    //
+    // P2 修复: library_ids 为空时（全库查询），展开所有有 active index 的库。
+    // 此展开仅用于向量检索，不影响 title/FTS 等非向量 retriever 的 library_ids 过滤。
+    let index_entries: Vec<(i64, Vec<i64>)> = {
+        let mut entries = Vec::new();
+
+        // 1) 显式指定的 index_id：用全部 library_ids（或调用方传入的子集）
+        if let Some(explicit_id) = embedding_index_id {
+            entries.push((explicit_id, library_ids.to_vec()));
+        }
+
+        // 2) 未显式指定时，从 library_ids 解析所有库的 active index
+        if embedding_index_id.is_none() {
+            let libs_to_resolve: Vec<i64> = if library_ids.is_empty() {
+                // 全库查询：展开所有有 active index 的库，仅用于向量检索
+                // P3 修复: propagate error instead of unwrap_or_default
+                crate::kb::embedding_index::all_library_ids_with_active_index(conn)?
+            } else {
+                library_ids.to_vec()
+            };
+
+            if !libs_to_resolve.is_empty() {
+                // P3 修复: propagate error instead of if let Ok
+                let groups =
+                    crate::kb::embedding_index::group_libraries_by_active_index(conn, &libs_to_resolve)?;
+                // 验证单模型：如果多个库用了不同 embedding 模型且 embedding_index_id 未指定，
+                // 传入的 query_vector 只对应一个模型，无法跨模型检索
+                if groups.len() > 1 {
+                    return Err(crate::GBrainError::InvalidInput(format!(
+                        "查询的多个库使用了不同的 embedding 模型 ({}、{})，\
+                         向量不可互换。请对每个模型单独生成查询向量并分别检索",
+                        groups[0].0, groups[1].0
+                    )));
+                }
+                for (_model, _dims, group_entries) in groups {
+                    for (idx_id, lib_ids) in group_entries {
+                        // 避免与显式指定的 index_id 重复
+                        if !entries.iter().any(|(id, _)| *id == idx_id) {
+                            entries.push((idx_id, lib_ids));
+                        }
+                    }
+                }
+            }
+        }
+
+        entries
+    };
+
+    // 有 per-index vec 表可查时，检索所有相关表并合并结果
+    if !index_entries.is_empty() {
+        let mut all_results: Vec<RankedResult> = Vec::new();
+        let mut seen_nodes: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+        for (index_id, ref lib_ids) in &index_entries {
+            let per_index_table =
+                crate::kb::embedding_index::vec_table_name_for_index(*index_id);
+            if let Ok(results) = try_vec_knn(
+                conn,
+                &query_blob,
+                lib_ids,
+                level,
+                top_k,
+                &per_index_table,
+            ) {
+                for r in results {
+                    if seen_nodes.insert(r.node_id) {
+                        all_results.push(r);
+                    }
+                }
+            }
+        }
+
+        // 按 score 降序排列（sqlite-vec distance 越小越相关，但 RankedResult.score 已转换）
+        all_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // P2 修复: 多 index 合并后按全局顺序重写 rank，避免 RRF 把多张表的局部第一都当 rank=1
+        for (i, r) in all_results.iter_mut().enumerate() {
+            r.rank = i + 1;
+        }
+
+        if all_results.len() >= top_k {
+            all_results.truncate(top_k);
+            return Ok(all_results);
+        }
+
+        if !all_results.is_empty() {
+            // 结果不足 top_k：尝试 BLOB fallback 补充
+            let fallback = vector_search_fallback_multi_index(
+                conn,
+                embedding,
+                library_ids,
+                level,
+                top_k,
+                &index_entries,
+            )?;
+            for r in fallback {
+                if seen_nodes.insert(r.node_id) {
+                    all_results.push(r);
+                }
+            }
+            all_results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            // P2 修复: fallback 合并后也按全局顺序重写 rank
+            for (i, r) in all_results.iter_mut().enumerate() {
+                r.rank = i + 1;
+            }
+            all_results.truncate(top_k);
+            return Ok(all_results);
+        }
+
+        // 所有 vec 表都没结果，走 BLOB fallback
+        return vector_search_fallback_multi_index(
             conn,
-            &query_blob,
+            embedding,
             library_ids,
             level,
             top_k,
-            &per_index_table,
+            &index_entries,
         );
-        match result {
-            // 结果充足时直接返回
-            Ok(results) if results.len() >= top_k => return Ok(results),
-            // 结果不足 top_k：尝试 fallback 补充
-            Ok(results) if !results.is_empty() => {
-                return supplement_with_fallback(
-                    conn, embedding, library_ids, level, top_k,
-                    embedding_index_id, results,
-                );
-            }
-            _ => {
-                // 不 fallback 到 legacy vec_kb_nodes，只 fallback 到同 index 的 BLOB 表
-                return vector_search_fallback(
-                    conn,
-                    embedding,
-                    library_ids,
-                    level,
-                    top_k,
-                    embedding_index_id,
-                );
-            }
-        }
     }
 
-    // 未指定 index：legacy 路径，先查 legacy vec 表，再 fallback BLOB
+    // 没有任何 active index：legacy 路径，
+    // 先查 legacy vec 表，再 fallback BLOB（向后兼容无 active index 的旧库）
     let result = try_vec_knn(
         conn,
         &query_blob,
@@ -1656,16 +1762,15 @@ pub fn kb_vector_search(
         Ok(results) if !results.is_empty() => {
             supplement_with_fallback(
                 conn, embedding, library_ids, level, top_k,
-                embedding_index_id, results,
+                None, results,
             )
         }
-        _ => vector_search_fallback(
+        _ => vector_search_fallback_legacy(
             conn,
             embedding,
             library_ids,
             level,
             top_k,
-            embedding_index_id,
         ),
     }
 }
@@ -1881,15 +1986,26 @@ fn supplement_with_fallback(
         top_k,
         "sqlite-vec KNN 结果不足，用 fallback 补充"
     );
-    // fallback 请求 top_k 数量（而非 deficit），以便按相似度排序后取最优补充
-    let fallback_results = vector_search_fallback(
-        conn,
-        embedding,
-        library_ids,
-        level,
-        top_k,
-        embedding_index_id,
-    )?;
+    // P1 修复: legacy 路径使用 legacy fallback（无 index 过滤），
+    // 新路径已在 kb_vector_search 中通过 vector_search_fallback_multi_index 处理
+    let fallback_results = if let Some(index_id) = embedding_index_id {
+        vector_search_fallback_multi_index(
+            conn,
+            embedding,
+            library_ids,
+            level,
+            top_k,
+            &[(index_id, library_ids.to_vec())],
+        )?
+    } else {
+        vector_search_fallback_legacy(
+            conn,
+            embedding,
+            library_ids,
+            level,
+            top_k,
+        )?
+    };
 
     let existing_ids: std::collections::HashSet<i64> =
         existing.iter().map(|r| r.node_id).collect();
@@ -2013,22 +2129,118 @@ fn try_vec_knn(
     Ok(results)
 }
 
-/// Brute-force cosine similarity search over kb_node_embeddings BLOB table.
-///
-/// This is the fallback when sqlite-vec is not available. It loads candidate
-/// embeddings into memory (capped at 10000 rows) and computes cosine similarity.
+/// BLOB brute-force fallback: 最大候选行数，防止无界内存分配
 const VECTOR_FALLBACK_MAX_ROWS: usize = 10000;
 
-fn vector_search_fallback(
+/// BLOB brute-force fallback：对多个 embedding index 分别过滤。
+/// entries: [(index_id, [library_ids])]，每个 index_id 对应一个 vec 表的检索范围。
+fn vector_search_fallback_multi_index(
+    conn: &Connection,
+    embedding: &[f32],
+    _library_ids: &[i64],
+    level: Option<i32>,
+    top_k: usize,
+    index_entries: &[(i64, Vec<i64>)],
+) -> Result<Vec<RankedResult>> {
+    let mut all_candidates: Vec<(i64, f64)> = Vec::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
+    for (index_id, ref lib_ids) in index_entries {
+        // 对每个 index_id 分别查询 kb_node_embeddings
+        let mut sql = String::from(
+            "SELECT ne.node_id, ne.embedding \
+             FROM kb_node_embeddings ne \
+             INNER JOIN kb_document_nodes n ON n.id = ne.node_id \
+             INNER JOIN kb_documents d ON d.id = n.document_id \
+             WHERE ne.embedding_index_id = ?1 \
+             AND d.deleted_at IS NULL AND d.document_status != 'deleted' \
+             AND n.retired_at IS NULL \
+             AND d.current_version_id IS NOT NULL \
+             AND n.version_id = d.current_version_id \
+             AND d.index_status = 'ready'",
+        );
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(*index_id)];
+
+        // 限制 library 范围
+        if !lib_ids.is_empty() {
+            let start = param_values.len() + 1;
+            let placeholders: Vec<String> = lib_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", start + i))
+                .collect();
+            sql.push_str(&format!(
+                " AND n.library_id IN ({})",
+                placeholders.join(",")
+            ));
+            for &id in lib_ids {
+                param_values.push(Box::new(id));
+            }
+        }
+
+        if let Some(lvl) = level {
+            let idx = param_values.len() + 1;
+            sql.push_str(&format!(" AND n.level = ?{}", idx));
+            param_values.push(Box::new(lvl));
+        }
+
+        let limit_idx = param_values.len() + 1;
+        sql.push_str(&format!(" LIMIT ?{}", limit_idx));
+        param_values.push(Box::new(VECTOR_FALLBACK_MAX_ROWS as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) = stmt.query_map(param_refs.as_slice(), |row| {
+                let node_id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((node_id, blob))
+            }) {
+                for row in rows.flatten() {
+                    if seen.insert(row.0) {
+                        let node_embedding = blob_to_embedding(&row.1);
+                        let sim = cosine_similarity_f64(embedding, &node_embedding);
+                        all_candidates.push((row.0, sim));
+                    }
+                }
+            }
+        }
+    }
+
+    all_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    all_candidates.truncate(top_k);
+
+    Ok(all_candidates
+        .iter()
+        .enumerate()
+        .map(|(i, (node_id, sim))| {
+            let mut sig = RankSignals::default();
+            sig.retrievers.push(RetrieverKind::Vector);
+            sig.vector_similarity = Some(*sim);
+            sig.source_score = *sim;
+            RankedResult {
+                node_id: *node_id,
+                rank: i + 1,
+                score: *sim,
+                signals: sig,
+            }
+        })
+        .collect())
+}
+
+/// BLOB brute-force fallback（legacy 路径，不过滤 embedding_index_id）。
+/// 向后兼容没有 active index 的旧库。
+fn vector_search_fallback_legacy(
     conn: &Connection,
     embedding: &[f32],
     library_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
-    embedding_index_id: Option<i64>,
 ) -> Result<Vec<RankedResult>> {
-    // 修复：JOIN kb_documents 过滤已删除文档，否则 fallback 向量搜索也会返回已软删的节点
-    // P1-1: 同时过滤退役节点与非 active version 节点
+    // 修复：JOIN kb_documents 过滤已删除文档
     let mut sql = String::from(
         "SELECT ne.node_id, ne.embedding \
          FROM kb_node_embeddings ne \
@@ -2040,13 +2252,6 @@ fn vector_search_fallback(
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-    // P5-011: Filter by embedding_index_id if specified
-    if let Some(index_id) = embedding_index_id {
-        let idx = param_values.len() + 1;
-        sql.push_str(&format!(" AND ne.embedding_index_id = ?{}", idx));
-        param_values.push(Box::new(index_id));
-    }
 
     if !library_ids.is_empty() {
         let start = param_values.len() + 1;
@@ -2070,7 +2275,6 @@ fn vector_search_fallback(
         param_values.push(Box::new(lvl));
     }
 
-    // Cap candidate rows to prevent unbounded memory allocation
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" LIMIT ?{}", limit_idx));
     param_values.push(Box::new(VECTOR_FALLBACK_MAX_ROWS as i64));
@@ -2096,9 +2300,6 @@ fn vector_search_fallback(
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     candidates.truncate(top_k);
 
-    // FIX11-06: 保留实际 cosine similarity 分数，而非丢弃为 0.0
-    // 丢弃分数导致 RRF merge 和 rerank 无法区分向量检索结果的质量
-    // P0-1: 同步写入 RankSignals,以便 RRF 融合 + rerank 使用完整向量信号
     Ok(candidates
         .iter()
         .enumerate()

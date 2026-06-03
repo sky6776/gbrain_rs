@@ -41,18 +41,59 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
         "KB worker: 认领作业"
     );
 
-    // 创建 embedder（如果已配置 API key）
+    // P1 修复: 创建 embedder 时优先使用库 active embedding index 的模型/维度，
+    // 而不是全局 config 的默认值。这确保生成的向量与库的索引维度一致。
     let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
+        let (model, dims): (String, Option<usize>) = match crate::kb::embedding_index::get_active_index_for_library(
+            conn,
+            payload.library_id,
+        ) {
+            Ok(Some(idx)) => {
+                tracing::debug!(
+                    library_id = payload.library_id,
+                    index_id = idx.id,
+                    model = idx.model.as_str(),
+                    dimensions = idx.dimensions,
+                    "KB worker: 使用库 active embedding index 配置 embedder"
+                );
+                (idx.model, Some(idx.dimensions as usize))
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    library_id = payload.library_id,
+                    "KB worker: 库无 active embedding index，回退到全局 config"
+                );
+                (
+                    config.embedding_model.clone(),
+                    Some(config.embedding_dimensions),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    library_id = payload.library_id,
+                    error = %e,
+                    "KB worker: 解析 active embedding index 失败，回退到全局 config"
+                );
+                (
+                    config.embedding_model.clone(),
+                    Some(config.embedding_dimensions),
+                )
+            }
+        };
         Arc::new(Embedder::new(
             api_key,
             config.openai_base_url.as_deref(),
-            Some(&config.embedding_model),
-            Some(config.embedding_dimensions),
+            Some(&model),
+            dims,
         ))
     });
 
     // 构建 RaptorConfig（使用默认值）
     let raptor_config = RaptorConfig::default();
+
+    // P3 修复: 提前 resolve 完整的 RAPTOR config（合并 config 文件+环境变量），
+    // 传入 pipeline 供 RAPTOR summary/augmentation 回退使用。
+    let resolved_raptor_cfg = config.raptor_config_resolved();
 
     // 获取全局共享 tokio 运行时执行异步管道
     let rt = crate::runtime::shared_runtime();
@@ -71,6 +112,8 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
             Some(config.kb_raptor_model.as_str())
         },
         None,
+        // P3 修复: 传入完整的 resolved RAPTOR config（api_key+base_url+model 均已 resolve）
+        Some(&resolved_raptor_cfg),
     ));
 
     match result {
@@ -361,11 +404,25 @@ pub fn run_kb_cmd_worker_once(engine: &SqliteEngine, config: &Config) -> Result<
             ref processing_run_id,
         } => match config.openai_api_key.as_deref().filter(|s| !s.is_empty()) {
             Some(api_key) => {
+                // P1 修复: 使用库 active embedding index 的模型/维度创建 embedder
+                let (model, dims): (String, Option<usize>) =
+                    match crate::kb::embedding_index::get_active_index_for_library(conn, library_id)
+                    {
+                        Ok(Some(idx)) => (idx.model, Some(idx.dimensions as usize)),
+                        Ok(None) => (
+                            config.embedding_model.clone(),
+                            Some(config.embedding_dimensions),
+                        ),
+                        Err(_) => (
+                            config.embedding_model.clone(),
+                            Some(config.embedding_dimensions),
+                        ),
+                    };
                 let embedder = Arc::new(Embedder::new(
                     api_key,
                     config.openai_base_url.as_deref(),
-                    Some(&config.embedding_model),
-                    Some(config.embedding_dimensions),
+                    Some(&model),
+                    dims,
                 ));
                 let rt = crate::runtime::shared_runtime();
                 match rt.block_on(crate::kb::pipeline::embed_nodes_for_document_version(
@@ -788,16 +845,58 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
         return Ok(false);
     };
 
-    let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
-        Arc::new(Embedder::new(
-            api_key,
-            config.openai_base_url.as_deref(),
-            Some(&config.embedding_model),
-            Some(config.embedding_dimensions),
-        ))
-    });
-
     let rt = crate::runtime::shared_runtime();
+
+    // P1 修复: 在创建 embedder 之前，先解析目标库的 active embedding index，
+    // 使用库实际的 model/dimensions 而非全局 config。否则目标 index 与全局配置
+    // 不一致时会把错模型/错维度的向量写入索引。
+    let resolve_embedder_config =
+        |conn: &Connection, library_id: i64| -> (Option<Arc<Embedder>>, String) {
+            let (model, dims): (String, Option<usize>) =
+                match crate::kb::embedding_index::get_active_index_for_library(conn, library_id)
+                {
+                    Ok(Some(idx)) => {
+                        tracing::debug!(
+                            library_id,
+                            index_id = idx.id,
+                            model = idx.model.as_str(),
+                            dimensions = idx.dimensions,
+                            "re-embed worker: 使用库 active embedding index 配置 embedder"
+                        );
+                        (idx.model, Some(idx.dimensions as usize))
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            library_id,
+                            "re-embed worker: 库无 active embedding index，回退到全局 config"
+                        );
+                        (
+                            config.embedding_model.clone(),
+                            Some(config.embedding_dimensions),
+                        )
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            library_id,
+                            error = %e,
+                            "re-embed worker: 解析 active embedding index 失败，回退到全局 config"
+                        );
+                        (
+                            config.embedding_model.clone(),
+                            Some(config.embedding_dimensions),
+                        )
+                    }
+                };
+            let embedder = config.openai_api_key.as_deref().map(|api_key| {
+                Arc::new(Embedder::new(
+                    api_key,
+                    config.openai_base_url.as_deref(),
+                    Some(&model),
+                    dims,
+                ))
+            });
+            (embedder, model)
+        };
 
     let result = match job_type.as_str() {
         "kb_reembed_node" => {
@@ -811,7 +910,17 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 )?;
                 return Ok(true);
             }
-            reembed_single_node(conn, &embedder, rt, node_id, None, &config.embedding_model)
+
+            // P1 修复: 从节点所在库解析 active index 的模型/维度，而非用全局 config
+            let library_id: i64 = conn
+                .query_row(
+                    "SELECT library_id FROM kb_document_nodes WHERE id = ?1",
+                    rusqlite::params![node_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let (embedder, model) = resolve_embedder_config(conn, library_id);
+            reembed_single_node(conn, &embedder, rt, node_id, None, &model)
         }
         "kb_reembed" => {
             // 文档级重嵌入：读取所有无 embedding 的节点，逐个嵌入
@@ -845,6 +954,59 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                     return Ok(true);
                 }
             }
+
+            // P1 修复: 根据 target_embedding_index_id 决定用哪个 index 的模型/维度创建 embedder。
+            // target>0 时查目标 index 的 model/dimensions，避免用 active index 的模型把向量写错维度。
+            // target==0 时才解析文档当前 active index。
+            let library_id: i64 = conn
+                .query_row(
+                    "SELECT library_id FROM kb_documents WHERE id = ?1",
+                    rusqlite::params![doc_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let (embedder, model, target_dims) = if target_index_id > 0 {
+                // 显式指定目标 index：按目标 index 的 model/dimensions 创建 embedder
+                match conn.query_row(
+                    "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
+                    rusqlite::params![target_index_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
+                ) {
+                    Ok((target_model, target_dimensions)) => {
+                        tracing::debug!(
+                            target_index_id,
+                            model = target_model.as_str(),
+                            dimensions = target_dimensions,
+                            "re-embed worker: 使用目标 embedding index 的模型/维度"
+                        );
+                        let embedder = config.openai_api_key.as_deref().map(|api_key| {
+                            Arc::new(Embedder::new(
+                                api_key,
+                                config.openai_base_url.as_deref(),
+                                Some(&target_model),
+                                Some(target_dimensions as usize),
+                            ))
+                        });
+                        (embedder, target_model, Some(target_dimensions))
+                    }
+                    Err(_) => {
+                        // P2 修复: 目标 index 不存在时直接 fail job，不静默回退。
+                        // 回退到 active index 会写错索引，且 job 仍 complete——payload 明确
+                        // 指定的目标丢失了，属于不可恢复的配置错误。
+                        let err_msg = format!(
+                            "re-embed worker: 目标 embedding index (id={}) 不存在，job 失败",
+                            target_index_id
+                        );
+                        tracing::error!(target_index_id, "{}", err_msg);
+                        fail_kb_job(conn, job_db_id, &err_msg)?;
+                        return Ok(true);
+                    }
+                }
+            } else {
+                // target==0：解析文档当前 active index
+                let (embedder, model) = resolve_embedder_config(conn, library_id);
+                (embedder, model, None)
+            };
 
             // 外部 embedding 始终允许，不再检查库级策略
 
@@ -901,7 +1063,8 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                 rt,
                 doc_id,
                 target_index_id,
-                &config.embedding_model,
+                &model,
+                target_dims,
             )
         }
         _ => Err(GBrainError::InvalidInput(format!(
@@ -992,6 +1155,20 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                     )? {
                         return Ok(true);
                     }
+                }
+            }
+
+            // P3 修复: reembed 成功写入后递增检索缓存版本。
+            // 缓存 TTL 为 30 秒，不递增会让重嵌入后立即查询仍可能复用旧候选集。
+            if count > 0 {
+                if let Err(e) = crate::kb::embedding_index::increment_index_version(
+                    conn,
+                    "retrieval_cache",
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        "re-embed worker: 递增检索缓存版本失败，缓存可能返回过期结果"
+                    );
                 }
             }
 
@@ -2818,6 +2995,8 @@ fn reembed_single_node(
 /// 对文档中所有缺失 embedding 的节点执行批量 re-embed
 ///
 /// `target_index_id` 为 0 时自动解析为该文档所属 library 的 active index。
+/// `target_dims` 为显式目标索引的维度（target>0 时查 kb_embedding_indexes 得到），
+/// 用于在写入前校验向量维度一致性。
 fn reembed_document_nodes(
     conn: &Connection,
     embedder: &Option<Arc<Embedder>>,
@@ -2825,6 +3004,7 @@ fn reembed_document_nodes(
     document_id: i64,
     target_index_id: i64,
     model: &str,
+    target_dims: Option<i32>,
 ) -> Result<usize> {
     // 解析 target_index_id：0 → active index（通过文档的当前版本节点查找所属 library）
     let resolved_index_id = if target_index_id > 0 {
@@ -2896,6 +3076,17 @@ fn reembed_document_nodes(
         let vectors = rt.block_on(embedder.embed_batch(&texts))?;
         for ((node_id, _, _), vec) in chunk.iter().zip(vectors.iter()) {
             let dims = vec.len() as i32;
+            // P1 修复: 写入前校验向量维度与目标 index 一致。
+            // 避免用 active index 的模型生成的向量写到指定 target index 时维度不匹配。
+            if let Some(expected_dims) = target_dims {
+                if dims != expected_dims {
+                    return Err(GBrainError::InvalidInput(format!(
+                        "生成的 embedding 向量维度 ({}) 与目标 index (id={}, dims={}) 不一致，\
+                         请检查 embedding 配置: model={}",
+                        dims, resolved_index_id, expected_dims, model
+                    )));
+                }
+            }
             crate::kb::embedding_index::upsert_node_embedding_for_index(
                 conn,
                 *node_id,
@@ -3070,6 +3261,9 @@ fn rebuild_raptor_after_reembed(
     }
 
     // 解析 RAPTOR LLM 配置
+    // P3 修复: 传入完整的 resolved RAPTOR config（合并 config 文件+环境变量），
+    // 保证 base_url/model 也来自已加载 config 而非仅环境变量。
+    let resolved_raptor_cfg = config.raptor_config_resolved();
     let llm_config = crate::kb::raptor::resolve_raptor_llm_config(
         Some(library),
         config.kb_raptor_secret_ref.as_deref(),
@@ -3079,6 +3273,7 @@ fn rebuild_raptor_after_reembed(
         } else {
             Some(config.kb_raptor_model.as_str())
         },
+        Some(&resolved_raptor_cfg),
     )?;
 
     let max_tokens = raptor_config.max_tokens_per_summary;

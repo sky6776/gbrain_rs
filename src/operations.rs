@@ -1367,19 +1367,107 @@ impl<'a> Operations<'a> {
         let query_for_vector = rewritten_query.as_deref().unwrap_or(&input.query);
         let query_for_vector = crate::kb::search::normalize_query(query_for_vector);
 
+        // ── P1 修复: 先展开库/解析显式 index，再决定 query vector 模型 ──
+        //
+        // 问题: 之前用原始 input.library_ids (全库查询时为空) 解析 active index，
+        // resolved_index=None 导致回退到全局 config；若库的 active index 模型/维度
+        // 与全局 config 不一致，向量召回报错或精度错误。
+        //
+        // 修复: 先确定"向量检索要查询哪些库"（展开或解析），再从中提取共识模型/维度；
+        // 显式 embedding_index_id 也要按目标 index 查 model/dims。
+        let user_explicit_index_id: Option<i64> = input.embedding_index_id;
+
+        // Step 1: 确定向量检索用的库集合及共识 embedding 模型/维度
+        let (embedding_model_for_query, embedding_dims_for_query): (String, Option<usize>) =
+            if let Some(explicit_id) = user_explicit_index_id {
+                // 用户显式传了 embedding_index_id：按该 index 的 model/dimensions 生成向量
+                match conn.query_row(
+                    "SELECT model, dimensions FROM kb_embedding_indexes WHERE id = ?1",
+                    rusqlite::params![explicit_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)),
+                ) {
+                    Ok((m, d)) => (m, Some(d as usize)),
+                    Err(_) => {
+                        return Err(crate::error::GBrainError::InvalidInput(format!(
+                            "指定的 embedding_index_id={} 不存在",
+                            explicit_id
+                        )));
+                    }
+                }
+            } else {
+                // 未显式指定：用所有待查库的 active index 提取共识模型
+                let libs_for_resolve: Vec<i64> = if input.library_ids.is_empty() {
+                    // 全库查询：展开所有有 active index 的库用于解析模型
+                    crate::kb::embedding_index::all_library_ids_with_active_index(conn)?
+                } else {
+                    input.library_ids.clone()
+                };
+
+                if libs_for_resolve.is_empty() {
+                    // 没有任何 active index：回退到全局 config
+                    (
+                        self.config.embedding_model.clone(),
+                        Some(self.config.embedding_dimensions),
+                    )
+                } else {
+                    // P2 修复: 多模型冲突时不直接报错，而是 warn 并跳过向量分支。
+                    // 这样 title/FTS/metadata 等非向量召回仍能正常执行。
+                    match crate::kb::embedding_index::resolve_active_index_for_libraries(
+                        conn,
+                        &libs_for_resolve,
+                    ) {
+                        Ok(Some((_, model, dims))) => (model, Some(dims as usize)),
+                        Ok(None) => (
+                            self.config.embedding_model.clone(),
+                            Some(self.config.embedding_dimensions),
+                        ),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                lib_count = libs_for_resolve.len(),
+                                "kb_query: 无法解析共识 embedding 模型，将跳过向量检索，\
+                                 仅执行 title/FTS/metadata 等非向量召回"
+                            );
+                            // 返回一个无法匹配模型的哨兵值，query_vector 设为 None
+                            (String::new(), None)
+                        }
+                    }
+                }
+            };
+
+        // P2 修复: 如果模型解析失败（多模型冲突等），跳过向量检索，
+        // 仅执行 title/FTS/metadata 等非向量召回。
         let query_vector: Option<Vec<f32>> =
-            if let Some(api_key) = self.config.openai_api_key.as_deref() {
+            if embedding_dims_for_query.is_none() && embedding_model_for_query.is_empty() {
+                // 多模型冲突降级：不生成 query vector
+                tracing::info!("kb_query: 向量检索已被禁用，仅执行非向量召回");
+                None
+            } else if let Some(api_key) = self.config.openai_api_key.as_deref() {
                 let embedder = crate::embedding::Embedder::new(
                     api_key,
                     self.config.openai_base_url.as_deref(),
-                    Some(&self.config.embedding_model),
-                    Some(self.config.embedding_dimensions),
+                    Some(&embedding_model_for_query),
+                    embedding_dims_for_query,
                 );
                 // H4 fix: 使用全局共享运行时
                 let rt = crate::runtime::shared_runtime();
-                rt.block_on(embedder.embed_batch(&[&query_for_vector]))
+                let vec_result = rt.block_on(embedder.embed_batch(&[&query_for_vector]))
                     .ok()
-                    .and_then(|v| v.into_iter().next())
+                    .and_then(|v| v.into_iter().next());
+
+                // P1 修复: 验证生成的向量维度与目标一致
+                if let (Some(ref vec), Some(expected_dims)) = (&vec_result, embedding_dims_for_query) {
+                    let actual_dims = vec.len();
+                    if actual_dims != expected_dims {
+                        return Err(crate::error::GBrainError::InvalidInput(format!(
+                            "生成的查询向量维度 ({}) 与目标维度 ({}) 不一致，\
+                             请检查 embedding 模型配置: model={}",
+                            actual_dims, expected_dims, embedding_model_for_query
+                        )));
+                    }
+                }
+
+                vec_result
             } else {
                 None
             };
@@ -1405,6 +1493,20 @@ impl<'a> Operations<'a> {
         if input_with_config.max_chunks_per_doc.is_none() {
             input_with_config.max_chunks_per_doc = Some(3);
         }
+
+        // P1 修复: 只有用户显式传了 embedding_index_id 时才转发给 kb_search；
+        // 否则不注入，让 kb_vector_search 自行按 group_libraries_by_active_index
+        // 展开所有 active index 并分别查询各自的 vec_kb_{id} 表，避免漏库。
+        if input_with_config.embedding_index_id.is_none() {
+            input_with_config.embedding_index_id = user_explicit_index_id;
+        }
+
+        // P2 修复: 不要把 expanded_library_ids 写回 input_with_config.library_ids。
+        // library_ids=[] 表示"所有库"，title/FTS/summary/table 等非向量 retriever
+        // 通过空数组做无过滤全库检索是正确的；只有向量检索需要展开为 active-index 库。
+        // kb_vector_search 内部在 library_ids 为空时会自动查询所有 active index。
+        // 这里保持原始 library_ids 不变，避免没有 active index 的库连关键词/标题
+        // 召回也被排除。
 
         crate::kb::search::kb_search(conn, &input_with_config, query_vector.as_deref())
     }
