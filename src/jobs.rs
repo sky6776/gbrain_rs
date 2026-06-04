@@ -17,6 +17,8 @@ pub enum JobStatus {
     Running,
     Completed,
     Failed,
+    /// KB pause/reprocess 标记的取消状态，不同于 Failed（终态）
+    Cancelled,
 }
 
 impl std::fmt::Display for JobStatus {
@@ -26,6 +28,7 @@ impl std::fmt::Display for JobStatus {
             Self::Running => write!(f, "running"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -37,6 +40,7 @@ impl JobStatus {
             "running" => Self::Running,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
             _ => Self::Failed, // Unknown statuses default to Failed (safe: prevents re-processing)
         }
     }
@@ -54,6 +58,7 @@ pub struct Job {
     pub max_attempts: i32,
     pub error: Option<String>,
     pub created_at: String,
+    pub updated_at: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
 }
@@ -133,7 +138,7 @@ impl<'a> JobQueue<'a> {
             // Find next pending job (optionally filtered by type)
             let job = if let Some(jt) = job_type_filter {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, updated_at, started_at, completed_at
                      FROM jobs
                      WHERE status = 'pending' AND job_type = ?1
                      ORDER BY priority DESC, created_at ASC
@@ -142,7 +147,7 @@ impl<'a> JobQueue<'a> {
                 stmt.query_row(params![jt], Self::row_to_job).ok()
             } else {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                    "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, updated_at, started_at, completed_at
                      FROM jobs
                      WHERE status = 'pending'
                      ORDER BY priority DESC, created_at ASC
@@ -157,7 +162,7 @@ impl<'a> JobQueue<'a> {
 
             // Atomic claim: only transition if still pending (prevents concurrent dequeue races)
             let rows = self.conn.execute(
-                "UPDATE jobs SET status = 'running', started_at = datetime('now'), attempts = attempts + 1
+                "UPDATE jobs SET status = 'running', started_at = datetime('now'), updated_at = datetime('now'), attempts = attempts + 1
                  WHERE id = ?1 AND status = 'pending'",
                 params![job.id],
             )?;
@@ -179,7 +184,7 @@ impl<'a> JobQueue<'a> {
     /// Guarded: only transitions from 'running' state (mirrors fail() pattern)
     pub fn complete(&self, job_id: i64) -> Result<()> {
         let rows = self.conn.execute(
-            "UPDATE jobs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1 AND status = 'running'",
+            "UPDATE jobs SET status = 'completed', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1 AND status = 'running'",
             params![job_id],
         )?;
         if rows == 0 {
@@ -198,6 +203,7 @@ impl<'a> JobQueue<'a> {
             "UPDATE jobs SET
                 status = CASE WHEN attempts < max_attempts THEN 'pending' ELSE 'failed' END,
                 error = ?2,
+                updated_at = datetime('now'),
                 completed_at = CASE WHEN attempts >= max_attempts THEN datetime('now') ELSE NULL END
              WHERE id = ?1 AND status = 'running'",
             params![job_id, error],
@@ -235,7 +241,7 @@ impl<'a> JobQueue<'a> {
 
         let jobs: Vec<Job> = if let Some(ref st) = status_str {
             let mut stmt = self.conn.prepare(
-                "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, updated_at, started_at, completed_at
                  FROM jobs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
             )?;
             let x: Vec<Job> = stmt
@@ -245,7 +251,7 @@ impl<'a> JobQueue<'a> {
             x
         } else {
             let mut stmt = self.conn.prepare(
-                "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+                "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, updated_at, started_at, completed_at
                  FROM jobs ORDER BY created_at DESC LIMIT ?1",
             )?;
             let x: Vec<Job> = stmt
@@ -261,7 +267,7 @@ impl<'a> JobQueue<'a> {
     /// Get a specific job by ID
     pub fn get(&self, job_id: i64) -> Result<Option<Job>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, started_at, completed_at
+            "SELECT id, job_type, payload, status, priority, attempts, max_attempts, error, created_at, updated_at, started_at, completed_at
              FROM jobs WHERE id = ?1",
         )?;
         let result = stmt.query_row(params![job_id], Self::row_to_job).ok();
@@ -269,9 +275,11 @@ impl<'a> JobQueue<'a> {
     }
 
     /// Cancel a pending job
+    /// 使用 status='cancelled' + cancel_reason='manual'，
+    /// 与 KB pause/reprocess 的取消保持一致状态值，便于过滤和统计。
     pub fn cancel(&self, job_id: i64) -> Result<()> {
         let rows = self.conn.execute(
-            "UPDATE jobs SET status = 'failed', error = 'cancelled', completed_at = datetime('now')
+            "UPDATE jobs SET status = 'cancelled', cancel_reason = 'manual', updated_at = datetime('now')
              WHERE id = ?1 AND status = 'pending'",
             params![job_id],
         )?;
@@ -342,8 +350,9 @@ impl<'a> JobQueue<'a> {
             max_attempts: row.get(6)?,
             error: row.get(7)?,
             created_at: row.get(8)?,
-            started_at: row.get(9)?,
-            completed_at: row.get(10)?,
+            updated_at: row.get(9)?,
+            started_at: row.get(10)?,
+            completed_at: row.get(11)?,
         })
     }
 }

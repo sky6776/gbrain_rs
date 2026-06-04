@@ -246,7 +246,7 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                 // 非关键操作：即使 UPDATE 失败也要确保 fail_kb_job 被执行，
                 // 否则 job 会永久卡在 running 状态。
                 if let Err(e2) = conn.execute(
-                    "UPDATE jobs SET max_attempts = attempts WHERE id = ?1",
+                    "UPDATE jobs SET max_attempts = attempts, updated_at = datetime('now') WHERE id = ?1",
                     rusqlite::params![job_db_id],
                 ) {
                     tracing::warn!(

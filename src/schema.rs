@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 34;
+pub const SCHEMA_VERSION: i32 = 36;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -326,7 +326,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
     error TEXT,
+    cancel_reason TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT,
     started_at TEXT,
     completed_at TEXT
 );

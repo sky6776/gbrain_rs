@@ -25,6 +25,18 @@ fn reuse_kb_doc_and_enqueue(
     proj_key: &str,
 ) -> Result<String> {
     let run_id = new_run_id();
+
+    // 修复 P2：入队新 job 前先取消该文档的旧 pending job，
+    // 防止旧 job 被认领后因 run_id 不匹配被判定为 stale。
+    // 不取消 processing 状态的 job（worker 正在执行，无法中断）。
+    if let Err(e) = crate::kb::jobs::cancel_pending_kb_jobs_by_document_id(conn, kb_doc_id) {
+        tracing::warn!(
+            kb_doc_id,
+            error = %e,
+            "active 投影复用路径取消旧 KB job 失败，继续"
+        );
+    }
+
     // 修复 P1：复用已删除的 kb_document 时必须同时清 deleted_at，
     // 否则后续查询用 d.deleted_at IS NULL 过滤时搜不到。
     conn.execute(

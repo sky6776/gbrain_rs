@@ -1138,13 +1138,14 @@ pub async fn process_document_async(
             // 连续失败计数：超过阈值后跳过剩余增强，避免 LLM 持续不可用时拖慢整个文档处理
             let mut consecutive_failures = 0usize;
             const MAX_CONSECUTIVE_AUGMENT_FAILURES: usize = 5;
-            for node in &mut nodes {
+            for (i, node) in nodes.iter_mut().enumerate() {
                 // 连续失败过多，跳过剩余节点
                 if consecutive_failures >= MAX_CONSECUTIVE_AUGMENT_FAILURES {
                     tracing::warn!(
-                        skipped = nodes.len() - aug_count,
-                        "节点增强连续失败 {} 次，跳过剩余节点",
-                        MAX_CONSECUTIVE_AUGMENT_FAILURES
+                        remaining = nodes.len() - i,
+                        "节点增强连续失败 {} 次，跳过剩余 {} 个节点",
+                        MAX_CONSECUTIVE_AUGMENT_FAILURES,
+                        nodes.len() - i
                     );
                     break;
                 }

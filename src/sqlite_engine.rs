@@ -541,6 +541,43 @@ impl SqliteEngine {
             )?;
         }
 
+        // v34 → v35: jobs 表增加 cancel_reason 列，区分 pause/reprocess 取消原因
+        if current_version > 0 && current_version < 35 {
+            debug!(
+                "执行 schema 迁移 v{} → v35: jobs 表增加 cancel_reason",
+                current_version
+            );
+            // SQLite 不支持 ADD COLUMN IF NOT EXISTS，如果列已存在会报错，
+            // 用 try 吞掉 duplicate column 错误（幂等迁移）
+            if let Err(e) = conn.execute("ALTER TABLE jobs ADD COLUMN cancel_reason TEXT", []) {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(GBrainError::Database(format!(
+                        "迁移 v34→v35 失败: {}",
+                        e
+                    )));
+                }
+                debug!("cancel_reason 列已存在，跳过迁移");
+            }
+        }
+
+        // v35 → v36: jobs 表增加 updated_at 列
+        if current_version > 0 && current_version < 36 {
+            debug!(
+                "执行 schema 迁移 v{} → v36: jobs 表增加 updated_at",
+                current_version
+            );
+            // 幂等迁移：如果列已存在则跳过
+            if let Err(e) = conn.execute("ALTER TABLE jobs ADD COLUMN updated_at TEXT", []) {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(GBrainError::Database(format!(
+                        "迁移 v35→v36 失败: {}",
+                        e
+                    )));
+                }
+                debug!("updated_at 列已存在，跳过迁移");
+            }
+        }
+
         // 新数据库（current_version == 0）或已匹配当前版本：记录版本号
         if current_version < crate::schema::SCHEMA_VERSION {
             conn.execute(

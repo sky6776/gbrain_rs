@@ -474,12 +474,15 @@ pub fn list_kb_jobs(conn: &Connection, library_id: Option<i64>) -> Result<Vec<(i
 /// 防止旧 job 被认领后因 processing_run_id 不匹配被判定为 stale。
 /// 注意：不取消 processing 状态的 job，因为 worker 线程正在同步执行中，
 /// 改 DB 状态无法中断正在运行的处理，应让 run guard 自然处理。
+///
+/// 设置 cancel_reason='reprocess' 以区分 pause 取消，
+/// 避免 resume_library_jobs 误复活这些已过时的 reprocess 取消。
 pub fn cancel_pending_kb_jobs_by_document_id(
     conn: &Connection,
     document_id: i64,
 ) -> Result<usize> {
     let changed = conn.execute(
-        "UPDATE jobs SET status = 'cancelled', updated_at = datetime('now') \
+        "UPDATE jobs SET status = 'cancelled', cancel_reason = 'reprocess', updated_at = datetime('now') \
          WHERE job_type = 'kb_process_document' \
          AND status = 'pending' \
          AND payload->>'$.document_id' = ?1",
@@ -489,9 +492,12 @@ pub fn cancel_pending_kb_jobs_by_document_id(
 }
 
 /// Pause KB job processing for a library by cancelling pending jobs.
+///
+/// 设置 cancel_reason='pause' 以区别于 reprocess 取消，
+/// 使 resume_library_jobs 能精确恢复仅由暂停产生的取消。
 pub fn pause_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE jobs SET status='cancelled' \
+        "UPDATE jobs SET status='cancelled', cancel_reason='pause', updated_at = datetime('now') \
          WHERE job_type='kb_process_document' AND status='pending' \
          AND payload->>'$.library_id' = ?1",
         params![library_id],
@@ -500,10 +506,16 @@ pub fn pause_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
 }
 
 /// Resume KB job processing for a library by re-queuing cancelled jobs.
+///
+/// 仅恢复 cancel_reason='pause' 的取消（由 pause_library_jobs 产生），
+/// 不恢复 cancel_reason='reprocess' 的取消（由 reprocess/reupload 产生），
+/// 避免复活已过时的 stale job。
+/// 兼容旧数据：cancel_reason IS NULL 的也恢复（升级前暂停的作业）。
 pub fn resume_library_jobs(conn: &Connection, library_id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE jobs SET status='pending' \
+        "UPDATE jobs SET status='pending', updated_at = datetime('now') \
          WHERE job_type='kb_process_document' AND status='cancelled' \
+         AND (cancel_reason = 'pause' OR cancel_reason IS NULL) \
          AND payload->>'$.library_id' = ?1",
         params![library_id],
     )?;
