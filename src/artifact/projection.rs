@@ -219,8 +219,7 @@ pub fn create_kb_projection(
                 // 修复：入队新 job 前先取消该文档的旧 pending job，
                 // 防止旧 job 被认领后因 run_id 不匹配被判定为 stale。
                 // 不取消 processing 状态的 job（worker 正在执行，无法中断）。
-                if let Err(e) =
-                    crate::kb::jobs::cancel_pending_kb_jobs_by_document_id(conn, doc_id)
+                if let Err(e) = crate::kb::jobs::cancel_pending_kb_jobs_by_document_id(conn, doc_id)
                 {
                     tracing::warn!(
                         doc_id,

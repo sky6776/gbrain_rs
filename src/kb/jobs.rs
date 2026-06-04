@@ -477,10 +477,7 @@ pub fn list_kb_jobs(conn: &Connection, library_id: Option<i64>) -> Result<Vec<(i
 ///
 /// 设置 cancel_reason='reprocess' 以区分 pause 取消，
 /// 避免 resume_library_jobs 误复活这些已过时的 reprocess 取消。
-pub fn cancel_pending_kb_jobs_by_document_id(
-    conn: &Connection,
-    document_id: i64,
-) -> Result<usize> {
+pub fn cancel_pending_kb_jobs_by_document_id(conn: &Connection, document_id: i64) -> Result<usize> {
     let changed = conn.execute(
         "UPDATE jobs SET status = 'cancelled', cancel_reason = 'reprocess', updated_at = datetime('now') \
          WHERE job_type = 'kb_process_document' \

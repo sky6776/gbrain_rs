@@ -551,10 +551,7 @@ impl SqliteEngine {
             // 用 try 吞掉 duplicate column 错误（幂等迁移）
             if let Err(e) = conn.execute("ALTER TABLE jobs ADD COLUMN cancel_reason TEXT", []) {
                 if !e.to_string().contains("duplicate column") {
-                    return Err(GBrainError::Database(format!(
-                        "迁移 v34→v35 失败: {}",
-                        e
-                    )));
+                    return Err(GBrainError::Database(format!("迁移 v34→v35 失败: {}", e)));
                 }
                 debug!("cancel_reason 列已存在，跳过迁移");
             }
@@ -569,10 +566,7 @@ impl SqliteEngine {
             // 幂等迁移：如果列已存在则跳过
             if let Err(e) = conn.execute("ALTER TABLE jobs ADD COLUMN updated_at TEXT", []) {
                 if !e.to_string().contains("duplicate column") {
-                    return Err(GBrainError::Database(format!(
-                        "迁移 v35→v36 失败: {}",
-                        e
-                    )));
+                    return Err(GBrainError::Database(format!("迁移 v35→v36 失败: {}", e)));
                 }
                 debug!("updated_at 列已存在，跳过迁移");
             }
@@ -770,7 +764,14 @@ impl BrainEngine for SqliteEngine {
 
         // 注册 sqlite-vec 扩展（进程生命周期内仅执行一次）
         VEC_EXT_REGISTERED.call_once(|| unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *const i8,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> i32,
+            >(
                 sqlite_vec::sqlite3_vec_init as *const (),
             )));
         });
