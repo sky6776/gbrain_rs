@@ -22,6 +22,14 @@ fn validate_sql_identifier(name: &str) {
     );
 }
 
+fn token_vec_table_ddl(table: &str, dimensions: i32) -> String {
+    format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(\
+         embedding float[{}] distance_metric=cosine)",
+        table, dimensions,
+    )
+}
+
 fn with_savepoint<T>(
     conn: &Connection,
     name: &str,
@@ -530,12 +538,8 @@ fn knn_mine_via_vec(
     validate_sql_identifier(&table);
 
     // 1. 创建 cosine 距离度量的 sqlite-vec 虚表
-    conn.execute_batch(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(\
-         embedding float[{}] metric cosine)",
-        table, dimensions,
-    ))
-    .map_err(|e| GBrainError::Database(e.to_string()))?;
+    conn.execute_batch(&token_vec_table_ddl(&table, dimensions))
+        .map_err(|e| GBrainError::Database(e.to_string()))?;
 
     // guard：无论如何都清理虚表，防止 KNN 查询阶段出错导致虚表残留
     struct DropGuard<'a> {
@@ -850,6 +854,13 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(schema::SCHEMA_DDL).unwrap();
         conn
+    }
+
+    #[test]
+    fn token_vec_table_ddl_uses_sqlite_vec_distance_metric_syntax() {
+        let ddl = token_vec_table_ddl("vec_token_synonyms_1", 1536);
+        assert!(ddl.contains("embedding float[1536] distance_metric=cosine"));
+        assert!(!ddl.contains("metric cosine"));
     }
 
     /// 插入 library + active embedding index，返回 index id

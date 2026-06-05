@@ -975,14 +975,16 @@ pub async fn rewrite_query_with_context(
     let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
     let url = format!("{}/chat/completions", base_url);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 256,
+        "stream": false,
         "messages": [
             { "role": "system", "content": system_text },
             { "role": "user", "content": user_content }
         ]
     });
+    crate::llm::apply_deepseek_chat_options(&mut body, base_url, model);
 
     // 超时 5 秒，失败时静默降级
     let result = tokio::time::timeout(
@@ -999,6 +1001,9 @@ pub async fn rewrite_query_with_context(
     match result {
         Ok(Ok(resp)) if resp.status().is_success() => {
             if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if crate::llm::terminal_finish_reason(&data).is_some() {
+                    return query.to_string();
+                }
                 if let Some(content) = data
                     .get("choices")
                     .and_then(|c| c.get(0))

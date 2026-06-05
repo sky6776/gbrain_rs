@@ -253,15 +253,17 @@ pub async fn summarize_cluster(
 
     let user_content = format!("<cluster_text>\n{}\n</cluster_text>", input_text);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": llm_config.model,
         "messages": [
             { "role": "system", "content": system_text },
             { "role": "user", "content": user_content }
         ],
         "max_tokens": 300,
-        "temperature": 0.3
+        "temperature": 0.3,
+        "stream": false
     });
+    crate::llm::apply_deepseek_chat_options(&mut body, &llm_config.base_url, &llm_config.model);
 
     // Retry with exponential backoff (3 attempts)
     for attempt in 0..3u32 {
@@ -278,6 +280,9 @@ pub async fn summarize_cluster(
                 if resp.status().is_success() {
                     match resp.json::<serde_json::Value>().await {
                         Ok(data) => {
+                            if crate::llm::terminal_finish_reason(&data).is_some() {
+                                return Ok(concatenate_cluster(nodes));
+                            }
                             if let Some(summary) = extract_summary_text(&data) {
                                 return Ok(summary);
                             }

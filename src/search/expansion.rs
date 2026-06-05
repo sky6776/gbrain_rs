@@ -220,7 +220,7 @@ pub async fn expand_query(query: &str, api_key: &str, base_url: &str, model: &st
         "Only rephrase the search intent."
     );
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 256,
         "tools": [{
@@ -247,6 +247,7 @@ pub async fn expand_query(query: &str, api_key: &str, base_url: &str, model: &st
             { "role": "user", "content": format!("<user_query>\n{}\n</user_query>", sanitized) }
         ]
     });
+    crate::llm::apply_deepseek_chat_options(&mut body, base_url, model);
 
     // Retry with exponential backoff
     for attempt in 0..3 {
@@ -263,6 +264,9 @@ pub async fn expand_query(query: &str, api_key: &str, base_url: &str, model: &st
                 if resp.status().is_success() {
                     match resp.json::<serde_json::Value>().await {
                         Ok(data) => {
+                            if crate::llm::terminal_finish_reason(&data).is_some() {
+                                return vec![query.to_string()];
+                            }
                             // Extract tool_calls from response
                             if let Some(alternatives) = extract_alternatives_from_response(&data) {
                                 // M2: validate LLM output

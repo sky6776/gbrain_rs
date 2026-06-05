@@ -13,6 +13,37 @@ fn get_http_client() -> &'static reqwest::Client {
     HTTP_CLIENT.get_or_init(reqwest::Client::new)
 }
 
+const AUGMENT_MAX_OUTPUT_TOKENS: usize = 1024;
+
+fn build_augment_request_body(
+    model: &str,
+    system_text: &str,
+    user_content: &str,
+    disable_thinking: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": AUGMENT_MAX_OUTPUT_TOKENS,
+        "stream": false,
+        "response_format": { "type": "json_object" },
+        "messages": [
+            { "role": "system", "content": system_text },
+            { "role": "user", "content": user_content }
+        ]
+    });
+
+    if disable_thinking {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "disabled" }),
+            );
+        }
+    }
+
+    body
+}
+
 /// 单个 chunk 的增强信息
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkAugmentation {
@@ -65,14 +96,12 @@ pub async fn augment_chunk(
     let client = get_http_client();
     let url = format!("{}/chat/completions", base_url);
 
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": 512,
-        "messages": [
-            { "role": "system", "content": system_text },
-            { "role": "user", "content": user_content }
-        ]
-    });
+    let body = build_augment_request_body(
+        model,
+        system_text,
+        &user_content,
+        crate::llm::is_deepseek_chat_api(base_url, model),
+    );
 
     // 超时 10 秒
     let result = tokio::time::timeout(
@@ -116,6 +145,13 @@ pub async fn augment_chunk(
             )));
         }
     };
+
+    if let Some(finish_reason) = crate::llm::terminal_finish_reason(&data) {
+        return Err(crate::error::GBrainError::LLM(format!(
+            "增强生成提前结束: finish_reason={}",
+            finish_reason
+        )));
+    }
 
     // 提取 LLM 输出的文本
     let output_text = match data
@@ -286,6 +322,38 @@ pub(crate) fn append_augmentation_to_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_augment_request_body_uses_json_mode() {
+        let body = build_augment_request_body("deepseek-v4-pro", "system", "user", true);
+        assert_eq!(body["max_tokens"], AUGMENT_MAX_OUTPUT_TOKENS);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn test_build_augment_request_body_only_adds_thinking_when_requested() {
+        let body = build_augment_request_body("gpt-4o-mini", "system", "user", false);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn test_is_deepseek_chat_api() {
+        assert!(crate::llm::is_deepseek_chat_api(
+            "https://api.deepseek.com",
+            "deepseek-v4-pro"
+        ));
+        assert!(crate::llm::is_deepseek_chat_api(
+            "https://compatible.example.com",
+            "deepseek-v4-flash"
+        ));
+        assert!(!crate::llm::is_deepseek_chat_api(
+            "https://api.openai.com/v1",
+            "gpt-4o-mini"
+        ));
+    }
 
     #[test]
     fn test_extract_json_from_pure_json() {

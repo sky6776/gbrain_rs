@@ -16,6 +16,7 @@ use crate::kb::raptor::{self, RaptorConfig};
 use crate::kb::splitter::{create_async_splitter, create_splitter, SplitterConfig};
 use crate::kb::types::*;
 use crate::nlp::chinese;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,6 +24,47 @@ use std::sync::Arc;
 // M-8 修复：MAX_OCR_IMAGE_BYTES 统一定义在 ocr.rs，此处引用
 use crate::kb::ocr::MAX_OCR_IMAGE_BYTES;
 const OCR_IMAGE_TOTAL_PAGES: i32 = 1;
+const AUGMENT_MAX_CONCURRENCY: usize = 8;
+const AUGMENT_PROGRESS_EVERY_NODES: usize = 8;
+const AUGMENT_PROGRESS_START: i32 = 30;
+const AUGMENT_PROGRESS_END: i32 = 70;
+
+fn augment_concurrency_for(node_count: usize) -> usize {
+    match node_count {
+        0 | 1 => 1,
+        2..=16 => 2,
+        17..=64 => 4,
+        65..=128 => 6,
+        _ => AUGMENT_MAX_CONCURRENCY,
+    }
+}
+
+struct AugmentTaskResult {
+    index: usize,
+    input_chars: i32,
+    latency_ms: i32,
+    result: std::result::Result<Option<crate::kb::augment::ChunkAugmentation>, String>,
+}
+
+async fn run_augment_task(
+    index: usize,
+    content: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+) -> AugmentTaskResult {
+    let input_chars = content.chars().count() as i32;
+    let start = std::time::Instant::now();
+    let result = crate::kb::augment::augment_chunk(&content, &api_key, &base_url, &model)
+        .await
+        .map_err(|e| e.to_string());
+    AugmentTaskResult {
+        index,
+        input_chars,
+        latency_ms: start.elapsed().as_millis() as i32,
+        result,
+    }
+}
 
 fn is_ocr_image_extension(ext: &str) -> bool {
     crate::artifact::types::is_ocr_image_file(&ext.to_lowercase())
@@ -1135,44 +1177,38 @@ pub async fn process_document_async(
             );
 
             let mut aug_count = 0usize;
-            // 连续失败计数：超过阈值后跳过剩余增强，避免 LLM 持续不可用时拖慢整个文档处理
+            let mut processed_aug_count = 0usize;
+            let augment_inputs: Vec<(usize, String)> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.content.chars().count() >= 100)
+                .map(|(i, node)| (i, node.content.clone()))
+                .collect();
+            let total_aug_count = augment_inputs.len();
             let mut consecutive_failures = 0usize;
-            const MAX_CONSECUTIVE_AUGMENT_FAILURES: usize = 5;
-            for (i, node) in nodes.iter_mut().enumerate() {
-                // 连续失败过多，跳过剩余节点
-                if consecutive_failures >= MAX_CONSECUTIVE_AUGMENT_FAILURES {
-                    tracing::warn!(
-                        remaining = nodes.len() - i,
-                        "节点增强连续失败 {} 次，跳过剩余 {} 个节点",
-                        MAX_CONSECUTIVE_AUGMENT_FAILURES,
-                        nodes.len() - i
-                    );
-                    break;
-                }
+            let augment_concurrency = augment_concurrency_for(total_aug_count);
 
-                // 跳过过短的 chunk（不值得增强）
-                if node.content.chars().count() < 100 {
-                    continue;
-                }
+            let mut tasks = FuturesUnordered::new();
+            let mut next_augment_input = 0usize;
 
-                // 脱敏已关闭，直接使用原始内容
-                let content_for_augment = node.content.clone();
+            while next_augment_input < total_aug_count && tasks.len() < augment_concurrency {
+                let (index, content) = augment_inputs[next_augment_input].clone();
+                tasks.push(run_augment_task(
+                    index,
+                    content,
+                    cfg.api_key.clone(),
+                    cfg.base_url.clone(),
+                    cfg.model.clone(),
+                ));
+                next_augment_input += 1;
+            }
 
-                // 审计外部模型调用
-                let aug_start = std::time::Instant::now();
-                let aug_result = crate::kb::augment::augment_chunk(
-                    &content_for_augment,
-                    &cfg.api_key,
-                    &cfg.base_url,
-                    &cfg.model,
-                )
-                .await;
-                let aug_elapsed = aug_start.elapsed().as_millis() as i32;
+            while let Some(task_result) = tasks.next().await {
+                processed_aug_count += 1;
 
-                // 记录外部调用审计日志：传输/API/解析失败记为 false，并写入 error_message
-                let (success, error_msg): (bool, String) = match &aug_result {
+                let (success, error_msg): (bool, String) = match &task_result.result {
                     Ok(_) => (true, String::new()),
-                    Err(e) => (false, e.to_string()),
+                    Err(e) => (false, e.clone()),
                 };
                 let _ = crate::kb::privacy::log_external_model_call(
                     conn,
@@ -1181,22 +1217,25 @@ pub async fn process_document_async(
                     "augment",
                     "custom",
                     &cfg.model,
-                    content_for_augment.len() as i32,
+                    task_result.input_chars,
                     0,
-                    aug_elapsed,
+                    task_result.latency_ms,
                     0.0,
                     success,
                     &error_msg,
                 );
 
-                match aug_result {
+                match task_result.result {
                     Ok(Some(aug)) => {
-                        // 合并到 node_metadata
-                        node.node_metadata = crate::kb::augment::merge_augmentation_into_metadata(
-                            &node.node_metadata,
-                            &aug,
-                        );
-                        aug_count += 1;
+                        if let Some(node) = nodes.get_mut(task_result.index) {
+                            // 合并到 node_metadata
+                            node.node_metadata =
+                                crate::kb::augment::merge_augmentation_into_metadata(
+                                    &node.node_metadata,
+                                    &aug,
+                                );
+                            aug_count += 1;
+                        }
                         consecutive_failures = 0; // 成功后重置连续失败计数
                     }
                     Ok(None) => {} // LLM 返回空结果，正常跳过
@@ -1205,6 +1244,49 @@ pub async fn process_document_async(
                         tracing::debug!(consecutive_failures, "节点增强失败: {}", e);
                     }
                 }
+
+                while next_augment_input < total_aug_count && tasks.len() < augment_concurrency {
+                    let (index, content) = augment_inputs[next_augment_input].clone();
+                    tasks.push(run_augment_task(
+                        index,
+                        content,
+                        cfg.api_key.clone(),
+                        cfg.base_url.clone(),
+                        cfg.model.clone(),
+                    ));
+                    next_augment_input += 1;
+                }
+
+                if total_aug_count > 0
+                    && (processed_aug_count % AUGMENT_PROGRESS_EVERY_NODES == 0
+                        || processed_aug_count == total_aug_count)
+                {
+                    let span = (AUGMENT_PROGRESS_END - AUGMENT_PROGRESS_START) as usize;
+                    let progress = AUGMENT_PROGRESS_START
+                        + ((span * processed_aug_count) / total_aug_count) as i32;
+                    let _ = kb.update_document_status_with_run_guard(
+                        doc_id,
+                        Some(STATUS_PROCESSING),
+                        Some(progress.min(AUGMENT_PROGRESS_END)),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(run_id),
+                    );
+                    report_progress(
+                        on_progress,
+                        "augment",
+                        &format!(
+                            "已处理增强 {}/{} 个节点（成功 {} 个）",
+                            processed_aug_count, total_aug_count, aug_count
+                        ),
+                    );
+                }
+            }
+
+            if total_aug_count == 0 {
+                report_progress(on_progress, "augment", "无可增强节点，跳过增强");
             }
 
             if aug_count > 0 {

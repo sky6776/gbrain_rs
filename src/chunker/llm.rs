@@ -87,15 +87,17 @@ pub async fn llm_chunk(
     // Wrap document text in structural boundary tags (prompt injection defense)
     let user_content = format!("<document_text>\n{}\n</document_text>", text);
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": [
             { "role": "system", "content": system_text },
             { "role": "user", "content": user_content }
         ],
         "max_tokens": 2000,
-        "temperature": 0
+        "temperature": 0,
+        "stream": false
     });
+    crate::llm::apply_deepseek_chat_options(&mut body, base_url, model);
 
     // Retry with exponential backoff
     for attempt in 0..3 {
@@ -112,6 +114,9 @@ pub async fn llm_chunk(
                 if resp.status().is_success() {
                     match resp.json::<serde_json::Value>().await {
                         Ok(data) => {
+                            if crate::llm::terminal_finish_reason(&data).is_some() {
+                                return single_chunk(text, line_count);
+                            }
                             if let Some(chunks) = parse_llm_chunks(&data, &lines, max_chunks) {
                                 return chunks;
                             }

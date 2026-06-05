@@ -301,15 +301,17 @@ pub async fn chat_completions_rerank(
             query, doc_section
         );
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": reranker.model,
             "max_tokens": 128,
             "temperature": 0.0,
+            "stream": false,
             "messages": [
                 { "role": "system", "content": "You are a relevance scoring assistant. Score documents 0-100 based on their relevance to a query. Respond with only the score array." },
                 { "role": "user", "content": user_content }
             ]
         });
+        crate::llm::apply_deepseek_chat_options(&mut body, &reranker.base_url, &reranker.model);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(reranker.timeout_ms),
@@ -335,6 +337,13 @@ pub async fn chat_completions_rerank(
 
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
+                        if let Some(reason) = crate::llm::terminal_finish_reason(&data) {
+                            warn!(
+                                finish_reason = reason,
+                                "chat_completions_rerank: generation ended before a usable score array"
+                            );
+                            return None;
+                        }
                         let batch_scores = extract_scores_from_response(&data, chunk.len());
                         match batch_scores {
                             Some(scores) => {

@@ -1818,8 +1818,18 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
 const MAX_OCR_RETRIES: u32 = 3;
 /// OCR 请求初始退避时间（秒），每次重试翻倍
 const INITIAL_RETRY_BACKOFF_SECS: u64 = 2;
+/// GLM-OCR accepts more PDFs reliably after physical rewrite into small ranges.
+const GLM_OCR_SAFE_PAGES_PER_REQUEST: usize = 5;
 // M-8 修复：MAX_OCR_IMAGE_BYTES 统一定义在 ocr.rs，此处引用
 use crate::kb::ocr::MAX_OCR_IMAGE_BYTES;
+
+fn is_glm_ocr_payload(provider: &str, model: &str) -> bool {
+    provider.eq_ignore_ascii_case("glm_ocr") || model.eq_ignore_ascii_case("glm-ocr")
+}
+
+fn effective_glm_ocr_pages_per_request(configured: usize) -> usize {
+    configured.max(1).min(GLM_OCR_SAFE_PAGES_PER_REQUEST)
+}
 
 fn ocr_payload_extension(payload: &crate::kb::jobs::KbOcrPayload) -> String {
     std::path::Path::new(&payload.storage_path)
@@ -2671,7 +2681,27 @@ fn execute_ocr_job(
     options.model = payload.model.clone();
     options.return_crop_images = payload.return_crop_images;
     options.need_layout_visualization = payload.need_layout_visualization;
-    let submit_mode = OcrSubmitMode::from_str(&payload.submit_mode);
+    let mut submit_mode = OcrSubmitMode::from_str(&payload.submit_mode);
+    if is_glm_ocr_payload(&payload.provider, &payload.model) {
+        let configured_pages = options.max_pages_per_request;
+        let configured_submit_mode = submit_mode.clone();
+        submit_mode = OcrSubmitMode::PdfRange;
+        options.max_pages_per_request =
+            effective_glm_ocr_pages_per_request(options.max_pages_per_request);
+
+        if configured_submit_mode != submit_mode
+            || configured_pages != options.max_pages_per_request
+        {
+            tracing::info!(
+                document_id = payload.document_id,
+                configured_submit_mode = ?configured_submit_mode,
+                effective_submit_mode = ?submit_mode,
+                configured_pages_per_request = configured_pages,
+                effective_pages_per_request = options.max_pages_per_request,
+                "GLM-OCR PDF requests use small physical ranges for compatibility"
+            );
+        }
+    }
 
     // 创建临时目录：包含 run_id 避免同一文档的并发 job 相互覆盖/删除
     // 使用 RAII 守卫确保任何退出路径都自动清理
@@ -3812,4 +3842,26 @@ fn get_promotion_policy(conn: &Connection, artifact_id: i64) -> String {
         |row| row.get::<_, String>(0),
     )
     .unwrap_or_else(|_| "candidate".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_glm_ocr_payload_by_provider_or_model() {
+        assert!(is_glm_ocr_payload("glm_ocr", ""));
+        assert!(is_glm_ocr_payload("GLM_OCR", ""));
+        assert!(is_glm_ocr_payload("", "glm-ocr"));
+        assert!(is_glm_ocr_payload("other", "GLM-OCR"));
+        assert!(!is_glm_ocr_payload("openai", "glm-4.5"));
+    }
+
+    #[test]
+    fn caps_glm_ocr_pages_per_request_to_safe_range() {
+        assert_eq!(effective_glm_ocr_pages_per_request(0), 1);
+        assert_eq!(effective_glm_ocr_pages_per_request(1), 1);
+        assert_eq!(effective_glm_ocr_pages_per_request(5), 5);
+        assert_eq!(effective_glm_ocr_pages_per_request(100), 5);
+    }
 }

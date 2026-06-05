@@ -137,7 +137,7 @@ pub struct Config {
     pub ocr_image_count_threshold: usize,
     /// OCR 每页超时秒数
     pub ocr_timeout_seconds_per_page: u64,
-    /// OCR 单次请求最大页数（默认 100）
+    /// OCR 单次请求最大页数（默认 5）
     pub ocr_max_pages_per_request: usize,
     /// OCR 单次请求最大 PDF 字节数（默认 50MB）
     pub ocr_max_pdf_bytes_per_request: usize,
@@ -260,14 +260,14 @@ impl Default for Config {
             ocr_profile: "general".to_string(),
             ocr_enable_layout: true,
             ocr_mode: "auto".to_string(),
-            ocr_submit_mode: "pdf_first".to_string(),
+            ocr_submit_mode: "pdf_range".to_string(),
             ocr_text_density_threshold: 50,
             #[allow(deprecated)]
             ocr_min_low_density_ratio: 0.5,
             ocr_image_area_threshold: 0.08,
             ocr_image_count_threshold: 1,
             ocr_timeout_seconds_per_page: 60,
-            ocr_max_pages_per_request: 100,
+            ocr_max_pages_per_request: 5,
             ocr_max_pdf_bytes_per_request: 52_428_800, // 50MB
             ocr_max_pages_per_document: 300,
             ocr_max_concurrency: 2,

@@ -21,6 +21,7 @@ pub mod jobs;
 pub mod kb;
 pub mod link_extraction;
 pub mod lint;
+pub mod llm;
 pub mod logging;
 pub mod markdown;
 pub mod mcp;
