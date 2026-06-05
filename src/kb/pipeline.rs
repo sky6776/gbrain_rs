@@ -1258,7 +1258,7 @@ pub async fn process_document_async(
                 }
 
                 if total_aug_count > 0
-                    && (processed_aug_count % AUGMENT_PROGRESS_EVERY_NODES == 0
+                    && (processed_aug_count.is_multiple_of(AUGMENT_PROGRESS_EVERY_NODES)
                         || processed_aug_count == total_aug_count)
                 {
                     let span = (AUGMENT_PROGRESS_END - AUGMENT_PROGRESS_START) as usize;

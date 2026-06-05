@@ -1828,7 +1828,7 @@ fn is_glm_ocr_payload(provider: &str, model: &str) -> bool {
 }
 
 fn effective_glm_ocr_pages_per_request(configured: usize) -> usize {
-    configured.max(1).min(GLM_OCR_SAFE_PAGES_PER_REQUEST)
+    configured.clamp(1, GLM_OCR_SAFE_PAGES_PER_REQUEST)
 }
 
 fn ocr_payload_extension(payload: &crate::kb::jobs::KbOcrPayload) -> String {
