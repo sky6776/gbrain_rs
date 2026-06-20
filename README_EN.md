@@ -40,7 +40,7 @@ Keyword retrieval and local storage require no database or external service setu
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
 - **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when model configuration and library policy allow it; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
-- **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
+- **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through auto-apply or candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
 - **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
@@ -146,7 +146,7 @@ gbrain upload note.txt --page people/alice --intent attachment
 gbrain upload paper.pdf --library 1 --folder 2 --intent evidence
 
 # Upload with promotion policy
-gbrain upload document.md --intent memory --promotion auto-low-risk
+gbrain upload document.md --intent memory --promotion auto-apply
 
 # Preview upload routing
 gbrain upload data.csv --dry-run
@@ -253,8 +253,8 @@ gbrain put research/findings --content "Experiment data shows..." --intent evide
 # promote: shadow page + KB + candidates (requires review)
 gbrain put people/new-hire --content "New hire info..." --intent promote
 
-# upload promote + auto-accept low-risk
-gbrain upload meeting-notes.md --intent promote --promotion auto-low-risk --target people/alice
+# upload promote + auto-apply to pages
+gbrain upload meeting-notes.md --intent promote --promotion auto-apply --target people/alice
 
 # ===== KB OCR =====
 # Inspect status, run OCR for selected pages, and retry failed or empty pages
@@ -314,7 +314,7 @@ gbrain review apply 1
 | `kb_max_file_size_mb` | integer | KB max file size (MB) | `50` |
 | `kb_worker_enabled` | boolean | Enable KB background worker | `true` |
 | `kb_worker_poll_interval_secs` | integer | KB worker poll interval (seconds) | `30` |
-| `upload_default_promotion_policy` | string | Upload default promotion policy: none/shadow/candidate/auto-low-risk | `candidate` |
+| `upload_default_promotion_policy` | string | Upload default promotion policy: none/shadow/candidate/auto-low-risk/auto-apply | `auto-apply` |
 | `artifact_default_intent` | string | Artifact default intent: memory/evidence/promote | `memory` |
 | `artifact_auto_create_inbox_library` | boolean | Auto-create Inbox library when missing | `true` |
 | `artifact_manual_memory_to_kb` | boolean | Write memory intent to KB | `true` |
@@ -348,12 +348,12 @@ gbrain review apply 1
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | path | Yes | File path |
-| `--intent` | string | No | Upload intent: auto(automatic routing), evidence(alias document), memory, attachment, promote (default auto) |
+| `--intent` | string | No | Upload intent: auto(automatic routing; promotion defaults to `upload_default_promotion_policy`, currently `auto-apply`), evidence(alias document), memory, attachment, promote (default auto) |
 | `--target` | string | No | Target gbrain page slug (for promotion) |
 | `--page` | string | No | Target page slug (for file attachment) |
 | `--library` | integer | No | KB library ID |
 | `--folder` | integer | No | KB folder ID |
-| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk(alias auto) |
+| `--promotion` | string | No | Promotion policy: none/shadow/candidate/auto-low-risk(alias auto)/auto-apply |
 | `--dry-run` | flag | No | Return routing plan only, don't execute |
 
 ### `gbrain query`
@@ -664,10 +664,13 @@ MCP file requests can only read existing non-symlink files within the server pro
 
 | Policy | Alias | Description |
 |--------|-------|-------------|
-| `none` | — | No auto-promotion; no shadows or candidates |
+| `none` | — | Do not run promotion extraction; upload routing may still create KB/shadow pages by intent |
 | `shadow` | — | Create shadow pages only, no candidates |
-| `candidate` | — | Generate candidates for human review (default) |
+| `candidate` | — | Generate candidates for human review |
 | `auto-low-risk` | — | Auto-accept low-risk candidates (entity mentions, link suggestions, etc.); high-risk still needs review |
+| `auto-apply` | `auto_apply` | Auto-accept and apply all candidates; candidate records remain for audit and rollback (default) |
+
+Note: `upload`/`artifact_upload` uses `upload_default_promotion_policy` when `--promotion`/`promotion` is omitted; manual `put`/`artifact_put` with `memory` intent still uses the low-risk auto-apply policy.
 
 ---
 
@@ -690,12 +693,12 @@ MCP file requests can only read existing non-symlink files within the server pro
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Local file path |
-| `intent` | string | No | Upload intent: auto / evidence(alias document) / memory / attachment / promote (default auto) |
+| `intent` | string | No | Upload intent: auto / evidence(alias document) / memory / attachment / promote (default auto; promotion defaults to `upload_default_promotion_policy`, currently `auto-apply`) |
 | `target_slug` | string | No | Target gbrain page slug (for generating suggested changes) |
 | `page_slug` | string | No | Associated page slug (for attachments) |
 | `library_id` | integer | No | KB library ID (optional, defaults to auto-selecting Inbox) |
 | `folder_id` | integer | No | KB folder ID |
-| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk |
+| `promotion` | string | No | Promotion policy: none / shadow / candidate / auto-low-risk / auto-apply |
 | `dry_run` | boolean | No | Return routing plan only, don't write |
 
 ### `artifact_query`
@@ -968,7 +971,7 @@ External OCR is always allowed (library-level privacy switches have been removed
 |----------|-------------|---------|
 | `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | `$GBRAIN_DIR/artifacts` |
 | `GBRAIN_DEFAULT_KB_LIBRARY_ID` | Default KB library ID | — |
-| `GBRAIN_UPLOAD_PROMOTION_POLICY` | Upload default promotion policy: none/shadow/candidate/auto-low-risk | `candidate` |
+| `GBRAIN_UPLOAD_PROMOTION_POLICY` | Upload default promotion policy: none/shadow/candidate/auto-low-risk/auto-apply | `auto-apply` |
 | `GBRAIN_ARTIFACT_DEFAULT_INTENT` | Artifact default intent: memory/evidence/promote | `memory` |
 | `GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY` | Auto-create Inbox library when missing | `true` |
 | `GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB` | Write memory intent to KB (set to `false` to write gbrain pages only) | `true` |

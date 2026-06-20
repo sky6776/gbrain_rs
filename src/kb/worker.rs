@@ -1322,24 +1322,43 @@ pub fn run_artifact_worker_once(engine: &SqliteEngine, _config: &Config) -> Resu
                     get_promotion_policy(conn, artifact_id)
                 }
             });
-            if promotion_policy == "auto_accept_low_risk" {
-                // 修复：传入 occurrence_id，只自动应用本次上传产生的候选，
-                // 避免旧候选被后续重复上传自动提升
-                if let Err(e) = crate::artifact::promotion::auto_apply_candidates(
-                    conn,
-                    artifact_id,
-                    Some(kb_document_id),
-                    Some(occurrence_id),
-                ) {
-                    warn!(
+            match promotion_policy.as_str() {
+                "auto_accept_low_risk" => {
+                    // 修复：传入 occurrence_id，只自动应用本次上传产生的候选，
+                    // 避免旧候选被后续重复上传自动提升
+                    if let Err(e) = crate::artifact::promotion::auto_apply_candidates(
+                        conn,
                         artifact_id,
-                        error = %e,
-                        "artifact promote worker: 自动应用低风险候选失败，job 保持可重试状态"
-                    );
-                    // auto_apply 失败时标记 job 为失败，确保可重试
-                    fail_kb_job(conn, job.id, &format!("自动应用低风险候选失败: {}", e))?;
-                    return Ok(true);
+                        Some(kb_document_id),
+                        Some(occurrence_id),
+                    ) {
+                        warn!(
+                            artifact_id,
+                            error = %e,
+                            "artifact promote worker: 自动应用低风险候选失败，job 保持可重试状态"
+                        );
+                        // auto_apply 失败时标记 job 为失败，确保可重试
+                        fail_kb_job(conn, job.id, &format!("自动应用低风险候选失败: {}", e))?;
+                        return Ok(true);
+                    }
                 }
+                "auto_apply" | "auto-apply" | "auto_all" | "auto-all" | "auto-apply-all" => {
+                    if let Err(e) = crate::artifact::promotion::auto_apply_all_candidates(
+                        conn,
+                        artifact_id,
+                        Some(kb_document_id),
+                        Some(occurrence_id),
+                    ) {
+                        warn!(
+                            artifact_id,
+                            error = %e,
+                            "artifact promote worker: 自动应用全部候选失败，job 保持可重试状态"
+                        );
+                        fail_kb_job(conn, job.id, &format!("自动应用全部候选失败: {}", e))?;
+                        return Ok(true);
+                    }
+                }
+                _ => {}
             }
 
             complete_kb_job(conn, job.id)?;
@@ -3771,7 +3790,7 @@ fn enqueue_artifact_promote_if_linked(
     // 根据 promotion_policy 决定是否入队：
     // - none: 不触发 promotion
     // - shadow: 仅影子页面，不生成候选
-    // - candidate / auto_accept_low_risk: 触发 promotion extraction
+    // - candidate / auto_accept_low_risk / auto_apply: 触发 promotion extraction
     match promotion_policy.as_str() {
         "none" => {
             debug!(
@@ -3789,7 +3808,7 @@ fn enqueue_artifact_promote_if_linked(
             let _ = conn.execute("ROLLBACK", []);
             return Ok(());
         }
-        _ => {} // candidate / auto_accept_low_risk → 继续入队
+        _ => {} // candidate / auto_accept_low_risk / auto_apply → 继续入队
     }
 
     // 修复：入队时把 occurrence_id 和 promotion_policy 写进 payload，

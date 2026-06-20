@@ -1108,8 +1108,26 @@ pub fn auto_apply_candidates(
     kb_document_id: Option<i64>,
     occurrence_id: Option<i64>,
 ) -> Result<Vec<i64>> {
-    let candidates = list_candidates(conn, Some("pending"), None, None, 1000, 0)?;
+    auto_apply_candidates_scoped(conn, artifact_id, kb_document_id, occurrence_id, false)
+}
 
+/// 自动应用本次上传产生的所有候选（promotion_policy = auto_apply 时）
+pub fn auto_apply_all_candidates(
+    conn: &Connection,
+    artifact_id: i64,
+    kb_document_id: Option<i64>,
+    occurrence_id: Option<i64>,
+) -> Result<Vec<i64>> {
+    auto_apply_candidates_scoped(conn, artifact_id, kb_document_id, occurrence_id, true)
+}
+
+fn auto_apply_candidates_scoped(
+    conn: &Connection,
+    artifact_id: i64,
+    kb_document_id: Option<i64>,
+    occurrence_id: Option<i64>,
+    apply_all: bool,
+) -> Result<Vec<i64>> {
     let mut applied = Vec::new();
     // 修复：收集所有候选级失败，有失败时返回 Err，
     // 让 worker 知道存在未完成的 auto-apply，不会 complete job 导致候选永久停在 pending。
@@ -1118,25 +1136,20 @@ pub fn auto_apply_candidates(
     // worker 认为 auto-apply 成功并 complete job，低风险候选永久停在 pending 不会重试。
     let mut failures: Vec<String> = Vec::new();
 
-    for candidate in candidates {
-        if candidate.artifact_id != artifact_id {
-            continue;
+    loop {
+        let candidates = list_auto_apply_candidates(
+            conn,
+            artifact_id,
+            kb_document_id,
+            occurrence_id,
+            apply_all,
+            1000,
+        )?;
+        if candidates.is_empty() {
+            break;
         }
-        // 修复：按 kb_document_id 限定范围，避免跨 occurrence 自动应用
-        if let Some(kb_doc_id) = kb_document_id {
-            if candidate.kb_document_id != Some(kb_doc_id) {
-                continue;
-            }
-        }
-        // 修复：按 occurrence_id 限定范围，只自动应用本次上传产生的候选，
-        // 避免旧候选（如 candidate 策略产生的待审候选）被后续 auto_accept_low_risk 上传自动提升
-        if let Some(occ_id) = occurrence_id {
-            if candidate.occurrence_id != Some(occ_id) {
-                continue;
-            }
-        }
-        // 仅自动应用低风险候选
-        if candidate.risk_level == "low" && candidate.confidence >= 0.8 {
+
+        for candidate in candidates {
             let sp_name = format!("sp_auto_apply_{}", candidate.id);
             let result = with_savepoint(conn, &sp_name, |conn| {
                 // 外层 savepoint 覆盖整个 accept+apply 流程，失败时候选恢复为 pending 可重试。
@@ -1144,8 +1157,15 @@ pub fn auto_apply_candidates(
                 let review_input = ReviewCandidateInput {
                     candidate_id: candidate.id,
                     action: "accept".to_string(),
-                    reviewer: "auto".to_string(),
-                    notes: Some("自动审核: 低风险高置信度".to_string()),
+                    reviewer: if apply_all { "auto_apply" } else { "auto" }.to_string(),
+                    notes: Some(
+                        if apply_all {
+                            "自动审核: 全量自动应用"
+                        } else {
+                            "自动审核: 低风险高置信度"
+                        }
+                        .to_string(),
+                    ),
                 };
                 let mut candidate_for_apply = review_candidate(conn, &review_input)?;
                 apply_candidate_inner(conn, &mut candidate_for_apply)?;
@@ -1160,10 +1180,18 @@ pub fn auto_apply_candidates(
                 }
             }
         }
+
+        if !failures.is_empty() {
+            break;
+        }
     }
 
     if !applied.is_empty() {
-        info!("自动应用了 {} 个低风险候选", applied.len());
+        if apply_all {
+            info!("自动应用了 {} 个候选", applied.len());
+        } else {
+            info!("自动应用了 {} 个低风险候选", applied.len());
+        }
     }
 
     // 修复：有候选级失败时返回 Err，让 worker 知道存在未完成的 auto-apply，
@@ -1176,7 +1204,12 @@ pub fn auto_apply_candidates(
             failures.join("; ")
         );
         return Err(GBrainError::Database(format!(
-            "自动应用低风险候选部分失败 (成功={}, 失败={}): {}",
+            "自动应用候选部分失败 (policy={}, 成功={}, 失败={}): {}",
+            if apply_all {
+                "auto_apply"
+            } else {
+                "auto_accept_low_risk"
+            },
             applied.len(),
             failures.len(),
             failures.join("; ")
@@ -1184,6 +1217,65 @@ pub fn auto_apply_candidates(
     }
 
     Ok(applied)
+}
+
+fn list_auto_apply_candidates(
+    conn: &Connection,
+    artifact_id: i64,
+    kb_document_id: Option<i64>,
+    occurrence_id: Option<i64>,
+    apply_all: bool,
+    limit: i64,
+) -> Result<Vec<PromotionCandidate>> {
+    let mut sql = String::from(
+        "SELECT id, created_at, updated_at,
+                artifact_id, occurrence_id, kb_document_id, kb_node_id,
+                candidate_type, target_slug, target_field,
+                title, proposed_payload, evidence_json,
+                confidence, risk_level, status, reviewer, review_notes, applied_at,
+                candidate_fingerprint
+         FROM promotion_candidates
+         WHERE status = 'pending' AND artifact_id = ?1",
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(artifact_id)];
+    let mut param_idx = 2;
+
+    if let Some(kb_doc_id) = kb_document_id {
+        sql.push_str(&format!(" AND kb_document_id = ?{}", param_idx));
+        param_values.push(Box::new(kb_doc_id));
+        param_idx += 1;
+    }
+
+    if let Some(occ_id) = occurrence_id {
+        sql.push_str(&format!(" AND occurrence_id = ?{}", param_idx));
+        param_values.push(Box::new(occ_id));
+        param_idx += 1;
+    }
+
+    if !apply_all {
+        sql.push_str(" AND risk_level = 'low' AND confidence >= 0.8");
+    }
+
+    sql.push_str(&format!(
+        " ORDER BY created_at ASC, id ASC LIMIT ?{}",
+        param_idx
+    ));
+    param_values.push(Box::new(limit));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| GBrainError::Database(format!("准备自动应用候选查询失败: {}", e)))?;
+    let rows = stmt
+        .query_map(params_refs.as_slice(), row_to_promotion_candidate)
+        .map_err(|e| GBrainError::Database(format!("查询自动应用候选失败: {}", e)))?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| GBrainError::Database(format!("映射候选失败: {}", e)))?);
+    }
+    Ok(result)
 }
 
 /// 统计待审核候选数

@@ -53,7 +53,7 @@ pub(crate) static ARTIFACT_FACADE_DEFS: &[OperationDef] = &[
             ParamDef { name: "page_slug", description: "关联页面 slug（用于附件）", required: false, param_type: ParamType::String, enum_values: None, items_type: None },
             ParamDef { name: "library_id", description: "KB 库 ID（可选，默认自动选择 Inbox）", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
             ParamDef { name: "folder_id", description: "KB 文件夹 ID", required: false, param_type: ParamType::Integer, enum_values: None, items_type: None },
-            ParamDef { name: "promotion", description: "提升策略: none, shadow, candidate, auto-low-risk", required: false, param_type: ParamType::String, enum_values: Some(&["none", "shadow", "candidate", "auto-low-risk"]), items_type: None },
+            ParamDef { name: "promotion", description: "提升策略: none, shadow, candidate, auto-low-risk, auto-apply", required: false, param_type: ParamType::String, enum_values: Some(&["none", "shadow", "candidate", "auto", "auto-low-risk", "auto_accept_low_risk", "auto-apply", "auto_apply", "auto_all", "auto-all", "auto-apply-all"]), items_type: None },
             ParamDef { name: "dry_run", description: "仅返回路由计划，不实际写入", required: false, param_type: ParamType::Boolean, enum_values: None, items_type: None },
         ],
     },

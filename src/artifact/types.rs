@@ -302,6 +302,8 @@ pub enum PromotionPolicy {
     Candidate,
     /// 自动接受低风险候选
     AutoAcceptLowRisk,
+    /// 自动接受并应用所有候选
+    AutoApply,
 }
 
 impl fmt::Display for PromotionPolicy {
@@ -311,6 +313,7 @@ impl fmt::Display for PromotionPolicy {
             PromotionPolicy::Shadow => write!(f, "shadow"),
             PromotionPolicy::Candidate => write!(f, "candidate"),
             PromotionPolicy::AutoAcceptLowRisk => write!(f, "auto_accept_low_risk"),
+            PromotionPolicy::AutoApply => write!(f, "auto_apply"),
         }
     }
 }
@@ -324,9 +327,13 @@ impl std::str::FromStr for PromotionPolicy {
             "shadow" => Ok(PromotionPolicy::Shadow),
             "candidate" => Ok(PromotionPolicy::Candidate),
             "auto_accept_low_risk" => Ok(PromotionPolicy::AutoAcceptLowRisk),
+            "auto_apply" => Ok(PromotionPolicy::AutoApply),
             // 兼容旧值
             "auto" => Ok(PromotionPolicy::AutoAcceptLowRisk),
             "auto-low-risk" => Ok(PromotionPolicy::AutoAcceptLowRisk),
+            "auto-apply" | "auto_all" | "auto-all" | "auto-apply-all" => {
+                Ok(PromotionPolicy::AutoApply)
+            }
             _ => Err(format!("unknown promotion policy: {}", s)),
         }
     }
@@ -956,7 +963,7 @@ pub fn apply_promotion_policy(
     } else if !config_default_promotion_policy.is_empty()
         && config_default_promotion_policy != "candidate"
     {
-        // "candidate" 是初始默认值，与 intent 推断结果一致，无需覆盖
+        // 兼容旧配置：candidate 表示沿用 intent 推断出的候选审核流程，无需覆盖。
         if let Ok(policy) = config_default_promotion_policy.parse() {
             RoutePlan {
                 promotion: policy,
@@ -1476,5 +1483,22 @@ mod tests {
         assert!(plan.to_file);
         assert!(!plan.to_brain);
         assert_eq!(plan.promotion, PromotionPolicy::None);
+    }
+
+    #[test]
+    fn promotion_policy_accepts_auto_apply_aliases() {
+        assert_eq!(
+            "auto-apply".parse::<PromotionPolicy>().unwrap(),
+            PromotionPolicy::AutoApply
+        );
+        assert_eq!(
+            "auto_apply".parse::<PromotionPolicy>().unwrap(),
+            PromotionPolicy::AutoApply
+        );
+        assert_eq!(
+            "auto_all".parse::<PromotionPolicy>().unwrap(),
+            PromotionPolicy::AutoApply
+        );
+        assert_eq!(PromotionPolicy::AutoApply.to_string(), "auto_apply");
     }
 }

@@ -243,7 +243,7 @@ impl Default for Config {
             // 单入口多投影融合架构
             artifact_storage_dir: None,
             default_kb_library_id: None,
-            upload_default_promotion_policy: "candidate".to_string(),
+            upload_default_promotion_policy: "auto-apply".to_string(),
             // artifact 默认意图为 memory（写入 gbrain 页面 + KB）
             artifact_default_intent: "memory".to_string(),
             // 当 artifact_put 需要写入 KB 但没有 Inbox 库时，自动创建
@@ -882,13 +882,15 @@ impl Config {
                 self.autopilot_interval_secs = v;
             }
             "upload_default_promotion_policy" => {
-                // 校验合法枚举值，避免无效 policy 在 apply_promotion_policy 被静默忽略
-                let valid = ["none", "shadow", "candidate", "auto-low-risk"];
-                if !valid.contains(&value) {
+                // 复用 PromotionPolicy 解析器，避免配置入口与 CLI/MCP 支持的别名漂移。
+                if value
+                    .parse::<crate::artifact::types::PromotionPolicy>()
+                    .is_err()
+                {
                     return Err(format!(
                         "upload_default_promotion_policy 无效值: {}，有效值: {}",
                         value,
-                        valid.join(", ")
+                        "none, shadow, candidate, auto, auto-low-risk, auto_accept_low_risk, auto-apply, auto_apply, auto_all, auto-all, auto-apply-all"
                     ));
                 }
                 self.upload_default_promotion_policy = value.to_string()
@@ -1201,5 +1203,39 @@ fn parse_bool(key: &str, value: &str) -> Result<bool, String> {
             "{} 需要布尔值 (true/false/1/0)，不是: {}",
             key, value
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_default_promotion_policy_set_accepts_parser_aliases() {
+        let aliases = [
+            "none",
+            "shadow",
+            "candidate",
+            "auto",
+            "auto-low-risk",
+            "auto_accept_low_risk",
+            "auto-apply",
+            "auto_apply",
+            "auto_all",
+            "auto-all",
+            "auto-apply-all",
+        ];
+
+        let mut config = Config::default();
+        for alias in aliases {
+            config
+                .apply_set("upload_default_promotion_policy", alias)
+                .expect("promotion policy alias should be accepted");
+            assert_eq!(config.upload_default_promotion_policy, alias);
+        }
+
+        assert!(config
+            .apply_set("upload_default_promotion_policy", "not-a-policy")
+            .is_err());
     }
 }

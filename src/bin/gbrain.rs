@@ -93,7 +93,7 @@ enum Commands {
         /// KB 文件夹 ID
         #[arg(long)]
         folder: Option<i64>,
-        /// 提升策略: none, shadow, candidate, auto-low-risk
+        /// 提升策略: none, shadow, candidate, auto-low-risk, auto-apply
         #[arg(long)]
         promotion: Option<String>,
         /// 仅预览路由计划
@@ -1076,7 +1076,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             };
             let result = svc.query_facade(&input)?;
             if cli.json {
-                info!("{}", serde_json::to_string_pretty(&result)?);
+                println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 info!("模式: {} | 总命中: {}", result.mode, result.meta.total);
                 for m in &result.memories {

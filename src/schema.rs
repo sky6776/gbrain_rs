@@ -954,7 +954,7 @@ CREATE TABLE IF NOT EXISTS artifact_occurrences (
     page_slug TEXT NOT NULL DEFAULT '',
     library_id INTEGER,
     folder_id INTEGER,
-    promotion_policy TEXT NOT NULL DEFAULT 'candidate',
+    promotion_policy TEXT NOT NULL DEFAULT 'auto_apply',
 
     status TEXT NOT NULL DEFAULT 'active',
     stale_reason TEXT NOT NULL DEFAULT '',

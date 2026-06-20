@@ -10,7 +10,10 @@
 
 use gbrain_core::artifact::promotion::{self, CreateCandidateInput};
 use gbrain_core::artifact::service::ArtifactService;
-use gbrain_core::artifact::types::{CandidateType, ReviewCandidateInput, RiskLevel};
+use gbrain_core::artifact::types::{
+    CandidateType, PromotionPolicy, ReviewCandidateInput, RiskLevel, SourceKind, UploadIntent,
+    UploadSourceInput,
+};
 use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::operations::OpContext;
@@ -36,6 +39,38 @@ fn make_config() -> Config {
 fn make_svc<'a>(engine: &'a SqliteEngine, config: &'a Config) -> ArtifactService<'a> {
     let ctx = OpContext::default();
     ArtifactService::new(engine, ctx, config)
+}
+
+#[test]
+fn artifact_upload_default_promotion_policy_auto_applies() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+
+    assert_eq!(config.upload_default_promotion_policy, "auto-apply");
+
+    let result = svc
+        .upload_file(UploadSourceInput {
+            content: b"# Upload Default\n\nFresh knowledge for the KB.".to_vec(),
+            path: None,
+            original_name: "upload-default.md".to_string(),
+            source_kind: SourceKind::Upload,
+            source_uri: "upload://upload-default.md".to_string(),
+            intent: UploadIntent::Auto,
+            target_slug: None,
+            page_slug: None,
+            library_id: None,
+            folder_id: None,
+            promotion_policy: None,
+            owner_ref: None,
+            metadata: None,
+            dry_run: true,
+        })
+        .expect("dry-run upload");
+
+    assert!(result.route_plan.to_kb);
+    assert!(result.route_plan.to_shadow);
+    assert_eq!(result.route_plan.promotion, PromotionPolicy::AutoApply);
 }
 
 #[allow(dead_code)]
@@ -922,9 +957,8 @@ fn artifact_list_dto_json_no_internal_fields() {
 }
 
 // --- P1-2 修复验证: manual put intent=memory 的 occurrence promotion_policy 与 route plan 对齐 ---
-// 默认配置 upload_default_promotion_policy="candidate" 时，
-// intent=memory 的 route plan 是 AutoAcceptLowRisk，
-// occurrence 的 promotion_policy 应为 auto_accept_low_risk 而非 candidate
+// manual put intent=memory 不受 upload 默认提升策略影响；
+// route plan 与 occurrence 都应保持 AutoAcceptLowRisk。
 
 #[test]
 fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
@@ -983,6 +1017,151 @@ fn artifact_put_memory_occurrence_promotion_policy_matches_route_plan() {
         occ.promotion_policy, "auto_accept_low_risk",
         "occurrence promotion_policy 应与 route plan 的 auto_accept_low_risk 对齐"
     );
+}
+
+#[test]
+fn auto_apply_all_candidates_applies_medium_risk_candidates() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    let _result = svc
+        .put_memory(
+            "people/auto-apply-all-test",
+            "Initial page content",
+            Some("Auto Apply All Test"),
+            None,
+            false,
+            false,
+        )
+        .expect("put_memory should succeed");
+
+    let artifact_id: i64 = conn
+        .query_row(
+            "SELECT id FROM source_artifacts WHERE canonical_slug = 'people/auto-apply-all-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("get artifact_id");
+
+    let candidate_id = promotion::create_candidate(
+        conn,
+        CreateCandidateInput {
+            artifact_id,
+            occurrence_id: None,
+            kb_document_id: None,
+            kb_node_id: None,
+            candidate_type: CandidateType::FactClaim,
+            target_slug: "people/auto-apply-all-test".to_string(),
+            target_field: "compiled_truth".to_string(),
+            title: "Medium risk fact".to_string(),
+            proposed_payload: serde_json::json!({
+                "subject_slug": "people/auto-apply-all-test",
+                "predicate": "summary",
+                "object_text": "Auto applied medium-risk knowledge",
+            })
+            .to_string(),
+            evidence_json: "{}".to_string(),
+            confidence: 0.6,
+            risk_level: RiskLevel::Medium,
+        },
+    )
+    .expect("create medium-risk candidate");
+
+    let applied = promotion::auto_apply_all_candidates(conn, artifact_id, None, None)
+        .expect("auto apply all");
+
+    assert_eq!(applied, vec![candidate_id]);
+
+    let (status, reviewer): (String, String) = conn
+        .query_row(
+            "SELECT status, reviewer FROM promotion_candidates WHERE id = ?1",
+            rusqlite::params![candidate_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("query candidate status");
+    assert_eq!(status, "applied");
+    assert_eq!(reviewer, "auto_apply");
+
+    let page_content: String = conn
+        .query_row(
+            "SELECT compiled_truth FROM pages WHERE slug = 'people/auto-apply-all-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query page content");
+    assert!(page_content.contains("Auto applied medium-risk knowledge"));
+}
+
+#[test]
+fn auto_apply_all_candidates_processes_more_than_one_batch() {
+    let engine = make_engine();
+    let config = make_config();
+    let svc = make_svc(&engine, &config);
+    let conn = engine.connection().expect("connection");
+
+    svc.put_memory(
+        "people/auto-apply-paged-test",
+        "Initial page content",
+        Some("Auto Apply Paged Test"),
+        None,
+        false,
+        false,
+    )
+    .expect("put_memory should succeed");
+
+    let artifact_id: i64 = conn
+        .query_row(
+            "SELECT id FROM source_artifacts WHERE canonical_slug = 'people/auto-apply-paged-test'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("get artifact_id");
+
+    let mut candidate_ids = Vec::new();
+    for i in 0..1005 {
+        let candidate_id = promotion::create_candidate(
+            conn,
+            CreateCandidateInput {
+                artifact_id,
+                occurrence_id: None,
+                kb_document_id: None,
+                kb_node_id: None,
+                candidate_type: CandidateType::FactClaim,
+                target_slug: "people/auto-apply-paged-test".to_string(),
+                target_field: "compiled_truth".to_string(),
+                title: format!("Paged medium risk fact {}", i),
+                proposed_payload: serde_json::json!({
+                    "subject_slug": "people/auto-apply-paged-test",
+                    "predicate": "summary",
+                    "object_text": format!("Auto applied paged knowledge {}", i),
+                })
+                .to_string(),
+                evidence_json: "{}".to_string(),
+                confidence: 0.6,
+                risk_level: RiskLevel::Medium,
+            },
+        )
+        .expect("create paged medium-risk candidate");
+        candidate_ids.push(candidate_id);
+    }
+
+    let applied = promotion::auto_apply_all_candidates(conn, artifact_id, None, None)
+        .expect("auto apply all paged");
+
+    assert_eq!(applied.len(), candidate_ids.len());
+    assert_eq!(applied.first(), candidate_ids.first());
+    assert_eq!(applied.last(), candidate_ids.last());
+
+    let pending_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM promotion_candidates WHERE artifact_id = ?1 AND status = 'pending'",
+            rusqlite::params![artifact_id],
+            |row| row.get(0),
+        )
+        .expect("count pending candidates");
+    assert_eq!(pending_count, 0);
 }
 
 // --- P1/P2 修复验证: manual promote 创建 shadow page ---
