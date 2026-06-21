@@ -572,6 +572,26 @@ impl SqliteEngine {
             }
         }
 
+        // v36 → v37: 增加表格行 FTS5 索引并回填已有 row_tokens
+        if current_version > 0 && current_version < 37 {
+            debug!(
+                "执行 schema 迁移 v{} → v37: 创建并回填 kb_table_row_fts",
+                current_version
+            );
+            conn.execute_batch(
+                "INSERT INTO kb_table_row_fts(rowid, tokens, table_id, document_id, library_id)
+                 SELECT r.id,
+                        trim(r.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || r.row_text),
+                        r.table_id,
+                        t.document_id,
+                        d.library_id
+                 FROM kb_table_rows r
+                 JOIN kb_tables t ON t.id = r.table_id
+                 JOIN kb_documents d ON d.id = t.document_id
+                 WHERE trim(r.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || r.row_text) != '';",
+            )?;
+        }
+
         // 新数据库（current_version == 0）或已匹配当前版本：记录版本号
         if current_version < crate::schema::SCHEMA_VERSION {
             conn.execute(

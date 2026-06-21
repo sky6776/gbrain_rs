@@ -355,6 +355,13 @@ fn query_kb_evidence(
         filter_slug,
         1.0,
     )?);
+    routes.push(query_kb_hybrid_candidates(
+        conn,
+        query,
+        fetch_k,
+        filter_slug,
+        1.2,
+    )?);
 
     let mut candidates = merge_evidence_routes(routes);
     if candidates.is_empty() {
@@ -1129,6 +1136,168 @@ fn query_passage_candidates(
         }
     }
     Ok(out)
+}
+
+fn query_kb_hybrid_candidates(
+    conn: &Connection,
+    query: &str,
+    fetch_k: usize,
+    filter_slug: Option<&str>,
+    route_weight: f64,
+) -> Result<Vec<EvidenceCandidate>> {
+    let document_filter = if let Some(slug) = filter_slug {
+        active_kb_document_ids_for_slug(conn, slug)?
+    } else {
+        Vec::new()
+    };
+    if filter_slug.is_some() && document_filter.is_empty() {
+        return Ok(Vec::new());
+    }
+    let document_filter_set: HashSet<i64> = document_filter.iter().copied().collect();
+    let library_ids = if document_filter.is_empty() {
+        Vec::new()
+    } else {
+        library_ids_for_documents(conn, &document_filter)?
+    };
+
+    let input = crate::kb::types::KbSearchInput {
+        library_ids,
+        document_ids: document_filter,
+        query: query.to_string(),
+        top_k: fetch_k.clamp(20, 500),
+        profile: Some("recall".to_string()),
+        max_chunks_per_doc: Some(3),
+        ..Default::default()
+    };
+
+    let results = crate::kb::search::kb_search(conn, &input, None)?;
+    let mut out = Vec::new();
+    for (rank, result) in results.into_iter().enumerate() {
+        if !document_filter_set.is_empty() && !document_filter_set.contains(&result.document_id) {
+            continue;
+        }
+        let (source_start, source_end) = node_source_span(conn, result.node_id);
+        let artifact_id = artifact_id_for_kb_document(conn, result.document_id, filter_slug);
+        out.push(EvidenceCandidate {
+            candidate_id: -result.node_id,
+            passage_id: None,
+            kb_document_id: result.document_id,
+            library_id: result.library_id,
+            title: result.document_name,
+            content: result.content,
+            level: result.level as i64,
+            artifact_id,
+            view_type: result.matched_by.unwrap_or_else(|| "kb_hybrid".to_string()),
+            source_start,
+            source_end,
+            was_truncated: false,
+            route_score: route_weight / (60.0 + rank as f64 + 1.0),
+            local_score: 0.0,
+            final_score: 0.0,
+        });
+    }
+    Ok(out)
+}
+
+fn active_kb_document_ids_for_slug(conn: &Connection, slug: &str) -> Result<Vec<i64>> {
+    let (slug_ref, documents_slug_ref) = slug_ref_variants(slug);
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT CAST(substr(ap_kb.projection_ref, length('kb_document:') + 1) AS INTEGER)
+         FROM artifact_projections ap_sp
+         JOIN artifact_projections ap_kb ON ap_kb.artifact_id = ap_sp.artifact_id
+              AND ap_kb.projection_type = 'kb_document'
+              AND ap_kb.projection_ref LIKE 'kb_document:%'
+              AND ap_kb.status = 'active'
+         JOIN kb_documents d
+              ON d.id = CAST(substr(ap_kb.projection_ref, length('kb_document:') + 1) AS INTEGER)
+         WHERE ap_sp.projection_type = 'brain_shadow_page'
+           AND (ap_sp.projection_ref = ?1 OR ap_sp.projection_ref = ?2)
+           AND ap_sp.status = 'active'
+           AND d.document_status != 'deleted'
+           AND d.deleted_at IS NULL
+           AND d.index_status = 'ready'",
+    )?;
+    let rows = stmt.query_map(params![slug_ref, documents_slug_ref], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn library_ids_for_documents(conn: &Connection, document_ids: &[i64]) -> Result<Vec<i64>> {
+    if document_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<String> = document_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
+    let sql = format!(
+        "SELECT DISTINCT library_id FROM kb_documents WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let params: Vec<&dyn rusqlite::types::ToSql> = document_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, i64>(0))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn node_source_span(conn: &Connection, node_id: i64) -> (Option<i64>, Option<i64>) {
+    conn.query_row(
+        "SELECT source_start, source_end FROM kb_document_nodes WHERE id = ?1",
+        params![node_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i32>>(0)?.map(i64::from),
+                row.get::<_, Option<i32>>(1)?.map(i64::from),
+            ))
+        },
+    )
+    .unwrap_or((None, None))
+}
+
+fn artifact_id_for_kb_document(
+    conn: &Connection,
+    document_id: i64,
+    filter_slug: Option<&str>,
+) -> i64 {
+    if let Some(slug) = filter_slug {
+        let (slug_ref, documents_slug_ref) = slug_ref_variants(slug);
+        return conn
+            .query_row(
+                "SELECT ap_kb.artifact_id
+                 FROM artifact_projections ap_kb
+                 JOIN artifact_projections ap_sp ON ap_sp.artifact_id = ap_kb.artifact_id
+                      AND ap_sp.projection_type = 'brain_shadow_page'
+                      AND (ap_sp.projection_ref = ?2 OR ap_sp.projection_ref = ?3)
+                      AND ap_sp.status = 'active'
+                 WHERE ap_kb.projection_type = 'kb_document'
+                   AND ap_kb.projection_ref = ?1
+                   AND ap_kb.status = 'active'
+                 LIMIT 1",
+                params![
+                    format!("kb_document:{}", document_id),
+                    slug_ref,
+                    documents_slug_ref
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+    }
+
+    conn.query_row(
+        "SELECT artifact_id FROM artifact_projections
+         WHERE projection_type = 'kb_document'
+           AND projection_ref = ?1
+           AND status = 'active'
+         LIMIT 1",
+        params![format!("kb_document:{}", document_id)],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
 }
 
 fn active_kb_document_ids_for_artifact(conn: &Connection, artifact_id: i64) -> Result<Vec<i64>> {

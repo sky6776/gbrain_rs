@@ -2,7 +2,7 @@
 //!
 //! 完整的 SQLite schema，包含 FTS5、触发器和索引。
 /// 当前 schema 版本号，新数据库会直接写入此版本以跳过历史迁移
-pub const SCHEMA_VERSION: i32 = 36;
+pub const SCHEMA_VERSION: i32 = 37;
 
 /// 完整的 schema DDL，新数据库一次性创建
 pub const SCHEMA_DDL: &str = r#"
@@ -653,6 +653,48 @@ CREATE TABLE IF NOT EXISTS kb_table_rows (
     row_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_kb_table_rows_table ON kb_table_rows(table_id);
+
+-- KB 表格行 FTS5 索引
+CREATE VIRTUAL TABLE IF NOT EXISTS kb_table_row_fts USING fts5(
+    tokens,
+    table_id UNINDEXED,
+    document_id UNINDEXED,
+    library_id UNINDEXED,
+    content='',
+    tokenize='unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS kb_table_row_fts_insert
+AFTER INSERT ON kb_table_rows BEGIN
+    INSERT INTO kb_table_row_fts(rowid, tokens, table_id, document_id, library_id)
+    SELECT new.id, trim(new.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || new.row_text), new.table_id, t.document_id, d.library_id
+    FROM kb_tables t
+    JOIN kb_documents d ON d.id = t.document_id
+    WHERE t.id = new.table_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_table_row_fts_update
+AFTER UPDATE OF row_tokens, row_text, table_id ON kb_table_rows BEGIN
+    INSERT INTO kb_table_row_fts(kb_table_row_fts, rowid, tokens, table_id, document_id, library_id)
+    SELECT 'delete', old.id, trim(old.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || old.row_text), old.table_id, t.document_id, d.library_id
+    FROM kb_tables t
+    JOIN kb_documents d ON d.id = t.document_id
+    WHERE t.id = old.table_id;
+    INSERT INTO kb_table_row_fts(rowid, tokens, table_id, document_id, library_id)
+    SELECT new.id, trim(new.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || new.row_text), new.table_id, t.document_id, d.library_id
+    FROM kb_tables t
+    JOIN kb_documents d ON d.id = t.document_id
+    WHERE t.id = new.table_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS kb_table_row_fts_delete
+AFTER DELETE ON kb_table_rows BEGIN
+    INSERT INTO kb_table_row_fts(kb_table_row_fts, rowid, tokens, table_id, document_id, library_id)
+    SELECT 'delete', old.id, trim(old.row_tokens || ' ' || t.sheet_name || ' ' || t.headers || ' ' || old.row_text), old.table_id, t.document_id, d.library_id
+    FROM kb_tables t
+    JOIN kb_documents d ON d.id = t.document_id
+    WHERE t.id = old.table_id;
+END;
 
 -- KB 外部模型调用审计
 CREATE TABLE IF NOT EXISTS kb_external_model_calls (

@@ -34,6 +34,27 @@ const SAME_TITLE_PATH_ONLY: bool = true;
 /// 每个命中结果扩展上下文的最大字符数
 const MAX_EXPANDED_CHARS_PER_HIT: usize = 2500;
 
+fn append_i64_in_filter(
+    sql: &mut String,
+    param_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+    column: &str,
+    values: &[i64],
+) {
+    if values.is_empty() {
+        return;
+    }
+    let start = param_values.len() + 1;
+    let placeholders: Vec<String> = values
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", start + i))
+        .collect();
+    sql.push_str(&format!(" AND {} IN ({})", column, placeholders.join(",")));
+    for &id in values {
+        param_values.push(Box::new(id));
+    }
+}
+
 /// Perform KB hybrid search with full pipeline:
 /// query normalization → planner → multi-retriever → RRF → rerank → context expansion
 ///
@@ -80,7 +101,13 @@ pub fn kb_search(
 
     // Title/name retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::TitleName) {
-        let title_results = title_name_retriever(conn, &final_query, &input.library_ids, fetch_k)?;
+        let title_results = title_name_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k,
+        )?;
         if !title_results.is_empty() {
             all_candidates.push(title_results);
         }
@@ -91,8 +118,14 @@ pub fn kb_search(
 
     // Node FTS retriever (P3-009)
     if retriever_set.contains(&crate::kb::planner::RetrieverType::NodeFts) {
-        let fts_results =
-            kb_fts_search(conn, &final_query, &input.library_ids, input.level, fetch_k)?;
+        let fts_results = kb_fts_search(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            input.level,
+            fetch_k,
+        )?;
         if !fts_results.is_empty() {
             all_candidates.push(fts_results);
         }
@@ -105,6 +138,7 @@ pub fn kb_search(
                 conn,
                 vec,
                 &input.library_ids,
+                &input.document_ids,
                 input.level,
                 fetch_k,
                 input.embedding_index_id,
@@ -117,7 +151,13 @@ pub fn kb_search(
 
     // P3-011: Summary retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Summary) {
-        if let Ok(sr) = summary_retriever(conn, &final_query, &input.library_ids, fetch_k) {
+        if let Ok(sr) = summary_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k,
+        ) {
             if !sr.is_empty() {
                 all_candidates.push(sr);
             }
@@ -126,7 +166,13 @@ pub fn kb_search(
 
     // P3-012: Table retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Table) {
-        if let Ok(tr) = table_retriever(conn, &final_query, &input.library_ids, fetch_k) {
+        if let Ok(tr) = table_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k,
+        ) {
             if !tr.is_empty() {
                 all_candidates.push(tr);
             }
@@ -135,7 +181,13 @@ pub fn kb_search(
 
     // P3-013: Metadata retriever
     if retriever_set.contains(&crate::kb::planner::RetrieverType::Metadata) {
-        if let Ok(mr) = metadata_retriever(conn, &final_query, &input.library_ids, fetch_k) {
+        if let Ok(mr) = metadata_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k,
+        ) {
             if !mr.is_empty() {
                 all_candidates.push(mr);
             }
@@ -144,7 +196,13 @@ pub fn kb_search(
 
     // P1 修复: PassageFts retriever — 段落级 FTS 兜底召回
     if retriever_set.contains(&crate::kb::planner::RetrieverType::PassageFts) {
-        if let Ok(pr) = passage_fts_retriever(conn, &final_query, &input.library_ids, fetch_k) {
+        if let Ok(pr) = passage_fts_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k,
+        ) {
             if !pr.is_empty() {
                 all_candidates.push(pr);
             }
@@ -173,10 +231,16 @@ pub fn kb_search(
     // 必须纳入缓存 key，否则同一 query/profile 下不同 override 会复用错误候选集。
     let planner_str = input.planner_override.as_deref().unwrap_or("-");
     let merge_cache_key = format!(
-        "merge:{}|libs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}|plan:{}",
+        "merge:{}|libs:{}|docs:{}|v:{}|k:{}|lvl:{}|prof:{}|fid:{}|eidx:{}|vec:{}|plan:{}",
         final_query,
         input
             .library_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        input
+            .document_ids
             .iter()
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
@@ -214,9 +278,14 @@ pub fn kb_search(
         let mut variants = crate::nlp::chinese::expand_query_with_synonyms(&final_query);
         variants.extend(crate::nlp::chinese::expand_query_with_aliases(&final_query));
         for variant in variants.iter().skip(1).take(3) {
-            if let Ok(fr) =
-                kb_fts_search(conn, variant, &input.library_ids, input.level, fetch_k * 2)
-            {
+            if let Ok(fr) = kb_fts_search(
+                conn,
+                variant,
+                &input.library_ids,
+                &input.document_ids,
+                input.level,
+                fetch_k * 2,
+            ) {
                 if !fr.is_empty() {
                     merged.extend(fr);
                     fallbacks_used.push("synonym_alias_expand");
@@ -236,6 +305,7 @@ pub fn kb_search(
                 conn,
                 &broad_query,
                 &input.library_ids,
+                &input.document_ids,
                 input.level,
                 fetch_k * 2,
             ) {
@@ -252,6 +322,7 @@ pub fn kb_search(
             conn,
             &input.query,
             &input.library_ids,
+            &input.document_ids,
             input.level,
             fetch_k * 3,
         ) {
@@ -263,7 +334,13 @@ pub fn kb_search(
     }
     if merged.is_empty() {
         // Level 4: title_name_expand — 扩展到文件名/标题检索
-        if let Ok(fr) = title_name_retriever(conn, &final_query, &input.library_ids, fetch_k * 3) {
+        if let Ok(fr) = title_name_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k * 3,
+        ) {
             if !fr.is_empty() {
                 merged.extend(fr);
                 fallbacks_used.push("title_name_expand");
@@ -272,7 +349,13 @@ pub fn kb_search(
     }
     if merged.is_empty() {
         // Level 5: summary_search — 搜索摘要
-        if let Ok(sr) = summary_retriever(conn, &final_query, &input.library_ids, fetch_k * 3) {
+        if let Ok(sr) = summary_retriever(
+            conn,
+            &final_query,
+            &input.library_ids,
+            &input.document_ids,
+            fetch_k * 3,
+        ) {
             if !sr.is_empty() {
                 merged.extend(sr);
                 fallbacks_used.push("summary_search");
@@ -287,6 +370,7 @@ pub fn kb_search(
                 conn,
                 vec,
                 &input.library_ids,
+                &input.document_ids,
                 input.level,
                 fetch_k * 5,
                 input.embedding_index_id,
@@ -641,6 +725,7 @@ fn title_name_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
@@ -662,21 +747,8 @@ fn title_name_retriever(
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND d.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "d.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "d.id", document_ids);
 
     // P2 修复: ORDER BY bm25 确保按 FTS 相关性排序。
     // bm25 值越低表示越相关（FTS5 中 bm25 返回负值表示更高相关性），
@@ -736,6 +808,7 @@ fn passage_fts_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
     let token_query = chinese::build_fts_match_query(query);
@@ -757,21 +830,8 @@ fn passage_fts_retriever(
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND ps.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "ps.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "ps.document_id", document_ids);
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(
@@ -1232,6 +1292,7 @@ fn summary_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
     let mut sql = String::from(
@@ -1245,21 +1306,8 @@ fn summary_retriever(
     let like_query = format!("%{}%", query);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND d.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "d.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "d.id", document_ids);
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY s.document_id LIMIT ?{}", limit_idx));
@@ -1296,55 +1344,83 @@ fn table_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
+    let token_query = chinese::build_fts_match_query(query);
+    if token_query.is_empty() || top_k == 0 {
+        return Ok(Vec::new());
+    }
+
     // P1 修复：表格检索器按 active version 过滤，通过 t.version_id = d.current_version_id
     // 确保表格索引与当前版本节点原子一致，不会返回退役版本的表格行。
     let mut sql = String::from(
-        "SELECT MIN(n.id) FROM kb_table_rows r \
+        "SELECT n.id, r.table_id FROM kb_table_row_fts \
+         JOIN kb_table_rows r ON r.id = kb_table_row_fts.rowid \
          JOIN kb_tables t ON t.id = r.table_id \
          JOIN kb_documents d ON d.id = t.document_id \
-         JOIN kb_document_nodes n ON n.document_id = d.id \
-         WHERE r.row_text LIKE ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted' \
-         AND n.retired_at IS NULL \
-         AND d.current_version_id IS NOT NULL AND n.version_id = d.current_version_id \
+         JOIN kb_document_nodes n ON n.id = ( \
+             SELECT n2.id FROM kb_document_nodes n2 \
+             WHERE n2.document_id = d.id \
+               AND n2.retired_at IS NULL \
+               AND n2.version_id = d.current_version_id \
+             ORDER BY n2.chunk_order ASC, n2.id ASC \
+             LIMIT 1 \
+         ) \
+         WHERE kb_table_row_fts MATCH ?1 AND d.deleted_at IS NULL AND d.document_status != 'deleted' \
+         AND d.current_version_id IS NOT NULL \
          AND t.version_id = d.current_version_id AND d.index_status = 'ready'",
     );
-    let like_query = format!("%{}%", query);
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND d.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "d.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "d.id", document_ids);
 
     let limit_idx = param_values.len() + 1;
-    sql.push_str(&format!(" GROUP BY r.table_id LIMIT ?{}", limit_idx));
-    param_values.push(Box::new(top_k as i64));
+    let offset_idx = limit_idx + 1;
+    sql.push_str(&format!(
+        " ORDER BY bm25(kb_table_row_fts) ASC, kb_table_row_fts.rowid ASC LIMIT ?{} OFFSET ?{}",
+        limit_idx, offset_idx
+    ));
 
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        param_values.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(RankedResult {
-            node_id: row.get::<_, i64>(0)?,
-            rank: 0,
-            score: 0.0,
-            signals: RankSignals::default(),
-        })
-    })?;
-    let mut results: Vec<RankedResult> = rows.filter_map(|r| r.ok()).collect();
+    let mut results = Vec::new();
+    let mut seen_tables = std::collections::HashSet::new();
+    let batch_limit = top_k.saturating_mul(8).clamp(32, 5000) as i64;
+    let mut offset = 0i64;
+    loop {
+        let row_count = {
+            let mut param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+            param_refs.push(&batch_limit);
+            param_refs.push(&offset);
+            let mut rows = stmt.query(param_refs.as_slice())?;
+            let mut row_count = 0i64;
+            while let Some(row) = rows.next()? {
+                row_count += 1;
+                let node_id: i64 = row.get(0)?;
+                let table_id: i64 = row.get(1)?;
+                if !seen_tables.insert(table_id) {
+                    continue;
+                }
+                results.push(RankedResult {
+                    node_id,
+                    rank: 0,
+                    score: 0.0,
+                    signals: RankSignals::default(),
+                });
+                if results.len() >= top_k {
+                    break;
+                }
+            }
+            row_count
+        };
+
+        if results.len() >= top_k || row_count < batch_limit {
+            break;
+        }
+        offset += row_count;
+    }
     for (i, r) in results.iter_mut().enumerate() {
         r.rank = i + 1;
         // 表格检索器:写 Table 信号 + table_score
@@ -1364,6 +1440,7 @@ fn metadata_retriever(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
     let mut sql = String::from(
@@ -1377,21 +1454,8 @@ fn metadata_retriever(
     let like_query = format!("%{}%", query);
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(like_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND d.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "d.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "d.id", document_ids);
 
     let limit_idx = param_values.len() + 1;
     sql.push_str(&format!(" GROUP BY d.id LIMIT ?{}", limit_idx));
@@ -1556,6 +1620,7 @@ pub fn kb_vector_search(
     conn: &Connection,
     embedding: &[f32],
     library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
     embedding_index_id: Option<i64>,
@@ -1622,9 +1687,15 @@ pub fn kb_vector_search(
 
         for (index_id, ref lib_ids) in &index_entries {
             let per_index_table = crate::kb::embedding_index::vec_table_name_for_index(*index_id);
-            if let Ok(results) =
-                try_vec_knn(conn, &query_blob, lib_ids, level, top_k, &per_index_table)
-            {
+            if let Ok(results) = try_vec_knn(
+                conn,
+                &query_blob,
+                lib_ids,
+                document_ids,
+                level,
+                top_k,
+                &per_index_table,
+            ) {
                 for r in results {
                     if seen_nodes.insert(r.node_id) {
                         all_results.push(r);
@@ -1655,6 +1726,7 @@ pub fn kb_vector_search(
                 conn,
                 embedding,
                 library_ids,
+                document_ids,
                 level,
                 top_k,
                 &index_entries,
@@ -1682,6 +1754,7 @@ pub fn kb_vector_search(
             conn,
             embedding,
             library_ids,
+            document_ids,
             level,
             top_k,
             &index_entries,
@@ -1690,13 +1763,30 @@ pub fn kb_vector_search(
 
     // 没有任何 active index：legacy 路径，
     // 先查 legacy vec 表，再 fallback BLOB（向后兼容无 active index 的旧库）
-    let result = try_vec_knn(conn, &query_blob, library_ids, level, top_k, "vec_kb_nodes");
+    let result = try_vec_knn(
+        conn,
+        &query_blob,
+        library_ids,
+        document_ids,
+        level,
+        top_k,
+        "vec_kb_nodes",
+    );
     match result {
         Ok(results) if results.len() >= top_k => Ok(results),
-        Ok(results) if !results.is_empty() => {
-            supplement_with_fallback(conn, embedding, library_ids, level, top_k, None, results)
+        Ok(results) if !results.is_empty() => supplement_with_fallback(
+            conn,
+            embedding,
+            library_ids,
+            document_ids,
+            level,
+            top_k,
+            None,
+            results,
+        ),
+        _ => {
+            vector_search_fallback_legacy(conn, embedding, library_ids, document_ids, level, top_k)
         }
-        _ => vector_search_fallback_legacy(conn, embedding, library_ids, level, top_k),
     }
 }
 
@@ -1709,6 +1799,7 @@ pub fn kb_fts_search(
     conn: &Connection,
     query: &str,
     library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
@@ -1730,21 +1821,8 @@ pub fn kb_fts_search(
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(token_query)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND n.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "n.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "n.document_id", document_ids);
 
     if let Some(lvl) = level {
         let idx = param_values.len() + 1;
@@ -1897,6 +1975,7 @@ fn supplement_with_fallback(
     conn: &Connection,
     embedding: &[f32],
     library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
     embedding_index_id: Option<i64>,
@@ -1918,12 +1997,13 @@ fn supplement_with_fallback(
             conn,
             embedding,
             library_ids,
+            document_ids,
             level,
             top_k,
             &[(index_id, library_ids.to_vec())],
         )?
     } else {
-        vector_search_fallback_legacy(conn, embedding, library_ids, level, top_k)?
+        vector_search_fallback_legacy(conn, embedding, library_ids, document_ids, level, top_k)?
     };
 
     let existing_ids: std::collections::HashSet<i64> = existing.iter().map(|r| r.node_id).collect();
@@ -1956,6 +2036,7 @@ fn try_vec_knn(
     conn: &Connection,
     query_blob: &[u8],
     library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
     table_name: &str,
@@ -1983,21 +2064,8 @@ fn try_vec_knn(
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
         vec![Box::new(query_blob.to_vec()), Box::new(knn_k as i64)];
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND n.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "n.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "n.document_id", document_ids);
 
     if let Some(lvl) = level {
         let idx = param_values.len() + 1;
@@ -2056,6 +2124,7 @@ fn vector_search_fallback_multi_index(
     conn: &Connection,
     embedding: &[f32],
     _library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
     index_entries: &[(i64, Vec<i64>)],
@@ -2080,22 +2149,8 @@ fn vector_search_fallback_multi_index(
 
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(*index_id)];
 
-        // 限制 library 范围
-        if !lib_ids.is_empty() {
-            let start = param_values.len() + 1;
-            let placeholders: Vec<String> = lib_ids
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", start + i))
-                .collect();
-            sql.push_str(&format!(
-                " AND n.library_id IN ({})",
-                placeholders.join(",")
-            ));
-            for &id in lib_ids {
-                param_values.push(Box::new(id));
-            }
-        }
+        append_i64_in_filter(&mut sql, &mut param_values, "n.library_id", lib_ids);
+        append_i64_in_filter(&mut sql, &mut param_values, "n.document_id", document_ids);
 
         if let Some(lvl) = level {
             let idx = param_values.len() + 1;
@@ -2154,6 +2209,7 @@ fn vector_search_fallback_legacy(
     conn: &Connection,
     embedding: &[f32],
     library_ids: &[i64],
+    document_ids: &[i64],
     level: Option<i32>,
     top_k: usize,
 ) -> Result<Vec<RankedResult>> {
@@ -2170,21 +2226,8 @@ fn vector_search_fallback_legacy(
 
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if !library_ids.is_empty() {
-        let start = param_values.len() + 1;
-        let placeholders: Vec<String> = library_ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", start + i))
-            .collect();
-        sql.push_str(&format!(
-            " AND n.library_id IN ({})",
-            placeholders.join(",")
-        ));
-        for &id in library_ids {
-            param_values.push(Box::new(id));
-        }
-    }
+    append_i64_in_filter(&mut sql, &mut param_values, "n.library_id", library_ids);
+    append_i64_in_filter(&mut sql, &mut param_values, "n.document_id", document_ids);
 
     if let Some(lvl) = level {
         let idx = param_values.len() + 1;
@@ -2733,5 +2776,286 @@ mod tests {
 
         // DocC has 3 hits, so group_hits has 2 entries
         assert_eq!(grouped[2].group_hits.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_table_retriever_uses_table_row_fts() {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(crate::schema::SCHEMA_DDL)
+            .expect("schema");
+
+        conn.execute("INSERT INTO kb_libraries (name) VALUES ('lib')", [])
+            .unwrap();
+        let lib_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_documents
+             (library_id, original_name, name_tokens, file_size, content_hash, extension,
+              mime_type, document_status, index_status)
+             VALUES (?1, 'sales.csv', 'sales csv', 10, 'hash', 'csv', 'text/csv', 'ready', 'ready')",
+            rusqlite::params![lib_id],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_document_versions (document_id, index_status, content_hash)
+             VALUES (?1, 'ready', 'hash')",
+            rusqlite::params![doc_id],
+        )
+        .unwrap();
+        let version_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE kb_documents SET current_version_id = ?1 WHERE id = ?2",
+            rusqlite::params![version_id, doc_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kb_document_nodes
+             (library_id, document_id, version_id, content, content_tokens, level, chunk_order)
+             VALUES (?1, ?2, ?3, '销售表格尾部', '销售 表格 尾部', 0, 1)",
+            rusqlite::params![lib_id, doc_id, version_id],
+        )
+        .unwrap();
+        let _later_node_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_document_nodes
+             (library_id, document_id, version_id, content, content_tokens, level, chunk_order)
+             VALUES (?1, ?2, ?3, '销售表格', '销售 表格', 0, 0)",
+            rusqlite::params![lib_id, doc_id, version_id],
+        )
+        .unwrap();
+        let node_id = conn.last_insert_rowid();
+        let table_id = crate::kb::table_index::insert_table(
+            &conn,
+            doc_id,
+            version_id,
+            "销售明细",
+            &["区域".to_string(), "销售额".to_string()],
+            1,
+        )
+        .unwrap();
+        crate::kb::table_index::insert_table_row(
+            &conn,
+            table_id,
+            0,
+            "区域: 华东 销售额: 100",
+            r#"{"区域":"华东","销售额":"100"}"#,
+        )
+        .unwrap();
+
+        let token_query = chinese::build_fts_match_query("销售额");
+        let all_fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM kb_table_row_fts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let row_tokens: String = conn
+            .query_row("SELECT row_tokens FROM kb_table_rows LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let matched_fts_rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM kb_table_row_fts WHERE kb_table_row_fts MATCH ?1 LIMIT 1",
+                rusqlite::params![chinese::build_fts_match_query("销售额")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let table_row_id: i64 = conn
+            .query_row("SELECT id FROM kb_table_rows LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            matched_fts_rowid, table_row_id,
+            "FTS rowid should equal kb_table_rows.id"
+        );
+        assert_eq!(
+            all_fts_count, 1,
+            "table row FTS trigger should insert one row; row_tokens={row_tokens}"
+        );
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kb_table_row_fts WHERE kb_table_row_fts MATCH ?1",
+                rusqlite::params![token_query],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_count, 1,
+            "table row FTS should match indexed row; row_tokens={row_tokens}"
+        );
+        let row_join_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kb_table_row_fts
+                 JOIN kb_table_rows r ON r.id = kb_table_row_fts.rowid
+                 WHERE kb_table_row_fts MATCH ?1",
+                rusqlite::params![chinese::build_fts_match_query("销售额")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_join_count, 1, "FTS rowid should match table row id");
+        let joined_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kb_table_row_fts
+                 JOIN kb_table_rows r ON r.id = kb_table_row_fts.rowid
+                 JOIN kb_tables t ON t.id = r.table_id
+                 JOIN kb_documents d ON d.id = t.document_id
+                 JOIN kb_document_nodes n ON n.id = (
+                     SELECT n2.id FROM kb_document_nodes n2
+                     WHERE n2.document_id = d.id
+                       AND n2.retired_at IS NULL
+                       AND n2.version_id = d.current_version_id
+                     ORDER BY n2.chunk_order ASC, n2.id ASC
+                     LIMIT 1
+                 )
+                 WHERE kb_table_row_fts MATCH ?1
+                   AND d.document_status != 'deleted'
+                   AND d.deleted_at IS NULL
+                   AND d.current_version_id IS NOT NULL
+                   AND t.version_id = d.current_version_id
+                   AND d.index_status = 'ready'",
+                rusqlite::params![chinese::build_fts_match_query("销售额")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined_count, 1, "table FTS joined filters should keep row");
+
+        let results = table_retriever(&conn, "销售额", &[lib_id], &[], 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, node_id);
+        assert!(results[0]
+            .signals
+            .retrievers
+            .contains(&RetrieverKind::Table));
+    }
+
+    #[test]
+    fn test_kb_fts_search_applies_document_filter_before_limit() {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(crate::schema::SCHEMA_DDL)
+            .expect("schema");
+
+        conn.execute("INSERT INTO kb_libraries (name) VALUES ('lib')", [])
+            .unwrap();
+        let lib_id = conn.last_insert_rowid();
+
+        let mut target_doc_id = 0;
+        let mut target_node_id = 0;
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO kb_documents
+                 (library_id, original_name, name_tokens, file_size, content_hash, extension,
+                  mime_type, document_status, index_status)
+                 VALUES (?1, ?2, ?3, 10, ?4, 'txt', 'text/plain', 'ready', 'ready')",
+                rusqlite::params![lib_id, format!("doc-{i}.txt"), "alpha", format!("hash-{i}")],
+            )
+            .unwrap();
+            let doc_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO kb_document_versions (document_id, index_status, content_hash)
+                 VALUES (?1, 'ready', ?2)",
+                rusqlite::params![doc_id, format!("hash-{i}")],
+            )
+            .unwrap();
+            let version_id = conn.last_insert_rowid();
+            conn.execute(
+                "UPDATE kb_documents SET current_version_id = ?1 WHERE id = ?2",
+                rusqlite::params![version_id, doc_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kb_document_nodes
+                 (library_id, document_id, version_id, content, content_tokens, level, chunk_order)
+                 VALUES (?1, ?2, ?3, ?4, 'alpha', 0, 0)",
+                rusqlite::params![lib_id, doc_id, version_id, format!("alpha content {i}")],
+            )
+            .unwrap();
+            let node_id = conn.last_insert_rowid();
+            if i == 2 {
+                target_doc_id = doc_id;
+                target_node_id = node_id;
+            }
+        }
+
+        let results = kb_fts_search(&conn, "alpha", &[lib_id], &[target_doc_id], None, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].node_id, target_node_id);
+    }
+
+    #[test]
+    fn test_table_retriever_pages_until_enough_distinct_tables() {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(crate::schema::SCHEMA_DDL)
+            .expect("schema");
+
+        conn.execute("INSERT INTO kb_libraries (name) VALUES ('lib')", [])
+            .unwrap();
+        let lib_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_documents
+             (library_id, original_name, name_tokens, file_size, content_hash, extension,
+              mime_type, document_status, index_status)
+             VALUES (?1, 'sales.csv', 'sales csv', 10, 'hash', 'csv', 'text/csv', 'ready', 'ready')",
+            rusqlite::params![lib_id],
+        )
+        .unwrap();
+        let doc_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_document_versions (document_id, index_status, content_hash)
+             VALUES (?1, 'ready', 'hash')",
+            rusqlite::params![doc_id],
+        )
+        .unwrap();
+        let version_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE kb_documents SET current_version_id = ?1 WHERE id = ?2",
+            rusqlite::params![version_id, doc_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO kb_document_nodes
+             (library_id, document_id, version_id, content, content_tokens, level, chunk_order)
+             VALUES (?1, ?2, ?3, '销售表格', '销售 表格', 0, 0)",
+            rusqlite::params![lib_id, doc_id, version_id],
+        )
+        .unwrap();
+
+        let first_table_id = crate::kb::table_index::insert_table(
+            &conn,
+            doc_id,
+            version_id,
+            "销售明细",
+            &["销售额".to_string()],
+            33,
+        )
+        .unwrap();
+        for i in 0..33 {
+            crate::kb::table_index::insert_table_row(
+                &conn,
+                first_table_id,
+                i,
+                &format!("销售额: {}", i),
+                &format!(r#"{{"销售额":"{}"}}"#, i),
+            )
+            .unwrap();
+        }
+        let second_table_id = crate::kb::table_index::insert_table(
+            &conn,
+            doc_id,
+            version_id,
+            "销售汇总",
+            &["销售额".to_string()],
+            1,
+        )
+        .unwrap();
+        crate::kb::table_index::insert_table_row(
+            &conn,
+            second_table_id,
+            0,
+            "销售额: 999",
+            r#"{"销售额":"999"}"#,
+        )
+        .unwrap();
+
+        let results = table_retriever(&conn, "销售额", &[lib_id], &[], 2).unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

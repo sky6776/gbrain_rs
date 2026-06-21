@@ -393,6 +393,10 @@ pub struct ChatMessage {
 #[derive(Debug, Clone, Serialize)]
 pub struct KbSearchInput {
     pub library_ids: Vec<i64>,
+    /// Optional hard filter for specific KB documents. Empty means all documents
+    /// within the selected libraries are eligible.
+    #[serde(default)]
+    pub document_ids: Vec<i64>,
     pub query: String,
     pub level: Option<i32>,
     pub top_k: usize,
@@ -435,6 +439,7 @@ impl Default for KbSearchInput {
     fn default() -> Self {
         Self {
             library_ids: vec![],
+            document_ids: vec![],
             query: String::new(),
             level: None,
             top_k: 10,
