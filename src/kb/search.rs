@@ -1971,6 +1971,7 @@ pub fn rrf_merge(
 /// 当 sqlite-vec KNN 因过度过滤（retired/版本等）返回不足 `top_k` 条结果时，
 /// 用 brute-force cosine fallback 补充缺失的名额。
 /// 已由 KNN 返回的 node_id 不会重复计入；补充后统一按 score 降序重排 rank。
+#[allow(clippy::too_many_arguments)]
 fn supplement_with_fallback(
     conn: &Connection,
     embedding: &[f32],

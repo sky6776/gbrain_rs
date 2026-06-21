@@ -94,7 +94,7 @@ fn extract_docx_text_from_document_xml(
     let mut table_rows: Vec<Vec<String>> = Vec::new();
     let mut table_index = 0usize;
 
-    let mut reader = quick_xml::Reader::from_str(&xml_content);
+    let mut reader = quick_xml::Reader::from_str(xml_content);
     let mut buf = Vec::new();
 
     loop {
@@ -321,10 +321,7 @@ fn table_to_markdown(headers: &[String], rows: &[Vec<String>]) -> String {
 }
 
 fn escape_markdown_cell(value: &str) -> String {
-    value
-        .replace('|', "\\|")
-        .replace('\r', " ")
-        .replace('\n', " ")
+    value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 
 #[cfg(test)]
