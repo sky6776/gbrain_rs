@@ -375,12 +375,27 @@ fn artifact_query_evidence_snippet_centers_a_late_match_for_all_kb_file_types() 
         let content_hash = format!("late-match-document-{}", extension);
         conn.execute(
             "INSERT INTO kb_documents \
-             (library_id, original_name, content_hash, extension, mime_type, document_status) \
-             VALUES (?1, ?2, ?3, ?4, 'application/octet-stream', 'ready')",
+             (library_id, original_name, content_hash, extension, mime_type, \
+              document_status, index_status, parsing_status, embedding_status, ocr_status) \
+             VALUES (?1, ?2, ?3, ?4, 'application/octet-stream', \
+                     'ready', 'ready', 2, 2, 'not_needed')",
             rusqlite::params![library_id, original_name, content_hash, extension],
         )
         .expect("insert document");
         let document_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO kb_document_versions \
+             (document_id, index_status, content_hash, node_count, activated_at) \
+             VALUES (?1, 'ready', ?2, 1, datetime('now'))",
+            rusqlite::params![document_id, content_hash],
+        )
+        .expect("insert ready document version");
+        let version_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE kb_documents SET current_version_id = ?1 WHERE id = ?2",
+            rusqlite::params![version_id, document_id],
+        )
+        .expect("activate document version");
 
         let content = format!(
             "{}The Vendor Logo is displayed on the startup screen and can be replaced by configuration.",
@@ -389,9 +404,9 @@ fn artifact_query_evidence_snippet_centers_a_late_match_for_all_kb_file_types() 
         let content_tokens = gbrain_core::nlp::chinese::tokenize_content(&content);
         conn.execute(
             "INSERT INTO kb_document_nodes \
-             (library_id, document_id, content, content_tokens, level, chunk_order) \
-             VALUES (?1, ?2, ?3, ?4, 0, 0)",
-            rusqlite::params![library_id, document_id, content, content_tokens],
+             (library_id, document_id, version_id, content, content_tokens, level, chunk_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+            rusqlite::params![library_id, document_id, version_id, content, content_tokens],
         )
         .expect("insert searchable node");
 
@@ -1800,6 +1815,11 @@ fn mcp_tools_call_kb_document_status() {
         .expect("dispatch kb_document_status");
 
     assert_eq!(result.get("document_id").and_then(|v| v.as_i64()), Some(1));
+    assert_eq!(
+        result.get("ocr_status").and_then(|v| v.as_str()),
+        Some("not_evaluated"),
+        "尚未被 KB worker 处理的文档不应显示为 not_needed"
+    );
     assert!(
         result.get("ocr_status").is_some(),
         "kb_document_status 应返回 ocr_status"

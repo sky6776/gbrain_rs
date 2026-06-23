@@ -294,6 +294,8 @@ pub fn rebuild_document_index(conn: &Connection, document_id: i64) -> Result<()>
          embedding_status = 0, \
          embedding_progress = 0, \
          embedding_error = '', \
+         ocr_status = 'not_evaluated', \
+         ocr_text_coverage = 0.0, \
          updated_at = datetime('now') \
          WHERE id = ?2",
         rusqlite::params![run_id, document_id],

@@ -478,12 +478,15 @@ impl<'a> KbEngine<'a> {
 
     pub fn create_document(&self, doc: &Document) -> Result<i64> {
         self.transaction(|conn| {
+            // 新文档刚创建时只代表“已进入 KB 队列”，还没有经过 PDF 文本层检测、
+            // 图片 OCR 能力判断或普通文档解析流程。这里必须显式写入 not_evaluated，
+            // 避免用户在 worker 尚未处理前查询状态时，把默认值误解为“已判定不需要 OCR”。
             conn.execute(
                 "INSERT INTO kb_documents \
                  (library_id, folder_id, original_name, name_tokens, \
                   file_size, content_hash, extension, mime_type, \
-                  source_type, storage_path, original_path, job_id, processing_run_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                  source_type, storage_path, original_path, job_id, processing_run_id, ocr_status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     doc.library_id,
                     doc.folder_id,
@@ -498,6 +501,7 @@ impl<'a> KbEngine<'a> {
                     doc.original_path,
                     doc.job_id,
                     doc.processing_run_id,
+                    crate::kb::ocr::OcrStatus::NotEvaluated.as_str(),
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -771,10 +775,13 @@ impl<'a> KbEngine<'a> {
     /// 重置文档处理状态为 queued/pending，用于 Changed 场景重新处理
     pub fn reset_document_processing(&self, id: i64) -> Result<()> {
         self.transaction(|conn| {
+            // 内容变更后会重新进入完整解析流程。旧 OCR 结论已经不再可信，
+            // 因此同时清空覆盖率并回到 not_evaluated，等待新的 worker run 重新判定。
             conn.execute(
                 "UPDATE kb_documents SET document_status = 'queued', index_status = 'pending', \
                  parsing_status = 0, parsing_progress = 0, parsing_error = '', \
                  embedding_status = 0, embedding_progress = 0, embedding_error = '', \
+                 ocr_status = 'not_evaluated', ocr_text_coverage = 0.0, \
                  updated_at = datetime('now') WHERE id = ?1",
                 params![id],
             )?;
@@ -821,6 +828,10 @@ impl<'a> KbEngine<'a> {
             ("processing", "pending", false)
         };
         // 修复：直接在已有事务的 conn 上执行 UPDATE，不再开新事务
+        // 到达统计更新阶段，说明文档已经完成了解析流程的关键判断。
+        // 如果 OCR 状态仍停留在初始的 not_evaluated，表示该文档没有进入 PDF/图片 OCR 分支，
+        // 可以安全推进为 not_needed；若 OCR 分支已写入 queued/done/needed/failed 等真实状态，
+        // CASE 表达式会保留这些更精确的结果，避免被普通统计更新覆盖。
         let conn = self.conn;
         let run_guard = run_id.is_some();
         if set_last_indexed {
@@ -829,6 +840,7 @@ impl<'a> KbEngine<'a> {
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                      parsing_status = ?3, embedding_status = ?4, \
                      document_status = ?5, index_status = ?6, \
+                     ocr_status = CASE WHEN ocr_status = 'not_evaluated' THEN 'not_needed' ELSE ocr_status END, \
                      last_indexed_at = datetime('now'), updated_at = datetime('now') \
                      WHERE id = ?7 AND processing_run_id = ?8",
                     params![
@@ -847,6 +859,7 @@ impl<'a> KbEngine<'a> {
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                      parsing_status = ?3, embedding_status = ?4, \
                      document_status = ?5, index_status = ?6, \
+                     ocr_status = CASE WHEN ocr_status = 'not_evaluated' THEN 'not_needed' ELSE ocr_status END, \
                      last_indexed_at = datetime('now'), updated_at = datetime('now') \
                      WHERE id = ?7",
                     params![
@@ -872,6 +885,7 @@ impl<'a> KbEngine<'a> {
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                      parsing_status = ?3, embedding_status = ?4, \
                      document_status = ?5, index_status = ?6, \
+                     ocr_status = CASE WHEN ocr_status = 'not_evaluated' THEN 'not_needed' ELSE ocr_status END, \
                      updated_at = datetime('now') \
                      WHERE id = ?7 AND processing_run_id = ?8",
                     params![
@@ -890,6 +904,7 @@ impl<'a> KbEngine<'a> {
                     "UPDATE kb_documents SET word_total = ?1, split_total = ?2, \
                      parsing_status = ?3, embedding_status = ?4, \
                      document_status = ?5, index_status = ?6, \
+                     ocr_status = CASE WHEN ocr_status = 'not_evaluated' THEN 'not_needed' ELSE ocr_status END, \
                      updated_at = datetime('now') \
                      WHERE id = ?7",
                     params![

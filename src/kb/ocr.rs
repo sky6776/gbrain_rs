@@ -48,6 +48,8 @@ pub fn check_ocr_run_guard(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OcrStatus {
+    /// OCR 尚未进入判定阶段（例如文档仍在 KB worker 队列中）。
+    NotEvaluated,
     /// 不需要 OCR（纯文本 PDF）
     NotNeeded,
     /// 需要 OCR，但 OCR 或外部 OCR 被显式关闭，或等待排队
@@ -67,6 +69,7 @@ pub enum OcrStatus {
 impl OcrStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::NotEvaluated => "not_evaluated",
             Self::NotNeeded => "not_needed",
             Self::Needed => "needed",
             Self::Queued => "queued",
@@ -80,6 +83,7 @@ impl OcrStatus {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
+            "not_evaluated" => Self::NotEvaluated,
             "not_needed" => Self::NotNeeded,
             "needed" => Self::Needed,
             "queued" => Self::Queued,
@@ -1261,6 +1265,7 @@ mod tests {
 
     #[test]
     fn test_ocr_status_as_str() {
+        assert_eq!(OcrStatus::NotEvaluated.as_str(), "not_evaluated");
         assert_eq!(OcrStatus::Done.as_str(), "done");
         assert_eq!(OcrStatus::Needed.as_str(), "needed");
         assert_eq!(OcrStatus::Failed.as_str(), "failed");

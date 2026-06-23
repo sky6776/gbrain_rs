@@ -145,6 +145,7 @@ pub fn restore_document(conn: &Connection, document_id: i64) -> Result<()> {
          processing_run_id = ?1, \
          parsing_status = 0, parsing_progress = 0, parsing_error = '', \
          embedding_status = 0, embedding_progress = 0, embedding_error = '', \
+         ocr_status = 'not_evaluated', ocr_text_coverage = 0.0, \
          updated_at = datetime('now') WHERE id = ?2",
         params![run_id, document_id],
     )?;

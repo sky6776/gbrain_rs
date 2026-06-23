@@ -600,7 +600,8 @@ mod tests {
         let options = build_ocr_options_from_config(&config);
         assert_eq!(options.model, "glm-ocr");
         assert!(options.enable_layout);
-        assert_eq!(options.max_pages_per_request, 100);
+        // 默认每次 OCR 请求最多 5 页，避免单次 GLM-OCR 请求过大导致超时或失败。
+        assert_eq!(options.max_pages_per_request, 5);
         assert_eq!(options.max_pdf_bytes_per_request, 52_428_800);
     }
 

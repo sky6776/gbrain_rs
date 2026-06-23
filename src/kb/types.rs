@@ -288,7 +288,7 @@ impl Default for Document {
             purged_at: None,
             last_indexed_at: None,
             last_seen_at: None,
-            ocr_status: "not_needed".to_string(),
+            ocr_status: "not_evaluated".to_string(),
             ocr_text_coverage: 0.0,
         }
     }

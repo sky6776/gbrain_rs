@@ -40,7 +40,9 @@ fn reuse_kb_doc_and_enqueue(
     // 修复 P1：复用已删除的 kb_document 时必须同时清 deleted_at，
     // 否则后续查询用 d.deleted_at IS NULL 过滤时搜不到。
     conn.execute(
-        "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
+        "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', \
+         ocr_status = 'not_evaluated', ocr_text_coverage = 0.0, \
+         deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
         params![run_id, kb_doc_id],
     )
     .map_err(|e| GBrainError::Database(format!("更新 KB document run_id 失败: {}", e)))?;
@@ -196,10 +198,14 @@ pub fn create_kb_projection(
                 // 修复 P1：复用已删除的 kb_document 时必须同时清 deleted_at，
                 // 否则后续查询用 d.deleted_at IS NULL 过滤时搜不到。
                 conn.execute(
-                    "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
+                    "UPDATE kb_documents SET processing_run_id = ?1, document_status = 'queued', \
+                     ocr_status = 'not_evaluated', ocr_text_coverage = 0.0, \
+                     deleted_at = NULL, updated_at = datetime('now') WHERE id = ?2",
                     rusqlite::params![run_id, doc_id],
                 )
-                .map_err(|e| GBrainError::Database(format!("更新 KB document run_id 失败: {}", e)))?;
+                .map_err(|e| {
+                    GBrainError::Database(format!("更新 KB document run_id 失败: {}", e))
+                })?;
 
                 let artifact = store::find_artifact_by_id(conn, artifact_id)
                     .map_err(|e| GBrainError::Database(format!("查找 artifact 失败: {}", e)))?

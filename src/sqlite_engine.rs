@@ -1810,10 +1810,13 @@ impl BrainEngine for SqliteEngine {
             .enumerate()
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
-        let table = if conn.prepare("SELECT 1 FROM vec_chunks LIMIT 0").is_ok() {
-            "vec_chunks"
-        } else if has_table(conn, "chunk_embeddings") {
+        // chunk_embeddings 是 embedding 的权威持久化表；vec_chunks 是 sqlite-vec 检索索引，
+        // 写入时是 best-effort，某些测试环境或维度不匹配时可能为空。按 chunk_id 精确读取
+        // embedding 时应优先读权威表，避免把索引缺失误判为 embedding 丢失。
+        let table = if has_table(conn, "chunk_embeddings") {
             "chunk_embeddings"
+        } else if conn.prepare("SELECT 1 FROM vec_chunks LIMIT 0").is_ok() {
+            "vec_chunks"
         } else {
             return Ok(Vec::new());
         };
