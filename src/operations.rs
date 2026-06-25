@@ -4,7 +4,7 @@
 //! Operations are the single source of truth for the brain API surface.
 //! CLI and MCP server both dispatch through these operations.
 
-use crate::chunker::chunk_text;
+use crate::chunker::chunk_page_content;
 use crate::chunker::tree_sitter::chunk_code_tree_sitter;
 use crate::code_index::{index_code, CodeIndex};
 use crate::config::Config;
@@ -810,7 +810,7 @@ impl<'a> Operations<'a> {
             );
         }
 
-        let mut chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
+        let mut chunks = chunk_page_content(content, &self.config, &pt);
         let next_index = chunks.len() as i32;
         let code_index = if pt == PageType::Code {
             let language = parsed.frontmatter.get("language").and_then(|v| v.as_str());

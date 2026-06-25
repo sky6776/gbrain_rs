@@ -695,6 +695,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     "embedding_dimensions",
                     "expansion_model",
                     "chunker_model",
+                    "page_chunker_mode",
                     "chunk_size",
                     "chunk_overlap",
                     "auto_link",

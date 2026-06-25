@@ -52,7 +52,7 @@ GBRAIN_EXPANSION_MODEL = "glm-5.2"
 # -----------------------------------------------------------------------------
 # LLM 引导分块配置
 # -----------------------------------------------------------------------------
-# LLM 分块器 API 密钥，必填。用于让模型识别文档自然章节边界。
+# LLM 分块器 API 密钥，必填。用于让模型识别普通脑页的自然章节边界。
 # 不会作为 RAPTOR 的回退密钥；RAPTOR 必须配置自己的密钥。
 GBRAIN_CHUNKER_API_KEY = "<请填写 LLM 分块器 API 密钥>"
 
@@ -61,6 +61,14 @@ GBRAIN_CHUNKER_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 
 # LLM 分块器模型，必填。输出期望是 JSON 数组；glm 开头模型会自动关闭 thinking。
 GBRAIN_CHUNKER_MODEL = "glm-5.2"
+
+# 普通脑页分块模式，未配置时默认 auto。
+# 可选值：
+# - auto：默认。非代码脑页优先尝试 LLM 引导分块；模型不可用、输出不适合或内容超限时回退递归分块。
+# - recursive：始终使用本地递归分块，不调用 LLM 分块器。
+# - llm：强制优先调用 LLM 分块器；失败时仍回退递归分块，避免页面没有 chunks。
+# 说明：该配置只影响 pages/chunks 的普通脑页分块；KB 文档仍使用 src/kb/splitter 自适应分块。
+GBRAIN_PAGE_CHUNKER_MODE = "auto"
 
 # -----------------------------------------------------------------------------
 # KB RAPTOR 摘要配置

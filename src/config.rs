@@ -47,6 +47,10 @@ pub struct Config {
     pub chunker_api_key: Option<String>,
     pub chunker_base_url: Option<String>,
     pub chunker_model: String,
+    /// 普通脑页分块模式：auto / recursive / llm。
+    ///
+    /// auto 为默认值：非代码页面优先尝试 LLM 引导分块，不适合或失败时回退 recursive。
+    pub page_chunker_mode: String,
 
     // --- Transcription (speech-to-text) ---
     pub transcription_provider: String, // "groq" | "openai"
@@ -181,6 +185,7 @@ impl Default for Config {
             chunker_api_key: None,
             chunker_base_url: None,
             chunker_model: "gpt-4o-mini".to_string(),
+            page_chunker_mode: "auto".to_string(),
 
             // Transcription
             transcription_provider: "groq".to_string(),
@@ -342,6 +347,9 @@ impl Config {
         }
         if let Ok(model) = std::env::var("GBRAIN_CHUNKER_MODEL") {
             config.chunker_model = model;
+        }
+        if let Ok(mode) = std::env::var("GBRAIN_PAGE_CHUNKER_MODE") {
+            config.page_chunker_mode = mode.to_lowercase();
         }
 
         // --- Transcription env vars ---
@@ -708,6 +716,9 @@ impl Config {
         self.chunker_api_key = Some(required_env_value("GBRAIN_CHUNKER_API_KEY")?);
         self.chunker_base_url = Some(required_url_env("GBRAIN_CHUNKER_BASE_URL")?);
         self.chunker_model = required_env_value("GBRAIN_CHUNKER_MODEL")?;
+        if let Some(mode) = optional_env_value("GBRAIN_PAGE_CHUNKER_MODE")? {
+            self.page_chunker_mode = mode.to_lowercase();
+        }
 
         required_env_value("GBRAIN_KB_RAPTOR_API_KEY")?;
         self.kb_raptor_secret_ref = Some("GBRAIN_KB_RAPTOR_API_KEY".to_string());
@@ -847,6 +858,11 @@ impl Config {
                 self.chunk_overlap, self.chunk_size
             )));
         }
+        validate_enum_value(
+            "GBRAIN_PAGE_CHUNKER_MODE",
+            &self.page_chunker_mode,
+            &["auto", "recursive", "llm"],
+        )?;
         if self
             .kb_allowed_extensions
             .iter()
@@ -931,6 +947,7 @@ impl Config {
             "embedding_dimensions" => Some(self.embedding_dimensions.to_string()),
             "expansion_model" => Some(self.expansion_model.clone()),
             "chunker_model" => Some(self.chunker_model.clone()),
+            "page_chunker_mode" => Some(self.page_chunker_mode.clone()),
             "chunk_size" => Some(self.chunk_size.to_string()),
             "chunk_overlap" => Some(self.chunk_overlap.to_string()),
             "log_level" => Some(self.log_level.clone()),
@@ -978,6 +995,16 @@ impl Config {
             }
             "expansion_model" => self.expansion_model = value.to_string(),
             "chunker_model" => self.chunker_model = value.to_string(),
+            "page_chunker_mode" => {
+                let normalized = value.to_lowercase();
+                validate_enum_value(
+                    "page_chunker_mode",
+                    &normalized,
+                    &["auto", "recursive", "llm"],
+                )
+                .map_err(|e| e.to_string())?;
+                self.page_chunker_mode = normalized;
+            }
             "chunk_size" => {
                 let v: usize = value
                     .parse()
@@ -1159,6 +1186,7 @@ impl Config {
             self.chunker_base_url = other.chunker_base_url;
         }
         self.chunker_model = other.chunker_model;
+        self.page_chunker_mode = other.page_chunker_mode;
         self.transcription_provider = other.transcription_provider;
         if other.transcription_groq_api_key.is_some() {
             self.transcription_groq_api_key = other.transcription_groq_api_key;
@@ -1399,8 +1427,13 @@ fn required_env_f64(name: &str) -> crate::error::Result<f64> {
 
 fn required_env_enum(name: &str, valid: &[&str]) -> crate::error::Result<String> {
     let value = required_env_value(name)?;
-    if valid.contains(&value.as_str()) {
-        Ok(value)
+    validate_enum_value(name, &value, valid)?;
+    Ok(value)
+}
+
+fn validate_enum_value(name: &str, value: &str, valid: &[&str]) -> crate::error::Result<()> {
+    if valid.contains(&value) {
+        Ok(())
     } else {
         Err(config_error(format!(
             "{} 无效值 '{}'，有效值: {}",

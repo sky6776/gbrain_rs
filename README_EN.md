@@ -30,7 +30,7 @@ gbrain query "who is Alice"
 gbrain serve
 ```
 
-Keyword retrieval and local storage require no database or external service setup. Embeddings, query expansion, and reranking are optional and activate only on the corresponding lower-level or KB retrieval paths when API keys are configured.
+gbrain uses embedded SQLite, so no external database is required; however, current startup strictly validates storage, LLM, OCR, KB, logging, and related environment variables. Keyword retrieval itself does not call an external model, while embeddings, query expansion, reranking, RAPTOR, and OCR call their respective configured services.
 
 ---
 
@@ -38,11 +38,11 @@ Keyword retrieval and local storage require no database or external service setu
 
 - **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when model configuration and library policy allow it; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
+- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when the document has enough nodes; the RAPTOR LLM reads only `GBRAIN_KB_RAPTOR_*`; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through auto-apply or candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
-- **Zero Config** — Embedded SQLite, no external services required (embeddings optional)
+- **Embedded Storage** — SQLite/FTS5-based storage with no external database; provide the complete environment configuration before startup
 - **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
 - **Version History** — Full page versioning with rollback
 - **Autopilot** — Self-maintenance daemon thread, auto-runs in background when `gbrain serve` starts. Periodically embeds stale content and runs integrity checks (default every 3600s, configurable via `GBRAIN_AUTOPILOT_INTERVAL`, at least 60s, disable via `GBRAIN_AUTOPILOT_ENABLED`)
@@ -287,11 +287,11 @@ gbrain review apply 1
 
 | Subcommand | Description |
 |------------|-------------|
-| `gbrain config show` | Show common config values (quick overview of 15 core items) |
-| `gbrain config get <key>` | Get a single config value (supports all 29 keys listed below) |
+| `gbrain config show` | Show a quick overview of common config values |
+| `gbrain config get <key>` | Get a single config value (supports the Config fields listed below) |
 | `gbrain config set <key> <value>` | Set a config value (also accepts two set-only OCR threshold keys) |
 
-> **Note:** `config show` only displays the 15 most used core keys; `config get <key>` can access all 29 config items listed in the table below. `config set` also accepts `ocr_text_density_threshold` and `ocr_timeout_seconds_per_page`, which are saved to `config.json` but are not currently returned by `config get`.
+> **Note:** `config show` is a quick overview. `config get <key>` can access the Config fields in the table below. `writer.lint_on_put_page` is a SQLite-engine key and is read after the database is connected. `config set` also accepts `ocr_text_density_threshold` and `ocr_timeout_seconds_per_page`, which are saved to `config.json` but are not currently returned by `config get`.
 
 **Available config keys:**
 
@@ -300,7 +300,8 @@ gbrain review apply 1
 | `embedding_model` | string | Embedding model name | `text-embedding-3-large` |
 | `embedding_dimensions` | integer | Embedding vector dimensions | `1536` |
 | `expansion_model` | string | Query expansion LLM model | `gpt-4o-mini` |
-| `chunker_model` | string | LLM chunking model (reserved; also used as a RAPTOR fallback model) | `gpt-4o-mini` |
+| `chunker_model` | string | LLM-guided chunking model for ordinary brain pages; KB document processing does not use this chunker | `gpt-4o-mini` |
+| `page_chunker_mode` | string | Ordinary brain page chunking mode: auto/recursive/llm; code pages still append tree-sitter symbol chunks | `auto` |
 | `chunk_size` | integer | Chunk size (characters) | `500` |
 | `chunk_overlap` | integer | Chunk overlap (characters) | `50` |
 | `log_level` | string | Log level (trace/debug/info/warn/error) | `info` |
@@ -310,7 +311,7 @@ gbrain review apply 1
 | `auto_timeline` | boolean | Auto-extract timeline on write | `true` |
 | `post_write_lint` | boolean | Run validator checks after write and log the result | `false` |
 | `kb_enabled` | boolean | Enable KB subsystem | `true` |
-| `kb_raptor_model` | string | KB RAPTOR LLM model | `gpt-4o-mini` |
+| `kb_raptor_model` | string | KB RAPTOR LLM model, supplied explicitly by `GBRAIN_KB_RAPTOR_MODEL` at startup | empty string |
 | `kb_max_file_size_mb` | integer | KB max file size (MB) | `50` |
 | `kb_worker_enabled` | boolean | Enable KB background worker | `true` |
 | `kb_worker_poll_interval_secs` | integer | KB worker poll interval (seconds) | `30` |
@@ -324,7 +325,7 @@ gbrain review apply 1
 | `ocr_base_url` | string | GLM-OCR endpoint | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
 | `ocr_model` | string | OCR model | `glm-ocr` |
 | `ocr_mode` | string | OCR selection mode: auto/all_pages | `auto` |
-| `ocr_submit_mode` | string | OCR submission mode: pdf_first/pdf_range | `pdf_first` |
+| `ocr_submit_mode` | string | OCR submission mode: pdf_first/pdf_range | `pdf_range` |
 | `ocr_profile` | string | OCR profile: auto/general/table/formula/handwriting | `auto` |
 
 ---
@@ -826,132 +827,130 @@ No parameters.
 
 ### LLM Configuration Groups
 
-LLM configuration is split by call type and feature:
+LLM configuration is split by call type and feature. Startup now validates these environment variables strictly: missing required values, empty values, invalid URLs, invalid enum/boolean values, or invalid numeric values fail fast and stop startup.
 
 | Group | Environment Variables | Used By |
 |-------|----------------------|---------|
-| **Embeddings** | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` / `GBRAIN_EMBEDDING_MODEL` | Document chunk embedding (vectorization), semantic chunking (paragraph similarity), query vectors |
+| **Embeddings** | `GBRAIN_EMBEDDING_API_KEY` / `GBRAIN_EMBEDDING_BASE_URL` / `GBRAIN_EMBEDDING_MODEL` / `GBRAIN_EMBEDDING_DIMENSIONS` | Document chunk embedding (vectorization), semantic chunking (paragraph similarity), query vectors |
 | **Query Expansion / Reranking** | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL` / `GBRAIN_EXPANSION_MODEL` | Search query expansion, search reranking via chat/completions |
-| **KB RAPTOR** | Library `raptor_llm_*`, `GBRAIN_KB_RAPTOR_*`, `GBRAIN_EXPANSION_*`, `GBRAIN_CHUNKER_*` | RAPTOR tree summarization |
-| **LLM Chunker (reserved)** | `GBRAIN_CHUNKER_API_KEY` / `GBRAIN_CHUNKER_BASE_URL` / `GBRAIN_CHUNKER_MODEL` | Reserved for LLM-guided chunking; not wired into the current KB document pipeline, and also used as a RAPTOR fallback |
+| **KB RAPTOR** | `GBRAIN_KB_RAPTOR_API_KEY` / `GBRAIN_KB_RAPTOR_BASE_URL` / `GBRAIN_KB_RAPTOR_MODEL` | RAPTOR tree summarization and keyword/question augmentation that reuses RAPTOR LLM config |
+| **Ordinary Page LLM Chunker** | `GBRAIN_CHUNKER_API_KEY` / `GBRAIN_CHUNKER_BASE_URL` / `GBRAIN_CHUNKER_MODEL` / `GBRAIN_PAGE_CHUNKER_MODE` | LLM-guided chunking for ordinary `pages/chunks`; KB documents still use the KB adaptive splitter |
+| **Audio Transcription** | `GBRAIN_TRANSCRIPTION_PROVIDER` plus the selected provider's API key/base URL | Audio transcription in the library module |
 | **PDF/Image OCR (GLM-OCR)** | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` / `GBRAIN_OCR_MODEL` | Page-level PDF layout recognition, JPG/PNG single-image recognition, text writeback, and re-embedding |
 
-### API Key Fallback Chain
+### Environment Variables Are Not Shared Or Fallback-Based
 
-Each module's API key falls back in this priority order:
+External model configuration must be provided explicitly per use case. gbrain no longer uses shared API keys, shared OpenAI-compatible base URLs, or old compatibility aliases:
 
-```
-Embeddings:    GBRAIN_OPENAI_API_KEY
-Expansion:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
-LLM Chunker (reserved): GBRAIN_CHUNKER_API_KEY → GBRAIN_OPENAI_API_KEY
-KB RAPTOR:     library raptor_llm_secret_ref → GBRAIN_KB_RAPTOR_API_KEY → GBRAIN_EXPANSION_API_KEY → GBRAIN_CHUNKER_API_KEY
-Reranking:     GBRAIN_EXPANSION_API_KEY → GBRAIN_OPENAI_API_KEY
-PDF/Image OCR: GBRAIN_OCR_API_KEY → ZHIPU_API_KEY
-```
-
-Set `GBRAIN_OPENAI_API_KEY` to enable embeddings, query expansion, and search reranking with the OpenAI-compatible default endpoint/model. RAPTOR needs a library/KB RAPTOR secret or `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_CHUNKER_API_KEY`. PDF/image OCR uses separate GLM-OCR credentials and does not fall back to `GBRAIN_OPENAI_API_KEY`.
+- Embeddings read only `GBRAIN_EMBEDDING_*`.
+- Query expansion, search reranking, and conversational query rewrite read only `GBRAIN_EXPANSION_*`.
+- Ordinary page LLM chunking reads only `GBRAIN_CHUNKER_*`; the mode is controlled by `GBRAIN_PAGE_CHUNKER_MODE`.
+- RAPTOR reads only `GBRAIN_KB_RAPTOR_*`; it no longer falls back to library `raptor_llm_*`, `GBRAIN_EXPANSION_*`, or `GBRAIN_CHUNKER_*`.
+- OCR reads only `GBRAIN_OCR_*`; `ZHIPU_API_KEY`, `GLMOCR_MODEL`, `GLMOCR_ENABLE_LAYOUT`, `GLM_OCR_TIMEOUT`, and `GLMOCR_TIMEOUT` are no longer supported.
+- The old shared `GBRAIN_OPENAI_*` prefix is no longer used as a fallback by any module.
 
 ### Base Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_DIR` | Data storage root directory | `~/.gbrain` |
-| `GBRAIN_DB_PATH` | Database file path | `$GBRAIN_DIR/brain.db` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_DIR` | Data storage root directory | Required, non-empty |
+| `GBRAIN_DB_PATH` | SQLite database file path | Required, non-empty |
 
 ### Embeddings
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_OPENAI_API_KEY` | OpenAI API key (for embeddings; also fallback for other modules) | — |
-| `GBRAIN_OPENAI_BASE_URL` | OpenAI-compatible base URL (also fallback for other modules) | — |
-| `GBRAIN_EMBEDDING_MODEL` | Embedding model name | `text-embedding-3-large` |
-| `GBRAIN_EMBEDDING_DIMENSIONS` | Embedding vector dimensions | `1536` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_EMBEDDING_API_KEY` | Embedding API key | Required, non-empty |
+| `GBRAIN_EMBEDDING_BASE_URL` | OpenAI-compatible embeddings base URL | Required valid http/https URL |
+| `GBRAIN_EMBEDDING_MODEL` | Embedding model name | Required, non-empty |
+| `GBRAIN_EMBEDDING_DIMENSIONS` | Embedding vector dimensions | Required nonzero integer |
+| `GBRAIN_EMBEDDING_CONCURRENCY` | Concurrent embedding sub-batch requests, capped at 8 | Optional; not startup-validated, unparsable values act as `1`, final value is clamped to `1..=8` |
 
 ### Query Expansion / Reranking (Chat Completions)
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_EXPANSION_API_KEY` | Query expansion and search reranking LLM API key | Falls back to `GBRAIN_OPENAI_API_KEY` |
-| `GBRAIN_EXPANSION_BASE_URL` | Query expansion and search reranking LLM base URL | Falls back to `GBRAIN_OPENAI_BASE_URL`; default OpenAI endpoint is used if omitted |
-| `GBRAIN_EXPANSION_MODEL` | Query expansion and search reranking LLM model | `gpt-4o-mini` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_EXPANSION_API_KEY` | Query expansion, search reranking, and query rewrite LLM API key | Required, non-empty |
+| `GBRAIN_EXPANSION_BASE_URL` | Query expansion, search reranking, and query rewrite OpenAI-compatible base URL | Required valid http/https URL |
+| `GBRAIN_EXPANSION_MODEL` | Query expansion, search reranking, and query rewrite LLM model | Required, non-empty |
 
-### LLM Chunking
+### Ordinary Page LLM Chunking
 
-The current KB document pipeline uses Markdown/recursive chunking or embedding-based semantic chunking; it does not call the LLM-guided chunker in `src/chunker/llm.rs` yet. The variables below are reserved for that path, and `GBRAIN_CHUNKER_*` is also used as the final RAPTOR fallback.
+Ordinary brain pages (`pages/chunks`) default to `GBRAIN_PAGE_CHUNKER_MODE=auto`: non-code pages try the LLM-guided chunker in `src/chunker/llm.rs` first and fall back to recursive chunking when unsuitable or failed; code pages keep deterministic chunking and append tree-sitter symbol chunks. KB documents do not use this LLM chunker; they still use `src/kb/splitter`.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_CHUNKER_API_KEY` | LLM chunking API key | Falls back to `GBRAIN_OPENAI_API_KEY` |
-| `GBRAIN_CHUNKER_BASE_URL` | LLM chunking base URL | Falls back to `GBRAIN_OPENAI_BASE_URL` |
-| `GBRAIN_CHUNKER_MODEL` | LLM chunking model | `gpt-4o-mini` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_CHUNKER_API_KEY` | LLM chunking API key | Required, non-empty |
+| `GBRAIN_CHUNKER_BASE_URL` | LLM chunking OpenAI-compatible base URL | Required valid http/https URL |
+| `GBRAIN_CHUNKER_MODEL` | LLM chunking model | Required, non-empty |
+| `GBRAIN_PAGE_CHUNKER_MODE` | Ordinary brain page chunking mode: `auto` / `recursive` / `llm`; defaults to `auto` when unset | Optional; if set, must be a valid enum |
 
 ### Audio Transcription
 
 Transcription is available through the library module; no corresponding CLI or MCP tool is currently exposed.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_TRANSCRIPTION_PROVIDER` | Transcription service provider (`groq` / `openai`) | `groq` |
-| `GBRAIN_TRANSCRIPTION_GROQ_API_KEY` | Groq transcription API key | — |
-| `GBRAIN_TRANSCRIPTION_GROQ_BASE_URL` | Groq transcription base URL | — |
-| `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI transcription API key | — |
-| `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI transcription base URL | — |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_TRANSCRIPTION_PROVIDER` | Transcription service provider (`groq` / `openai`) | Required; must be `groq` or `openai` |
+| `GBRAIN_TRANSCRIPTION_GROQ_API_KEY` | Groq transcription API key | Required when provider=`groq`; if set, must be non-empty |
+| `GBRAIN_TRANSCRIPTION_GROQ_BASE_URL` | Groq transcription base URL | Required valid URL when provider=`groq`; if set, must be valid |
+| `GBRAIN_TRANSCRIPTION_OPENAI_API_KEY` | OpenAI transcription API key | Required when provider=`openai`; if set, must be non-empty |
+| `GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL` | OpenAI transcription base URL | Required valid URL when provider=`openai`; if set, must be valid |
 
 ### PDF/Image OCR (GLM-OCR)
 
 PDF parsing performs page-level OCR selection first. In `auto` mode, only pages with an empty or low-density text layer, images/vector or annotation risk, invisible or apparently garbled text, content parsing failures, or uncertain page geometry are sent to OCR. The decision is persisted as `ocr_scope` (`none` / `partial` / `full`), `needs_ocr_pages`, and `ocr_reasons_by_page`.
 
-JPG/PNG uploads are queued directly as single-page OCR documents. Recognized text is written back as KB text nodes and re-embedded. Single images follow GLM-OCR's 10 MiB limit; images have no PDF-style native text layer, so if OCR is disabled, missing credentials, or blocked by library policy, there is no local text fallback.
+JPG/PNG uploads are queued directly as single-page OCR documents. Recognized text is written back as KB text nodes and re-embedded. Single images follow GLM-OCR's 10 MiB limit; images have no PDF-style native text layer, so if OCR is disabled or credentials are missing, there is no local text fallback.
 
 External OCR is always allowed (library-level privacy switches have been removed). As long as the global switch `GBRAIN_OCR_ENABLED=true` and an API key is configured, PDF pages and JPG/PNG images will be sent to the external OCR service.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_OCR_ENABLED` | Global switch for PDF/image OCR | `true` |
-| `GBRAIN_OCR_API_KEY` | GLM-OCR API key; read only from the environment | — |
-| `ZHIPU_API_KEY` | Compatibility alias for the OCR API key, used only if `GBRAIN_OCR_API_KEY` is empty | — |
-| `GBRAIN_OCR_BASE_URL` | GLM-OCR endpoint; a custom URL also requires the safety gate below | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
-| `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL` | Allow a custom OCR endpoint; accepted only from the environment | `false` |
-| `GBRAIN_OCR_MODEL` / `GLMOCR_MODEL` | OCR model name, with the former taking precedence | `glm-ocr` |
-| `GBRAIN_OCR_PROFILE` | Post-processing profile: `auto` / `general` / `table` / `formula` / `handwriting`; `auto` enhances table and formula blocks based on OCR layout output, and is not sent to the API | `auto` |
-| `GBRAIN_OCR_ENABLE_LAYOUT` / `GLMOCR_ENABLE_LAYOUT` | Request layout recognition, with the former taking precedence | `true` |
-| `GBRAIN_OCR_MODE` | OCR selection mode: `auto` / `all_pages` | `auto` |
-| `GBRAIN_OCR_SUBMIT_MODE` | PDF submission mode: `pdf_first` / `pdf_range` | `pdf_first` |
-| `GBRAIN_OCR_SYNC_INLINE` | Execute OCR inline; background async jobs are used by default | `false` |
-| `GBRAIN_OCR_TEXT_DENSITY_THRESHOLD` | Character threshold for a low-density text layer | `50` |
-| `GBRAIN_OCR_MIN_LOW_DENSITY_RATIO` | Compatibility option for low-density ratio; currently retained as statistics and does not veto page selection | `0.5` |
-| `GBRAIN_OCR_IMAGE_AREA_THRESHOLD` | Image area coverage threshold | `0.08` |
-| `GBRAIN_OCR_IMAGE_COUNT_THRESHOLD` | Embedded image count threshold | `1` |
-| `GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE` / `GLM_OCR_TIMEOUT` / `GLMOCR_TIMEOUT` | Per-page request timeout in seconds, in priority order | `60` |
-| `GBRAIN_OCR_MAX_PAGES_PER_REQUEST` | Maximum pages in one OCR request | `100` |
-| `GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST` | Maximum PDF bytes in one OCR request | `52,428,800` (50 MiB) |
-| `GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT` | Maximum pages attempted for OCR per document; `0` is clamped to `1` | `300` |
-| `GBRAIN_OCR_MAX_CONCURRENCY` | Process-local limit for concurrent OCR work; `0` is clamped to `1` | `2` |
-| `GBRAIN_OCR_TEMP_DIR_MAX_BYTES` | Process-local total byte budget for temporary split-PDF files | `536,870,912` (512 MiB) |
-| `GBRAIN_OCR_RETURN_CROP_IMAGES` | Request returned crop images | `false` |
-| `GBRAIN_OCR_NEED_LAYOUT_VISUALIZATION` | Request returned layout visualization results | `false` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_OCR_ENABLED` | Global switch for PDF/image OCR | Required boolean |
+| `GBRAIN_OCR_API_KEY` | GLM-OCR API key | Required when `GBRAIN_OCR_ENABLED=true` |
+| `GBRAIN_OCR_BASE_URL` | GLM-OCR endpoint; a custom URL also requires the safety gate below | Required valid URL when `GBRAIN_OCR_ENABLED=true` |
+| `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL` | Whether to allow the custom endpoint in `GBRAIN_OCR_BASE_URL`; when `false`, requests use the official default endpoint | Required boolean |
+| `GBRAIN_OCR_MODEL` | OCR model name | Required when `GBRAIN_OCR_ENABLED=true` |
+| `GBRAIN_OCR_PROFILE` | Post-processing profile: `auto` / `general` / `table` / `formula` / `handwriting`; `auto` enhances table and formula blocks based on OCR layout output, and is not sent to the API | Required enum |
+| `GBRAIN_OCR_ENABLE_LAYOUT` | Request layout recognition; recommended when `GBRAIN_OCR_PROFILE=auto` | Required boolean |
+| `GBRAIN_OCR_MODE` | OCR selection mode: `auto` / `all_pages` | Required enum |
+| `GBRAIN_OCR_SUBMIT_MODE` | PDF submission mode: `pdf_first` / `pdf_range`; GLM-OCR payloads use the safe `pdf_range` flow | Required enum |
+| `GBRAIN_OCR_SYNC_INLINE` | Execute OCR inline; `false` uses background async jobs | Required boolean |
+| `GBRAIN_OCR_TEXT_DENSITY_THRESHOLD` | Character threshold for a low-density text layer | Required non-negative integer |
+| `GBRAIN_OCR_MIN_LOW_DENSITY_RATIO` | Compatibility option for low-density ratio; currently retained as statistics and does not veto page selection | Required finite number in 0..=1 |
+| `GBRAIN_OCR_IMAGE_AREA_THRESHOLD` | Image area coverage threshold | Required finite number in 0..=1 |
+| `GBRAIN_OCR_IMAGE_COUNT_THRESHOLD` | Embedded image count threshold | Required nonzero integer |
+| `GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE` | Per-page request timeout in seconds | Required nonzero integer |
+| `GBRAIN_OCR_MAX_PAGES_PER_REQUEST` | Maximum pages in one OCR request; GLM-OCR is effectively capped to 1..=5 | Required nonzero integer |
+| `GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST` | Maximum PDF bytes in one OCR request; `52,428,800` = 50 MiB | Required nonzero integer |
+| `GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT` | Maximum pages attempted for OCR per document | Required nonzero integer |
+| `GBRAIN_OCR_MAX_CONCURRENCY` | Process-local limit for concurrent OCR work | Required nonzero integer |
+| `GBRAIN_OCR_TEMP_DIR_MAX_BYTES` | Process-local total byte budget for temporary split-PDF files; `536,870,912` = 512 MiB | Required nonzero integer |
+| `GBRAIN_OCR_RETURN_CROP_IMAGES` | Request returned crop images | Required boolean |
+| `GBRAIN_OCR_NEED_LAYOUT_VISUALIZATION` | Request returned layout visualization results | Required boolean |
 
 **Security notes:**
 
-- `GBRAIN_OCR_API_KEY` and `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL` take effect only from environment variables; a configuration file cannot enable the custom-endpoint gate.
+- OCR reads only `GBRAIN_OCR_*` environment variables; old aliases no longer take effect.
 - Unless `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL=true` is explicitly set, requests use the official default endpoint even if `GBRAIN_OCR_BASE_URL` is configured.
 - Enabling a custom endpoint writes an audit warning; the logged endpoint strips userinfo, query, and fragment components, while errors and persisted OCR responses redact sensitive values such as the API key.
 
 ### KB Subsystem
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_KB_ENABLED` | Enable KB subsystem | `true` |
-| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Used via the default `kb_raptor_secret_ref`; fallback then tries `GBRAIN_EXPANSION_API_KEY`, then `GBRAIN_CHUNKER_API_KEY` |
-| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM base URL | Falls back to `GBRAIN_EXPANSION_BASE_URL`, then `GBRAIN_CHUNKER_BASE_URL`, then the OpenAI default endpoint |
-| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | `gpt-4o-mini`; if the KB/library model is empty, the resolver can use `GBRAIN_EXPANSION_MODEL`, then `GBRAIN_CHUNKER_MODEL` |
-| `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | `50` |
-| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated) | `pdf,docx,xlsx,csv,html,htm,txt,md,markdown,rst,json,xml,yaml,yml,toml,tsv,png,jpg,jpeg` |
-| `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | — |
-| `GBRAIN_KB_WORKER_ENABLED` | Enable KB background worker | `true` |
-| `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | `30` |
-| `GBRAIN_AUTOPILOT_ENABLED` | Enable autopilot background maintenance thread (takes effect in `gbrain serve`) | `true` |
-| `GBRAIN_AUTOPILOT_INTERVAL` | Autopilot maintenance interval (seconds, default 3600 = 1 hour, at least 60s) | `3600` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_KB_ENABLED` | Enable KB subsystem | Required boolean |
+| `GBRAIN_KB_RAPTOR_API_KEY` | KB RAPTOR LLM API key | Required, non-empty |
+| `GBRAIN_KB_RAPTOR_BASE_URL` | KB RAPTOR LLM OpenAI-compatible base URL | Required valid http/https URL |
+| `GBRAIN_KB_RAPTOR_MODEL` | KB RAPTOR LLM model | Required, non-empty |
+| `GBRAIN_KB_MAX_FILE_SIZE_MB` | KB max file size (MB) | Required nonzero integer |
+| `GBRAIN_KB_ALLOWED_EXTENSIONS` | KB allowed file extensions (comma-separated, no empty item) | Required non-empty list |
+| `GBRAIN_KB_STORAGE_DIR` | KB file storage directory | Required, non-empty |
+| `GBRAIN_KB_WORKER_ENABLED` | Enable KB background worker | Required boolean |
+| `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | Required nonzero integer |
+| `GBRAIN_AUTOPILOT_ENABLED` | Enable autopilot background maintenance thread (takes effect in `gbrain serve`) | Required boolean |
+| `GBRAIN_AUTOPILOT_INTERVAL` | Autopilot maintenance interval (seconds) | Required integer, minimum 60 |
 | `GBRAIN_KB_SYNONYMS_FILE` | Synonyms file path (for search query expansion) | — |
 | `GBRAIN_KB_ALIASES_FILE` | Alias mapping file path (for search query expansion) | — |
 
@@ -959,47 +958,50 @@ External OCR is always allowed (library-level privacy switches have been removed
 
 | Feature | LLM Type | API Key / Base URL | Model Used |
 |---------|----------|-------------------|------------|
-| Document chunk embedding (vectorization) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
-| Semantic chunking (paragraph similarity) | Embeddings API | `GBRAIN_OPENAI_API_KEY` / `GBRAIN_OPENAI_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
+| Document chunk embedding (vectorization) | Embeddings API | `GBRAIN_EMBEDDING_API_KEY` / `GBRAIN_EMBEDDING_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
+| Semantic chunking (paragraph similarity) | Embeddings API | `GBRAIN_EMBEDDING_API_KEY` / `GBRAIN_EMBEDDING_BASE_URL` | `GBRAIN_EMBEDDING_MODEL` |
 | Page-level PDF/image OCR and text writeback | GLM-OCR `layout_parsing` | `GBRAIN_OCR_API_KEY` / `GBRAIN_OCR_BASE_URL` (custom URL requires `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL=true`) | `GBRAIN_OCR_MODEL` |
-| RAPTOR hierarchical summarization | Chat Completions | Library `raptor_llm_*` → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*` | Library/KB model → `GBRAIN_EXPANSION_MODEL` → `GBRAIN_CHUNKER_MODEL` → `gpt-4o-mini` when no KB model is set |
-| Search reranking | Chat Completions | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL`, falling back to `GBRAIN_OPENAI_*` | `GBRAIN_EXPANSION_MODEL` / `expansion_model` → `gpt-4o-mini` |
+| RAPTOR hierarchical summarization | Chat Completions | `GBRAIN_KB_RAPTOR_API_KEY` / `GBRAIN_KB_RAPTOR_BASE_URL` | `GBRAIN_KB_RAPTOR_MODEL` |
+| Search reranking | Chat Completions; local rerank if not configured or failed | `GBRAIN_EXPANSION_API_KEY` / `GBRAIN_EXPANSION_BASE_URL` | `GBRAIN_EXPANSION_MODEL` |
 
 ### Artifact Fusion Architecture
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | `$GBRAIN_DIR/artifacts` |
-| `GBRAIN_DEFAULT_KB_LIBRARY_ID` | Default KB library ID | — |
-| `GBRAIN_UPLOAD_PROMOTION_POLICY` | Upload default promotion policy: none/shadow/candidate/auto-low-risk/auto-apply | `auto-apply` |
-| `GBRAIN_ARTIFACT_DEFAULT_INTENT` | Artifact default intent: memory/evidence/promote | `memory` |
-| `GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY` | Auto-create Inbox library when missing | `true` |
-| `GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB` | Write memory intent to KB (set to `false` to write gbrain pages only) | `true` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_ARTIFACT_STORAGE_DIR` | Artifact original file storage directory | Required, non-empty |
+| `GBRAIN_DEFAULT_KB_LIBRARY_ID` | Default KB library ID; empty means unspecified | Optional integer or empty string |
+| `GBRAIN_UPLOAD_PROMOTION_POLICY` | Upload default promotion policy: none/shadow/candidate/auto-low-risk/auto-apply/auto_all aliases | Required valid policy |
+| `GBRAIN_ARTIFACT_DEFAULT_INTENT` | Artifact default intent: memory/evidence/promote | Required enum |
+| `GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY` | Auto-create Inbox library when missing | Required boolean |
+| `GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB` | Write memory intent to KB (set to `false` to write gbrain pages only) | Required boolean |
 
 ### Logging
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_LOG_LEVEL` | Log level (trace/debug/info/warn/error) | `info` |
-| `GBRAIN_LOG_TO_FILE` | Enable file logging | `true` |
-| `GBRAIN_LOG_FILE_PATH` | Log file path | `$GBRAIN_DIR/logs/gbrain.log` |
-| `GBRAIN_LOG_TO_CONSOLE` | Enable console logging | `true` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_LOG_LEVEL` | Log level (trace/debug/info/warn/error) | Required enum |
+| `GBRAIN_LOG_TO_FILE` | Enable file logging | Required boolean |
+| `GBRAIN_LOG_FILE_PATH` | Log file path | Required when `GBRAIN_LOG_TO_FILE=true` |
+| `GBRAIN_LOG_TO_CONSOLE` | Enable console logging | Required boolean |
 
 ### Behavior
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_AUTO_LINK` | Auto-extract links on write | `true` |
-| `GBRAIN_AUTO_TIMELINE` | Auto-extract timeline on write | `true` |
-| `GBRAIN_POST_WRITE_LINT` | Run validator checks after write and log the result | `false` |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_AUTO_LINK` | Auto-extract links on write | Required boolean |
+| `GBRAIN_AUTO_TIMELINE` | Auto-extract timeline on write | Required boolean |
+| `GBRAIN_POST_WRITE_LINT` | Run validator checks after write and log the result | Required boolean |
 
 ### Debug
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GBRAIN_SEARCH_DEBUG` | Enable search debug logging (set to `1` or `true`) | — |
-| `GBRAIN_PROGRESS_MODE` | Progress display mode (`human` / `json` / `quiet`) | Auto-detected |
-| `GBRAIN_PROGRESS_JSON` | Set to `"1"` to enable JSON progress mode | — |
+| Variable | Description | Startup requirement |
+|----------|-------------|---------------------|
+| `GBRAIN_SEARCH_DEBUG` | Enable search debug logging (`true`/`false`/`1`/`0`) | Optional; if set, must be boolean |
+| `GBRAIN_PROGRESS_MODE` | Progress display mode (`auto` / `human` / `json` / `quiet`) | Optional; if set, must be a valid enum |
+| `GBRAIN_PROGRESS_JSON` | Force JSON progress output (`true`/`false`/`1`/`0`) | Optional; if set, must be boolean |
+| `GBRAIN_ASYNC_WORKER_THREADS` | Global Tokio runtime worker thread count | Optional; if set, must be nonzero integer |
+| `GBRAIN_SOURCE_BOOST` | Search source boost rules, comma-separated `prefix:factor` entries | Optional; factor must be finite and non-negative |
+| `GBRAIN_SEARCH_EXCLUDE` | Extra hard-excluded slug prefixes for search, comma-separated; defaults already exclude `test/`, `archive/`, `attachments/`, and `.raw/` | Optional; not startup-validated, empty items are ignored |
 
 ---
 
@@ -1114,10 +1116,10 @@ Async five-stage document processing pipeline:
 1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
 2. **Split** — Recursive splitter; semantic split mode (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
 3. **Embed** — Vector embedding generation and persistence
-4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and runtime prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization, four-level fallback chain: library config → `GBRAIN_KB_RAPTOR_*` → `GBRAIN_EXPANSION_*` → `GBRAIN_CHUNKER_*`)
+4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and the node-count prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization); the LLM uses only the explicit `GBRAIN_KB_RAPTOR_*` configuration
 5. **Persist** — Transaction-protected node/vector writes
 
-`raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Once enabled, the pipeline automatically skips RAPTOR when a document has fewer than three nodes, external summarization is disallowed, or no RAPTOR LLM credential can be resolved. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
+`raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Startup now requires `GBRAIN_KB_RAPTOR_API_KEY`, `GBRAIN_KB_RAPTOR_BASE_URL`, and `GBRAIN_KB_RAPTOR_MODEL`; the processing pipeline skips RAPTOR only when runtime prerequisites such as having fewer than three nodes are not met. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
 
 For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline. For JPG/PNG uploads, the pipeline creates a single-page OCR document immediately and generates KB nodes after OCR completes.
 

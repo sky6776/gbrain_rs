@@ -66,7 +66,6 @@ pub async fn llm_chunk(
     let url = format!("{}/chat/completions", base_url);
 
     // Pre-flight size check: reject documents that would exceed LLM context window
-    const MAX_LLM_CHUNK_INPUT_CHARS: usize = 50_000;
     if text.len() > MAX_LLM_CHUNK_INPUT_CHARS {
         tracing::warn!(
             "Document too large for LLM chunking ({} chars, max {}), falling back to single chunk",
@@ -148,6 +147,9 @@ pub async fn llm_chunk(
 
     single_chunk(text, line_count)
 }
+
+/// Maximum input size for LLM-guided chunk boundary detection.
+pub const MAX_LLM_CHUNK_INPUT_CHARS: usize = 50_000;
 
 fn single_chunk(text: &str, line_count: usize) -> Vec<LLMChunk> {
     vec![LLMChunk {
