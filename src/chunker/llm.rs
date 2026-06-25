@@ -217,9 +217,35 @@ fn parse_llm_chunks(
 
     if result.is_empty() {
         None
+    } else if !covers_all_lines_in_order(&result, lines.len()) {
+        tracing::warn!(
+            chunk_count = result.len(),
+            line_count = lines.len(),
+            "LLM chunker returned incomplete or overlapping line coverage"
+        );
+        None
     } else {
         Some(result)
     }
+}
+
+fn covers_all_lines_in_order(chunks: &[LLMChunk], line_count: usize) -> bool {
+    if line_count == 0 {
+        return chunks.is_empty();
+    }
+
+    let mut next_line = 1usize;
+    for chunk in chunks {
+        if chunk.start_line != next_line {
+            return false;
+        }
+        if chunk.end_line < chunk.start_line || chunk.end_line > line_count {
+            return false;
+        }
+        next_line = chunk.end_line.saturating_add(1);
+    }
+
+    next_line == line_count.saturating_add(1)
 }
 
 /// Intermediate parse struct
@@ -281,5 +307,34 @@ mod tests {
         assert_eq!(chunks[0].heading, "Document");
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[0].end_line, 2);
+    }
+
+    #[test]
+    fn test_rejects_llm_chunks_with_line_gaps() {
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": r#"[{"heading":"A","startLine":1,"endLine":1},{"heading":"B","startLine":3,"endLine":3}]"#
+                }
+            }]
+        });
+        let lines = vec!["one", "two", "three"];
+        assert!(parse_llm_chunks(&data, &lines, 10).is_none());
+    }
+
+    #[test]
+    fn test_accepts_llm_chunks_covering_all_lines() {
+        let data = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": r#"[{"heading":"A","startLine":1,"endLine":2},{"heading":"B","startLine":3,"endLine":3}]"#
+                }
+            }]
+        });
+        let lines = vec!["one", "two", "three"];
+        let chunks = parse_llm_chunks(&data, &lines, 10).unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].content, "one\ntwo");
+        assert_eq!(chunks[1].content, "three");
     }
 }

@@ -4,8 +4,8 @@
 //! Operations are the single source of truth for the brain API surface.
 //! CLI and MCP server both dispatch through these operations.
 
-use crate::chunker::chunk_page_content;
 use crate::chunker::tree_sitter::chunk_code_tree_sitter;
+use crate::chunker::{chunk_page_content, chunk_page_content_transactional};
 use crate::code_index::{index_code, CodeIndex};
 use crate::config::Config;
 use crate::embedding::Embedder;
@@ -267,6 +267,16 @@ impl<'a> Operations<'a> {
             in_transaction: true,
             query_cache: crate::artifact::query_cache::QueryCache::new(256, 300),
         }
+    }
+
+    pub(crate) fn precompute_page_body_chunks(
+        slug: &str,
+        content: &str,
+        config: &Config,
+        page_type: Option<&PageType>,
+    ) -> Vec<ChunkInput> {
+        let pt = page_type.cloned().unwrap_or_else(|| infer_type(slug));
+        chunk_page_content(content, config, &pt)
     }
 
     /// Query the brain (high-level search with auto-escalate)
@@ -559,10 +569,19 @@ impl<'a> Operations<'a> {
         let content_hash = content_hash.map(String::from);
         let ctx = self.ctx.clone();
         let config = self.config.clone();
+        let precomputed_chunks =
+            Self::precompute_page_body_chunks(&slug, &content, &config, page_type.as_ref());
 
         self.engine.transaction_with_engine(|engine| {
             let ops = Operations::with_config_in_transaction(engine, ctx.clone(), config.clone());
-            ops.put_page(&slug, &title, &content, page_type, content_hash.as_deref())
+            ops.put_page_with_precomputed_chunks(
+                &slug,
+                &title,
+                &content,
+                page_type,
+                content_hash.as_deref(),
+                Some(precomputed_chunks),
+            )
         })
     }
 
@@ -577,13 +596,27 @@ impl<'a> Operations<'a> {
     ) -> Result<Vec<(String, Result<Page>)>> {
         let ctx = self.ctx.clone();
         let config = self.config.clone();
+        let precomputed_chunks: Vec<Vec<ChunkInput>> = pages
+            .iter()
+            .map(|(slug, _title, content, page_type)| {
+                Self::precompute_page_body_chunks(slug, content, &config, page_type.as_ref())
+            })
+            .collect();
 
         self.engine.transaction_with_engine(|engine| {
             let ops = Operations::with_config_in_transaction(engine, ctx.clone(), config.clone());
             Ok(pages
                 .iter()
-                .map(|(slug, title, content, page_type)| {
-                    let result = ops.put_page(slug, title, content, page_type.clone(), None);
+                .zip(precomputed_chunks)
+                .map(|((slug, title, content, page_type), chunks)| {
+                    let result = ops.put_page_with_precomputed_chunks(
+                        slug,
+                        title,
+                        content,
+                        page_type.clone(),
+                        None,
+                        Some(chunks),
+                    );
                     (slug.clone(), result)
                 })
                 .collect::<Vec<_>>())
@@ -622,6 +655,18 @@ impl<'a> Operations<'a> {
         content: &str,
         page_type: Option<PageType>,
         content_hash: Option<&str>,
+    ) -> Result<Page> {
+        self.put_page_with_precomputed_chunks(slug, title, content, page_type, content_hash, None)
+    }
+
+    pub(crate) fn put_page_with_precomputed_chunks(
+        &self,
+        slug: &str,
+        title: &str,
+        content: &str,
+        page_type: Option<PageType>,
+        content_hash: Option<&str>,
+        precomputed_body_chunks: Option<Vec<ChunkInput>>,
     ) -> Result<Page> {
         validate_page_slug(slug)?;
 
@@ -810,7 +855,13 @@ impl<'a> Operations<'a> {
             );
         }
 
-        let mut chunks = chunk_page_content(content, &self.config, &pt);
+        let mut chunks = precomputed_body_chunks.unwrap_or_else(|| {
+            if self.in_transaction {
+                chunk_page_content_transactional(content, &pt)
+            } else {
+                chunk_page_content(content, &self.config, &pt)
+            }
+        });
         let next_index = chunks.len() as i32;
         let code_index = if pt == PageType::Code {
             let language = parsed.frontmatter.get("language").and_then(|v| v.as_str());

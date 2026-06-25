@@ -54,6 +54,21 @@ pub fn chunk_page_content(content: &str, config: &Config, page_type: &PageType) 
     }
 }
 
+/// Chunk page content without making external LLM calls.
+///
+/// Use this inside database transactions or direct SQL maintenance paths. The
+/// caller may still append tree-sitter/fenced-code chunks after this base body
+/// chunking step.
+pub fn chunk_page_content_transactional(content: &str, page_type: &PageType) -> Vec<ChunkInput> {
+    if *page_type != PageType::Code {
+        debug!(
+            page_type = %page_type,
+            "Page LLM chunker skipped: transactional chunking uses recursive mode"
+        );
+    }
+    chunk_text(content, None, None, ChunkSource::CompiledTruth)
+}
+
 fn can_attempt_llm(content: &str, config: &Config) -> bool {
     if content.trim().is_empty() {
         return false;

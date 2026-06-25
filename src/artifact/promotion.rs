@@ -2105,12 +2105,12 @@ fn now_str() -> String {
 /// shadow page 超过 800 字后，新追加的 facts/entities/events 不会进入 chunk 索引，
 /// BrainFirst 搜索搜不到刚提升的内容。同时同步处理 chunk_text_tokens 和 vec_chunks。
 fn rebuild_chunks_for_page(conn: &Connection, slug: &str) -> Result<()> {
-    // 读取 page_id 和 compiled_truth
-    let (page_id, content): (i64, Option<String>) = conn
+    // 读取 page_id、compiled_truth 和 page_type
+    let (page_id, content, page_type): (i64, Option<String>, String) = conn
         .query_row(
-            "SELECT id, compiled_truth FROM pages WHERE slug = ?1",
+            "SELECT id, compiled_truth, page_type FROM pages WHERE slug = ?1",
             params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| GBrainError::Database(format!("查询页面失败: {}", e)))?;
 
@@ -2119,13 +2119,9 @@ fn rebuild_chunks_for_page(conn: &Connection, slug: &str) -> Result<()> {
         _ => return Ok(()),
     };
 
-    // 使用 chunker 对全文分块
-    let chunks = crate::chunker::chunk_text(
-        &content,
-        None,
-        None,
-        crate::types::ChunkSource::CompiledTruth,
-    );
+    // 使用事务安全 page chunker 对全文分块
+    let page_type = crate::types::PageType::from_str_lossy(&page_type);
+    let chunks = crate::chunker::chunk_page_content_transactional(&content, &page_type);
 
     // 修复：先收集旧 chunk_id，再删 vec_chunks，最后删 chunks。
     // 之前先删 chunks 再用子查询删 vec_chunks，子查询已为空，旧向量行不会被删。

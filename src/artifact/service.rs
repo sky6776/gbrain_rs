@@ -19,6 +19,7 @@ use crate::error::{GBrainError, Result};
 use crate::kb::parser::ParserRegistry;
 use crate::operations::OpContext;
 use crate::sqlite_engine::SqliteEngine;
+use crate::types::ChunkInput;
 use rusqlite::Connection;
 use tracing::{debug, info, warn};
 
@@ -208,6 +209,7 @@ impl<'a> ArtifactService<'a> {
         page_conflict_detected: bool,
         route_plan: &RoutePlan,
         artifact_dir: &std::path::Path,
+        precomputed_page_chunks: Option<Vec<ChunkInput>>,
     ) -> Result<serde_json::Value> {
         let conn = engine.connection()?;
 
@@ -405,7 +407,14 @@ impl<'a> ArtifactService<'a> {
                 ctx.clone(),
                 config.clone(),
             );
-            let page = ops.put_page(slug, page_title, content, None, None)?;
+            let page = ops.put_page_with_precomputed_chunks(
+                slug,
+                page_title,
+                content,
+                None,
+                None,
+                precomputed_page_chunks,
+            )?;
 
             // P1 修复：写入页面后，将页面的 content_hash 存储到 brain_page_update 投影的
             // version_hash 中，以便下次 artifact_put 时能检测页面是否被人工修改。
@@ -522,6 +531,17 @@ impl<'a> ArtifactService<'a> {
         let artifact_dir = self.config.artifact_dir();
         std::fs::create_dir_all(&artifact_dir)
             .map_err(|e| GBrainError::FileError(format!("创建 artifact 目录失败: {}", e)))?;
+        let precomputed_page_chunks =
+            if route_plan.to_brain && !matches!(resolution, "conflict" | "no_op") {
+                let page_type = crate::markdown::infer_type(slug);
+                Some(crate::chunker::chunk_page_content(
+                    content,
+                    self.config,
+                    &page_type,
+                ))
+            } else {
+                None
+            };
 
         // 修复：将 put_page 和 artifact/projection 写入放进同一事务，
         // 避免 put_page 成功但后续 artifact/projection 失败时留下半写入状态。
@@ -538,6 +558,7 @@ impl<'a> ArtifactService<'a> {
                 ctx.page_conflict_detected,
                 &route_plan,
                 &artifact_dir,
+                precomputed_page_chunks,
             )
         })?;
 

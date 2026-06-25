@@ -443,11 +443,9 @@ pub fn upload_source(
                 // P3 修复：使用 chunker 对全文分块，而非只取前 800 字插入单个 chunk。
                 // shadow page 超过 800 字后，后续内容不会进入 chunk 索引，
                 // 导致长文档后半段的事实无法被搜索命中。
-                let chunks = crate::chunker::chunk_text(
+                let chunks = crate::chunker::chunk_page_content_transactional(
                     &body,
-                    None,
-                    None,
-                    crate::types::ChunkSource::CompiledTruth,
+                    &crate::types::PageType::Source,
                 );
                 for chunk in &chunks {
                     let chunk_text_tokens =
@@ -1111,11 +1109,9 @@ pub fn put_manual_memory(
             // P3 修复：使用 chunker 对全文分块，而非只取前 800 字插入单个 chunk。
             // shadow page 超过 800 字后，后续内容不会进入 chunk 索引，
             // 导致长文档后半段的事实无法被搜索命中。
-            let chunks = crate::chunker::chunk_text(
+            let chunks = crate::chunker::chunk_page_content_transactional(
                 &body,
-                None,
-                None,
-                crate::types::ChunkSource::CompiledTruth,
+                &crate::types::PageType::Source,
             );
             for chunk in &chunks {
                 let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk.chunk_text);

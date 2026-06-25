@@ -814,7 +814,7 @@ fn rebuild_shadow_page_chunks(conn: &Connection, page_id: i64, body: &str) -> Re
     .map_err(|e| GBrainError::Database(format!("删除 shadow page 旧 chunk 失败: {}", e)))?;
 
     let chunks =
-        crate::chunker::chunk_text(body, None, None, crate::types::ChunkSource::CompiledTruth);
+        crate::chunker::chunk_page_content_transactional(body, &crate::types::PageType::Source);
     for chunk in &chunks {
         let chunk_text_tokens = crate::nlp::chinese::tokenize_content(&chunk.chunk_text);
         conn.execute(
