@@ -42,108 +42,23 @@ pub struct RaptorLlmConfig {
     pub model: String,
 }
 
-/// Resolve RAPTOR LLM configuration with fallback chain:
-/// 1. Library-specific config (raptor_llm_secret_ref, raptor_llm_base_url, raptor_llm_model)
-/// 2. KB-level config (kb_raptor_secret_ref, kb_raptor_base_url, kb_raptor_model)
-/// 3. GBRAIN_EXPANSION_* env vars
-/// 4. GBRAIN_CHUNKER_* env vars
-/// 5. resolved_config (config.raptor_config_resolved() 的完整结果，包含 api_key/base_url/model，
-///    来自已加载 config 文件 + 环境变量，优先级高于 GBRAIN_OPENAI_API_KEY 环境变量回退)
+/// Resolve RAPTOR LLM configuration.
 ///
-/// Returns an error if no API key can be resolved.
+/// RAPTOR 不再从库级配置、KB 配置、EXPANSION、CHUNKER 或 EMBEDDING 配置回退；
+/// 必须显式配置 `GBRAIN_KB_RAPTOR_API_KEY`、`GBRAIN_KB_RAPTOR_BASE_URL` 和
+/// `GBRAIN_KB_RAPTOR_MODEL`。
 pub fn resolve_raptor_llm_config(
-    library: Option<&Library>,
-    kb_raptor_secret_ref: Option<&str>,
-    kb_raptor_base_url: Option<&str>,
-    kb_raptor_model: Option<&str>,
+    _library: Option<&Library>,
+    _kb_raptor_secret_ref: Option<&str>,
+    _kb_raptor_base_url: Option<&str>,
+    _kb_raptor_model: Option<&str>,
     resolved_config: Option<&crate::config::ResolvedRaptorConfig>,
 ) -> Result<RaptorLlmConfig, GBrainError> {
-    // Try library-specific config first
-    if let Some(lib) = library {
-        if !lib.raptor_llm_secret_ref.is_empty() {
-            // The secret_ref is an env var name; resolve its value
-            let api_key = std::env::var(&lib.raptor_llm_secret_ref).unwrap_or_default();
-            if !api_key.is_empty() {
-                let base_url = if !lib.raptor_llm_base_url.is_empty() {
-                    lib.raptor_llm_base_url.clone()
-                } else {
-                    resolve_expansion_base_url()
-                        .or_else(resolve_chunker_base_url)
-                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
-                };
-                let model = if !lib.raptor_llm_model.is_empty() {
-                    lib.raptor_llm_model.clone()
-                } else {
-                    resolve_expansion_model()
-                        .or_else(resolve_chunker_model)
-                        .unwrap_or_else(|| "gpt-4o-mini".to_string())
-                };
-                return Ok(RaptorLlmConfig {
-                    api_key,
-                    base_url,
-                    model,
-                });
-            }
-        }
-    }
-
-    // Try KB-level config (kb_raptor_secret_ref is an env var name)
-    if let Some(secret_ref) = kb_raptor_secret_ref {
-        let api_key = std::env::var(secret_ref).unwrap_or_default();
-        if !api_key.is_empty() {
-            let base_url = kb_raptor_base_url
-                .map(|s| s.to_string())
-                .or_else(resolve_expansion_base_url)
-                .or_else(resolve_chunker_base_url)
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let model = kb_raptor_model
-                .map(|s| s.to_string())
-                .or_else(resolve_expansion_model)
-                .or_else(resolve_chunker_model)
-                .unwrap_or_else(|| "gpt-4o-mini".to_string());
-            return Ok(RaptorLlmConfig {
-                api_key,
-                base_url,
-                model,
-            });
-        }
-    }
-
-    // Fallback: GBRAIN_EXPANSION_* env vars
-    if let Ok(api_key) = std::env::var("GBRAIN_EXPANSION_API_KEY") {
-        if !api_key.is_empty() {
-            let base_url = resolve_expansion_base_url()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let model = resolve_expansion_model().unwrap_or_else(|| "gpt-4o-mini".to_string());
-            return Ok(RaptorLlmConfig {
-                api_key,
-                base_url,
-                model,
-            });
-        }
-    }
-
-    // Fallback: GBRAIN_CHUNKER_* env vars
-    if let Ok(api_key) = std::env::var("GBRAIN_CHUNKER_API_KEY") {
-        if !api_key.is_empty() {
-            let base_url = resolve_chunker_base_url()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let model = resolve_chunker_model().unwrap_or_else(|| "gpt-4o-mini".to_string());
-            return Ok(RaptorLlmConfig {
-                api_key,
-                base_url,
-                model,
-            });
-        }
-    }
-
-    // P3 修复: Fallback 到调用方传入的 resolved_config（来自 config.raptor_config_resolved()）。
-    // 该配置已合并 config 文件 + 环境变量，包含完整的 api_key/base_url/model。
-    // 先前版本只给 shared_api_key，base_url/model 仍读环境变量——如果用户把
-    // openai_base_url/expansion_base_url 等写在 config 文件里而不是环境变量，
-    // RAPTOR summary/augmentation 仍不可用或把自定义 key 发到默认 OpenAI 地址。
     if let Some(rc) = resolved_config {
-        if !rc.api_key.is_empty() {
+        if !rc.api_key.trim().is_empty()
+            && !rc.base_url.trim().is_empty()
+            && !rc.model.trim().is_empty()
+        {
             return Ok(RaptorLlmConfig {
                 api_key: rc.api_key.clone(),
                 base_url: rc.base_url.clone(),
@@ -152,64 +67,28 @@ pub fn resolve_raptor_llm_config(
         }
     }
 
-    // 最后尝试 GBRAIN_OPENAI_API_KEY 环境变量（兼容未传入 config 的路径）
-    if let Ok(api_key) = std::env::var("GBRAIN_OPENAI_API_KEY") {
-        if !api_key.is_empty() {
-            let base_url = std::env::var("GBRAIN_OPENAI_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let model = std::env::var("GBRAIN_OPENAI_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "gpt-4o-mini".to_string());
-            return Ok(RaptorLlmConfig {
-                api_key,
-                base_url,
-                model,
-            });
-        }
+    let api_key = required_raptor_env("GBRAIN_KB_RAPTOR_API_KEY")?;
+    let base_url = required_raptor_env("GBRAIN_KB_RAPTOR_BASE_URL")?;
+    let model = required_raptor_env("GBRAIN_KB_RAPTOR_MODEL")?;
+    Ok(RaptorLlmConfig {
+        api_key,
+        base_url,
+        model,
+    })
+}
+
+fn required_raptor_env(name: &str) -> Result<String, GBrainError> {
+    let value = std::env::var(name)
+        .map_err(|_| GBrainError::Config(format!("缺少必需环境变量 {}", name)))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(GBrainError::Config(format!(
+            "缺少必需环境变量 {}：值不能为空",
+            name
+        )))
+    } else {
+        Ok(trimmed.to_string())
     }
-
-    Err(GBrainError::Config(
-        "No RAPTOR LLM API key configured. Set library raptor_llm_secret_ref, \
-         GBRAIN_EXPANSION_API_KEY, GBRAIN_CHUNKER_API_KEY, or config openai_api_key"
-            .to_string(),
-    ))
-}
-
-fn resolve_expansion_base_url() -> Option<String> {
-    std::env::var("GBRAIN_EXPANSION_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("GBRAIN_OPENAI_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-}
-
-fn resolve_expansion_model() -> Option<String> {
-    std::env::var("GBRAIN_EXPANSION_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-fn resolve_chunker_base_url() -> Option<String> {
-    std::env::var("GBRAIN_CHUNKER_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("GBRAIN_OPENAI_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-}
-
-fn resolve_chunker_model() -> Option<String> {
-    std::env::var("GBRAIN_CHUNKER_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
 }
 
 /// Call LLM to generate a summary of a cluster of RAPTOR nodes.

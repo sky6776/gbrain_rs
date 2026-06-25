@@ -43,8 +43,8 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
 
     // P1 修复: 创建 embedder 时优先使用库 active embedding index 的模型/维度，
     // 而不是全局 config 的默认值。这确保生成的向量与库的索引维度一致。
-    let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
-        let (model, dims): (String, Option<usize>) =
+    let embedder: Option<Arc<Embedder>> = config.embedding_api_key.as_deref().map(|api_key| {
+        let (model, dims): (String, usize) =
             match crate::kb::embedding_index::get_active_index_for_library(conn, payload.library_id)
             {
                 Ok(Some(idx)) => {
@@ -55,17 +55,14 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                         dimensions = idx.dimensions,
                         "KB worker: 使用库 active embedding index 配置 embedder"
                     );
-                    (idx.model, Some(idx.dimensions as usize))
+                    (idx.model, idx.dimensions as usize)
                 }
                 Ok(None) => {
                     tracing::debug!(
                         library_id = payload.library_id,
                         "KB worker: 库无 active embedding index，回退到全局 config"
                     );
-                    (
-                        config.embedding_model.clone(),
-                        Some(config.embedding_dimensions),
-                    )
+                    (config.embedding_model.clone(), config.embedding_dimensions)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -73,16 +70,16 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
                         error = %e,
                         "KB worker: 解析 active embedding index 失败，回退到全局 config"
                     );
-                    (
-                        config.embedding_model.clone(),
-                        Some(config.embedding_dimensions),
-                    )
+                    (config.embedding_model.clone(), config.embedding_dimensions)
                 }
             };
         Arc::new(Embedder::new(
             api_key,
-            config.openai_base_url.as_deref(),
-            Some(&model),
+            config
+                .embedding_base_url
+                .as_deref()
+                .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+            &model,
             dims,
         ))
     });
@@ -92,7 +89,7 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
 
     // P3 修复: 提前 resolve 完整的 RAPTOR config（合并 config 文件+环境变量），
     // 传入 pipeline 供 RAPTOR summary/augmentation 回退使用。
-    let resolved_raptor_cfg = config.raptor_config_resolved();
+    let resolved_raptor_cfg = config.raptor_config_resolved()?;
 
     // 获取全局共享 tokio 运行时执行异步管道
     let rt = crate::runtime::shared_runtime();
@@ -418,26 +415,27 @@ pub fn run_kb_cmd_worker_once(engine: &SqliteEngine, config: &Config) -> Result<
             document_id,
             library_id,
             ref processing_run_id,
-        } => match config.openai_api_key.as_deref().filter(|s| !s.is_empty()) {
+        } => match config
+            .embedding_api_key
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             Some(api_key) => {
                 // P1 修复: 使用库 active embedding index 的模型/维度创建 embedder
-                let (model, dims): (String, Option<usize>) =
+                let (model, dims): (String, usize) =
                     match crate::kb::embedding_index::get_active_index_for_library(conn, library_id)
                     {
-                        Ok(Some(idx)) => (idx.model, Some(idx.dimensions as usize)),
-                        Ok(None) => (
-                            config.embedding_model.clone(),
-                            Some(config.embedding_dimensions),
-                        ),
-                        Err(_) => (
-                            config.embedding_model.clone(),
-                            Some(config.embedding_dimensions),
-                        ),
+                        Ok(Some(idx)) => (idx.model, idx.dimensions as usize),
+                        Ok(None) => (config.embedding_model.clone(), config.embedding_dimensions),
+                        Err(_) => (config.embedding_model.clone(), config.embedding_dimensions),
                     };
                 let embedder = Arc::new(Embedder::new(
                     api_key,
-                    config.openai_base_url.as_deref(),
-                    Some(&model),
+                    config
+                        .embedding_base_url
+                        .as_deref()
+                        .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                    &model,
                     dims,
                 ));
                 let rt = crate::runtime::shared_runtime();
@@ -469,7 +467,8 @@ pub fn run_kb_cmd_worker_once(engine: &SqliteEngine, config: &Config) -> Result<
                 }
             }
             None => {
-                let e = GBrainError::InvalidInput("EmbedNodes 需要配置 openai_api_key".to_string());
+                let e =
+                    GBrainError::InvalidInput("EmbedNodes 需要配置 embedding_api_key".to_string());
                 tracing::warn!(
                     job_db_id,
                     document_id,
@@ -868,7 +867,7 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
     // 不一致时会把错模型/错维度的向量写入索引。
     let resolve_embedder_config =
         |conn: &Connection, library_id: i64| -> (Option<Arc<Embedder>>, String) {
-            let (model, dims): (String, Option<usize>) =
+            let (model, dims): (String, usize) =
                 match crate::kb::embedding_index::get_active_index_for_library(conn, library_id) {
                     Ok(Some(idx)) => {
                         tracing::debug!(
@@ -878,17 +877,14 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                             dimensions = idx.dimensions,
                             "re-embed worker: 使用库 active embedding index 配置 embedder"
                         );
-                        (idx.model, Some(idx.dimensions as usize))
+                        (idx.model, idx.dimensions as usize)
                     }
                     Ok(None) => {
                         tracing::debug!(
                             library_id,
                             "re-embed worker: 库无 active embedding index，回退到全局 config"
                         );
-                        (
-                            config.embedding_model.clone(),
-                            Some(config.embedding_dimensions),
-                        )
+                        (config.embedding_model.clone(), config.embedding_dimensions)
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -896,17 +892,17 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                             error = %e,
                             "re-embed worker: 解析 active embedding index 失败，回退到全局 config"
                         );
-                        (
-                            config.embedding_model.clone(),
-                            Some(config.embedding_dimensions),
-                        )
+                        (config.embedding_model.clone(), config.embedding_dimensions)
                     }
                 };
-            let embedder = config.openai_api_key.as_deref().map(|api_key| {
+            let embedder = config.embedding_api_key.as_deref().map(|api_key| {
                 Arc::new(Embedder::new(
                     api_key,
-                    config.openai_base_url.as_deref(),
-                    Some(&model),
+                    config
+                        .embedding_base_url
+                        .as_deref()
+                        .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                    &model,
                     dims,
                 ))
             });
@@ -994,12 +990,15 @@ pub fn run_reembed_worker_once(engine: &SqliteEngine, config: &Config) -> Result
                             dimensions = target_dimensions,
                             "re-embed worker: 使用目标 embedding index 的模型/维度"
                         );
-                        let embedder = config.openai_api_key.as_deref().map(|api_key| {
+                        let embedder = config.embedding_api_key.as_deref().map(|api_key| {
                             Arc::new(Embedder::new(
                                 api_key,
-                                config.openai_base_url.as_deref(),
-                                Some(&target_model),
-                                Some(target_dimensions as usize),
+                                config
+                                    .embedding_base_url
+                                    .as_deref()
+                                    .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                                &target_model,
+                                target_dimensions as usize,
                             ))
                         });
                         (embedder, target_model, Some(target_dimensions))
@@ -1387,16 +1386,19 @@ pub fn run_mine_synonyms_worker_once(engine: &SqliteEngine, config: &Config) -> 
 
     info!(job_db_id, "Synonym mining worker: 认领作业");
 
-    let Some(api_key) = config.openai_api_key.as_deref() else {
+    let Some(api_key) = config.embedding_api_key.as_deref() else {
         crate::kb::jobs::fail_kb_job(conn, job_db_id, "No embedding API key configured")?;
         return Ok(true);
     };
 
     let embedder = Embedder::new(
         api_key,
-        config.openai_base_url.as_deref(),
-        Some(&config.embedding_model),
-        Some(config.embedding_dimensions),
+        config
+            .embedding_base_url
+            .as_deref()
+            .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+        &config.embedding_model,
+        config.embedding_dimensions,
     );
 
     let rt = crate::runtime::shared_runtime();
@@ -1506,12 +1508,15 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
         };
 
     // 创建 embedder（用于语义分割，与 kb worker 一致）
-    let embedder: Option<Arc<Embedder>> = config.openai_api_key.as_deref().map(|api_key| {
+    let embedder: Option<Arc<Embedder>> = config.embedding_api_key.as_deref().map(|api_key| {
         Arc::new(Embedder::new(
             api_key,
-            config.openai_base_url.as_deref(),
-            Some(&config.embedding_model),
-            Some(config.embedding_dimensions),
+            config
+                .embedding_base_url
+                .as_deref()
+                .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+            &config.embedding_model,
+            config.embedding_dimensions,
         ))
     });
 
@@ -1608,7 +1613,7 @@ pub fn run_ocr_worker_once(engine: &SqliteEngine, config: &Config) -> Result<boo
             payload.document_id,
             &payload.pages,
             "failed",
-            "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)",
+            "未配置 OCR API key (GBRAIN_OCR_API_KEY)",
             &payload.provider,
             &payload.model,
             &payload.processing_run_id,
@@ -3326,7 +3331,7 @@ fn rebuild_raptor_after_reembed(
     // 解析 RAPTOR LLM 配置
     // P3 修复: 传入完整的 resolved RAPTOR config（合并 config 文件+环境变量），
     // 保证 base_url/model 也来自已加载 config 而非仅环境变量。
-    let resolved_raptor_cfg = config.raptor_config_resolved();
+    let resolved_raptor_cfg = config.raptor_config_resolved()?;
     let llm_config = crate::kb::raptor::resolve_raptor_llm_config(
         Some(library),
         config.kb_raptor_secret_ref.as_deref(),

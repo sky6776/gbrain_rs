@@ -484,7 +484,13 @@ fn main() {
     let cli = Cli::parse();
 
     // 从配置初始化日志
-    let mut config = Config::load().unwrap_or_default();
+    let mut config = match Config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("配置加载失败: {}", e);
+            std::process::exit(1);
+        }
+    };
     logging::init(&config);
 
     if let Err(e) = run(cli, &mut config) {
@@ -1391,7 +1397,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 } else {
                     resolve_pdf_page_count(conn, doc_id, &storage_path)?
                 };
-                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+                let config_local = gbrain_core::config::Config::load()
+                    .map_err(|e| gbrain_core::error::GBrainError::Config(e.to_string()))?;
 
                 // 解析页码：区分显式指定与自动检测
                 let (ocr_pages, _explicit_pages, detection_reasons) = if is_image {
@@ -1469,8 +1476,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 // OCR API key 检查
                 if config_local.ocr_api_key.is_none() {
                     return Err(gbrain_core::error::GBrainError::InvalidInput(
-                        "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
-                            .to_string(),
+                        "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY)".to_string(),
                     ));
                 }
 
@@ -1604,7 +1610,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
 
                 // 全局 OCR 开关和 API key 检查
                 {
-                    let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+                    let config_local = gbrain_core::config::Config::load()
+                        .map_err(|e| gbrain_core::error::GBrainError::Config(e.to_string()))?;
                     if !config_local.ocr_enabled {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
                             "全局 OCR 已关闭 (GBRAIN_OCR_ENABLED=false)，无法执行 OCR 重试"
@@ -1613,8 +1620,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     }
                     if config_local.ocr_api_key.is_none() {
                         return Err(gbrain_core::error::GBrainError::InvalidInput(
-                            "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"
-                                .to_string(),
+                            "未配置 OCR API key (需设置 GBRAIN_OCR_API_KEY)".to_string(),
                         ));
                     }
                 }
@@ -1648,7 +1654,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                     )
                     .unwrap_or_default();
 
-                let config_local = gbrain_core::config::Config::load().unwrap_or_default();
+                let config_local = gbrain_core::config::Config::load()
+                    .map_err(|e| gbrain_core::error::GBrainError::Config(e.to_string()))?;
                 let payload = gbrain_core::kb::jobs::KbOcrPayload {
                     kind: "kb_ocr_document".to_string(),
                     document_id: doc_id,
@@ -1714,16 +1721,19 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             }
 
             KbCommands::MineSynonyms { library_id, full } => {
-                let api_key = config.openai_api_key.as_deref().ok_or_else(|| {
+                let api_key = config.embedding_api_key.as_deref().ok_or_else(|| {
                     GBrainError::InvalidInput(
-                        "未配置 embedding API key（设置 GBRAIN_OPENAI_API_KEY）".to_string(),
+                        "未配置 embedding API key（设置 GBRAIN_EMBEDDING_API_KEY）".to_string(),
                     )
                 })?;
                 let embedder = gbrain_core::embedding::Embedder::new(
                     api_key,
-                    config.openai_base_url.as_deref(),
-                    Some(&config.embedding_model),
-                    Some(config.embedding_dimensions),
+                    config
+                        .embedding_base_url
+                        .as_deref()
+                        .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                    &config.embedding_model,
+                    config.embedding_dimensions,
                 );
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

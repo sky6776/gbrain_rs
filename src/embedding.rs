@@ -60,24 +60,19 @@ pub struct Embedder {
 
 impl Embedder {
     /// Create a new embedding client
-    pub fn new(
-        api_key: &str,
-        base_url: Option<&str>,
-        model: Option<&str>,
-        dimensions: Option<usize>,
-    ) -> Self {
+    pub fn new(api_key: &str, base_url: &str, model: &str, dimensions: usize) -> Self {
         debug!(
-            base_url = base_url.unwrap_or("https://api.openai.com/v1"),
-            model = model.unwrap_or(DEFAULT_MODEL),
-            dimensions = dimensions.unwrap_or(DEFAULT_DIMENSIONS),
+            base_url = base_url,
+            model = model,
+            dimensions = dimensions,
             "Creating embedding client"
         );
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.to_string(),
-            base_url: base_url.unwrap_or("https://api.openai.com/v1").to_string(),
-            model: model.unwrap_or(DEFAULT_MODEL).to_string(),
-            dimensions: dimensions.unwrap_or(DEFAULT_DIMENSIONS),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            dimensions,
         }
     }
 

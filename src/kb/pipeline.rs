@@ -730,7 +730,8 @@ pub async fn process_document_async(
     // M-7 修复：统一在此处加载一次 OCR 配置，避免图片/PDF 分支各自重复调用 Config::load()。
     // TODO: 调用方已持有 config: &Config，理想做法是将 &Config 作为参数传入本函数，
     // 但签名变更影响面较广（所有调用方需同步修改），当前先用单次加载缓解。
-    let ocr_config = crate::config::Config::load().unwrap_or_default();
+    let ocr_config = crate::config::Config::load()
+        .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
 
     kb.ensure_document_run_current(doc_id, run_id)?;
     let library = kb.get_library(lib_id)?;
@@ -2815,7 +2816,7 @@ fn enqueue_image_ocr(
     }
 
     if config.ocr_api_key.is_none() {
-        let reason = "missing OCR API key (GBRAIN_OCR_API_KEY or ZHIPU_API_KEY)";
+        let reason = "missing OCR API key (GBRAIN_OCR_API_KEY)";
         mark_image_ocr_unavailable(
             conn,
             doc_id,
@@ -3205,16 +3206,13 @@ fn maybe_apply_pdf_ocr(
 
     // 检查 API key
     if config.ocr_api_key.is_none() {
-        tracing::error!(
-            doc_id,
-            "PDF 需要 OCR 但未配置 GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY"
-        );
+        tracing::error!(doc_id, "PDF 需要 OCR 但未配置 GBRAIN_OCR_API_KEY");
         crate::kb::ocr::update_ocr_pages_status(
             conn,
             doc_id,
             &detection.ocr_pages,
             "failed",
-            "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)",
+            "未配置 OCR API key (GBRAIN_OCR_API_KEY)",
             "glm_ocr",
             &config.ocr_model,
             run_id,
@@ -3226,7 +3224,7 @@ fn maybe_apply_pdf_ocr(
             doc_id,
             None,
             None,
-            Some("未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)"),
+            Some("未配置 OCR API key (GBRAIN_OCR_API_KEY)"),
             None,
             None,
             None,

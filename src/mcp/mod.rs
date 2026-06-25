@@ -1009,7 +1009,8 @@ impl McpServer {
                     total
                 };
 
-                let config = crate::config::Config::load().unwrap_or_default();
+                let config = crate::config::Config::load()
+                    .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
 
                 // 解析页码范围或自动检测：区分显式指定与自动检测
                 let (ocr_pages, _explicit_pages, detection_reasons) = if is_image {
@@ -1104,7 +1105,7 @@ impl McpServer {
                 // 检查 OCR API key，与 worker/retry 路径一致
                 if config.ocr_api_key.is_none() {
                     return Err(crate::error::GBrainError::InvalidInput(
-                        "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)".to_string(),
+                        "未配置 OCR API key (GBRAIN_OCR_API_KEY)".to_string(),
                     ));
                 }
 
@@ -1253,7 +1254,8 @@ impl McpServer {
                 // 外部 OCR 始终允许，脱敏已关闭 — 不再检查库级策略
 
                 // 全局 OCR 开关和 API key 检查（与 kb_ocr_run 保持一致）
-                let config = crate::config::Config::load().unwrap_or_default();
+                let config = crate::config::Config::load()
+                    .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
                 if !config.ocr_enabled {
                     return Err(crate::error::GBrainError::InvalidInput(
                         "全局 OCR 已关闭".to_string(),
@@ -1261,7 +1263,7 @@ impl McpServer {
                 }
                 if config.ocr_api_key.is_none() {
                     return Err(crate::error::GBrainError::InvalidInput(
-                        "未配置 OCR API key (GBRAIN_OCR_API_KEY 或 ZHIPU_API_KEY)".to_string(),
+                        "未配置 OCR API key (GBRAIN_OCR_API_KEY)".to_string(),
                     ));
                 }
 

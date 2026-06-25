@@ -21,12 +21,15 @@ pub struct Autopilot<'a> {
 
 impl<'a> Autopilot<'a> {
     pub fn new(engine: &'a SqliteEngine, config: Config) -> Self {
-        let embedder = config.openai_api_key.as_deref().map(|api_key| {
+        let embedder = config.embedding_api_key.as_deref().map(|api_key| {
             Embedder::new(
                 api_key,
-                config.openai_base_url.as_deref(),
-                Some(&config.embedding_model),
-                Some(config.embedding_dimensions),
+                config
+                    .embedding_base_url
+                    .as_deref()
+                    .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                &config.embedding_model,
+                config.embedding_dimensions,
             )
         });
 

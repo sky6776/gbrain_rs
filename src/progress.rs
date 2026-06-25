@@ -32,7 +32,7 @@ impl ProgressMode {
             }
         }
         if std::env::var("GBRAIN_PROGRESS_JSON")
-            .map(|v| v == "1")
+            .map(|v| matches!(v.trim(), "1" | "true"))
             .unwrap_or(false)
         {
             return Self::Json;

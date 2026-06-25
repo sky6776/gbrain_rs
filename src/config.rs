@@ -1,11 +1,10 @@
 //! Configuration loading
 //! Mirrors gbrain's src/core/config.ts
 //!
-//! LLM configuration follows the per-provider pattern from the TS version:
-//! each LLM usage area (embedding, expansion, chunker, transcription) has
-//! its own API key / base URL / model env vars that fall back to the
-//! shared GBRAIN_OPENAI_* defaults when not set.
+//! 外部模型服务配置必须由各用途自己的环境变量显式提供。
+//! gbrain 不再把 GBRAIN_OPENAI_* 当作查询扩展、分块、RAPTOR 或转录的共享回退。
 
+use crate::error::GBrainError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{debug, info, trace};
@@ -26,8 +25,8 @@ pub struct Config {
 
     // --- Embedding (vector search) ---
     #[serde(skip_serializing)]
-    pub openai_api_key: Option<String>,
-    pub openai_base_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_base_url: Option<String>,
     pub embedding_model: String,
     pub embedding_dimensions: usize,
 
@@ -105,7 +104,7 @@ pub struct Config {
     // --- OCR 子系统配置 ---
     /// OCR 是否启用（默认 true）
     pub ocr_enabled: bool,
-    /// OCR API key（仅从环境变量读取: GBRAIN_OCR_API_KEY > ZHIPU_API_KEY）
+    /// OCR API key（仅从环境变量 GBRAIN_OCR_API_KEY 读取）
     /// L13: 使用 skip_serializing 允许从配置文件读取（向后兼容），但写入时不持久化密钥。
     /// 环境变量优先级高于配置文件值（见 apply_env_overrides）。
     #[serde(skip_serializing)]
@@ -164,8 +163,8 @@ impl Default for Config {
             pool_size: 10,
 
             // Embedding
-            openai_api_key: std::env::var("GBRAIN_OPENAI_API_KEY").ok(),
-            openai_base_url: std::env::var("GBRAIN_OPENAI_BASE_URL").ok(),
+            embedding_api_key: None,
+            embedding_base_url: None,
             embedding_model: "text-embedding-3-large".to_string(),
             embedding_dimensions: 1536,
 
@@ -173,12 +172,12 @@ impl Default for Config {
             chunk_size: 500,
             chunk_overlap: 50,
 
-            // Query Expansion — defaults to shared OpenAI config
+            // Query Expansion
             expansion_api_key: None,
             expansion_base_url: None,
             expansion_model: "gpt-4o-mini".to_string(),
 
-            // LLM Chunker — defaults to shared OpenAI config
+            // LLM Chunker
             chunker_api_key: None,
             chunker_base_url: None,
             chunker_model: "gpt-4o-mini".to_string(),
@@ -206,7 +205,7 @@ impl Default for Config {
             kb_enabled: true,
             kb_raptor_secret_ref: Some("GBRAIN_KB_RAPTOR_API_KEY".to_string()),
             kb_raptor_base_url: None,
-            kb_raptor_model: String::new(), // 空=未配置，回退到 expansion_model → chunker_model → "gpt-4o-mini"
+            kb_raptor_model: String::new(),
             kb_max_file_size_mb: 50,
             kb_allowed_extensions: vec![
                 // 修复：默认 KB 允许列表与 KB_SUPPORTED_EXTENSIONS 保持一致，
@@ -308,11 +307,11 @@ impl Config {
         }
 
         // --- Embedding env vars ---
-        if let Ok(key) = std::env::var("GBRAIN_OPENAI_API_KEY") {
-            config.openai_api_key = Some(key);
+        if let Ok(key) = std::env::var("GBRAIN_EMBEDDING_API_KEY") {
+            config.embedding_api_key = Some(key);
         }
-        if let Ok(url) = std::env::var("GBRAIN_OPENAI_BASE_URL") {
-            config.openai_base_url = Some(url);
+        if let Ok(url) = std::env::var("GBRAIN_EMBEDDING_BASE_URL") {
+            config.embedding_base_url = Some(url);
         }
         if let Ok(model) = std::env::var("GBRAIN_EMBEDDING_MODEL") {
             config.embedding_model = model;
@@ -392,15 +391,6 @@ impl Config {
         config.kb_enabled = std::env::var("GBRAIN_KB_ENABLED")
             .map(|v| v == "true")
             .unwrap_or(config.kb_enabled);
-        // kb_raptor_secret_ref 是一个间接引用（indirection）：
-        // 它存储的是另一个环境变量的名称（而非密钥值本身）。
-        // 当 GBRAIN_KB_RAPTOR_API_KEY 存在时，secret_ref 设为该字面字符串，
-        // raptor_config_resolved() 会通过 secret_ref 指向的变量名再次查找实际值。
-        // 这一间接层允许在运行时切换密钥来源而无需修改配置。
-        config.kb_raptor_secret_ref = std::env::var("GBRAIN_KB_RAPTOR_API_KEY")
-            .ok()
-            .map(|_| "GBRAIN_KB_RAPTOR_API_KEY".to_string())
-            .or(config.kb_raptor_secret_ref);
         if let Ok(url) = std::env::var("GBRAIN_KB_RAPTOR_BASE_URL") {
             config.kb_raptor_base_url = Some(url);
         }
@@ -477,8 +467,8 @@ impl Config {
 
         // --- OCR 子系统环境变量 ---
         config.ocr_enabled = parse_env_bool("GBRAIN_OCR_ENABLED").unwrap_or(config.ocr_enabled);
-        // API key: GBRAIN_OCR_API_KEY 优先，兼容 ZHIPU_API_KEY
-        if let Some(key) = first_nonempty_env(&["GBRAIN_OCR_API_KEY", "ZHIPU_API_KEY"]) {
+        // API key: 只读取 GBRAIN_OCR_API_KEY，不再兼容旧别名
+        if let Ok(key) = std::env::var("GBRAIN_OCR_API_KEY") {
             config.ocr_api_key = Some(key);
         }
         // base URL: 默认固定智谱 endpoint，需显式开启自定义
@@ -490,8 +480,8 @@ impl Config {
         if let Some(allowed) = parse_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL") {
             config.ocr_allow_custom_base_url = allowed;
         }
-        // 模型: GBRAIN_OCR_MODEL 优先，兼容 GLMOCR_MODEL
-        if let Some(model) = first_nonempty_env(&["GBRAIN_OCR_MODEL", "GLMOCR_MODEL"]) {
+        // 模型: 只读取 GBRAIN_OCR_MODEL，不再兼容旧别名
+        if let Ok(model) = std::env::var("GBRAIN_OCR_MODEL") {
             config.ocr_model = model;
         }
         if let Ok(profile) = std::env::var("GBRAIN_OCR_PROFILE") {
@@ -505,10 +495,9 @@ impl Config {
                 );
             }
         }
-        // layout 开关: GBRAIN_OCR_ENABLE_LAYOUT 优先，兼容 GLMOCR_ENABLE_LAYOUT
-        config.ocr_enable_layout = parse_env_bool("GBRAIN_OCR_ENABLE_LAYOUT")
-            .or_else(|| parse_env_bool("GLMOCR_ENABLE_LAYOUT"))
-            .unwrap_or(config.ocr_enable_layout);
+        // layout 开关: 只读取 GBRAIN_OCR_ENABLE_LAYOUT，不再兼容旧别名
+        config.ocr_enable_layout =
+            parse_env_bool("GBRAIN_OCR_ENABLE_LAYOUT").unwrap_or(config.ocr_enable_layout);
         if let Ok(mode) = std::env::var("GBRAIN_OCR_MODE") {
             config.ocr_mode = mode;
         }
@@ -530,12 +519,8 @@ impl Config {
         if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_IMAGE_COUNT_THRESHOLD"]) {
             config.ocr_image_count_threshold = v as usize;
         }
-        // 超时: GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE 优先，兼容 GLM_OCR_TIMEOUT、GLMOCR_TIMEOUT
-        if let Some(v) = first_valid_env_u64(&[
-            "GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE",
-            "GLM_OCR_TIMEOUT",
-            "GLMOCR_TIMEOUT",
-        ]) {
+        // 超时: 只读取 GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE，不再兼容旧别名
+        if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE"]) {
             config.ocr_timeout_seconds_per_page = v;
         }
         if let Some(v) = first_valid_env_u64(&["GBRAIN_OCR_MAX_PAGES_PER_REQUEST"]) {
@@ -568,6 +553,10 @@ impl Config {
             tracing::warn!("ocr_max_concurrency=0 无效，已 clamp 到 1");
             config.ocr_max_concurrency = 1;
         }
+
+        config
+            .apply_required_external_model_env()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
         info!(
             db_path = %config.db_path().display(),
@@ -650,106 +639,267 @@ impl Config {
         }
     }
 
-    // --- Resolved LLM config helpers (fallback to shared OpenAI config) ---
+    // --- Resolved LLM config helpers ---
 
-    /// Resolved API key for query expansion (falls back to shared key)
+    /// Resolved API key for query expansion.
     pub fn expansion_api_key_resolved(&self) -> Option<&str> {
-        self.expansion_api_key
-            .as_deref()
-            .or(self.openai_api_key.as_deref())
+        self.expansion_api_key.as_deref()
     }
 
-    /// Resolved base URL for query expansion (falls back to shared URL)
+    /// Resolved base URL for query expansion.
     pub fn expansion_base_url_resolved(&self) -> Option<&str> {
-        self.expansion_base_url
-            .as_deref()
-            .or(self.openai_base_url.as_deref())
+        self.expansion_base_url.as_deref()
     }
 
-    /// Resolved API key for LLM chunker (falls back to shared key)
+    /// Resolved API key for LLM chunker.
     pub fn chunker_api_key_resolved(&self) -> Option<&str> {
-        self.chunker_api_key
-            .as_deref()
-            .or(self.openai_api_key.as_deref())
+        self.chunker_api_key.as_deref()
     }
 
-    /// Resolved base URL for LLM chunker (falls back to shared URL)
+    /// Resolved base URL for LLM chunker.
     pub fn chunker_base_url_resolved(&self) -> Option<&str> {
-        self.chunker_base_url
-            .as_deref()
-            .or(self.openai_base_url.as_deref())
+        self.chunker_base_url.as_deref()
     }
 
-    /// Resolved API key for transcription (provider-specific, then shared)
+    /// Resolved API key for transcription.
     pub fn transcription_api_key_resolved(&self) -> Option<&str> {
         match self.transcription_provider.as_str() {
-            "openai" => self
-                .transcription_openai_api_key
-                .as_deref()
-                .or(self.openai_api_key.as_deref()),
-            _ => self.transcription_groq_api_key.as_deref(), // "groq" default — no shared fallback
+            "openai" => self.transcription_openai_api_key.as_deref(),
+            _ => self.transcription_groq_api_key.as_deref(),
         }
     }
 
-    /// Resolved base URL for transcription (provider-specific, then shared)
+    /// Resolved base URL for transcription.
     pub fn transcription_base_url_resolved(&self) -> Option<&str> {
         match self.transcription_provider.as_str() {
-            "openai" => self
-                .transcription_openai_base_url
-                .as_deref()
-                .or(self.openai_base_url.as_deref()),
+            "openai" => self.transcription_openai_base_url.as_deref(),
             _ => self.transcription_groq_base_url.as_deref(),
         }
     }
 
-    /// 解析 RAPTOR LLM 配置，按优先级：
-    /// 1. GBRAIN_KB_RAPTOR_* 环境变量
-    /// 2. kb_raptor_secret_ref 指向的环境变量
-    /// 3. expansion_api/chunker_api 的 fallback
-    /// 4. 默认值 "https://api.openai.com/v1" / "gpt-4o-mini"
-    pub fn raptor_config_resolved(&self) -> ResolvedRaptorConfig {
-        // API key: GBRAIN_KB_RAPTOR_API_KEY env → kb_raptor_secret_ref → expansion → chunker → shared
-        let api_key = std::env::var("GBRAIN_KB_RAPTOR_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                self.kb_raptor_secret_ref
-                    .as_deref()
-                    .and_then(|ref_name| std::env::var(ref_name).ok())
-                    .filter(|s| !s.is_empty())
-            })
-            .or_else(|| self.expansion_api_key_resolved().map(|s| s.to_string()))
-            .or_else(|| self.chunker_api_key_resolved().map(|s| s.to_string()))
-            .unwrap_or_default();
-        // base_url: KB env → KB config → expansion → chunker → shared
-        let base_url = std::env::var("GBRAIN_KB_RAPTOR_BASE_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.kb_raptor_base_url.clone().filter(|s| !s.is_empty()))
-            .or_else(|| self.expansion_base_url_resolved().map(|s| s.to_string()))
-            .or_else(|| self.chunker_base_url_resolved().map(|s| s.to_string()))
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        // model: KB env → KB config → expansion → chunker → default
-        let model = std::env::var("GBRAIN_KB_RAPTOR_MODEL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                if !self.kb_raptor_model.is_empty() {
-                    self.kb_raptor_model.clone()
-                } else if !self.expansion_model.is_empty() {
-                    self.expansion_model.clone()
-                } else if !self.chunker_model.is_empty() {
-                    self.chunker_model.clone()
-                } else {
-                    "gpt-4o-mini".to_string()
-                }
-            });
+    /// 解析 RAPTOR LLM 配置。RAPTOR 只读取自己的 GBRAIN_KB_RAPTOR_* 环境变量。
+    pub fn raptor_config_resolved(&self) -> crate::error::Result<ResolvedRaptorConfig> {
+        let api_key = required_env_value("GBRAIN_KB_RAPTOR_API_KEY")?;
+        let base_url = required_env_value("GBRAIN_KB_RAPTOR_BASE_URL")?;
+        let model = required_env_value("GBRAIN_KB_RAPTOR_MODEL")?;
         debug!(base_url = %base_url, model = %model, "RAPTOR config resolved");
-        ResolvedRaptorConfig {
+        Ok(ResolvedRaptorConfig {
             api_key,
             base_url,
             model,
+        })
+    }
+
+    fn apply_required_external_model_env(&mut self) -> crate::error::Result<()> {
+        self.database_path = Some(required_env_value("GBRAIN_DB_PATH")?);
+
+        self.embedding_api_key = Some(required_env_value("GBRAIN_EMBEDDING_API_KEY")?);
+        self.embedding_base_url = Some(required_url_env("GBRAIN_EMBEDDING_BASE_URL")?);
+        self.embedding_model = required_env_value("GBRAIN_EMBEDDING_MODEL")?;
+        self.embedding_dimensions = required_env_usize("GBRAIN_EMBEDDING_DIMENSIONS")?;
+
+        self.expansion_api_key = Some(required_env_value("GBRAIN_EXPANSION_API_KEY")?);
+        self.expansion_base_url = Some(required_url_env("GBRAIN_EXPANSION_BASE_URL")?);
+        self.expansion_model = required_env_value("GBRAIN_EXPANSION_MODEL")?;
+
+        self.chunker_api_key = Some(required_env_value("GBRAIN_CHUNKER_API_KEY")?);
+        self.chunker_base_url = Some(required_url_env("GBRAIN_CHUNKER_BASE_URL")?);
+        self.chunker_model = required_env_value("GBRAIN_CHUNKER_MODEL")?;
+
+        required_env_value("GBRAIN_KB_RAPTOR_API_KEY")?;
+        self.kb_raptor_secret_ref = Some("GBRAIN_KB_RAPTOR_API_KEY".to_string());
+        self.kb_raptor_base_url = Some(required_url_env("GBRAIN_KB_RAPTOR_BASE_URL")?);
+        self.kb_raptor_model = required_env_value("GBRAIN_KB_RAPTOR_MODEL")?;
+
+        self.transcription_provider =
+            required_env_value("GBRAIN_TRANSCRIPTION_PROVIDER")?.to_lowercase();
+        match self.transcription_provider.as_str() {
+            "groq" => {
+                self.transcription_groq_api_key =
+                    Some(required_env_value("GBRAIN_TRANSCRIPTION_GROQ_API_KEY")?);
+                self.transcription_groq_base_url =
+                    Some(required_url_env("GBRAIN_TRANSCRIPTION_GROQ_BASE_URL")?);
+            }
+            "openai" => {
+                self.transcription_openai_api_key =
+                    Some(required_env_value("GBRAIN_TRANSCRIPTION_OPENAI_API_KEY")?);
+                self.transcription_openai_base_url =
+                    Some(required_url_env("GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL")?);
+            }
+            other => {
+                return Err(config_error(format!(
+                    "GBRAIN_TRANSCRIPTION_PROVIDER 无效值 '{}'，有效值: groq, openai",
+                    other
+                )));
+            }
         }
+        if let Some(value) = optional_env_value("GBRAIN_TRANSCRIPTION_GROQ_API_KEY")? {
+            self.transcription_groq_api_key = Some(value);
+        }
+        if let Some(value) = optional_url_env("GBRAIN_TRANSCRIPTION_GROQ_BASE_URL")? {
+            self.transcription_groq_base_url = Some(value);
+        }
+        if let Some(value) = optional_env_value("GBRAIN_TRANSCRIPTION_OPENAI_API_KEY")? {
+            self.transcription_openai_api_key = Some(value);
+        }
+        if let Some(value) = optional_url_env("GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL")? {
+            self.transcription_openai_base_url = Some(value);
+        }
+
+        self.log_to_file = required_env_bool("GBRAIN_LOG_TO_FILE")?;
+        self.log_to_console = required_env_bool("GBRAIN_LOG_TO_CONSOLE")?;
+        self.log_level = required_env_enum(
+            "GBRAIN_LOG_LEVEL",
+            &["trace", "debug", "info", "warn", "error"],
+        )?;
+        if self.log_to_file {
+            self.log_file_path = Some(required_env_value("GBRAIN_LOG_FILE_PATH")?);
+        }
+
+        self.auto_link = required_env_bool_loose("GBRAIN_AUTO_LINK")?;
+        self.auto_timeline = required_env_bool_loose("GBRAIN_AUTO_TIMELINE")?;
+        self.post_write_lint = required_env_bool("GBRAIN_POST_WRITE_LINT")?;
+
+        self.kb_enabled = required_env_bool("GBRAIN_KB_ENABLED")?;
+        self.kb_max_file_size_mb = required_env_usize("GBRAIN_KB_MAX_FILE_SIZE_MB")?;
+        self.kb_allowed_extensions = parse_required_csv("GBRAIN_KB_ALLOWED_EXTENSIONS")?;
+        self.kb_storage_dir = Some(required_env_value("GBRAIN_KB_STORAGE_DIR")?);
+        self.kb_worker_enabled = required_env_bool("GBRAIN_KB_WORKER_ENABLED")?;
+        self.kb_worker_poll_interval_secs = required_env_u64("GBRAIN_KB_WORKER_POLL_INTERVAL")?;
+        self.autopilot_enabled = required_env_bool("GBRAIN_AUTOPILOT_ENABLED")?;
+        self.autopilot_interval_secs = required_env_u64("GBRAIN_AUTOPILOT_INTERVAL")?;
+
+        self.artifact_storage_dir = Some(required_env_value("GBRAIN_ARTIFACT_STORAGE_DIR")?);
+        self.default_kb_library_id = optional_env_i64_allow_empty("GBRAIN_DEFAULT_KB_LIBRARY_ID")?;
+        self.upload_default_promotion_policy =
+            required_env_value("GBRAIN_UPLOAD_PROMOTION_POLICY")?;
+        self.artifact_default_intent = required_env_enum(
+            "GBRAIN_ARTIFACT_DEFAULT_INTENT",
+            &["memory", "evidence", "promote"],
+        )?;
+        self.artifact_auto_create_inbox_library =
+            required_env_bool_loose("GBRAIN_ARTIFACT_AUTO_CREATE_INBOX_LIBRARY")?;
+        self.artifact_manual_memory_to_kb =
+            required_env_bool("GBRAIN_ARTIFACT_MANUAL_MEMORY_TO_KB")?;
+
+        self.ocr_enabled = required_env_bool("GBRAIN_OCR_ENABLED")?;
+        if self.ocr_enabled {
+            self.ocr_api_key = Some(required_env_value("GBRAIN_OCR_API_KEY")?);
+            self.ocr_base_url = required_url_env("GBRAIN_OCR_BASE_URL")?;
+            self.ocr_model = required_env_value("GBRAIN_OCR_MODEL")?;
+        }
+        self.ocr_allow_custom_base_url = required_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL")?;
+        self.ocr_profile = required_env_enum(
+            "GBRAIN_OCR_PROFILE",
+            &["general", "table", "formula", "handwriting"],
+        )?;
+        self.ocr_enable_layout = required_env_bool("GBRAIN_OCR_ENABLE_LAYOUT")?;
+        self.ocr_mode = required_env_enum("GBRAIN_OCR_MODE", &["auto", "all_pages"])?;
+        self.ocr_submit_mode =
+            required_env_enum("GBRAIN_OCR_SUBMIT_MODE", &["pdf_first", "pdf_range"])?;
+        self.ocr_text_density_threshold = required_env_usize("GBRAIN_OCR_TEXT_DENSITY_THRESHOLD")?;
+        #[allow(deprecated)]
+        {
+            self.ocr_min_low_density_ratio = required_env_f64("GBRAIN_OCR_MIN_LOW_DENSITY_RATIO")?;
+        }
+        self.ocr_image_area_threshold = required_env_f64("GBRAIN_OCR_IMAGE_AREA_THRESHOLD")?;
+        self.ocr_image_count_threshold = required_env_usize("GBRAIN_OCR_IMAGE_COUNT_THRESHOLD")?;
+        self.ocr_timeout_seconds_per_page =
+            required_env_u64("GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE")?;
+        self.ocr_max_pages_per_request = required_env_usize("GBRAIN_OCR_MAX_PAGES_PER_REQUEST")?;
+        self.ocr_max_pdf_bytes_per_request =
+            required_env_usize("GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST")?;
+        self.ocr_max_pages_per_document = required_env_usize("GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT")?;
+        self.ocr_max_concurrency = required_env_usize("GBRAIN_OCR_MAX_CONCURRENCY")?;
+        self.ocr_temp_dir_max_bytes = required_env_u64("GBRAIN_OCR_TEMP_DIR_MAX_BYTES")?;
+        self.ocr_return_crop_images = required_env_bool("GBRAIN_OCR_RETURN_CROP_IMAGES")?;
+        self.ocr_need_layout_visualization =
+            required_env_bool("GBRAIN_OCR_NEED_LAYOUT_VISUALIZATION")?;
+        self.ocr_sync_inline = required_env_bool("GBRAIN_OCR_SYNC_INLINE")?;
+
+        validate_optional_runtime_env()?;
+        self.validate_loaded_config()
+    }
+
+    fn validate_loaded_config(&self) -> crate::error::Result<()> {
+        required_env_value("GBRAIN_DIR")?;
+        validate_nonzero("GBRAIN_EMBEDDING_DIMENSIONS", self.embedding_dimensions)?;
+        validate_nonzero("GBRAIN_KB_MAX_FILE_SIZE_MB", self.kb_max_file_size_mb)?;
+        validate_nonzero_u64(
+            "GBRAIN_KB_WORKER_POLL_INTERVAL",
+            self.kb_worker_poll_interval_secs,
+        )?;
+        if self.autopilot_interval_secs < 60 {
+            return Err(config_error(format!(
+                "GBRAIN_AUTOPILOT_INTERVAL 最小值为 60 秒，当前值: {}",
+                self.autopilot_interval_secs
+            )));
+        }
+        if self.chunk_size == 0 {
+            return Err(config_error("chunk_size 必须大于 0"));
+        }
+        if self.chunk_overlap >= self.chunk_size {
+            return Err(config_error(format!(
+                "chunk_overlap 必须小于 chunk_size，当前 chunk_overlap={}, chunk_size={}",
+                self.chunk_overlap, self.chunk_size
+            )));
+        }
+        if self
+            .kb_allowed_extensions
+            .iter()
+            .any(|s| s.trim().is_empty())
+        {
+            return Err(config_error(
+                "GBRAIN_KB_ALLOWED_EXTENSIONS 不能包含空扩展名",
+            ));
+        }
+        self.upload_default_promotion_policy
+            .parse::<crate::artifact::types::PromotionPolicy>()
+            .map_err(|_| {
+                config_error(format!(
+                    "GBRAIN_UPLOAD_PROMOTION_POLICY 无效值 '{}'，有效值: none, shadow, candidate, auto, auto-low-risk, auto_accept_low_risk, auto-apply, auto_apply, auto_all, auto-all, auto-apply-all",
+                    self.upload_default_promotion_policy
+                ))
+            })?;
+        if !(0.0..=1.0).contains(&self.ocr_image_area_threshold) {
+            return Err(config_error(format!(
+                "GBRAIN_OCR_IMAGE_AREA_THRESHOLD 必须在 0..=1 之间，当前值: {}",
+                self.ocr_image_area_threshold
+            )));
+        }
+        #[allow(deprecated)]
+        {
+            let ratio = self.ocr_min_low_density_ratio;
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(config_error(format!(
+                    "GBRAIN_OCR_MIN_LOW_DENSITY_RATIO 必须在 0..=1 之间，当前值: {}",
+                    ratio
+                )));
+            }
+        }
+        validate_nonzero(
+            "GBRAIN_OCR_IMAGE_COUNT_THRESHOLD",
+            self.ocr_image_count_threshold,
+        )?;
+        validate_nonzero_u64(
+            "GBRAIN_OCR_TIMEOUT_SECONDS_PER_PAGE",
+            self.ocr_timeout_seconds_per_page,
+        )?;
+        validate_nonzero(
+            "GBRAIN_OCR_MAX_PAGES_PER_REQUEST",
+            self.ocr_max_pages_per_request,
+        )?;
+        validate_nonzero(
+            "GBRAIN_OCR_MAX_PDF_BYTES_PER_REQUEST",
+            self.ocr_max_pdf_bytes_per_request,
+        )?;
+        validate_nonzero(
+            "GBRAIN_OCR_MAX_PAGES_PER_DOCUMENT",
+            self.ocr_max_pages_per_document,
+        )?;
+        validate_nonzero("GBRAIN_OCR_MAX_CONCURRENCY", self.ocr_max_concurrency)?;
+        validate_nonzero_u64("GBRAIN_OCR_TEMP_DIR_MAX_BYTES", self.ocr_temp_dir_max_bytes)?;
+        Ok(())
     }
 
     /// Save configuration to config.json with restrictive permissions (0o600 on Unix).
@@ -981,11 +1131,11 @@ impl Config {
             trace!("merge: overriding database_path");
             self.database_path = other.database_path;
         }
-        if other.openai_api_key.is_some() {
-            self.openai_api_key = other.openai_api_key;
+        if other.embedding_api_key.is_some() {
+            self.embedding_api_key = other.embedding_api_key;
         }
-        if other.openai_base_url.is_some() {
-            self.openai_base_url = other.openai_base_url;
+        if other.embedding_base_url.is_some() {
+            self.embedding_base_url = other.embedding_base_url;
         }
         // Always take config file values for non-Option fields (they represent
         // explicit user choices, even if they match defaults)
@@ -1120,20 +1270,257 @@ impl Config {
     }
 }
 
-/// 解析环境变量布尔值，接受 true/false/1/0/TURE/FALSE（大小写不敏感）。
-/// 非法值会打 warn 日志并返回 None，由调用方决定回退策略。
-/// 按优先级依次检查多个环境变量名，返回第一个非空（trim 后非空）的值。
-/// 如果所有变量都未设置或为空，返回 None。
-fn first_nonempty_env(names: &[&str]) -> Option<String> {
-    for &name in names {
-        if let Ok(val) = std::env::var(name) {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+fn config_error(message: impl Into<String>) -> GBrainError {
+    GBrainError::Config(message.into())
+}
+
+fn required_env_value(name: &str) -> crate::error::Result<String> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(config_error(format!(
+                    "缺少必需环境变量 {}：值不能为空",
+                    name
+                )))
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {
+            Err(config_error(format!("缺少必需环境变量 {}", name)))
+        }
+        Err(e) => Err(config_error(format!("读取环境变量 {} 失败: {}", name, e))),
+    }
+}
+
+fn optional_env_value(name: &str) -> crate::error::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(config_error(format!("环境变量 {} 已配置但值为空", name)))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(config_error(format!("读取环境变量 {} 失败: {}", name, e))),
+    }
+}
+
+fn required_url_env(name: &str) -> crate::error::Result<String> {
+    let value = required_env_value(name)?;
+    validate_url(name, &value)?;
+    Ok(value)
+}
+
+fn optional_url_env(name: &str) -> crate::error::Result<Option<String>> {
+    let Some(value) = optional_env_value(name)? else {
+        return Ok(None);
+    };
+    validate_url(name, &value)?;
+    Ok(Some(value))
+}
+
+fn validate_url(name: &str, value: &str) -> crate::error::Result<()> {
+    let url = reqwest::Url::parse(value).map_err(|e| {
+        config_error(format!(
+            "{} 必须是合法 URL，当前值 '{}': {}",
+            name, value, e
+        ))
+    })?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        scheme => Err(config_error(format!(
+            "{} 只支持 http/https URL，当前 scheme: {}",
+            name, scheme
+        ))),
+    }
+}
+
+fn required_env_bool(name: &str) -> crate::error::Result<bool> {
+    parse_env_bool_str(name, &required_env_value(name)?)
+}
+
+fn required_env_bool_loose(name: &str) -> crate::error::Result<bool> {
+    match required_env_value(name)?.as_str() {
+        "false" | "0" => Ok(false),
+        "true" | "1" => Ok(true),
+        other => Err(config_error(format!(
+            "{} 需要布尔值 true/false/1/0，当前值: {}",
+            name, other
+        ))),
+    }
+}
+
+fn parse_env_bool_str(name: &str, value: &str) -> crate::error::Result<bool> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(config_error(format!(
+            "{} 需要布尔值 true/false/1/0，当前值: {}",
+            name, value
+        ))),
+    }
+}
+
+fn required_env_usize(name: &str) -> crate::error::Result<usize> {
+    let value = required_env_value(name)?;
+    value
+        .parse::<usize>()
+        .map_err(|e| config_error(format!("{} 需要非负整数，当前值 '{}': {}", name, value, e)))
+}
+
+fn required_env_u64(name: &str) -> crate::error::Result<u64> {
+    let value = required_env_value(name)?;
+    value
+        .parse::<u64>()
+        .map_err(|e| config_error(format!("{} 需要非负整数，当前值 '{}': {}", name, value, e)))
+}
+
+fn required_env_f64(name: &str) -> crate::error::Result<f64> {
+    let value = required_env_value(name)?;
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|e| config_error(format!("{} 需要数字，当前值 '{}': {}", name, value, e)))?;
+    if parsed.is_finite() {
+        Ok(parsed)
+    } else {
+        Err(config_error(format!(
+            "{} 需要有限数字，当前值: {}",
+            name, value
+        )))
+    }
+}
+
+fn required_env_enum(name: &str, valid: &[&str]) -> crate::error::Result<String> {
+    let value = required_env_value(name)?;
+    if valid.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(config_error(format!(
+            "{} 无效值 '{}'，有效值: {}",
+            name,
+            value,
+            valid.join(", ")
+        )))
+    }
+}
+
+fn parse_required_csv(name: &str) -> crate::error::Result<Vec<String>> {
+    let value = required_env_value(name)?;
+    let items: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
+    if items.is_empty() || items.iter().any(|s| s.is_empty()) {
+        return Err(config_error(format!("{} 必须是非空逗号分隔列表", name)));
+    }
+    Ok(items)
+}
+
+fn optional_env_i64_allow_empty(name: &str) -> crate::error::Result<Option<i64>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let parsed = trimmed.parse::<i64>().map_err(|e| {
+                config_error(format!("{} 需要整数，当前值 '{}': {}", name, trimmed, e))
+            })?;
+            if parsed <= 0 {
+                return Err(config_error(format!(
+                    "{} 必须大于 0，当前值: {}",
+                    name, parsed
+                )));
+            }
+            Ok(Some(parsed))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(config_error(format!("读取环境变量 {} 失败: {}", name, e))),
+    }
+}
+
+fn validate_nonzero(name: &str, value: usize) -> crate::error::Result<()> {
+    if value == 0 {
+        Err(config_error(format!("{} 必须大于 0", name)))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_nonzero_u64(name: &str, value: u64) -> crate::error::Result<()> {
+    if value == 0 {
+        Err(config_error(format!("{} 必须大于 0", name)))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_runtime_env() -> crate::error::Result<()> {
+    if let Ok(value) = std::env::var("RUST_LOG") {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(config_error("RUST_LOG 已配置但值为空"));
+        }
+        tracing_subscriber::EnvFilter::try_new(trimmed)
+            .map_err(|e| config_error(format!("RUST_LOG 无效值 '{}': {}", trimmed, e)))?;
+    }
+
+    if let Ok(value) = std::env::var("GBRAIN_PROGRESS_MODE") {
+        let trimmed = value.trim();
+        if !matches!(trimmed, "auto" | "human" | "json" | "quiet") {
+            return Err(config_error(format!(
+                "GBRAIN_PROGRESS_MODE 无效值 '{}'，有效值: auto, human, json, quiet",
+                trimmed
+            )));
+        }
+    }
+    if let Ok(value) = std::env::var("GBRAIN_PROGRESS_JSON") {
+        parse_env_bool_str("GBRAIN_PROGRESS_JSON", value.trim())?;
+    }
+    if let Ok(value) = std::env::var("GBRAIN_ASYNC_WORKER_THREADS") {
+        let trimmed = value.trim();
+        let threads = trimmed.parse::<usize>().map_err(|e| {
+            config_error(format!(
+                "GBRAIN_ASYNC_WORKER_THREADS 需要正整数，当前值 '{}': {}",
+                trimmed, e
+            ))
+        })?;
+        validate_nonzero("GBRAIN_ASYNC_WORKER_THREADS", threads)?;
+    }
+    if let Ok(value) = std::env::var("GBRAIN_SEARCH_DEBUG") {
+        parse_env_bool_str("GBRAIN_SEARCH_DEBUG", value.trim())?;
+    }
+    if let Ok(value) = std::env::var("GBRAIN_SOURCE_BOOST") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            for pair in trimmed.split(',') {
+                let Some((prefix, factor)) = pair.rsplit_once(':') else {
+                    return Err(config_error(format!(
+                        "GBRAIN_SOURCE_BOOST 条目 '{}' 无效，格式应为 前缀:系数",
+                        pair
+                    )));
+                };
+                if prefix.trim().is_empty() {
+                    return Err(config_error("GBRAIN_SOURCE_BOOST 不能包含空前缀"));
+                }
+                let factor = factor.trim().parse::<f64>().map_err(|e| {
+                    config_error(format!(
+                        "GBRAIN_SOURCE_BOOST 系数 '{}' 无效: {}",
+                        factor.trim(),
+                        e
+                    ))
+                })?;
+                if !factor.is_finite() || factor < 0.0 {
+                    return Err(config_error(format!(
+                        "GBRAIN_SOURCE_BOOST 系数必须是非负有限数，当前值: {}",
+                        factor
+                    )));
+                }
             }
         }
     }
-    None
+    Ok(())
 }
 
 /// 按优先级依次检查多个环境变量名，返回第一个有效 u64 的值。

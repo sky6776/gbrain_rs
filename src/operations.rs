@@ -424,7 +424,7 @@ impl<'a> Operations<'a> {
         query: &str,
         expanded_queries: &[String],
     ) -> (Option<Vec<f32>>, Option<Vec<Vec<f32>>>) {
-        let Some(api_key) = self.config.openai_api_key.as_deref() else {
+        let Some(api_key) = self.config.embedding_api_key.as_deref() else {
             return (None, None);
         };
         if api_key.is_empty() {
@@ -432,9 +432,12 @@ impl<'a> Operations<'a> {
         }
         let embedder = Embedder::new(
             api_key,
-            self.config.openai_base_url.as_deref(),
-            Some(&self.config.embedding_model),
-            Some(self.config.embedding_dimensions),
+            self.config
+                .embedding_base_url
+                .as_deref()
+                .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+            &self.config.embedding_model,
+            self.config.embedding_dimensions,
         );
         let mut texts = vec![query.to_string()];
         if !expanded_queries.is_empty() {
@@ -467,11 +470,7 @@ impl<'a> Operations<'a> {
     }
 
     fn expand_query_sync(&self, query: &str) -> Option<Vec<String>> {
-        let api_key = self
-            .config
-            .expansion_api_key
-            .as_deref()
-            .or(self.config.openai_api_key.as_deref())?;
+        let api_key = self.config.expansion_api_key.as_deref()?;
         if api_key.is_empty() {
             return None;
         }
@@ -479,8 +478,7 @@ impl<'a> Operations<'a> {
             .config
             .expansion_base_url
             .as_deref()
-            .or(self.config.openai_base_url.as_deref())
-            .unwrap_or("https://api.openai.com/v1");
+            .expect("GBRAIN_EXPANSION_BASE_URL 已在启动校验");
         // H4 fix: 使用全局共享运行时
         let rt = crate::runtime::shared_runtime();
         let expanded = rt.block_on(expand_query(
@@ -803,11 +801,13 @@ impl<'a> Operations<'a> {
         // P2-2: Log early embedding skip if no API key configured
         if self
             .config
-            .openai_api_key
+            .embedding_api_key
             .as_ref()
             .is_none_or(|k| k.is_empty())
         {
-            debug!("No GBRAIN_OPENAI_API_KEY configured, embedding will be skipped for this page");
+            debug!(
+                "No GBRAIN_EMBEDDING_API_KEY configured, embedding will be skipped for this page"
+            );
         }
 
         let mut chunks = chunk_text(content, None, None, ChunkSource::CompiledTruth);
@@ -1333,12 +1333,11 @@ impl<'a> Operations<'a> {
                 .rewrite_base_url
                 .as_deref()
                 .or_else(|| self.config.expansion_base_url_resolved())
-                .unwrap_or("https://api.openai.com/v1");
+                .unwrap_or("");
             let rewrite_model = input
                 .rewrite_model
                 .as_deref()
-                .or(Some(self.config.expansion_model.as_str()))
-                .unwrap_or("gpt-4o-mini");
+                .unwrap_or(self.config.expansion_model.as_str());
 
             if !rewrite_api_key.is_empty() {
                 let rt = crate::runtime::shared_runtime();
@@ -1443,12 +1442,15 @@ impl<'a> Operations<'a> {
             // 多模型冲突降级：不生成 query vector
             tracing::info!("kb_query: 向量检索已被禁用，仅执行非向量召回");
             None
-        } else if let Some(api_key) = self.config.openai_api_key.as_deref() {
+        } else if let Some(api_key) = self.config.embedding_api_key.as_deref() {
             let embedder = crate::embedding::Embedder::new(
                 api_key,
-                self.config.openai_base_url.as_deref(),
-                Some(&embedding_model_for_query),
-                embedding_dims_for_query,
+                self.config
+                    .embedding_base_url
+                    .as_deref()
+                    .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                &embedding_model_for_query,
+                embedding_dims_for_query.unwrap_or(self.config.embedding_dimensions),
             );
             // H4 fix: 使用全局共享运行时
             let rt = crate::runtime::shared_runtime();

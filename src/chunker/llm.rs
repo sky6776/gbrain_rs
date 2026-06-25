@@ -5,7 +5,7 @@
 //!
 //! Uses OpenAI-compatible SDK so any provider (OpenAI, Zhipu, DashScope,
 //! DeepSeek, etc.) can be used via GBRAIN_CHUNKER_* env vars.
-//! Falls back to GBRAIN_OPENAI_* for backward compatibility.
+//! GBRAIN_CHUNKER_* must be configured explicitly; no shared fallback is used.
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;

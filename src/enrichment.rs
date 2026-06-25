@@ -307,7 +307,8 @@ impl<'a> EnrichmentService<'a> {
         result.entities_detected = refs.len();
 
         // Load config once — auto_link gates both stub creation and backlink addition
-        let config = crate::config::Config::load().unwrap_or_default();
+        let config = crate::config::Config::load()
+            .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
         if !config.auto_link {
             debug!(slug = %slug, "auto_link disabled, skipping auto_enrich");
             return Ok(result);

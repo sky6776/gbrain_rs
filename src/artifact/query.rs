@@ -1618,7 +1618,7 @@ fn rerank_evidence_candidates(
     let base_url = config
         .expansion_base_url_resolved()
         .filter(|s| !s.is_empty())
-        .unwrap_or("https://api.openai.com/v1");
+        .unwrap_or("");
     let weights = vec![0.25, 0.0, 0.0, 0.65, 0.0, 0.0];
     // H3 fix: 使用全局共享运行时，避免每次证据重排创建新运行时
     let rt = crate::runtime::shared_runtime();
