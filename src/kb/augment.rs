@@ -100,7 +100,7 @@ pub async fn augment_chunk(
         model,
         system_text,
         &user_content,
-        crate::llm::is_deepseek_chat_api(base_url, model),
+        crate::llm::should_disable_thinking_for_chat(base_url, model),
     );
 
     // 超时 10 秒
