@@ -70,7 +70,7 @@ pub struct OcrOptions {
     pub need_layout_visualization: bool,
     pub max_pages_per_request: usize,
     pub max_pdf_bytes_per_request: usize,
-    /// OCR profile: general/table/formula/handwriting（只影响后处理增强，不丢弃 block）
+    /// OCR profile: auto/general/table/formula/handwriting（只影响后处理增强，不丢弃 block）
     pub ocr_profile: String,
 }
 

@@ -101,7 +101,7 @@ pub fn normalize_glm_ocr_response(
     model_name: &str,
     // 客户端生成的稳定 request_id，服务端未回显时作为 fallback
     client_request_id: Option<&str>,
-    // OCR profile: general/table/formula/handwriting
+    // OCR profile: auto/general/table/formula/handwriting
     ocr_profile: &str,
 ) -> Result<Vec<OcrPageResult>> {
     let request_page_count = (source_end_page - source_start_page + 1) as usize;
@@ -288,6 +288,7 @@ enum BlockFormatMode {
 }
 
 /// OCR profile 格式化策略：所有 block 均保留，但按 profile 对目标类型增强输出。
+/// - auto: 根据 block 类型自动选择 table/formula/general 增强
 /// - general: 无增强，按默认格式输出
 /// - table: 表格 block 使用完整 markdown 表格格式
 /// - formula: 公式 block 保留 LaTeX 原始内容，加独立标记
@@ -296,6 +297,7 @@ fn format_block(block: &OcrLayoutBlock, profile: &str, mode: BlockFormatMode) ->
     if block.content.is_empty() {
         return None;
     }
+    let profile = effective_block_profile(block, profile);
     match &block.label {
         OcrBlockLabel::Text => Some(block.content.clone()),
         OcrBlockLabel::Formula => {
@@ -321,6 +323,17 @@ fn format_block(block: &OcrLayoutBlock, profile: &str, mode: BlockFormatMode) ->
         }
         OcrBlockLabel::Image => None,
         OcrBlockLabel::Unknown(_) => Some(block.content.clone()),
+    }
+}
+
+fn effective_block_profile<'a>(block: &OcrLayoutBlock, profile: &'a str) -> &'a str {
+    if profile != "auto" {
+        return profile;
+    }
+    match block.label {
+        OcrBlockLabel::Formula => "formula",
+        OcrBlockLabel::Table => "table",
+        _ => "general",
     }
 }
 
@@ -581,6 +594,38 @@ mod tests {
         let plain = html_table_to_plain(html);
         assert!(plain.contains("A"));
         assert!(plain.contains("1"));
+    }
+
+    #[test]
+    fn test_auto_profile_enhances_table_and_formula_blocks() {
+        let blocks = vec![
+            OcrLayoutBlock {
+                page_number: 1,
+                index: Some(0),
+                label: OcrBlockLabel::Table,
+                bbox_2d: None,
+                content:
+                    "<table><tr><td>A</td><td>B</td></tr><tr><td>1</td><td>2</td></tr></table>"
+                        .to_string(),
+                width: None,
+                height: None,
+            },
+            OcrLayoutBlock {
+                page_number: 1,
+                index: Some(1),
+                label: OcrBlockLabel::Formula,
+                bbox_2d: None,
+                content: "E=mc^2".to_string(),
+                width: None,
+                height: None,
+            },
+        ];
+
+        let auto_text = blocks_to_plain_text(&blocks, "auto");
+
+        assert!(auto_text.contains("| A | B |"));
+        assert!(auto_text.contains("| --- | --- |"));
+        assert!(auto_text.contains("$$E=mc^2$$"));
     }
 
     #[test]

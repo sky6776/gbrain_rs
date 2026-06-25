@@ -206,11 +206,12 @@ GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL = "true"
 GBRAIN_OCR_MODEL = "glm-ocr"
 
 # OCR 后处理配置，必填，不直接发给 API，而是影响识别结果如何整理。可选值：
+# - auto：按 OCR 返回的版面块自动增强；表格块按 table，公式块按 formula，其它内容按 general。
 # - general：通用文档。
 # - table：更关注表格结构。
 # - formula：更关注公式内容。
 # - handwriting：手写场景。
-GBRAIN_OCR_PROFILE = "general"
+GBRAIN_OCR_PROFILE = "auto"
 
 # 是否请求 OCR 提供方返回版面细节，必填布尔值。不再兼容 GLMOCR_ENABLE_LAYOUT 回退。
 GBRAIN_OCR_ENABLE_LAYOUT = "true"

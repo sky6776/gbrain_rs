@@ -452,7 +452,7 @@ gbrain kb ocr-retry 1
 | `ocr_model` | string | OCR 模型 | `glm-ocr` |
 | `ocr_mode` | string | OCR 范围策略: auto/all_pages | `auto` |
 | `ocr_submit_mode` | string | OCR 提交策略: pdf_first/pdf_range | `pdf_first` |
-| `ocr_profile` | string | OCR 场景: general/table/formula/handwriting | `general` |
+| `ocr_profile` | string | OCR 场景: auto/general/table/formula/handwriting | `auto` |
 
 **示例：**
 
@@ -932,7 +932,7 @@ JPG/PNG 上传会直接作为单页 OCR 文档入队，识别结果回写为 KB 
 | `GBRAIN_OCR_BASE_URL` | GLM-OCR endpoint；自定义地址还必须显式开启下方安全开关 | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
 | `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL` | 允许使用自定义 OCR endpoint；仅接受环境变量设置 | `false` |
 | `GBRAIN_OCR_MODEL` / `GLMOCR_MODEL` | OCR 模型名称，前者优先 | `glm-ocr` |
-| `GBRAIN_OCR_PROFILE` | 后处理 profile：`general` / `table` / `formula` / `handwriting`；不发送给 API | `general` |
+| `GBRAIN_OCR_PROFILE` | 后处理 profile：`auto` / `general` / `table` / `formula` / `handwriting`；`auto` 会按 OCR 版面块自动增强表格和公式，不发送给 API | `auto` |
 | `GBRAIN_OCR_ENABLE_LAYOUT` / `GLMOCR_ENABLE_LAYOUT` | 请求版面识别，前者优先 | `true` |
 | `GBRAIN_OCR_MODE` | OCR 选择模式：`auto` / `all_pages` | `auto` |
 | `GBRAIN_OCR_SUBMIT_MODE` | PDF 提交模式：`pdf_first` / `pdf_range` | `pdf_first` |

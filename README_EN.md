@@ -325,7 +325,7 @@ gbrain review apply 1
 | `ocr_model` | string | OCR model | `glm-ocr` |
 | `ocr_mode` | string | OCR selection mode: auto/all_pages | `auto` |
 | `ocr_submit_mode` | string | OCR submission mode: pdf_first/pdf_range | `pdf_first` |
-| `ocr_profile` | string | OCR profile: general/table/formula/handwriting | `general` |
+| `ocr_profile` | string | OCR profile: auto/general/table/formula/handwriting | `auto` |
 
 ---
 
@@ -913,7 +913,7 @@ External OCR is always allowed (library-level privacy switches have been removed
 | `GBRAIN_OCR_BASE_URL` | GLM-OCR endpoint; a custom URL also requires the safety gate below | `https://open.bigmodel.cn/api/paas/v4/layout_parsing` |
 | `GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL` | Allow a custom OCR endpoint; accepted only from the environment | `false` |
 | `GBRAIN_OCR_MODEL` / `GLMOCR_MODEL` | OCR model name, with the former taking precedence | `glm-ocr` |
-| `GBRAIN_OCR_PROFILE` | Post-processing profile: `general` / `table` / `formula` / `handwriting`; not sent to the API | `general` |
+| `GBRAIN_OCR_PROFILE` | Post-processing profile: `auto` / `general` / `table` / `formula` / `handwriting`; `auto` enhances table and formula blocks based on OCR layout output, and is not sent to the API | `auto` |
 | `GBRAIN_OCR_ENABLE_LAYOUT` / `GLMOCR_ENABLE_LAYOUT` | Request layout recognition, with the former taking precedence | `true` |
 | `GBRAIN_OCR_MODE` | OCR selection mode: `auto` / `all_pages` | `auto` |
 | `GBRAIN_OCR_SUBMIT_MODE` | PDF submission mode: `pdf_first` / `pdf_range` | `pdf_first` |

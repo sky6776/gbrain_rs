@@ -115,7 +115,7 @@ pub struct Config {
     pub ocr_allow_custom_base_url: bool,
     /// OCR 模型名（默认 glm-ocr）
     pub ocr_model: String,
-    /// OCR profile: general/table/formula/handwriting（只影响后处理，不发送给 API）
+    /// OCR profile: auto/general/table/formula/handwriting（只影响后处理，不发送给 API）
     pub ocr_profile: String,
     /// 是否启用 layout details（默认 true，用于块级合并）
     pub ocr_enable_layout: bool,
@@ -256,7 +256,7 @@ impl Default for Config {
             ocr_base_url: "https://open.bigmodel.cn/api/paas/v4/layout_parsing".to_string(),
             ocr_allow_custom_base_url: false,
             ocr_model: "glm-ocr".to_string(),
-            ocr_profile: "general".to_string(),
+            ocr_profile: "auto".to_string(),
             ocr_enable_layout: true,
             ocr_mode: "auto".to_string(),
             ocr_submit_mode: "pdf_range".to_string(),
@@ -486,11 +486,14 @@ impl Config {
         }
         if let Ok(profile) = std::env::var("GBRAIN_OCR_PROFILE") {
             let profile = profile.trim();
-            if matches!(profile, "general" | "table" | "formula" | "handwriting") {
+            if matches!(
+                profile,
+                "auto" | "general" | "table" | "formula" | "handwriting"
+            ) {
                 config.ocr_profile = profile.to_string();
             } else if !profile.is_empty() {
                 tracing::warn!(
-                    "GBRAIN_OCR_PROFILE 无效值 '{}'，有效值: general/table/formula/handwriting，已忽略",
+                    "GBRAIN_OCR_PROFILE 无效值 '{}'，有效值: auto/general/table/formula/handwriting，已忽略",
                     profile
                 );
             }
@@ -791,7 +794,7 @@ impl Config {
         self.ocr_allow_custom_base_url = required_env_bool("GBRAIN_OCR_ALLOW_CUSTOM_BASE_URL")?;
         self.ocr_profile = required_env_enum(
             "GBRAIN_OCR_PROFILE",
-            &["general", "table", "formula", "handwriting"],
+            &["auto", "general", "table", "formula", "handwriting"],
         )?;
         self.ocr_enable_layout = required_env_bool("GBRAIN_OCR_ENABLE_LAYOUT")?;
         self.ocr_mode = required_env_enum("GBRAIN_OCR_MODE", &["auto", "all_pages"])?;
@@ -1089,7 +1092,7 @@ impl Config {
                 self.ocr_submit_mode = value.to_string();
             }
             "ocr_profile" => {
-                let valid = ["general", "table", "formula", "handwriting"];
+                let valid = ["auto", "general", "table", "formula", "handwriting"];
                 if !valid.contains(&value) {
                     return Err(format!(
                         "ocr_profile 无效值: {}，有效值: {}",
