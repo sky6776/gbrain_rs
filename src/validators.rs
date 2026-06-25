@@ -485,14 +485,15 @@ mod tests {
     #[test]
     fn test_validate_source_citations_missing() {
         let content = "According to [Source:people/bob], the project started in 2020.";
-        let result = validate_source_citations(&SqliteEngine::in_memory(), "test/page", content);
+        let engine = SqliteEngine::with_config(":memory:", crate::config::Config::default());
+        let result = validate_source_citations(&engine, "test/page", content);
         assert!(result.issues.iter().any(|i| i.rule == "source-citation"));
     }
 
     #[test]
     fn test_validate_back_link_symmetry_no_symmetry() {
         // Create an in-memory engine with a page and a one-way link
-        let mut engine = SqliteEngine::in_memory();
+        let mut engine = SqliteEngine::with_config(":memory:", crate::config::Config::default());
         engine.connect().unwrap();
         engine.init_schema().unwrap();
         engine

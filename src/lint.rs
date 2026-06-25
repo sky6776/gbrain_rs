@@ -650,14 +650,10 @@ mod tests {
             fix: false,
             dry_run: false,
         };
+        let engine = SqliteEngine::with_config(":memory:", crate::config::Config::default());
 
         // With fix enabled, should return fixed content
-        let result = lint_page(
-            &SqliteEngine::in_memory(),
-            &page,
-            &all_slugs,
-            &opts_with_fix,
-        );
+        let result = lint_page(&engine, &page, &all_slugs, &opts_with_fix);
         assert!(result.fixed_content.is_some());
         assert!(!result.fixed_content.as_ref().unwrap().contains("Of course"));
         assert!(result
@@ -667,7 +663,7 @@ mod tests {
             .contains("Real content"));
 
         // Without fix, should not return fixed content
-        let result = lint_page(&SqliteEngine::in_memory(), &page, &all_slugs, &opts_no_fix);
+        let result = lint_page(&engine, &page, &all_slugs, &opts_no_fix);
         assert!(result.fixed_content.is_none());
     }
 
@@ -691,8 +687,9 @@ mod tests {
             fix: true,
             dry_run: false,
         };
+        let engine = SqliteEngine::with_config(":memory:", crate::config::Config::default());
 
-        let result = lint_page(&SqliteEngine::in_memory(), &page, &all_slugs, &opts);
+        let result = lint_page(&engine, &page, &all_slugs, &opts);
         // placeholder-date is not auto-fixable, so no fixed content
         assert!(result.fixed_content.is_none());
         // But the issue should still be reported

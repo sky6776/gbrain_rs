@@ -287,7 +287,10 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(engine: SqliteEngine) -> Self {
-        Self::with_config(engine, Config::default())
+        let config = Config::load().unwrap_or_else(|e| {
+            panic!("gbrain 配置加载失败，必须通过环境变量显式配置必选项: {}", e);
+        });
+        Self::with_config(engine, config)
     }
 
     pub fn with_config(engine: SqliteEngine, config: Config) -> Self {

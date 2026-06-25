@@ -174,16 +174,9 @@ pub struct SqliteEngine {
 impl SqliteEngine {
     pub fn new(db_path: &Path) -> Self {
         let config = Config::load().unwrap_or_else(|e| {
-            tracing::warn!("Config load failed, using defaults: {}", e);
-            Config::default()
+            panic!("gbrain 配置加载失败，必须通过环境变量显式配置必选项: {}", e);
         });
-        let dims = config.embedding_dimensions;
-        Self {
-            conn: None,
-            db_path: db_path.to_string_lossy().to_string(),
-            config,
-            embedding_dimensions: dims,
-        }
+        Self::with_config(db_path, config)
     }
 
     pub fn with_config(db_path: impl AsRef<Path>, config: Config) -> Self {
@@ -198,16 +191,9 @@ impl SqliteEngine {
 
     pub fn in_memory() -> Self {
         let config = Config::load().unwrap_or_else(|e| {
-            tracing::warn!("Config load failed, using defaults: {}", e);
-            Config::default()
+            panic!("gbrain 配置加载失败，必须通过环境变量显式配置必选项: {}", e);
         });
-        let dims = config.embedding_dimensions;
-        Self {
-            conn: None,
-            db_path: ":memory:".to_string(),
-            config,
-            embedding_dimensions: dims,
-        }
+        Self::with_config(":memory:", config)
     }
 
     fn conn(&self) -> Result<&Connection> {

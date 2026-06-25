@@ -1,13 +1,13 @@
 //! Engine CRUD integration tests against in-memory SQLite
 
+use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::operations::{OpContext, Operations};
 use gbrain_core::sqlite_engine::SqliteEngine;
 use gbrain_core::types::*;
-use std::path::PathBuf;
 
 fn make_engine() -> SqliteEngine {
-    let mut engine = SqliteEngine::new(PathBuf::from(":memory:").as_path());
+    let mut engine = SqliteEngine::with_config(":memory:", Config::default());
     engine.connect().expect("connect");
     engine.init_schema().expect("init_schema");
     engine
@@ -322,7 +322,7 @@ fn test_stale_chunks_track_embedding_status() {
 #[test]
 fn test_code_page_indexes_symbols_and_edges() {
     let engine = make_engine();
-    let ops = Operations::new(&engine, OpContext::default());
+    let ops = Operations::with_config(&engine, OpContext::default(), Config::default());
     let content = r#"
 pub fn alpha() {
     beta();
@@ -364,7 +364,7 @@ fn beta() {
 #[test]
 fn test_code_search_filters_language_and_symbol_kind() {
     let engine = make_engine();
-    let ops = Operations::new(&engine, OpContext::default());
+    let ops = Operations::with_config(&engine, OpContext::default(), Config::default());
     let content = r#"---
 language: rust
 ---
@@ -417,7 +417,7 @@ fn beta() {
 #[test]
 fn test_embedding_refresh_preserves_code_metadata() {
     let engine = make_engine();
-    let ops = Operations::new(&engine, OpContext::default());
+    let ops = Operations::with_config(&engine, OpContext::default(), Config::default());
     let content = r#"---
 language: rust
 ---

@@ -218,7 +218,10 @@ impl<'a> Operations<'a> {
     const MAX_CONTENT_SIZE: usize = 5_000_000;
 
     pub fn new(engine: &'a SqliteEngine, ctx: OpContext) -> Self {
-        Self::with_config(engine, ctx, Config::default())
+        let config = Config::load().unwrap_or_else(|e| {
+            panic!("gbrain 配置加载失败，必须通过环境变量显式配置必选项: {}", e);
+        });
+        Self::with_config(engine, ctx, config)
     }
 
     pub fn with_config(engine: &'a SqliteEngine, ctx: OpContext, config: Config) -> Self {
@@ -277,6 +280,54 @@ impl<'a> Operations<'a> {
     ) -> Vec<ChunkInput> {
         let pt = page_type.cloned().unwrap_or_else(|| infer_type(slug));
         chunk_page_content(content, config, &pt)
+    }
+
+    fn validate_put_page_request(&self, slug: &str, content: &str) -> Result<()> {
+        validate_page_slug(slug)?;
+
+        if let Some(ref subagent_id) = self.ctx.subagent_id {
+            let required_prefix = format!("wiki/agents/{}/", subagent_id);
+            if !slug.starts_with(&required_prefix) {
+                return Err(crate::error::GBrainError::Security(format!(
+                    "Sub-agent '{}' can only write to '{}' namespace, got '{}'",
+                    subagent_id, required_prefix, slug
+                )));
+            }
+        }
+
+        if content.len() > Self::MAX_CONTENT_SIZE {
+            return Err(crate::error::GBrainError::InvalidInput(format!(
+                "content size {} exceeds maximum {} bytes",
+                content.len(),
+                Self::MAX_CONTENT_SIZE
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn dry_run_put_page(
+        &self,
+        slug: &str,
+        title: &str,
+        content: &str,
+        page_type: Option<PageType>,
+        content_hash: Option<&str>,
+    ) -> Page {
+        info!(slug = %slug, title = %title, "Dry-run: would put page");
+        Page {
+            id: 0,
+            slug: slug.to_string(),
+            page_type: page_type.unwrap_or(PageType::Note),
+            title: title.to_string(),
+            compiled_truth: content.to_string(),
+            timeline: None,
+            frontmatter: None,
+            content_hash: content_hash.map(|s| s.to_string()),
+            created_at: String::new(),
+            updated_at: String::new(),
+            deleted_at: None,
+        }
     }
 
     /// Query the brain (high-level search with auto-escalate)
@@ -563,6 +614,11 @@ impl<'a> Operations<'a> {
         page_type: Option<PageType>,
         content_hash: Option<&str>,
     ) -> Result<Page> {
+        self.validate_put_page_request(slug, content)?;
+        if self.ctx.dry_run {
+            return Ok(self.dry_run_put_page(slug, title, content, page_type, content_hash));
+        }
+
         let slug = slug.to_string();
         let title = title.to_string();
         let content = content.to_string();
@@ -596,31 +652,54 @@ impl<'a> Operations<'a> {
     ) -> Result<Vec<(String, Result<Page>)>> {
         let ctx = self.ctx.clone();
         let config = self.config.clone();
-        let precomputed_chunks: Vec<Vec<ChunkInput>> = pages
-            .iter()
-            .map(|(slug, _title, content, page_type)| {
-                Self::precompute_page_body_chunks(slug, content, &config, page_type.as_ref())
-            })
-            .collect();
+        let mut prepared = Vec::new();
+        let mut results: Vec<Option<(String, Result<Page>)>> =
+            (0..pages.len()).map(|_| None).collect();
 
-        self.engine.transaction_with_engine(|engine| {
+        for (idx, (slug, title, content, page_type)) in pages.into_iter().enumerate() {
+            if let Err(e) = self.validate_put_page_request(&slug, &content) {
+                results[idx] = Some((slug, Err(e)));
+                continue;
+            }
+
+            if self.ctx.dry_run {
+                let page = self.dry_run_put_page(&slug, &title, &content, page_type, None);
+                results[idx] = Some((slug, Ok(page)));
+                continue;
+            }
+
+            let chunks =
+                Self::precompute_page_body_chunks(&slug, &content, &config, page_type.as_ref());
+            prepared.push((idx, slug, title, content, page_type, chunks));
+        }
+
+        if prepared.is_empty() {
+            return Ok(results.into_iter().flatten().collect());
+        }
+
+        let tx_results = self.engine.transaction_with_engine(|engine| {
             let ops = Operations::with_config_in_transaction(engine, ctx.clone(), config.clone());
-            Ok(pages
-                .iter()
-                .zip(precomputed_chunks)
-                .map(|((slug, title, content, page_type), chunks)| {
+            Ok(prepared
+                .into_iter()
+                .map(|(idx, slug, title, content, page_type, chunks)| {
                     let result = ops.put_page_with_precomputed_chunks(
-                        slug,
-                        title,
-                        content,
-                        page_type.clone(),
+                        &slug,
+                        &title,
+                        &content,
+                        page_type,
                         None,
                         Some(chunks),
                     );
-                    (slug.clone(), result)
+                    (idx, slug, result)
                 })
                 .collect::<Vec<_>>())
-        })
+        })?;
+
+        for (idx, slug, result) in tx_results {
+            results[idx] = Some((slug, result));
+        }
+
+        Ok(results.into_iter().flatten().collect())
     }
 
     /// P2-4: Batch add multiple links in a single transaction.
@@ -668,45 +747,10 @@ impl<'a> Operations<'a> {
         content_hash: Option<&str>,
         precomputed_body_chunks: Option<Vec<ChunkInput>>,
     ) -> Result<Page> {
-        validate_page_slug(slug)?;
-
-        // P1-7: Sub-agent namespace enforcement (mirrors TS viaSubagent)
-        // When subagent_id is set, restrict writes to wiki/agents/<subagent_id>/... namespace
-        if let Some(ref subagent_id) = self.ctx.subagent_id {
-            let required_prefix = format!("wiki/agents/{}/", subagent_id);
-            if !slug.starts_with(&required_prefix) {
-                return Err(crate::error::GBrainError::Security(format!(
-                    "Sub-agent '{}' can only write to '{}' namespace, got '{}'",
-                    subagent_id, required_prefix, slug
-                )));
-            }
-        }
-
-        // P2-1: Content size guard (mirrors TS 5MB limit)
-        if content.len() > Self::MAX_CONTENT_SIZE {
-            return Err(crate::error::GBrainError::InvalidInput(format!(
-                "content size {} exceeds maximum {} bytes",
-                content.len(),
-                Self::MAX_CONTENT_SIZE
-            )));
-        }
+        self.validate_put_page_request(slug, content)?;
 
         if self.ctx.dry_run {
-            info!(slug = %slug, title = %title, "Dry-run: would put page");
-            // Return a stub page for preview
-            return Ok(Page {
-                id: 0,
-                slug: slug.to_string(),
-                page_type: page_type.unwrap_or(PageType::Note),
-                title: title.to_string(),
-                compiled_truth: content.to_string(),
-                timeline: None,
-                frontmatter: None,
-                content_hash: content_hash.map(|s| s.to_string()),
-                created_at: String::new(),
-                updated_at: String::new(),
-                deleted_at: None,
-            });
+            return Ok(self.dry_run_put_page(slug, title, content, page_type, content_hash));
         }
 
         info!(slug = %slug, title = %title, "Writing page");
@@ -1378,19 +1422,22 @@ impl<'a> Operations<'a> {
             let rewrite_api_key = input
                 .rewrite_api_key
                 .as_deref()
+                .filter(|v| !v.trim().is_empty())
                 .or_else(|| self.config.expansion_api_key_resolved())
                 .unwrap_or("");
             let rewrite_base_url = input
                 .rewrite_base_url
                 .as_deref()
+                .filter(|v| !v.trim().is_empty())
                 .or_else(|| self.config.expansion_base_url_resolved())
                 .unwrap_or("");
             let rewrite_model = input
                 .rewrite_model
                 .as_deref()
+                .filter(|v| !v.trim().is_empty())
                 .unwrap_or(self.config.expansion_model.as_str());
 
-            if !rewrite_api_key.is_empty() {
+            if !rewrite_api_key.is_empty() && !rewrite_base_url.is_empty() {
                 let rt = crate::runtime::shared_runtime();
                 // rewrite_query_with_context 内部会做标准化，直接传入原始查询
                 let rewritten = rt.block_on(crate::kb::search::rewrite_query_with_context(

@@ -5,6 +5,7 @@
 //! Uses git CLI (not git2 crate) for simplicity.
 //! Tracks sync state in a SyncManifest and logs failures as JSONL.
 
+use crate::config::Config;
 use crate::error::{GBrainError, Result};
 use crate::types::PageType;
 use serde::{Deserialize, Serialize};
@@ -166,6 +167,7 @@ pub fn git_sync(
     manifest_path: &Path,
     failure_log_path: &Path,
     engine: &crate::sqlite_engine::SqliteEngine,
+    config: &Config,
 ) -> Result<GitSyncResult> {
     info!(repo_url = %repo_url, local_path = %local_path.display(), "Starting git sync");
 
@@ -247,7 +249,7 @@ pub fn git_sync(
         };
 
         // Connect engine if needed
-        let ops = crate::operations::Operations::new(
+        let ops = crate::operations::Operations::with_config(
             engine,
             crate::operations::OpContext {
                 remote: false,
@@ -255,6 +257,7 @@ pub fn git_sync(
                 dry_run: false,
                 subagent_id: None,
             },
+            config.clone(),
         );
 
         let result = ops.put_page(&slug, &title, &import_content, page_type, Some(&hash));
@@ -320,6 +323,7 @@ pub fn git_sync(
 /// `remote` should be true when called from MCP (untrusted callers), false for CLI.
 pub fn sync_brain(
     engine: &crate::sqlite_engine::SqliteEngine,
+    config: &Config,
     repo_path: &Path,
     force_full: bool,
     remote: bool,
@@ -427,7 +431,7 @@ pub fn sync_brain(
             content
         };
 
-        let ops = crate::operations::Operations::new(
+        let ops = crate::operations::Operations::with_config(
             engine,
             crate::operations::OpContext {
                 remote,
@@ -435,6 +439,7 @@ pub fn sync_brain(
                 dry_run: false,
                 subagent_id: None,
             },
+            config.clone(),
         );
 
         match ops.put_page(&slug, &title, &import_content, page_type, Some(&hash)) {

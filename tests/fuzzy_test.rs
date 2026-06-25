@@ -1,13 +1,13 @@
 //! Fuzzy search integration tests
 //! Tests trigram_similarity, find_by_title_fuzzy, and resolve_slugs
 
+use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::sqlite_engine::SqliteEngine;
 use gbrain_core::types::*;
-use std::path::PathBuf;
 
 fn make_engine() -> SqliteEngine {
-    let mut engine = SqliteEngine::new(PathBuf::from(":memory:").as_path());
+    let mut engine = SqliteEngine::with_config(":memory:", Config::default());
     engine.connect().expect("connect");
     engine.init_schema().expect("init_schema");
     engine

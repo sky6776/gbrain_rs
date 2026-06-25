@@ -771,7 +771,8 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
     }
 
     // ---------- 需要数据库的命令 ----------
-    let mut engine = SqliteEngine::new(PathBuf::from(db_path.clone()).as_path());
+    let mut engine =
+        SqliteEngine::with_config(PathBuf::from(db_path.clone()).as_path(), config.clone());
     // dry-run 时使用只读连接，跳过 journal_mode=WAL 等写入型 PRAGMA，避免修改数据库状态
     if any_dry_run {
         engine.connect_readonly()?;

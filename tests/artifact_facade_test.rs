@@ -18,10 +18,9 @@ use gbrain_core::config::Config;
 use gbrain_core::engine::BrainEngine;
 use gbrain_core::operations::OpContext;
 use gbrain_core::sqlite_engine::SqliteEngine;
-use std::path::PathBuf;
 
 fn make_engine() -> SqliteEngine {
-    let mut engine = SqliteEngine::new(PathBuf::from(":memory:").as_path());
+    let mut engine = SqliteEngine::with_config(":memory:", Config::default());
     engine.connect().expect("connect");
     engine.init_schema().expect("init_schema");
     // Ensure jobs table exists (needed by KB document processing)
@@ -1658,7 +1657,7 @@ fn artifact_put_promote_same_slug_update_stales_shadow_projection() {
 
 fn make_mcp_server() -> gbrain_core::mcp::McpServer {
     let engine = make_engine();
-    gbrain_core::mcp::McpServer::new(engine)
+    gbrain_core::mcp::McpServer::with_config(engine, Config::default())
 }
 
 // --- MCP tools/call 测试: artifact_put 通过 dispatch 创建 artifact ---
