@@ -23,6 +23,7 @@ pub fn mime_type_for_ext(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "doc" => "application/msword",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         // 文本
         "txt" => "text/plain",

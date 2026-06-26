@@ -16,7 +16,7 @@ use tracing::debug;
 /// | --intent evidence                    | yes      | yes| yes    | no   | candidate |
 /// | --intent memory                      | yes      | yes| yes    | no   | auto-low  |
 /// | --intent promote                     | yes      | yes| yes    | no   | candidate |
-/// | PDF/DOCX/XLSX/CSV/HTML/TXT with auto| yes      | yes| yes    | no   | candidate |
+/// | PDF/DOCX/XLS/XLSX/CSV/HTML/TXT auto | yes      | yes| yes    | no   | candidate |
 /// | Raw Markdown with auto               | yes      | yes| yes    | no   | candidate |
 /// | Markdown with gbrain frontmatter     | optional | no | no     | no   | direct put_page |
 /// | Code file/repo with auto             | optional | no | no     | no   | code import/sync |

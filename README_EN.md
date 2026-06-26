@@ -38,7 +38,7 @@ gbrain uses embedded SQLite, so no external database is required; however, curre
 
 - **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when the document has enough nodes; the RAPTOR LLM reads only `GBRAIN_KB_RAPTOR_*`; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
+- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when the document has enough nodes; the RAPTOR LLM reads only `GBRAIN_KB_RAPTOR_*`; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLS/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through auto-apply or candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
@@ -1113,7 +1113,7 @@ Lower-level hybrid search pipeline (used by internal or programmatic search path
 
 Async five-stage document processing pipeline:
 
-1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
+1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLS / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
 2. **Split** — Recursive splitter; semantic split mode (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
 3. **Embed** — Vector embedding generation and persistence
 4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and the node-count prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization); the LLM uses only the explicit `GBRAIN_KB_RAPTOR_*` configuration

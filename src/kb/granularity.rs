@@ -1,7 +1,7 @@
 //! 文档大小分类 — 决定处理策略（全文/段落/章节/结构化）
 //!
 //! 规则初版：
-//! - xlsx/csv → Table
+//! - xls/xlsx/csv → Table
 //! - 0-800 chars → Micro
 //! - 801-3000 chars → Small
 //! - 3001-30000 chars → Medium
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DocumentGranularity {
-    /// 表格文档（xlsx/csv），有结构化的行和列
+    /// 表格文档（xls/xlsx/csv），有结构化的行和列
     Table,
     /// 0-800 字符：作为单个 whole-document node 处理
     Micro,
@@ -60,7 +60,7 @@ pub fn classify_granularity(
     page_count: usize,
 ) -> DocumentGranularity {
     // 表格检测（按扩展名）
-    if matches!(extension, "xlsx" | "csv") {
+    if matches!(extension, "xls" | "xlsx" | "csv") {
         return DocumentGranularity::Table;
     }
 
@@ -152,6 +152,10 @@ mod tests {
 
     #[test]
     fn test_classify_table() {
+        assert_eq!(
+            classify_granularity("xls", 10000, 0),
+            DocumentGranularity::Table
+        );
         assert_eq!(
             classify_granularity("xlsx", 0, 0),
             DocumentGranularity::Table

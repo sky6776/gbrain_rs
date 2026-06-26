@@ -1724,7 +1724,7 @@ pub async fn ingest_directory(
     }
 
     let supported_extensions: &[&str] = &[
-        "pdf", "docx", "xlsx", "csv", "html", "htm", "txt", "md", "png", "jpg", "jpeg",
+        "pdf", "docx", "xls", "xlsx", "csv", "html", "htm", "txt", "md", "png", "jpg", "jpeg",
     ];
 
     let mut files: Vec<std::path::PathBuf> = Vec::new();

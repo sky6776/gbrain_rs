@@ -521,6 +521,7 @@ mod tests {
     #[test]
     fn test_is_table_extension() {
         assert!(is_table_extension("csv"));
+        assert!(is_table_extension("xls"));
         assert!(is_table_extension("xlsx"));
         assert!(!is_table_extension("md"));
         assert!(!is_table_extension("txt"));

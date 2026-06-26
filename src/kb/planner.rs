@@ -16,7 +16,7 @@ pub enum QueryType {
     FactLookup,
     /// 概念/开放式搜索
     Conceptual,
-    /// 表格查询：含 "sheet/表/清单/xlsx/csv"
+    /// 表格查询：含 "sheet/表/清单/xls/xlsx/csv"
     TableLookup,
     /// 时间范围查询：含日期/时间词
     RecentOrTimebound,
@@ -104,6 +104,7 @@ pub fn classify_query(query: &str) -> QueryType {
     if q.contains("表")
         || q.contains("sheet")
         || q.contains("清单")
+        || q.contains("xls")
         || q.contains("xlsx")
         || q.contains("csv")
         || q.contains("汇总")
@@ -212,6 +213,7 @@ mod tests {
     #[test]
     fn test_classify_table() {
         assert_eq!(classify_query("2024 Q3 报销清单"), QueryType::TableLookup);
+        assert_eq!(classify_query("导出xls报表"), QueryType::TableLookup);
         assert_eq!(classify_query("导出xlsx报表"), QueryType::TableLookup);
     }
 

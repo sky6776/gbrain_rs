@@ -217,6 +217,7 @@ impl Default for Config {
                 // 否则 route planner 认为可处理的文件会被 MCP 安全检查拒绝
                 "pdf".into(),
                 "docx".into(),
+                "xls".into(),
                 "xlsx".into(),
                 "csv".into(),
                 "tsv".into(),

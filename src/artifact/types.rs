@@ -802,13 +802,13 @@ pub struct ArtifactEvent {
 
 /// KB 支持的文档扩展名列表
 ///
-/// 设计文档 §6.2: PDF/DOCX/XLSX/CSV/HTML/TXT/MD 走 KB 投影路径。
+/// 设计文档 §6.2: PDF/DOCX/XLS/XLSX/CSV/HTML/TXT/MD 走 KB 投影路径。
 /// GLM-OCR 支持的 JPG/PNG 图片走 KB OCR 投影路径，其他图片走附件路径。
-/// 修复：移除 doc/xls — ParserRegistry 未注册对应 parser，
-/// 旧版二进制 Office 文件走 text fallback 要求 UTF-8 会失败
+/// 修复：移除 doc — ParserRegistry 未注册对应 parser，
+/// 旧版 Word 二进制文件走 text fallback 要求 UTF-8 会失败
 pub const KB_SUPPORTED_EXTENSIONS: &[&str] = &[
-    "pdf", "docx", "xlsx", "csv", "tsv", "html", "htm", "txt", "md", "markdown", "rst", "json",
-    "xml", "yaml", "yml", "toml", "png", "jpg", "jpeg",
+    "pdf", "docx", "xls", "xlsx", "csv", "tsv", "html", "htm", "txt", "md", "markdown", "rst",
+    "json", "xml", "yaml", "yml", "toml", "png", "jpg", "jpeg",
 ];
 
 /// 代码文件扩展名列表
@@ -858,7 +858,7 @@ pub fn is_ocr_image_file(extension: &str) -> bool {
 /// | --intent document                    | yes      | yes| yes    | no   | candidate |
 /// | --intent memory                      | yes      | yes| yes    | no   | auto-low  |
 /// | --intent promote                     | yes      | yes| yes    | no   | candidate |
-/// | PDF/DOCX/XLSX/CSV/HTML/TXT with auto| yes      | yes| yes    | no   | candidate |
+/// | PDF/DOCX/XLS/XLSX/CSV/HTML/TXT auto | yes      | yes| yes    | no   | candidate |
 /// | Raw Markdown with auto               | yes      | yes| yes    | no   | candidate |
 /// | Markdown with gbrain frontmatter     | optional | no | no     | no   | direct put_page |
 /// | Code file/repo with auto             | optional | no | no     | no   | code import/sync |

@@ -1,10 +1,10 @@
-//! XLSX parser using calamine with structured sheet/row output (P2-012)
+//! Spreadsheet parser using calamine with structured sheet/row output (P2-012)
 //! FIX9-04: 为每个 sheet block 写入 source span
 //! FIX9-18: 表头行不写入数据行
 
 use super::{DocumentParser, ParsedDocument};
 use crate::error::GBrainError;
-use calamine::{open_workbook_from_rs, Data, Reader, Xlsx};
+use calamine::{open_workbook_auto_from_rs, Data, Reader};
 use std::collections::HashMap;
 
 pub struct XlsxParser;
@@ -24,8 +24,8 @@ impl XlsxParser {
 impl DocumentParser for XlsxParser {
     fn parse(&self, data: &[u8]) -> Result<ParsedDocument, GBrainError> {
         let cursor = std::io::Cursor::new(data);
-        let mut workbook: Xlsx<_> = open_workbook_from_rs(cursor)
-            .map_err(|e| GBrainError::FileError(format!("XLSX open failed: {}", e)))?;
+        let mut workbook = open_workbook_auto_from_rs(cursor)
+            .map_err(|e| GBrainError::FileError(format!("spreadsheet open failed: {}", e)))?;
 
         let sheets = workbook.sheet_names().to_vec();
         let mut parts = Vec::new();
@@ -124,6 +124,19 @@ impl DocumentParser for XlsxParser {
     }
 
     fn extensions(&self) -> &[&str] {
-        &["xlsx"]
+        &["xlsx", "xls"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spreadsheet_parser_accepts_legacy_xls_extension() {
+        let parser = XlsxParser::new();
+
+        assert!(parser.extensions().contains(&"xlsx"));
+        assert!(parser.extensions().contains(&"xls"));
     }
 }

@@ -2758,7 +2758,7 @@ fn artifact_put_content_exceeds_1mb_rejected() {
 }
 
 /// P2-12 修复验证：artifact_put --file 的文本文件扩展名白名单。
-/// pdf/docx/xlsx 等二进制格式不应通过 artifact_put --file，
+/// pdf/docx/xls/xlsx 等二进制格式不应通过 artifact_put --file，
 /// 它们应走 artifact_upload 路径。
 #[test]
 fn artifact_put_file_text_only_allowlist() {
@@ -2771,6 +2771,10 @@ fn artifact_put_file_text_only_allowlist() {
     assert!(
         !text_exts.contains(&"docx"),
         "P2-12 修复：TEXT_FILE_EXTENSIONS 不应包含 docx"
+    );
+    assert!(
+        !text_exts.contains(&"xls"),
+        "P2-12 修复：TEXT_FILE_EXTENSIONS 不应包含 xls"
     );
     assert!(
         !text_exts.contains(&"xlsx"),
@@ -3061,7 +3065,7 @@ fn mcp_artifact_put_file_accepts_text_extensions() {
     );
 }
 
-/// P3 修复验证：通过 MCP dispatch artifact_put --file 传入 .pdf/.docx/.xlsx
+/// P3 修复验证：通过 MCP dispatch artifact_put --file 传入 .pdf/.docx/.xls/.xlsx
 /// 应在 validate_upload_source 阶段被扩展名白名单拒绝，
 /// 不会进入 String::from_utf8 转换。
 #[test]
@@ -3069,7 +3073,7 @@ fn mcp_artifact_put_file_rejects_binary_extensions() {
     let mut server = make_mcp_server();
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).expect("创建临时目录");
 
-    for ext in &["pdf", "docx", "xlsx"] {
+    for ext in &["pdf", "docx", "xls", "xlsx"] {
         let file_path = dir.path().join(format!("test.{}", ext));
         std::fs::write(&file_path, b"fake binary content").expect("写入二进制文件");
 

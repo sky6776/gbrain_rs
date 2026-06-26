@@ -38,7 +38,7 @@ gbrain 使用嵌入式 SQLite，不需要外部数据库；但当前启动会严
 
 - **检索能力** — 统一 facade 查询当前以 FTS5 关键词检索为主；底层 hybrid API 可将关键词与可选向量结果用 RRF 融合并支持多查询扩展，模糊三元组查询作为独立 API 提供
 - **知识图谱** — Wiki 链接提取、类型化链接、图遍历、反向链接对称性验证
-- **KB 子系统** — 异步文档处理管线，新建库默认启用 RAPTOR（文档节点数满足要求时执行，LLM 只读取 `GBRAIN_KB_RAPTOR_*`）；语义分块仍按库配置启用；支持 Markdown/PDF/DOCX/XLSX/CSV/HTML/纯文本解析、PDF 页级 OCR 自动检测与回写，以及 JPG/PNG 图片上传后的自动 OCR 入库；代码页面索引走独立代码流程
+- **KB 子系统** — 异步文档处理管线，新建库默认启用 RAPTOR（文档节点数满足要求时执行，LLM 只读取 `GBRAIN_KB_RAPTOR_*`）；语义分块仍按库配置启用；支持 Markdown/PDF/DOCX/XLS/XLSX/CSV/HTML/纯文本解析、PDF 页级 OCR 自动检测与回写，以及 JPG/PNG 图片上传后的自动 OCR 入库；代码页面索引走独立代码流程
 - **中文 NLP** — jieba 分词 + 拼音 + 前缀通配符，FTS5 查询自动重构，中文标点断句与分词计数，预分词列自动同步
 - **单入口多投影融合** — 原件上传（Upload）自动创建 KB 文档、影子页面、页面更新或附件等投影，并通过自动应用或候选评审形成链接/时间线变更；支持溯源审计、提升、版本链与回滚，内部 Memory Query 含 4 种策略
 - **MCP 服务器** — 完整的模型上下文协议（JSON-RPC 2.0）服务器，默认暴露 Artifact facade 与 KB OCR 工具
@@ -1142,7 +1142,7 @@ cargo clippy                  # 代码检查
 
 异步五阶段文档处理管线:
 
-1. **解析** — 文档解析器（Markdown / PDF / DOCX / XLSX / CSV / HTML / 纯文本）；代码图索引走独立页面流程
+1. **解析** — 文档解析器（Markdown / PDF / DOCX / XLS / XLSX / CSV / HTML / 纯文本）；代码图索引走独立页面流程
 2. **拆分** — 递归拆分器；库启用 `semantic_enabled` 且具备嵌入能力时可使用语义拆分器（Savitzky-Golay 平滑 + chunk_overlap 重叠）
 3. **嵌入** — 向量嵌入生成与持久化
 4. **RAPTOR（新库默认开启）** — `raptor_enabled=true` 且节点数量满足条件时构建递归摘要树（K-Means++ 聚类 + LLM 摘要）；LLM 只使用显式的 `GBRAIN_KB_RAPTOR_*` 配置

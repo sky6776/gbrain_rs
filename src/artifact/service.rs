@@ -31,7 +31,7 @@ pub const MAX_PUT_MEMORY_CONTENT_BYTES: usize = 1024 * 1024;
 
 /// P2-12 修复：artifact_put --file 文本文件专用扩展名白名单。
 /// artifact_put 语义是"把文件内容作为手动长期记忆写入"，
-/// 只接受纯文本格式，不接受 pdf/docx/xlsx 等 KB 文档类型
+/// 只接受纯文本格式，不接受 pdf/docx/xls/xlsx 等 KB 文档类型
 /// （这些应走 artifact_upload 路径）。
 pub const TEXT_FILE_EXTENSIONS: &[&str] = &[
     "txt", "md", "markdown", "rst", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "html",
