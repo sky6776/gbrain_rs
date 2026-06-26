@@ -265,6 +265,47 @@ struct EmbeddedImageOcrCandidate {
     base64: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EmbeddedImageOcrOutcome {
+    status: OcrStatus,
+    coverage: f64,
+}
+
+fn embedded_image_ocr_outcome(total: usize, success_count: usize) -> EmbeddedImageOcrOutcome {
+    let coverage = if total == 0 {
+        0.0
+    } else {
+        success_count as f64 / total as f64
+    };
+    let status = if total == 0 {
+        OcrStatus::NotNeeded
+    } else if success_count == total {
+        OcrStatus::Done
+    } else if success_count > 0 {
+        OcrStatus::Partial
+    } else {
+        OcrStatus::Failed
+    };
+    EmbeddedImageOcrOutcome { status, coverage }
+}
+
+fn finish_embedded_image_ocr(
+    conn: &Connection,
+    doc_id: i64,
+    run_id: &str,
+    outcome: Option<EmbeddedImageOcrOutcome>,
+) -> Result<()> {
+    if let Some(outcome) = outcome {
+        KbEngine::new(conn).update_document_ocr_with_run_guard(
+            doc_id,
+            outcome.status.as_str(),
+            outcome.coverage,
+            Some(run_id),
+        )?;
+    }
+    Ok(())
+}
+
 fn supported_embedded_image_ocr_mime(mime_type: Option<&str>) -> Option<&'static str> {
     let mime_type = mime_type?.trim().to_ascii_lowercase();
     match mime_type.as_str() {
@@ -365,10 +406,10 @@ fn apply_embedded_image_ocr(
     run_id: &str,
     normalized: &mut crate::kb::parser::NormalizedDocument,
     config: &crate::config::Config,
-) -> Result<usize> {
+) -> Result<Option<EmbeddedImageOcrOutcome>> {
     let candidates = embedded_image_ocr_candidates(&normalized.media_refs);
     if candidates.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
 
     let kb = KbEngine::new(conn);
@@ -384,7 +425,7 @@ fn apply_embedded_image_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(0);
+        return Ok(None);
     }
 
     let Some(api_key) = config.ocr_api_key.as_deref() else {
@@ -399,7 +440,7 @@ fn apply_embedded_image_ocr(
             0.0,
             Some(run_id),
         )?;
-        return Ok(0);
+        return Ok(None);
     };
 
     use crate::kb::ocr_glm::{build_ocr_options_from_config, GlmOcrProvider};
@@ -531,16 +572,7 @@ fn apply_embedded_image_ocr(
         }
     }
 
-    let coverage = success_count as f64 / total as f64;
-    let status = if success_count == total {
-        OcrStatus::Done
-    } else if success_count > 0 {
-        OcrStatus::Partial
-    } else {
-        OcrStatus::Failed
-    };
-    kb.update_document_ocr_with_run_guard(doc_id, status.as_str(), coverage, Some(run_id))?;
-    Ok(success_count)
+    Ok(Some(embedded_image_ocr_outcome(total, success_count)))
 }
 
 /// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
@@ -800,15 +832,17 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
         }
     });
 
-    if normalized
+    let embedded_ocr_outcome = if normalized
         .media_refs
         .iter()
         .any(|media| media.media_type == "image" && media.embedded_data_base64.is_some())
     {
         let ocr_config = crate::config::Config::load_partial()
             .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
-        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?;
-    }
+        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?
+    } else {
+        None
+    };
 
     let word_total: i32 = count_words(&normalized.markdown) as i32;
     kb.update_document_status_with_run_guard(
@@ -975,6 +1009,8 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             }
         }
     }
+
+    finish_embedded_image_ocr(conn, doc_id, run_id, embedded_ocr_outcome)?;
 
     Ok(ProcessResult {
         word_total,
@@ -1167,9 +1203,11 @@ pub async fn process_document_async(
         parsed
     };
 
-    if ext != "pdf" {
-        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?;
-    }
+    let embedded_ocr_outcome = if ext != "pdf" {
+        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?
+    } else {
+        None
+    };
 
     let effective_content = normalized.markdown.as_str();
     let word_total: i32 = count_words(effective_content) as i32;
@@ -1930,6 +1968,7 @@ pub async fn process_document_async(
             .unwrap_or(0);
         crate::kb::ocr::update_document_ocr_status(conn, doc_id, pdf_total, Some(run_id))?;
     }
+    finish_embedded_image_ocr(conn, doc_id, run_id, embedded_ocr_outcome)?;
 
     report_progress(
         on_progress,
@@ -4104,6 +4143,21 @@ mod tests {
             "embedded://docx/word/media/image1.png"
         );
         assert_eq!(candidates[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn embedded_image_ocr_outcome_tracks_final_status() {
+        let done = embedded_image_ocr_outcome(2, 2);
+        assert_eq!(done.status, OcrStatus::Done);
+        assert!((done.coverage - 1.0).abs() < f64::EPSILON);
+
+        let partial = embedded_image_ocr_outcome(2, 1);
+        assert_eq!(partial.status, OcrStatus::Partial);
+        assert!((partial.coverage - 0.5).abs() < f64::EPSILON);
+
+        let failed = embedded_image_ocr_outcome(2, 0);
+        assert_eq!(failed.status, OcrStatus::Failed);
+        assert!((failed.coverage - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -5,11 +5,14 @@
 
 use super::{DocumentParser, ParsedDocument};
 use crate::error::GBrainError;
-use crate::kb::types::MediaRef;
+use crate::kb::types::{MediaRef, ParsedBlock};
 use std::collections::HashMap;
 use std::io::Read;
 
 pub struct DocxParser;
+
+type DocxText = (String, Vec<String>, Vec<ParsedBlock>);
+type DocxStructured = (String, Vec<String>, Vec<ParsedBlock>, Vec<MediaRef>);
 
 impl Default for DocxParser {
     fn default() -> Self {
@@ -61,17 +64,7 @@ fn heading_level(style: &str) -> Option<u32> {
 }
 
 /// P2-007 + P2-008: 结构化提取 DOCX 文本，同时收集标题层级
-fn extract_docx_text_structured(
-    data: &[u8],
-) -> Result<
-    (
-        String,
-        Vec<String>,
-        Vec<crate::kb::types::ParsedBlock>,
-        Vec<MediaRef>,
-    ),
-    GBrainError,
-> {
+fn extract_docx_text_structured(data: &[u8]) -> Result<DocxStructured, GBrainError> {
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| GBrainError::FileError(format!("DOCX open failed: {}", e)))?;
@@ -115,9 +108,7 @@ fn extract_docx_embedded_images<R: std::io::Read + std::io::Seek>(
     refs
 }
 
-fn extract_docx_text_from_document_xml(
-    xml_content: &str,
-) -> Result<(String, Vec<String>, Vec<crate::kb::types::ParsedBlock>), GBrainError> {
+fn extract_docx_text_from_document_xml(xml_content: &str) -> Result<DocxText, GBrainError> {
     let mut parts = Vec::new();
     let mut headings = Vec::new();
     let mut blocks = Vec::new();
