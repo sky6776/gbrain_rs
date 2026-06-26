@@ -746,6 +746,15 @@ pub struct MediaRef {
     pub media_type: String,
     /// 存储路径或远程 URL
     pub storage_path: String,
+    /// MIME 类型（内嵌媒体或已知远程资源）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// 媒体字节大小
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_size: Option<i64>,
+    /// 仅用于处理阶段的内嵌媒体数据；不会写入 node metadata 或 API 响应。
+    #[serde(skip)]
+    pub embedded_data_base64: Option<String>,
     /// alt 文本（图片）或链接文本（附件）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_text: Option<String>,

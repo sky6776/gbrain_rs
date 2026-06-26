@@ -697,6 +697,9 @@ pub fn extract_media_refs(html: &str) -> Vec<crate::kb::types::MediaRef> {
         refs.push(crate::kb::types::MediaRef {
             media_type: "image".to_string(),
             storage_path: src,
+            mime_type: None,
+            byte_size: None,
+            embedded_data_base64: None,
             alt_text: alt,
             ocr_text: None,
             caption: title,
@@ -720,6 +723,9 @@ pub fn extract_media_refs(html: &str) -> Vec<crate::kb::types::MediaRef> {
         refs.push(crate::kb::types::MediaRef {
             media_type: "attachment".to_string(),
             storage_path: href,
+            mime_type: None,
+            byte_size: None,
+            embedded_data_base64: None,
             alt_text: if label.is_empty() { None } else { Some(label) },
             ocr_text: None,
             caption: None,
@@ -740,6 +746,9 @@ pub fn extract_media_refs(html: &str) -> Vec<crate::kb::types::MediaRef> {
         refs.push(crate::kb::types::MediaRef {
             media_type: "attachment".to_string(),
             storage_path: href,
+            mime_type: None,
+            byte_size: None,
+            embedded_data_base64: None,
             alt_text: if inner_text.is_empty() {
                 None
             } else {

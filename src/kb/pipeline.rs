@@ -22,8 +22,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 // M-8 修复：MAX_OCR_IMAGE_BYTES 统一定义在 ocr.rs，此处引用
-use crate::kb::ocr::MAX_OCR_IMAGE_BYTES;
+use crate::kb::ocr::{OcrStatus, MAX_OCR_IMAGE_BYTES};
 const OCR_IMAGE_TOTAL_PAGES: i32 = 1;
+const EMBEDDED_IMAGE_OCR_SECTION_TITLE: &str = "Embedded Image OCR";
 const AUGMENT_MAX_CONCURRENCY: usize = 8;
 const AUGMENT_PROGRESS_EVERY_NODES: usize = 8;
 const AUGMENT_PROGRESS_START: i32 = 30;
@@ -254,6 +255,292 @@ fn media_ref_matches_chunk(media: &MediaRef, page_num: Option<i32>, chunk: &str)
         let probe = probe.trim();
         !probe.is_empty() && chunk_lower.contains(&probe.to_lowercase())
     })
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedImageOcrCandidate {
+    media_index: usize,
+    storage_path: String,
+    mime_type: String,
+    base64: String,
+}
+
+fn supported_embedded_image_ocr_mime(mime_type: Option<&str>) -> Option<&'static str> {
+    let mime_type = mime_type?.trim().to_ascii_lowercase();
+    match mime_type.as_str() {
+        "image/png" => Some("image/png"),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        _ => None,
+    }
+}
+
+fn embedded_image_ocr_candidates(media_refs: &[MediaRef]) -> Vec<EmbeddedImageOcrCandidate> {
+    media_refs
+        .iter()
+        .enumerate()
+        .filter_map(|(media_index, media)| {
+            if media.media_type != "image"
+                || media
+                    .ocr_text
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                return None;
+            }
+            let base64 = media.embedded_data_base64.as_ref()?;
+            let mime_type = supported_embedded_image_ocr_mime(media.mime_type.as_deref())?;
+            let byte_size = match media.byte_size {
+                Some(size) if size >= 0 => size as usize,
+                _ => base64.len().saturating_mul(3) / 4,
+            };
+            if byte_size > MAX_OCR_IMAGE_BYTES {
+                tracing::warn!(
+                    media_path = %media.storage_path,
+                    byte_size,
+                    max_bytes = MAX_OCR_IMAGE_BYTES,
+                    "Skipping embedded image OCR because image is too large"
+                );
+                return None;
+            }
+            Some(EmbeddedImageOcrCandidate {
+                media_index,
+                storage_path: media.storage_path.clone(),
+                mime_type: mime_type.to_string(),
+                base64: base64.clone(),
+            })
+        })
+        .collect()
+}
+
+fn embedded_image_ocr_result_text(results: &[crate::kb::ocr_provider::OcrPageResult]) -> String {
+    results
+        .iter()
+        .filter_map(|result| {
+            let text = if result.text.trim().is_empty() {
+                result.markdown.trim()
+            } else {
+                result.text.trim()
+            };
+            (!text.is_empty()).then(|| text.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn append_embedded_image_ocr_markdown(
+    normalized: &mut crate::kb::parser::NormalizedDocument,
+    storage_path: &str,
+    text: &str,
+) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let source_start = normalized.markdown.chars().count() as i32;
+    let prefix = if normalized.markdown.trim().is_empty() {
+        ""
+    } else {
+        "\n\n"
+    };
+    let section =
+        format!("{prefix}## {EMBEDDED_IMAGE_OCR_SECTION_TITLE}\n\n### {storage_path}\n\n{text}\n");
+    normalized.markdown.push_str(&section);
+    let source_end = normalized.markdown.chars().count() as i32;
+    normalized.blocks.push(ParsedBlock {
+        text: text.to_string(),
+        title_path: EMBEDDED_IMAGE_OCR_SECTION_TITLE.to_string(),
+        page_number: None,
+        source_start: Some(source_start),
+        source_end: Some(source_end),
+        block_type: "image_ocr".to_string(),
+        metadata: serde_json::json!({ "storage_path": storage_path }).to_string(),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_embedded_image_ocr(
+    conn: &Connection,
+    doc_id: i64,
+    lib_id: i64,
+    run_id: &str,
+    normalized: &mut crate::kb::parser::NormalizedDocument,
+    config: &crate::config::Config,
+) -> Result<usize> {
+    let candidates = embedded_image_ocr_candidates(&normalized.media_refs);
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
+    let kb = KbEngine::new(conn);
+    if !config.ocr_enabled {
+        tracing::warn!(
+            doc_id,
+            image_count = candidates.len(),
+            "Embedded image OCR needed but OCR is disabled"
+        );
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Needed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(0);
+    }
+
+    let Some(api_key) = config.ocr_api_key.as_deref() else {
+        tracing::warn!(
+            doc_id,
+            image_count = candidates.len(),
+            "Embedded image OCR needed but OCR API key is not configured"
+        );
+        kb.update_document_ocr_with_run_guard(
+            doc_id,
+            OcrStatus::Needed.as_str(),
+            0.0,
+            Some(run_id),
+        )?;
+        return Ok(0);
+    };
+
+    use crate::kb::ocr_glm::{build_ocr_options_from_config, GlmOcrProvider};
+    use crate::kb::ocr_provider::{OcrFilePayload, OcrInput, OcrProvider};
+
+    kb.update_document_ocr_with_run_guard(
+        doc_id,
+        OcrStatus::Processing.as_str(),
+        0.0,
+        Some(run_id),
+    )?;
+
+    let options = build_ocr_options_from_config(config);
+    let provider = GlmOcrProvider::new(api_key);
+    let total = candidates.len();
+    let mut success_count = 0usize;
+
+    for candidate in candidates {
+        let input = OcrInput::Image {
+            file: OcrFilePayload::Base64(candidate.base64),
+            mime_type: candidate.mime_type.clone(),
+            document_id: doc_id,
+            run_id: format!("{}-embedded-image-{}", run_id, candidate.media_index + 1),
+        };
+
+        let mut retry_count = 0u32;
+        loop {
+            let Some(_ocr_permit) = crate::kb::worker::try_acquire_ocr_permit(
+                config.ocr_max_concurrency,
+                std::time::Duration::from_secs(30),
+            ) else {
+                tracing::warn!(
+                    doc_id,
+                    media_path = %candidate.storage_path,
+                    "Embedded image OCR skipped because concurrency slots are full"
+                );
+                break;
+            };
+
+            let call_started = std::time::Instant::now();
+            let recognition = provider.recognize(&input, &options);
+            let latency_ms = call_started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+
+            match recognition {
+                Ok(results) => {
+                    let results =
+                        crate::kb::ocr::sanitize_ocr_page_results(&results, Some(api_key));
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        lib_id,
+                        doc_id,
+                        "glm_ocr",
+                        &config.ocr_model,
+                        latency_ms,
+                        true,
+                        "",
+                        &results,
+                        Some(api_key),
+                    );
+                    let text = embedded_image_ocr_result_text(&results);
+                    if text.trim().is_empty() {
+                        tracing::warn!(
+                            doc_id,
+                            media_path = %candidate.storage_path,
+                            "Embedded image OCR returned empty text"
+                        );
+                    } else {
+                        if let Some(media) = normalized.media_refs.get_mut(candidate.media_index) {
+                            media.ocr_text = Some(text.clone());
+                        }
+                        append_embedded_image_ocr_markdown(
+                            normalized,
+                            &candidate.storage_path,
+                            &text,
+                        );
+                        success_count += 1;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    let safe_error =
+                        crate::kb::ocr::sanitize_error_text_with_secret(&error_str, Some(api_key));
+                    crate::kb::ocr::log_ocr_external_model_call(
+                        conn,
+                        lib_id,
+                        doc_id,
+                        "glm_ocr",
+                        &config.ocr_model,
+                        latency_ms,
+                        false,
+                        &error_str,
+                        &[],
+                        Some(api_key),
+                    );
+                    let lower = error_str.to_lowercase();
+                    let retryable = lower.contains("429")
+                        || lower.contains("rate limit")
+                        || lower.contains("503")
+                        || lower.contains("timeout")
+                        || lower.contains("timed out")
+                        || lower.contains("connection")
+                        || lower.contains("hyper");
+
+                    if retryable && retry_count < 3 {
+                        retry_count += 1;
+                        let backoff_secs = 2u64 * 2u64.pow(retry_count - 1);
+                        tracing::warn!(
+                            doc_id,
+                            media_path = %candidate.storage_path,
+                            retry = retry_count,
+                            backoff_secs,
+                            error = %safe_error,
+                            "Embedded image OCR hit retryable error"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        doc_id,
+                        media_path = %candidate.storage_path,
+                        error = %safe_error,
+                        "Embedded image OCR failed"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    let coverage = success_count as f64 / total as f64;
+    let status = if success_count == total {
+        OcrStatus::Done
+    } else if success_count > 0 {
+        OcrStatus::Partial
+    } else {
+        OcrStatus::Failed
+    };
+    kb.update_document_ocr_with_run_guard(doc_id, status.as_str(), coverage, Some(run_id))?;
+    Ok(success_count)
 }
 
 /// FIX10-R1: 在全文中定位每个 chunk 的字符偏移范围
@@ -499,7 +786,7 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
     })?;
 
     let normalizer = registry.get_normalizer(ext);
-    let normalized = normalizer.normalize(parsed.clone()).unwrap_or_else(|e| {
+    let mut normalized = normalizer.normalize(parsed.clone()).unwrap_or_else(|e| {
         tracing::warn!(
             doc_id,
             error = %e,
@@ -512,6 +799,16 @@ pub fn process_document(conn: &Connection, payload: &KbProcessPayload) -> Result
             attachments: parsed.media_refs.clone(),
         }
     });
+
+    if normalized
+        .media_refs
+        .iter()
+        .any(|media| media.media_type == "image" && media.embedded_data_base64.is_some())
+    {
+        let ocr_config = crate::config::Config::load_partial()
+            .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
+        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?;
+    }
 
     let word_total: i32 = count_words(&normalized.markdown) as i32;
     kb.update_document_status_with_run_guard(
@@ -870,7 +1167,12 @@ pub async fn process_document_async(
         parsed
     };
 
-    let word_total: i32 = count_words(&parsed.content) as i32;
+    if ext != "pdf" {
+        apply_embedded_image_ocr(conn, doc_id, lib_id, run_id, &mut normalized, &ocr_config)?;
+    }
+
+    let effective_content = normalized.markdown.as_str();
+    let word_total: i32 = count_words(effective_content) as i32;
 
     // P1-013: 元数据抽取（文件系统 + 格式特定）
     let storage = std::path::Path::new(storage_path);
@@ -890,7 +1192,7 @@ pub async fn process_document_async(
     doc_meta.merge_with(&format_meta);
     // P1-019: 关键词和实体抽取
     let (keywords, entities) = crate::kb::metadata::extract_keywords_and_entities(
-        &parsed.content,
+        effective_content,
         doc_meta.language.as_deref().unwrap_or("zh"),
     );
     // 合并 meta keywords（如 HTML <meta name="keywords">）与正文提取的关键词。
@@ -920,7 +1222,7 @@ pub async fn process_document_async(
     }
 
     // P1-014: 文档粒度分类（解析完成后立即判定）
-    let char_count = parsed.content.chars().count();
+    let char_count = effective_content.chars().count();
     let page_count: usize = parsed
         .metadata
         .get("total_pages")
@@ -929,7 +1231,7 @@ pub async fn process_document_async(
     let granularity = crate::kb::granularity::classify_granularity(ext, char_count, page_count);
     let chunk_strategy = crate::kb::granularity::chunk_strategy_for(granularity);
     // P0-4: 使用统一的启发式 token counter 计算精确 token 数
-    let token_count = crate::kb::token_counter::count_tokens_heuristic(&parsed.content) as i32;
+    let token_count = crate::kb::token_counter::count_tokens_heuristic(effective_content) as i32;
     // 修复：传入 run_id，防止旧 job 污染新 run 的 granularity
     kb.update_document_granularity_with_run_guard(
         doc_id,
@@ -2297,7 +2599,7 @@ pub(crate) fn persist_media_assets(
             "INSERT INTO kb_media_assets \
              (library_id, document_id, version_id, node_id, media_type, storage_path, \
               alt_text, ocr_text, caption, page_number, sort_order, mime_type, byte_size) \
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '', 0)",
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             rusqlite::params![
                 lib_id,
                 doc_id,
@@ -2309,6 +2611,8 @@ pub(crate) fn persist_media_assets(
                 m.caption,
                 m.page_number,
                 idx as i64,
+                m.mime_type.as_deref().unwrap_or(""),
+                m.byte_size.unwrap_or(0),
             ],
         )?;
     }
@@ -3757,6 +4061,74 @@ fn execute_inline_ocr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_media_ref(
+        storage_path: &str,
+        mime_type: Option<&str>,
+        embedded_data_base64: Option<&str>,
+    ) -> crate::kb::types::MediaRef {
+        crate::kb::types::MediaRef {
+            media_type: "image".to_string(),
+            storage_path: storage_path.to_string(),
+            mime_type: mime_type.map(str::to_string),
+            byte_size: Some(3),
+            embedded_data_base64: embedded_data_base64.map(str::to_string),
+            alt_text: None,
+            ocr_text: None,
+            caption: None,
+            page_number: None,
+        }
+    }
+
+    #[test]
+    fn embedded_image_ocr_candidates_keep_supported_inline_images() {
+        let refs = vec![
+            test_media_ref(
+                "embedded://docx/word/media/image1.png",
+                Some("image/png"),
+                Some("abc"),
+            ),
+            test_media_ref(
+                "embedded://docx/word/media/image2.gif",
+                Some("image/gif"),
+                Some("abc"),
+            ),
+            test_media_ref("https://example.com/image.jpg", Some("image/jpeg"), None),
+        ];
+
+        let candidates = embedded_image_ocr_candidates(&refs);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].storage_path,
+            "embedded://docx/word/media/image1.png"
+        );
+        assert_eq!(candidates[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn append_embedded_image_ocr_markdown_adds_searchable_block() {
+        let mut normalized = crate::kb::parser::NormalizedDocument {
+            markdown: "Document text".to_string(),
+            ..Default::default()
+        };
+
+        append_embedded_image_ocr_markdown(
+            &mut normalized,
+            "embedded://spreadsheet/media/image1.jpg",
+            "OCR picture text",
+        );
+
+        assert!(normalized
+            .markdown
+            .contains(EMBEDDED_IMAGE_OCR_SECTION_TITLE));
+        assert!(normalized
+            .markdown
+            .contains("embedded://spreadsheet/media/image1.jpg"));
+        assert!(normalized.markdown.contains("OCR picture text"));
+        assert_eq!(normalized.blocks.len(), 1);
+        assert_eq!(normalized.blocks[0].block_type, "image_ocr");
+    }
 
     #[test]
     fn test_embedding_to_blob_roundtrip() {

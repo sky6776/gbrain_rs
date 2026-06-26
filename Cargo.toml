@@ -66,7 +66,7 @@ tree-sitter-cpp = "0.23"
 lopdf = "0.34"
 zip = "2"
 quick-xml = "0.37"
-calamine = "0.26"
+calamine = { version = "0.26", features = ["picture"] }
 csv = "1"
 html2text = "0.13"
 pulldown-cmark = "0.12"

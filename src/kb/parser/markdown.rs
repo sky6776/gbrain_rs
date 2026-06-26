@@ -58,6 +58,9 @@ fn extract_markdown_media_refs(markdown: &str) -> Vec<MediaRef> {
         refs.push(MediaRef {
             media_type: "image".to_string(),
             storage_path: path.to_string(),
+            mime_type: None,
+            byte_size: None,
+            embedded_data_base64: None,
             alt_text: cap
                 .get(1)
                 .map(|m| m.as_str().to_string())
@@ -88,6 +91,9 @@ fn extract_markdown_media_refs(markdown: &str) -> Vec<MediaRef> {
         refs.push(MediaRef {
             media_type: "attachment".to_string(),
             storage_path: path.to_string(),
+            mime_type: None,
+            byte_size: None,
+            embedded_data_base64: None,
             alt_text: if label.is_empty() {
                 None
             } else {

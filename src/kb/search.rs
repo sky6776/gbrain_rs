@@ -2473,7 +2473,7 @@ fn load_media_refs_for_documents(
         .collect();
     let sql = format!(
         "SELECT m.document_id, m.media_type, m.storage_path, m.alt_text, \
-                m.ocr_text, m.caption, m.page_number \
+                m.ocr_text, m.caption, m.page_number, m.mime_type, m.byte_size \
          FROM kb_media_assets m \
          INNER JOIN kb_documents d ON d.id = m.document_id \
          WHERE m.document_id IN ({}) \
@@ -2499,17 +2499,32 @@ fn load_media_refs_for_documents(
             row.get::<_, Option<String>>(4)?, // ocr_text
             row.get::<_, Option<String>>(5)?, // caption
             row.get::<_, Option<i32>>(6)?,    // page_number
+            row.get::<_, Option<String>>(7)?, // mime_type
+            row.get::<_, Option<i64>>(8)?,    // byte_size
         ))
     });
     let Ok(rows) = query_iter else {
         return out;
     };
     for r in rows.flatten() {
-        let (document_id, media_type, storage_path, alt_text, ocr_text, caption, page_number) = r;
+        let (
+            document_id,
+            media_type,
+            storage_path,
+            alt_text,
+            ocr_text,
+            caption,
+            page_number,
+            mime_type,
+            byte_size,
+        ) = r;
         let entry = out.entry(document_id).or_default();
         entry.push(MediaRef {
             media_type,
             storage_path,
+            mime_type: mime_type.filter(|value| !value.trim().is_empty()),
+            byte_size: byte_size.filter(|value| *value > 0),
+            embedded_data_base64: None,
             alt_text,
             ocr_text,
             caption,

@@ -2,6 +2,7 @@
 
 pub mod csv;
 pub mod docx;
+mod embedded_media;
 pub mod html;
 pub mod markdown;
 pub mod pdf;

@@ -5,6 +5,7 @@
 
 use super::{DocumentParser, ParsedDocument};
 use crate::error::GBrainError;
+use crate::kb::types::MediaRef;
 use std::collections::HashMap;
 use std::io::Read;
 
@@ -24,7 +25,7 @@ impl DocxParser {
 
 impl DocumentParser for DocxParser {
     fn parse(&self, data: &[u8]) -> Result<ParsedDocument, GBrainError> {
-        let (content, headings, blocks) = extract_docx_text_structured(data)?;
+        let (content, headings, blocks, media_refs) = extract_docx_text_structured(data)?;
         let mut metadata = HashMap::new();
         if !headings.is_empty() {
             metadata.insert("headings".to_string(), headings.join(" > "));
@@ -36,7 +37,7 @@ impl DocumentParser for DocxParser {
             content,
             metadata,
             blocks: (!blocks.is_empty()).then_some(blocks),
-            media_refs: Vec::new(),
+            media_refs,
         })
     }
 
@@ -62,19 +63,56 @@ fn heading_level(style: &str) -> Option<u32> {
 /// P2-007 + P2-008: 结构化提取 DOCX 文本，同时收集标题层级
 fn extract_docx_text_structured(
     data: &[u8],
-) -> Result<(String, Vec<String>, Vec<crate::kb::types::ParsedBlock>), GBrainError> {
+) -> Result<
+    (
+        String,
+        Vec<String>,
+        Vec<crate::kb::types::ParsedBlock>,
+        Vec<MediaRef>,
+    ),
+    GBrainError,
+> {
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| GBrainError::FileError(format!("DOCX open failed: {}", e)))?;
 
     let mut xml_content = String::new();
-    let mut file = archive
-        .by_name("word/document.xml")
-        .map_err(|_| GBrainError::FileError("DOCX missing word/document.xml".to_string()))?;
-    file.read_to_string(&mut xml_content)
-        .map_err(|e| GBrainError::FileError(format!("DOCX read failed: {}", e)))?;
+    {
+        let mut file = archive
+            .by_name("word/document.xml")
+            .map_err(|_| GBrainError::FileError("DOCX missing word/document.xml".to_string()))?;
+        file.read_to_string(&mut xml_content)
+            .map_err(|e| GBrainError::FileError(format!("DOCX read failed: {}", e)))?;
+    }
 
-    extract_docx_text_from_document_xml(&xml_content)
+    let (content, headings, blocks) = extract_docx_text_from_document_xml(&xml_content)?;
+    let media_refs = extract_docx_embedded_images(&mut archive);
+    Ok((content, headings, blocks, media_refs))
+}
+
+fn extract_docx_embedded_images<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Vec<MediaRef> {
+    let mut refs = Vec::new();
+    for i in 0..archive.len() {
+        let Ok(mut file) = archive.by_index(i) else {
+            continue;
+        };
+        let name = file.name().replace('\\', "/");
+        if !name.starts_with("word/media/") || name.ends_with('/') {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        if let Some(media) =
+            super::embedded_media::embedded_image_ref(format!("embedded://docx/{}", name), bytes)
+        {
+            refs.push(media);
+        }
+    }
+    refs
 }
 
 fn extract_docx_text_from_document_xml(
@@ -327,6 +365,7 @@ fn escape_markdown_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn test_heading_level() {
@@ -364,5 +403,30 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_str(&blocks[0].metadata).unwrap();
         assert_eq!(meta["headers"][0], "Name");
         assert_eq!(meta["rows"][0]["Name"], "Alice");
+    }
+
+    #[test]
+    fn docx_parser_extracts_embedded_images() {
+        let mut docx = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut docx);
+            let opts = zip::write::SimpleFileOptions::default();
+            writer.start_file("word/document.xml", opts).unwrap();
+            writer
+                .write_all(
+                    br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#,
+                )
+                .unwrap();
+            writer.start_file("word/media/image1.png", opts).unwrap();
+            writer.write_all(&[0x89, b'P', b'N', b'G']).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let parsed = DocxParser::new().parse(&docx.into_inner()).expect("parse");
+
+        assert_eq!(parsed.media_refs.len(), 1);
+        assert_eq!(parsed.media_refs[0].media_type, "image");
+        assert_eq!(parsed.media_refs[0].mime_type.as_deref(), Some("image/png"));
+        assert!(parsed.media_refs[0].embedded_data_base64.is_some());
     }
 }

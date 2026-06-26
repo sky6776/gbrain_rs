@@ -114,18 +114,38 @@ impl DocumentParser for XlsxParser {
         let content = parts.join("\n");
         let mut metadata = HashMap::new();
         metadata.insert("sheet_count".to_string(), sheets.len().to_string());
+        let media_refs = spreadsheet_picture_refs(workbook.pictures().unwrap_or_default());
 
         Ok(ParsedDocument {
             content,
             metadata,
             blocks: Some(blocks),
-            media_refs: Vec::new(),
+            media_refs,
         })
     }
 
     fn extensions(&self) -> &[&str] {
         &["xlsx", "xls"]
     }
+}
+
+fn spreadsheet_picture_refs(pictures: Vec<(String, Vec<u8>)>) -> Vec<crate::kb::types::MediaRef> {
+    pictures
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, (ext, bytes))| {
+            let ext = ext.trim_start_matches('.').trim().to_ascii_lowercase();
+            let ext = if ext.is_empty() {
+                "bin".to_string()
+            } else {
+                ext
+            };
+            super::embedded_media::embedded_image_ref(
+                format!("embedded://spreadsheet/media/image{}.{}", idx + 1, ext),
+                bytes,
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -138,5 +158,15 @@ mod tests {
 
         assert!(parser.extensions().contains(&"xlsx"));
         assert!(parser.extensions().contains(&"xls"));
+    }
+
+    #[test]
+    fn spreadsheet_picture_refs_keep_embedded_bytes_for_ocr() {
+        let refs = spreadsheet_picture_refs(vec![("jpg".to_string(), vec![0xff, 0xd8, 0xff])]);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].mime_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(refs[0].byte_size, Some(3));
+        assert!(refs[0].embedded_data_base64.is_some());
     }
 }
