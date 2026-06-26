@@ -292,8 +292,13 @@ pub struct ResolvedRaptorConfig {
 }
 
 impl Config {
-    /// Load configuration from environment and config file
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    /// 轻量配置加载：只读 config.json 与可选环境变量，不执行严格运行时校验。
+    ///
+    /// P1 修复：供 CLI 的 dry-run / config / --db / init 等“不需要外部模型”的快速路径使用，
+    /// 避免在 fresh 或 partial 环境（缺少 GBRAIN_EMBEDDING_* 等必填 env）下提前失败。
+    /// 本函数只读取 config.json 与可选 env 并填充字段，绝不调用
+    /// `apply_required_external_model_env()`，因此不会因缺失外部模型 env 而返回 Err。
+    pub fn load_partial() -> Result<Self, Box<dyn std::error::Error>> {
         let mut config = Self::default();
 
         // Try loading from config file
@@ -565,6 +570,20 @@ impl Config {
             config.ocr_max_concurrency = 1;
         }
 
+        // 注意：load_partial 不调用 apply_required_external_model_env()，
+        // 因此不会因缺失外部模型 env 而失败。严格校验留给真正需要外部模型
+        // 的调用方（见 load() 与 apply_required_runtime_env_preserving_cli_db）。
+        Ok(config)
+    }
+
+    /// 完整配置加载：先 `load_partial()`，再执行严格运行时校验
+    /// （强制要求所有外部模型 env，如 embedding / expansion / chunker / raptor 等）。
+    ///
+    /// MCP server / worker / autopilot 等需要完整外部模型配置的入口应继续使用本方法，
+    /// 行为与历史一致。CLI 入口改用 `load_partial()`，把严格校验延后到真正需要时。
+    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut config = Self::load_partial()?;
+
         config
             .apply_required_external_model_env()
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -702,7 +721,13 @@ impl Config {
     }
 
     fn apply_required_external_model_env(&mut self) -> crate::error::Result<()> {
-        self.database_path = Some(required_env_value("GBRAIN_DB_PATH")?);
+        // 仅在尚未设置 database_path 时才强制要求 GBRAIN_DB_PATH。
+        // load_partial 已按优先级填好 database_path（环境变量 GBRAIN_DB_PATH 或 config.json），
+        // CLI 的 --db 也会在 run() 中回填到 database_path。此处若再无条件覆盖，
+        // 会用 env 抹掉 CLI 指定的 --db，也违背 config.json 中显式配置的 DB 路径。
+        if self.database_path.is_none() {
+            self.database_path = Some(required_env_value("GBRAIN_DB_PATH")?);
+        }
 
         self.embedding_api_key = Some(required_env_value("GBRAIN_EMBEDDING_API_KEY")?);
         self.embedding_base_url = Some(required_url_env("GBRAIN_EMBEDDING_BASE_URL")?);
@@ -833,6 +858,16 @@ impl Config {
 
         validate_optional_runtime_env()?;
         self.validate_loaded_config()
+    }
+
+    /// CLI 运行时严格校验入口：复用 `apply_required_external_model_env` 的全部校验，
+    /// 但保留已由 CLI `--db` / 环境变量 `GBRAIN_DB_PATH` / config.json 设置的 `database_path`，
+    /// 不再用 `GBRAIN_DB_PATH` 覆盖 CLI 指定的 `--db`（见上方 database_path 守卫）。
+    ///
+    /// 调用时机：仅在真正需要外部模型 / DB 的命令路径上调用（见 `src/bin/gbrain.rs::run`），
+    /// 让 dry-run / config / init 等快速路径可在 partial 环境下运行。
+    pub fn apply_required_runtime_env_preserving_cli_db(&mut self) -> crate::error::Result<()> {
+        self.apply_required_external_model_env()
     }
 
     fn validate_loaded_config(&self) -> crate::error::Result<()> {

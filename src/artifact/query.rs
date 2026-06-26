@@ -1619,19 +1619,41 @@ fn rerank_evidence_candidates(
         .expansion_base_url_resolved()
         .filter(|s| !s.is_empty())
         .unwrap_or("");
+    // P2 修复：与 KB search (kb::search) 保持一致——只有 api_key 与 base_url 都非空时
+    // 才调用模型 rerank。否则 try_model_rerank_simple 在“有 key 但缺 base_url”时会走
+    // fallback，并把 model_rerank_attempted 标为 true，导致下方误写“已发起外部请求”的
+    // 外部调用审计。这里缺 base_url 时直接本地 rerank，并标记 attempted=false。
+    let has_api_key = !api_key.trim().is_empty();
+    let has_base_url = !base_url.trim().is_empty();
     let weights = vec![0.25, 0.0, 0.0, 0.65, 0.0, 0.0];
     // H3 fix: 使用全局共享运行时，避免每次证据重排创建新运行时
     let rt = crate::runtime::shared_runtime();
-    let (scored, rerank_info) = rt.block_on(crate::kb::rerank::try_model_rerank_simple(
-        &rerank_cfg,
-        query,
-        &local_candidates,
-        &candidate_texts,
-        &weights,
-        None,
-        base_url,
-        api_key,
-    ));
+    let (scored, rerank_info) = if rerank_cfg.model_rerank_enabled && has_api_key && has_base_url {
+        rt.block_on(crate::kb::rerank::try_model_rerank_simple(
+            &rerank_cfg,
+            query,
+            &local_candidates,
+            &candidate_texts,
+            &weights,
+            None,
+            base_url,
+            api_key,
+        ))
+    } else {
+        // 未配置 api_key 或 base_url：未实际发起外部请求，直接本地 rerank，
+        // 标记 model_rerank_attempted=false，避免误写外部调用审计。
+        (
+            crate::kb::rerank::local_rerank(&local_candidates, &weights),
+            crate::kb::rerank::RerankResult {
+                model_rerank_attempted: false,
+                model_rerank_succeeded: false,
+                fallback_used: true,
+                fallback_reason: Some(crate::kb::rerank::FallbackReason::NotConfigured),
+                provider: "local".into(),
+                candidates_reranked: local_candidates.len(),
+            },
+        )
+    };
 
     // P2+P3: 在调用完成后按实际结果写审计，每个涉及的库独立记录一条
     let should_audit = rerank_cfg.model_rerank_enabled

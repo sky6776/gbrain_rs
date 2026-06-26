@@ -483,8 +483,11 @@ fn detect_ocr_pages_for_pdf(
 fn main() {
     let cli = Cli::parse();
 
-    // 从配置初始化日志
-    let mut config = match Config::load() {
+    // 从配置初始化日志。
+    // P1 修复：改用 load_partial()——只读 config.json 与可选环境变量，不做严格运行时校验。
+    // 这样 dry-run / config / --db / init 等快速路径不会因缺失外部模型 env 提前失败。
+    // 严格校验延后到 run() 中真正需要外部模型/DB 的命令路径上执行。
+    let mut config = match Config::load_partial() {
         Ok(config) => config,
         Err(e) => {
             eprintln!("配置加载失败: {}", e);
@@ -500,15 +503,25 @@ fn main() {
 }
 
 fn run(cli: Cli, config: &mut Config) -> Result<()> {
+    // db_path：优先 CLI --db，否则用 config.db_path()（database_path 或默认 ~/.gbrain/brain.db）。
+    // 这里克隆 cli.db（不 move），供后续 if let 继续判断 --db 是否显式传入。
     let db_path = cli
         .db
+        .clone()
         .unwrap_or_else(|| config.db_path().to_str().unwrap_or("brain.db").to_string());
 
-    // 修复：当 --db 覆盖了 DB 路径时，同步到 config，使 artifact_dir()
-    // 等基于 db_path 推导的目录与实际 DB 路径一致，避免 DB 写到 X 但
-    // artifact 写到默认配置库旁边
-    if config.database_path.as_ref() != Some(&db_path) {
-        config.database_path = Some(db_path.clone());
+    // P1 修复：只在用户显式传了 --db 时才回填 config.database_path。
+    // 之前无论来源都会把 db_path（含隐式默认 ~/.gbrain/brain.db）写回 database_path，
+    // 导致下方 apply_required_runtime_env_preserving_cli_db 里 `database_path.is_none()`
+    // 为 false，从而跳过 GBRAIN_DB_PATH 必填校验——serve/query/list 等真实命令会静默
+    // 使用默认库，可能读写错库。
+    // 现在仅在显式 --db 时回填；隐式默认路径不当作“已配置”，保留到校验处要求 GBRAIN_DB_PATH。
+    // 注意：config.db_path() 在 database_path 为 None 时本身就会返回默认路径，
+    // 所以 artifact_dir() 等基于 db_path() 推导的目录不受影响，仍与实际 DB 路径一致。
+    if let Some(cli_db) = cli.db.as_ref() {
+        if config.database_path.as_ref() != Some(cli_db) {
+            config.database_path = Some(cli_db.clone());
+        }
     }
 
     // --dry-run 时不应创建/初始化数据库。
@@ -729,6 +742,25 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
             Commands::Reprocess { dry_run, .. } => *dry_run,
             _ => false,
         };
+
+    // P1 修复：dry-run 的“跳过严格校验 / 只读连库 / ctx.dry_run”只对真正有预览语义的命令生效。
+    // 全局 --dry-run 对所有命令生效，但 serve 这类没有预览语义的命令不应因 --dry-run 而：
+    //   1) 绕过必需 env 校验；2) 用只读连接后仍继续启动 MCP server，并 spawn KB worker / autopilot
+    //      ——这些后台线程会自行 connect() 写连接 + init_schema()（见 worker.rs），破坏 dry-run 无写副作用。
+    // 因此用白名单把“生效的 dry-run”限制在 put/delete/detach/restore/reprocess（config/review 的
+    // dry-run 预览已在下方 any_dry_run 早退分支处理，不进入连接流程）。
+    // 其余命令（serve/query/list/get/health/kb/...）即便带了 --dry-run，也按正常命令处理
+    // （走严格校验 + 写连接），--dry-run 在此被忽略。
+    let dry_run_preview_command = matches!(
+        &cli.command,
+        Commands::Put { .. }
+            | Commands::Delete { .. }
+            | Commands::Detach { .. }
+            | Commands::Restore { .. }
+            | Commands::Reprocess { .. }
+    );
+    let effective_dry_run = any_dry_run && dry_run_preview_command;
+
     // 这些命令的 dry-run 路径只是打印预览信息，无需访问数据库
     if any_dry_run {
         match &cli.command {
@@ -756,25 +788,46 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                 info!("Dry-run: 将回滚建议变更 {}", change_id);
                 return Ok(());
             }
-            _ => {
-                // 其余命令的 dry-run 需要 DB 才能生成预览（如 delete 需查询 artifact），
-                // 但 dry-run 不应创建或初始化数据库
-                let db_path_buf = PathBuf::from(&db_path);
-                if !db_path_buf.exists() {
-                    // 数据库尚不存在，无可预览内容
-                    info!("Dry-run: 数据库 {} 尚不存在，无操作可预览", db_path);
-                    return Ok(());
-                }
-                // 数据库已存在，落入下方连接流程（将跳过 init_schema）
-            }
+            _ => {}
         }
     }
 
+    // 其余预览命令需要 DB 才能生成预览（如 delete 需查询 artifact），
+    // 但 dry-run 不应创建或初始化数据库。注意这里必须使用 effective_dry_run，
+    // 不能使用 any_dry_run；serve/query/kb 等非预览命令即便带全局 --dry-run，
+    // 也应继续走正常校验和连接流程。
+    if effective_dry_run {
+        let db_path_buf = PathBuf::from(&db_path);
+        if !db_path_buf.exists() {
+            // 数据库尚不存在，无可预览内容
+            info!("Dry-run: 数据库 {} 尚不存在，无操作可预览", db_path);
+            return Ok(());
+        }
+        // 数据库已存在，落入下方只读连接流程。
+    }
+
     // ---------- 需要数据库的命令 ----------
+    // 严格运行时校验延后到此。main() 已改用 load_partial()（未做严格校验），
+    // 让 dry-run / config / --db / init 等快速路径可在 partial 环境下运行。
+    //
+    // 跳过校验的两类命令：
+    // - Init（非 dry-run）：引导命令（仅建库建表+复制可执行文件），不需要任何外部模型 env，
+    //   使 `gbrain --db <path> init` 在 fresh 环境下可直接完成。
+    // - effective_dry_run：仅 put/delete/detach/restore/reprocess 这类“有预览语义”的命令在
+    //   --dry-run + DB 已存在时只读连库生成预览，不发起外部模型调用，不应被完整 env 卡住。
+    //
+    // 其余“真正连库且可能调用外部模型”的命令（serve/query/list/upload/...）仍走完整校验——
+    // 特别地，serve 即便带了全局 --dry-run 也不会跳过校验（effective_dry_run 对其为 false），
+    // 避免其后台 worker/autopilot 线程在未校验环境下 spawn 并写库。
+    // 校验内部会保留 CLI --db 指定的 database_path，不再用 GBRAIN_DB_PATH 覆盖。
+    if !matches!(cli.command, Commands::Init) && !effective_dry_run {
+        config.apply_required_runtime_env_preserving_cli_db()?;
+    }
+
     let mut engine =
         SqliteEngine::with_config(PathBuf::from(db_path.clone()).as_path(), config.clone());
     // dry-run 时使用只读连接，跳过 journal_mode=WAL 等写入型 PRAGMA，避免修改数据库状态
-    if any_dry_run {
+    if effective_dry_run {
         engine.connect_readonly()?;
     } else {
         info!(db_path = %db_path, "Connecting to brain database");
@@ -783,7 +836,7 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
     }
 
     let mut ctx = OpContext::default();
-    if any_dry_run {
+    if effective_dry_run {
         ctx.dry_run = true;
         info!("Dry-run mode enabled — no changes will be committed");
     }
@@ -1728,12 +1781,16 @@ fn run(cli: Cli, config: &mut Config) -> Result<()> {
                         "未配置 embedding API key（设置 GBRAIN_EMBEDDING_API_KEY）".to_string(),
                     )
                 })?;
+                // dry-run 路径已跳过严格运行时校验，embedding_base_url 可能为 None；
+                // 用优雅 Err 代替 .expect，避免在 partial 环境下 panic。
+                let base_url = config.embedding_base_url.as_deref().ok_or_else(|| {
+                    GBrainError::InvalidInput(
+                        "未配置 embedding base URL（设置 GBRAIN_EMBEDDING_BASE_URL）".to_string(),
+                    )
+                })?;
                 let embedder = gbrain_core::embedding::Embedder::new(
                     api_key,
-                    config
-                        .embedding_base_url
-                        .as_deref()
-                        .expect("GBRAIN_EMBEDDING_BASE_URL 已在启动校验"),
+                    base_url,
                     &config.embedding_model,
                     config.embedding_dimensions,
                 );

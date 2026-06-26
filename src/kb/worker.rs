@@ -87,14 +87,27 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
     // 构建 RaptorConfig（使用默认值）
     let raptor_config = RaptorConfig::default();
 
-    // P3 修复: 提前 resolve 完整的 RAPTOR config（合并 config 文件+环境变量），
-    // 传入 pipeline 供 RAPTOR summary/augmentation 回退使用。
-    let resolved_raptor_cfg = config.raptor_config_resolved()?;
-
     // 获取全局共享 tokio 运行时执行异步管道
     let rt = crate::runtime::shared_runtime();
 
-    // 执行文档处理管道
+    // 执行文档处理管道。
+    //
+    // P2 修复：不再在 worker 提前解析 RAPTOR 配置——resolved_raptor_config 直接传 None。
+    // 之前只要 library.raptor_enabled，worker 就会先 raptor_config_resolved()?，导致
+    // RAPTOR-enabled 库里的小文档（最终只有 1-2 个节点，本不会构建 RAPTOR）也因缺失
+    // GBRAIN_KB_RAPTOR_* 而失败。
+    //
+    // 现在 RAPTOR LLM 配置由 pipeline 在真正需要时才解析：raptor::resolve_raptor_llm_config
+    // 在 resolved_config 为 None 时，会自行读取 GBRAIN_KB_RAPTOR_* 环境变量（与
+    // Config::raptor_config_resolved 读取同一组 env，仅是时机延后）。两个使用点均带条件守卫：
+    //   - augmentation：library.augmentation_enabled && !nodes.is_empty()（解析失败时 if let Ok 静默跳过）
+    //   - RAPTOR 树：  library.raptor_enabled && nodes.len() >= 3（解析失败时 match Err 静默跳过）
+    // 因此小文档（不满足上述条件）不会再被缺失的 RAPTOR env 阻断；即便真正构建 RAPTOR 时
+    // env 缺失，pipeline 也只是跳过摘要、不会让 process_document_async 返回 Err。
+    //
+    // 注意：claim_next_kb_job 已把 job 置为 running，此处到下方 match result 之间不得出现
+    // 会提前返回的 `?`，否则 job 会卡在 running。当前路径唯一的 Result 来自 process_document_async，
+    // 由 match 统一处理（Ok→complete，Err→fail_kb_job）。
     let result = rt.block_on(process_document_async(
         conn,
         &payload,
@@ -108,8 +121,7 @@ pub fn run_kb_worker_once(engine: &SqliteEngine, config: &Config) -> Result<bool
             Some(config.kb_raptor_model.as_str())
         },
         None,
-        // P3 修复: 传入完整的 resolved RAPTOR config（api_key+base_url+model 均已 resolve）
-        Some(&resolved_raptor_cfg),
+        None,
     ));
 
     match result {

@@ -730,7 +730,13 @@ pub async fn process_document_async(
     // M-7 修复：统一在此处加载一次 OCR 配置，避免图片/PDF 分支各自重复调用 Config::load()。
     // TODO: 调用方已持有 config: &Config，理想做法是将 &Config 作为参数传入本函数，
     // 但签名变更影响面较广（所有调用方需同步修改），当前先用单次加载缓解。
-    let ocr_config = crate::config::Config::load()
+    //
+    // P2 修复：改用 load_partial() 而非 load()。worker 已传 resolved_raptor_config=None
+    // 让 RAPTOR 配置延迟到真正需要时（nodes>=3 或 augmentation）才解析；若此处仍用完整
+    // load()，会在进入实际 RAPTOR 条件前就因强制要求 GBRAIN_KB_RAPTOR_* 等env 而失败，
+    // 抵消延迟解析。load_partial 不做严格校验，OCR 相关字段仍从 env/config.json 正常读取；
+    // OCR 子系统对“未配置/已关闭”本身有跳过与兜底逻辑，不受影响。
+    let ocr_config = crate::config::Config::load_partial()
         .map_err(|e| crate::error::GBrainError::Config(e.to_string()))?;
 
     kb.ensure_document_run_current(doc_id, run_id)?;
