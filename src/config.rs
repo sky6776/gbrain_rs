@@ -1529,13 +1529,13 @@ fn validate_nonzero_u64(name: &str, value: u64) -> crate::error::Result<()> {
 }
 
 fn validate_optional_runtime_env() -> crate::error::Result<()> {
-    if let Ok(value) = std::env::var("RUST_LOG") {
+    if let Ok(value) = std::env::var("GBRAIN_RUST_LOG") {
         let trimmed = value.trim();
         if trimmed.is_empty() {
-            return Err(config_error("RUST_LOG 已配置但值为空"));
+            return Err(config_error("GBRAIN_RUST_LOG 已配置但值为空"));
         }
         tracing_subscriber::EnvFilter::try_new(trimmed)
-            .map_err(|e| config_error(format!("RUST_LOG 无效值 '{}': {}", trimmed, e)))?;
+            .map_err(|e| config_error(format!("GBRAIN_RUST_LOG 无效值 '{}': {}", trimmed, e)))?;
     }
 
     if let Ok(value) = std::env::var("GBRAIN_PROGRESS_MODE") {

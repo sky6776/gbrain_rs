@@ -119,9 +119,66 @@ GBRAIN_LOG_LEVEL = "trace"
 # 日志文件路径。GBRAIN_LOG_TO_FILE=true 时必填；实际文件名可能带日期后缀。
 GBRAIN_LOG_FILE_PATH = "<请填写日志文件路径>"
 
-# tracing 日志过滤规则，可选但这里显式配置。优先级高于 GBRAIN_LOG_LEVEL。
-# 可写简单级别如 trace/debug/info，也可写模块过滤规则，如 gbrain_core=debug,sqlx=warn。非法规则会导致启动失败。
-RUST_LOG = "trace"
+# gbrain 专用 tracing 日志过滤规则，可选但这里显式配置。优先级高于 GBRAIN_LOG_LEVEL。
+# 非法规则会导致启动失败；为空也会被视为配置错误。
+#
+# 基本语法：
+#   1. 写单个级别，作为全局默认过滤级别：
+#      GBRAIN_RUST_LOG = "info"
+#   2. 写一组英文逗号分隔的规则：
+#      GBRAIN_RUST_LOG = "warn,gbrain_core::kb::pipeline=debug,gbrain_core::kb::ocr_glm=trace"
+#   3. 每条模块规则格式为：
+#      <tracing target>=<level>
+#
+# 可用 level：
+#   trace  最详细，包含大量内部细节
+#   debug  调试信息
+#   info   常规运行信息
+#   warn   只看警告及错误
+#   error  只看错误
+#
+# tracing target 通常等于 Rust 模块路径；gbrain 主库 crate 是 gbrain_core，CLI 二进制是 gbrain。
+# 父模块规则通常会覆盖其子模块，例如 gbrain_core::kb=debug 会影响 gbrain_core::kb::pipeline。
+#
+# 常用 gbrain 模块过滤 target：
+#   gbrain_core                         整个 gbrain 核心库
+#   gbrain                              CLI 入口
+#   gbrain_core::config                 配置加载与运行时校验
+#   gbrain_core::mcp                    MCP stdio 服务层
+#   gbrain_core::operations             CLI/MCP 操作编排层
+#   gbrain_core::sqlite_engine          SQLite / FTS / sqlite-vec 存储层
+#   gbrain_core::artifact               artifact 写入、上传、查询、投影、promotion
+#   gbrain_core::artifact::promotion    promotion / auto-apply / rollback
+#   gbrain_core::artifact::upload       文件上传与 artifact 路由
+#   gbrain_core::kb                     KB 子系统整体
+#   gbrain_core::kb::pipeline           文档导入、解析、切分、索引 pipeline
+#   gbrain_core::kb::worker             后台 job worker
+#   gbrain_core::kb::search             KB 检索、召回、融合
+#   gbrain_core::kb::rerank             rerank 逻辑
+#   gbrain_core::kb::ocr_glm            GLM OCR 请求、响应、错误处理
+#   gbrain_core::kb::ocr_detector       PDF/图片 OCR 触发判断
+#   gbrain_core::chunker                页面/代码/LLM chunker
+#   gbrain_core::search                 搜索扩展、关键词、混合检索
+#   gbrain_core::embedding              embedding 请求与向量处理
+#   gbrain_core::enrichment             页面增强、实体提取、分层
+#   gbrain_core::sync                   同步与导入
+#
+# 常用组合示例：
+#   仅看常规信息：
+#     GBRAIN_RUST_LOG = "info"
+#   全局保持安静，只打开 KB pipeline 调试：
+#     GBRAIN_RUST_LOG = "warn,gbrain_core::kb::pipeline=debug"
+#   排查 OCR：
+#     GBRAIN_RUST_LOG = "info,gbrain_core::kb::ocr_detector=debug,gbrain_core::kb::ocr_glm=trace"
+#   排查检索：
+#     GBRAIN_RUST_LOG = "info,gbrain_core::kb::search=debug,gbrain_core::search=debug,gbrain_core::kb::rerank=debug"
+#   排查 artifact promotion：
+#     GBRAIN_RUST_LOG = "info,gbrain_core::artifact::promotion=debug,gbrain_core::artifact::projection=debug"
+#   降低第三方库噪音，同时打开 gbrain 调试：
+#     GBRAIN_RUST_LOG = "gbrain_core=debug,gbrain=info,reqwest=warn,hyper=warn"
+#
+# 当前示例打开全量 trace；生产环境通常建议使用 info 或 warn，再单独放大目标模块。
+GBRAIN_RUST_LOG = "trace"
 
 # -----------------------------------------------------------------------------
 # 页面写入后的后处理配置

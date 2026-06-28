@@ -494,7 +494,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    logging::init(&config);
+    if let Err(e) = logging::init(&config) {
+        eprintln!("日志初始化失败: {}", e);
+        std::process::exit(1);
+    }
 
     if let Err(e) = run(cli, &mut config) {
         error!("Fatal error: {}", e);
