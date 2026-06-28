@@ -1,11 +1,11 @@
 # gbrain-rs
 
-中文 | [English](./README_EN.md)
+[中文](./README.md) | English
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange.svg)](https://www.rust-lang.org/)
 
-**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), a KB subsystem (async document processing pipeline + RAPTOR recursive summarization enabled by default for new libraries), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle, time-decay search, and more. Built on embedded SQLite + FTS5; vector retrieval uses sqlite-vec when available and otherwise falls back to built-in BLOB storage, with no external database required.
+**Personal Knowledge Brain Engine** — Rust port of [gbrain](https://github.com/garrytan/gbrain), with Single-Entry Multi-Projection Fusion Architecture (Artifact originals → KB/Shadow Pages/Candidate Changes/Attachments multi-projection + provenance audit + rollback), a KB subsystem (async document processing pipeline + RAPTOR recursive summarization enabled by default for new libraries), full Chinese NLP support (jieba tokenization + pinyin + FTS5 query rewriting), soft-delete lifecycle, time-decay weighting for brain-page search, and more. Built on embedded SQLite + FTS5; vector retrieval uses sqlite-vec when available and otherwise falls back to built-in BLOB storage, with no external database required.
 
 > The original TypeScript version was developed by [Garry Tan](https://github.com/garrytan). Built with **Vibe coding**.
 
@@ -30,21 +30,21 @@ gbrain query "who is Alice"
 gbrain serve
 ```
 
-gbrain uses embedded SQLite, so no external database is required; however, current startup strictly validates storage, LLM, OCR, KB, logging, and related environment variables. Keyword retrieval itself does not call an external model, while embeddings, query expansion, reranking, RAPTOR, and OCR call their respective configured services.
+gbrain uses embedded SQLite, so no external database is required. `gbrain init`, `gbrain config show/get/set` for Config fields, and dry-run paths with preview semantics try to skip full external-model validation; real database-backed commands such as `serve`, `query`, `list/get/health`, non-preview writes/uploads, KB, and OCR validate storage, LLM, OCR, KB, logging, and related environment variables before running. Keyword retrieval itself does not call an external model, while embeddings, query expansion, reranking, RAPTOR, and OCR call their respective configured services.
 
 ---
 
 ## Features
 
-- **Retrieval** — Unified facade queries currently use FTS5 keyword retrieval; the lower-level hybrid API can fuse keyword and optional vector results with RRF and accept expanded queries, while fuzzy trigram matching is exposed as a separate API
+- **Retrieval** — Artifact unified facade queries currently rely mainly on FTS5 keyword retrieval; the lower-level hybrid library API can RRF-fuse keyword and vector results when a query embedding is provided, and can include precomputed `expanded_queries` as additional vector-result lists in RRF; title-level trigram fuzzy matching is used for link resolution, while full fuzzy search is exposed only as a library API
 - **Knowledge Graph** — Wiki-link extraction, typed links, graph traversal, backlink symmetry verification
-- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when the document has enough nodes; the RAPTOR LLM reads only `GBRAIN_KB_RAPTOR_*`; semantic chunking remains library-configured; includes multi-format parsers (Markdown/PDF/DOCX/XLS/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
+- **KB Subsystem** — Async document processing pipeline, with RAPTOR enabled by default for new libraries and executed when the document has enough nodes; the RAPTOR LLM reads only `GBRAIN_KB_RAPTOR_*`; document splitting uses an adaptive strategy and can semantically refine large chunks when an embedder is available; includes multi-format parsers (Markdown/PDF/DOCX/XLS/XLSX/CSV/HTML/plaintext), automatic page-level PDF OCR detection/writeback, and automatic OCR import for uploaded JPG/PNG images; code-page indexing is a separate path
 - **Chinese NLP** — jieba tokenization + pinyin + prefix wildcards, FTS5 query auto-rewriting, Chinese punctuation sentence-breaking and token counting, pre-tokenized column auto-sync
 - **Single-Entry Multi-Projection Fusion** — Artifact uploads create KB document, shadow-page, page-update, or attachment projections, with link and timeline changes flowing through auto-apply or candidate review; includes provenance audit, promotion, version chains, rollback, and four internal Memory Query strategies
 - **MCP Server** — Full Model Context Protocol (JSON-RPC 2.0) server, exposing Artifact facade and KB OCR tools
-- **Embedded Storage** — SQLite/FTS5-based storage with no external database; provide the complete environment configuration before startup
-- **Layered Enrichment** — Automatic entity detection and promotion (mention → stub → enriched)
-- **Version History** — Full page versioning with rollback
+- **Embedded Storage** — SQLite/FTS5-based storage with no external database; real database-backed commands require the complete environment configuration described below
+- **Layered Enrichment** — Library APIs support entity detection, stub-page creation, backlinks, and tier/tag/link suggestions
+- **Version History** — Page overwrites create version snapshots; the library API supports reverting to a version, and suggested-change rollback is exposed via `gbrain review rollback`
 - **Autopilot** — Self-maintenance daemon thread, auto-runs in background when `gbrain serve` starts. Periodically embeds stale content and runs integrity checks (default every 3600s, configurable via `GBRAIN_AUTOPILOT_INTERVAL`, at least 60s, disable via `GBRAIN_AUTOPILOT_ENABLED`)
 - **Safety Guards** — Path traversal protection, slug validation, MCP remote-file confinement, parameterized queries against SQL injection
 - **Code Knowledge Graph** — Code pages imported or reindexed as code can use Tree-sitter AST chunking and regex symbol indexing for definitions, references, and call graphs (Rust/TypeScript/JavaScript/Python/Go/Java/C/C++)
@@ -114,6 +114,7 @@ Global options must precede the subcommand, for example `gbrain --json query "Al
 | `gbrain kb ocr-status <doc_id>` | View KB document OCR status |
 | `gbrain kb ocr-run <doc_id> [--pages]` | Trigger or enqueue OCR manually |
 | `gbrain kb ocr-retry <doc_id>` | Retry failed or empty-result OCR pages |
+| `gbrain kb mine-synonyms [--library-id] [--full]` | Offline mine token semantic synonyms |
 | `gbrain serve` | Run as MCP stdio server |
 
 #### Examples
@@ -261,6 +262,10 @@ gbrain upload meeting-notes.md --intent promote --promotion auto-apply --target 
 gbrain kb ocr-status 1
 gbrain kb ocr-run 1 --pages "1,3,5-10"
 gbrain kb ocr-retry 1
+
+# Mine token semantic synonyms
+gbrain kb mine-synonyms --library-id 1
+gbrain kb mine-synonyms --full
 ```
 
 ### Review Operations
@@ -411,7 +416,7 @@ gbrain review apply 1
 | `id_or_uid` | string | Yes | Artifact ID or UID |
 | `--dry-run` | flag | No | Preview reprocess impact, don't execute |
 
-### `gbrain kb OCR`
+### `gbrain kb`
 
 | Command/Parameter | Type | Required | Description |
 |-------------------|------|----------|-------------|
@@ -419,6 +424,9 @@ gbrain review apply 1
 | `ocr-run <doc_id>` | integer | Yes | Trigger or enqueue OCR for a KB document |
 | `ocr-retry <doc_id>` | integer | Yes | Retry failed or empty-result OCR pages |
 | `ocr-run --pages <RANGES>` | string | No | Page ranges to run, e.g. `1,3,5-10` |
+| `mine-synonyms` | command | No | Offline mine token semantic synonyms from token embeddings |
+| `mine-synonyms --library-id <ID>` | integer | No | Mine only one KB library |
+| `mine-synonyms --full` | flag | No | Full remine, ignoring existing token embeddings |
 
 ### `gbrain review list`
 
@@ -601,6 +609,9 @@ MCP file requests can only read existing non-symlink files within the server pro
 // Get knowledge source details (with projections and sources)
 { "tool": "artifact_get", "params": { "id_or_uid": "art_abc123", "include_sources": true, "include_projections": true } }
 
+// Read focused excerpts by query instead of loading the full original
+{ "tool": "artifact_get", "params": { "id_or_uid": "art_abc123", "content_mode": "focused", "content_query": "Rust async", "max_chars": 1600 } }
+
 // Get by ID
 { "tool": "artifact_get", "params": { "id_or_uid": "1" } }
 ```
@@ -726,7 +737,11 @@ Note: `upload`/`artifact_upload` uses `upload_default_promotion_policy` when `--
 | `id_or_uid` | string | Yes | Artifact ID or UID (e.g., '1' or 'art_ab12cd34ef56') |
 | `include_projections` | boolean | No | Include projection details |
 | `include_sources` | boolean | No | Include source tracing |
-| `include_content` | boolean | No | Include original content |
+| `include_content` | boolean | No | Include original content; prefer `content_mode=focused` or `artifact_query` excerpts by default |
+| `content_mode` | string | No | Content read mode: `focused` (query/passage excerpt) or `full` (full text, requires `include_content=true`) |
+| `content_query` | string | No | Query text for `focused` mode |
+| `max_chars` | integer | No | Maximum focused content characters, default 1600, internally clamped to 200..=10000 |
+| `passage_id` | integer | No | Directly read a KB passage ID returned by `artifact_query` |
 
 ### `artifact_delete`
 
@@ -827,7 +842,7 @@ No parameters.
 
 ### LLM Configuration Groups
 
-LLM configuration is split by call type and feature. Startup now validates these environment variables strictly: missing required values, empty values, invalid URLs, invalid enum/boolean values, or invalid numeric values fail fast and stop startup.
+LLM configuration is split by call type and feature. Except for `init`, Config-field reads/writes, and dry-run fast paths with preview semantics, real database-backed commands run full runtime validation: missing required values, empty values, invalid URLs, invalid enum/boolean values, or invalid numeric values fail fast and stop the command.
 
 | Group | Environment Variables | Used By |
 |-------|----------------------|---------|
@@ -854,7 +869,7 @@ External model configuration must be provided explicitly per use case. gbrain no
 | Variable | Description | Startup requirement |
 |----------|-------------|---------------------|
 | `GBRAIN_DIR` | Data storage root directory | Required, non-empty |
-| `GBRAIN_DB_PATH` | SQLite database file path | Required, non-empty |
+| `GBRAIN_DB_PATH` | SQLite database file path | Required and non-empty when the database path is not already supplied by CLI `--db` or config.json `database_path` |
 
 ### Embeddings
 
@@ -951,8 +966,6 @@ External OCR is always allowed (library-level privacy switches have been removed
 | `GBRAIN_KB_WORKER_POLL_INTERVAL` | KB worker poll interval (seconds) | Required nonzero integer |
 | `GBRAIN_AUTOPILOT_ENABLED` | Enable autopilot background maintenance thread (takes effect in `gbrain serve`) | Required boolean |
 | `GBRAIN_AUTOPILOT_INTERVAL` | Autopilot maintenance interval (seconds) | Required integer, minimum 60 |
-| `GBRAIN_KB_SYNONYMS_FILE` | Synonyms file path (for search query expansion) | — |
-| `GBRAIN_KB_ALIASES_FILE` | Alias mapping file path (for search query expansion) | — |
 
 **KB Subsystem LLM Usage:**
 
@@ -983,6 +996,7 @@ External OCR is always allowed (library-level privacy switches have been removed
 | `GBRAIN_LOG_TO_FILE` | Enable file logging | Required boolean |
 | `GBRAIN_LOG_FILE_PATH` | Log file path | Required when `GBRAIN_LOG_TO_FILE=true` |
 | `GBRAIN_LOG_TO_CONSOLE` | Enable console logging | Required boolean |
+| `GBRAIN_RUST_LOG` | gbrain-specific tracing filter rules; overrides `GBRAIN_LOG_LEVEL` and supports module rules such as `gbrain_core::kb::pipeline=debug` | Optional; if set, must be non-empty and a valid EnvFilter rule |
 
 ### Behavior
 
@@ -1114,12 +1128,12 @@ Lower-level hybrid search pipeline (used by internal or programmatic search path
 Async five-stage document processing pipeline:
 
 1. **Parse** — Document parsers (Markdown / PDF / DOCX / XLS / XLSX / CSV / HTML / plaintext); code graph indexing follows the separate page path
-2. **Split** — Recursive splitter; semantic split mode (Savitzky-Golay smoothing + chunk_overlap overlap) is available when a library enables `semantic_enabled` and embeddings are configured
+2. **Split** — Adaptive splitter with structure-first behavior; tables/code use specialized paths, and ordinary large chunks can use semantic splitting (Savitzky-Golay smoothing + chunk_overlap overlap) when an embedder is available, otherwise they fall back to recursive splitting
 3. **Embed** — Vector embedding generation and persistence
 4. **RAPTOR (enabled by default for new libraries)** — When `raptor_enabled=true` and the node-count prerequisites are met, build a recursive summarization tree (K-Means++ clustering + LLM summarization); the LLM uses only the explicit `GBRAIN_KB_RAPTOR_*` configuration
 5. **Persist** — Transaction-protected node/vector writes
 
-`raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Startup now requires `GBRAIN_KB_RAPTOR_API_KEY`, `GBRAIN_KB_RAPTOR_BASE_URL`, and `GBRAIN_KB_RAPTOR_MODEL`; the processing pipeline skips RAPTOR only when runtime prerequisites such as having fewer than three nodes are not met. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
+`raptor_enabled` is stored on each `kb_libraries` row. Newly created libraries, including an automatically created `Inbox`, default it to `true`. Full runtime validation requires `GBRAIN_KB_RAPTOR_API_KEY`, `GBRAIN_KB_RAPTOR_BASE_URL`, and `GBRAIN_KB_RAPTOR_MODEL`; the processing pipeline skips or continues without RAPTOR when the document has fewer than three nodes, too few vectorized nodes, RAPTOR LLM config cannot be resolved, or summarization fails, so basic indexing is not blocked by summary-tree failures. The current `gbrain config`, CLI `kb` subcommands, and MCP tools do not expose a disable switch.
 
 For PDFs, parsing first creates a page-level OCR decision. Pages with empty/low-density text, images or vector content, annotation appearance risk, hidden text, suspected font-encoding problems, or parse/geometry uncertainty are conservatively selected. When OCR is needed, the system queues an asynchronous OCR job by default, writes recognized text back, and re-embeds it; set `GBRAIN_OCR_SYNC_INLINE=true` only to execute OCR inline in the document pipeline. For JPG/PNG uploads, the pipeline creates a single-page OCR document immediately and generates KB nodes after OCR completes.
 
