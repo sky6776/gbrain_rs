@@ -131,11 +131,17 @@ pub fn write_artifact_file(
             )));
         }
         Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(GBrainError::FileError(format!(
-                "安装 artifact 文件失败: {}",
-                e
-            )));
+            // hard_link 在 Termux/Android 上会被 SELinux 拒绝 link syscall（诊断确认：
+            // ~/.gbrain/artifacts 下 `ln` 报 Permission denied，但 mkdir/写文件正常），
+            // FUSE 文件系统同样不支持硬链接。回退到 rename：同盘 rename 是原子的，
+            // 文件名即 sha256，并发写入同名的另一进程内容必然相同，rename 即使覆盖也安全。
+            if let Err(rerr) = fs::rename(&tmp_path, &path) {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(GBrainError::FileError(format!(
+                    "安装 artifact 文件失败: hard_link={}, rename={}",
+                    e, rerr
+                )));
+            }
         }
     }
 
