@@ -677,6 +677,13 @@ impl<'a> ArtifactService<'a> {
         fallback_state.record_query("original_query", &query_text);
 
         let mut candidates = Vec::new();
+        let mut partial_result = has_partial_evidence_match(&internal_result).then(|| {
+            (
+                internal_result.clone(),
+                query_text.clone(),
+                mode_text.clone(),
+            )
+        });
         if !is_query_result_useful(&internal_result, &fallback_plan.core_terms) {
             let fallback_reason = if internal_result.total_hits == 0 {
                 "primary_no_hits"
@@ -709,37 +716,52 @@ impl<'a> ArtifactService<'a> {
                     mode_text = attempt.mode;
                     internal_result = result;
                     break;
+                } else if has_partial_evidence_match(&result)
+                    && partial_result.as_ref().map_or(true, |(current, _, _)| {
+                        result.total_hits > current.total_hits
+                    })
+                {
+                    partial_result = Some((result, attempt.query, attempt.mode));
                 }
             }
 
             if !fallback_state.fallback_used
                 && !is_query_result_useful(&internal_result, &fallback_plan.core_terms)
             {
-                let conn = self.engine.connection()?;
-                candidates = find_title_slug_candidates(
-                    conn,
-                    &fallback_plan.core_terms,
-                    input.limit.unwrap_or(10).clamp(1, 25),
-                    input.filter_slug.as_deref(),
-                )?;
-                if !candidates.is_empty() {
+                if let Some((partial, partial_query, partial_mode)) = partial_result {
                     fallback_state.fallback_used = true;
-                    fallback_state.fallback_stage = Some("title_slug".to_string());
-                    fallback_state.needs_focused_context = true;
-                    internal_result.brain_hits.clear();
-                    internal_result.evidence_hits.clear();
-                    internal_result.timeline_hits.clear();
-                    internal_result.provenance_records.clear();
-                    internal_result.total_hits = candidates.len() as i64;
+                    fallback_state.fallback_stage = Some("partial_results".to_string());
+                    fallback_state.fallback_reason = Some("primary_low_quality".to_string());
+                    query_text = partial_query;
+                    mode_text = partial_mode;
+                    internal_result = partial;
                 } else {
-                    fallback_state.fallback_used = true;
-                    fallback_state.fallback_stage = Some("no_results".to_string());
-                    fallback_state.no_results = true;
-                    internal_result.brain_hits.clear();
-                    internal_result.evidence_hits.clear();
-                    internal_result.timeline_hits.clear();
-                    internal_result.provenance_records.clear();
-                    internal_result.total_hits = 0;
+                    let conn = self.engine.connection()?;
+                    candidates = find_title_slug_candidates(
+                        conn,
+                        &fallback_plan.core_terms,
+                        input.limit.unwrap_or(10).clamp(1, 25),
+                        input.filter_slug.as_deref(),
+                    )?;
+                    if !candidates.is_empty() {
+                        fallback_state.fallback_used = true;
+                        fallback_state.fallback_stage = Some("title_slug".to_string());
+                        fallback_state.needs_focused_context = true;
+                        internal_result.brain_hits.clear();
+                        internal_result.evidence_hits.clear();
+                        internal_result.timeline_hits.clear();
+                        internal_result.provenance_records.clear();
+                        internal_result.total_hits = candidates.len() as i64;
+                    } else {
+                        fallback_state.fallback_used = true;
+                        fallback_state.fallback_stage = Some("no_results".to_string());
+                        fallback_state.no_results = true;
+                        internal_result.brain_hits.clear();
+                        internal_result.evidence_hits.clear();
+                        internal_result.timeline_hits.clear();
+                        internal_result.provenance_records.clear();
+                        internal_result.total_hits = 0;
+                    }
                 }
             }
         }
@@ -1670,6 +1692,13 @@ fn is_query_result_useful(result: &UnifiedQueryResult, core_terms: &[String]) ->
         hit.matched_terms.len() >= required
             || core_term_coverage(&hit.snippet, &hit.title, core_terms) >= required
     })
+}
+
+fn has_partial_evidence_match(result: &UnifiedQueryResult) -> bool {
+    result
+        .evidence_hits
+        .iter()
+        .any(|hit| !hit.matched_terms.is_empty())
 }
 
 fn core_term_coverage(text: &str, title: &str, core_terms: &[String]) -> usize {
